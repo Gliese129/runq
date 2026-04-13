@@ -1,0 +1,7 @@
+# Minimal job.yaml — single grid sweep, no overrides
+project: resnet50
+sweep:
+  - method: grid
+    parameters:
+      lr: [0.001, 0.01, 0.1]
+      batch_size: [32, 64]

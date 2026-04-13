@@ -1,0 +1,42 @@
+-- runq SQLite schema
+
+CREATE TABLE IF NOT EXISTS projects (
+    name         TEXT PRIMARY KEY,
+    config_json  TEXT NOT NULL,       -- serialized project.Config as JSON
+    created_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at   DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS jobs (
+    id           TEXT PRIMARY KEY,    -- ULID or short UUID
+    project_name TEXT NOT NULL REFERENCES projects(name),
+    description  TEXT,
+    config_json  TEXT NOT NULL,       -- serialized job.JobConfig as JSON
+    status       TEXT NOT NULL DEFAULT 'pending',  -- pending/running/paused/done
+    total_tasks  INTEGER NOT NULL DEFAULT 0,
+    created_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
+    finished_at  DATETIME
+);
+
+CREATE TABLE IF NOT EXISTS tasks (
+    id           TEXT PRIMARY KEY,    -- ULID or short UUID
+    job_id       TEXT NOT NULL REFERENCES jobs(id),
+    project_name TEXT NOT NULL,
+    command      TEXT NOT NULL,
+    params_json  TEXT NOT NULL,       -- serialized TaskParams as JSON
+    gpus_needed  INTEGER NOT NULL DEFAULT 1,
+    gpus         TEXT,                -- comma-separated GPU indices, e.g. "0,1,3"
+    status       TEXT NOT NULL DEFAULT 'pending',
+    retry_count  INTEGER NOT NULL DEFAULT 0,
+    max_retry    INTEGER NOT NULL DEFAULT 0,  -- 0 = unlimited
+    pid          INTEGER,
+    start_time   INTEGER,            -- /proc starttime for reclaim validation
+    log_path     TEXT,
+    enqueued_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+    started_at   DATETIME,
+    finished_at  DATETIME
+);
+
+CREATE INDEX IF NOT EXISTS idx_tasks_job_id ON tasks(job_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+CREATE INDEX IF NOT EXISTS idx_jobs_status  ON jobs(status);

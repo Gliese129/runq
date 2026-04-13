@@ -1,0 +1,44 @@
+# runq job configuration
+#
+# Submit with:  runq submit .              (from this directory, looks for job.yaml)
+#          or:  runq submit path/to/job.yaml
+#
+# Preview expanded tasks:  runq submit job.yaml --dry-run
+# Submit and watch:        runq submit job.yaml --watch
+#
+# ─── How sweep expansion works ───
+#
+# "sweep" is a list of blocks. Each block expands independently,
+# then all blocks are combined via cartesian product.
+#
+# method: grid  → cartesian product of all parameters within the block
+# method: list  → zip parameters 1-to-1 (all lists must have same length)
+#
+# Example below:
+#   block 1: grid(lr × optimizer) = 3 × 2 = 6 combinations
+#   block 2: list(batch_size, num_workers) = 3 paired combos
+#   total: 6 × 3 = 18 tasks
+
+project: resnet50
+description: "LR × optimizer sweep with tied batch/worker configs"
+
+sweep:
+  # Grid block: all combinations of lr and optimizer
+  - method: grid
+    parameters:
+      lr: [0.001, 0.01, 0.1]
+      optimizer: [adam, sgd]
+
+  # List block: batch_size and num_workers are paired 1-to-1
+  # (all parameter lists must have the same length)
+  - method: list
+    parameters:
+      batch_size: [32, 64, 128]
+      num_workers: [4, 8, 16]
+
+# Optional: override project defaults for this job
+# overrides:
+#   gpus_per_task: 4
+#   max_retry: 0
+#   env:
+#     WANDB_RUN_GROUP: sweep-v2

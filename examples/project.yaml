@@ -1,0 +1,26 @@
+# runq project configuration
+#
+# Register with:  runq project add .          (from this directory)
+#            or:  runq project add myname     (override name via CLI)
+#
+# Config priority: CLI flag > YAML field > built-in default
+
+project_name: resnet50
+working_dir: /home/user/projects/resnet50
+command_template: python train.py {{args}}
+
+# Environment variables injected into every task
+environment:
+  WANDB_PROJECT: resnet-experiments
+
+# Defaults (can be overridden per-job in job.yaml → overrides)
+defaults:
+  gpus_per_task: 1
+  max_retry: 3       # 0 = unlimited retries
+
+# Resume configuration
+# Set enabled: true only if your training script supports checkpoint resume.
+# extra_args are appended to the command when a crashed task is auto-restarted.
+resume:
+  enabled: true
+  extra_args: --resume --ckpt latest
