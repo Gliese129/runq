@@ -1,7 +1,6 @@
 package executor
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -11,12 +10,14 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/gliese129/runq/internal/utils"
 )
 
 // RunSpec contains everything needed to start a task process.
 type RunSpec struct {
 	TaskID     string
-	Command    string            // full shell command, passed to "sh -c"
+	Command    string // full shell command, passed to "sh -c"
 	WorkingDir string
 	Env        map[string]string // extra env vars (merged with os.Environ)
 	GPUs       []int             // GPU indices → CUDA_VISIBLE_DEVICES
@@ -77,7 +78,7 @@ func (e *Executor) Start(parentCtx context.Context, spec RunSpec) (Result, error
 	}
 
 	pid := cmd.Process.Pid
-	startTime, err := readStartTime(pid)
+	startTime, err := utils.ReadProcessStartTime(pid)
 	if err != nil {
 		// Non-fatal: /proc may not exist (e.g. macOS). Log and continue.
 		startTime = time.Time{}
@@ -129,67 +130,4 @@ func buildEnv(gpus []int, extra map[string]string) []string {
 		env = append(env, k+"="+v)
 	}
 	return env
-}
-
-// clkTick is the kernel clock tick rate (USER_HZ).
-// 100 is the standard value on x86_64 Linux. If this ever needs to be
-// dynamic, read it via sysconf(_SC_CLK_TCK) or /proc/self/auxv.
-const clkTick = 100
-
-// readStartTime reads the process start time from /proc/<pid>/stat and
-// converts it to an absolute time.Time using boot time from /proc/stat.
-func readStartTime(pid int) (time.Time, error) {
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
-	if err != nil {
-		return time.Time{}, err
-	}
-
-	s := string(data)
-	// Field 22 (starttime) comes after "(comm)" which may contain spaces/parens.
-	// Find the last ')' to safely skip the comm field.
-	lastParen := strings.LastIndex(s, ")")
-	if lastParen < 0 || lastParen+2 >= len(s) {
-		return time.Time{}, fmt.Errorf("invalid /proc/%d/stat format", pid)
-	}
-
-	fields := strings.Fields(s[lastParen+2:])
-	if len(fields) < 20 {
-		return time.Time{}, fmt.Errorf("/proc/%d/stat: not enough fields after comm", pid)
-	}
-
-	tick, err := strconv.ParseInt(fields[19], 10, 64)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("parse starttime tick: %w", err)
-	}
-
-	bootTime, err := getBootTime()
-	if err != nil {
-		return time.Time{}, fmt.Errorf("read boot time: %w", err)
-	}
-
-	seconds := tick / clkTick
-	nanoRemainder := (tick % clkTick) * (1e9 / clkTick)
-	return time.Unix(bootTime+seconds, nanoRemainder), nil
-}
-
-// getBootTime reads the system boot time (seconds since epoch) from /proc/stat.
-func getBootTime() (int64, error) {
-	f, err := os.Open("/proc/stat")
-	if err != nil {
-		return 0, err
-	}
-	defer f.Close()
-
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.HasPrefix(line, "btime ") {
-			fields := strings.Fields(line)
-			if len(fields) < 2 {
-				return 0, fmt.Errorf("malformed btime line: %q", line)
-			}
-			return strconv.ParseInt(fields[1], 10, 64)
-		}
-	}
-	return 0, fmt.Errorf("btime not found in /proc/stat")
 }

@@ -3,7 +3,7 @@ package scheduler
 import (
 	"testing"
 
-	"github.com/runq/runq/internal/gpu"
+	"github.com/gliese129/runq/internal/gpu"
 )
 
 func makePool(n int) *GPUPool {

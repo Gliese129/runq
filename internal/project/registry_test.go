@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/runq/runq/internal/store"
+	"github.com/gliese129/runq/internal/store"
 )
 
 // helper: open an in-memory store and return a Registry + cleanup func.

@@ -25,6 +25,11 @@ Quick start:
   runq logs <task_id>            Tail task output`,
 }
 
+func init() {
+	rootCmd.PersistentFlags().String("socket", "", "path to daemon unix socket")
+
+}
+
 // Execute is the entry point called from main.
 func Execute() error {
 	return rootCmd.Execute()

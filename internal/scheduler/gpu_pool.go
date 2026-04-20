@@ -6,7 +6,7 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/runq/runq/internal/gpu"
+	"github.com/gliese129/runq/internal/gpu"
 )
 
 // GPUState tracks the status of a single GPU.

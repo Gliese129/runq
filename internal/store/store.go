@@ -9,6 +9,8 @@ import (
 )
 
 // Store provides persistence via SQLite.
+const DEFAULT_DB_PATH = "~/.runq/runq.db"
+
 type Store struct {
 	db *sql.DB
 }

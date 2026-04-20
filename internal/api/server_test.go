@@ -1,0 +1,163 @@
+package api
+
+import (
+	"bytes"
+	"encoding/json"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"testing"
+
+	"github.com/gin-gonic/gin"
+	"github.com/gliese129/runq/internal/executor"
+	"github.com/gliese129/runq/internal/gpu"
+	"github.com/gliese129/runq/internal/project"
+	"github.com/gliese129/runq/internal/scheduler"
+	"github.com/gliese129/runq/internal/store"
+)
+
+func init() {
+	gin.SetMode(gin.TestMode)
+}
+
+func setupTestServer(t *testing.T) *Server {
+	t.Helper()
+
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("failed to open store: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+
+	reg := project.NewRegistry(st.DB())
+	q := scheduler.NewQueue()
+	pool := scheduler.NewGPUPool([]gpu.Info{
+		{Index: 0, MemFree: 80000},
+		{Index: 1, MemFree: 80000},
+	})
+	exec := executor.New()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	deps := Deps{
+		Store:    st,
+		Registry: reg,
+		Queue:    q,
+		Pool:     pool,
+		Executor: exec,
+		Logger:   logger,
+	}
+
+	return NewServer(deps, "", "")
+}
+
+// doRequest sends a test HTTP request through the Gin router.
+func doRequest(s *Server, method, path string, body any) *httptest.ResponseRecorder {
+	var buf bytes.Buffer
+	if body != nil {
+		json.NewEncoder(&buf).Encode(body)
+	}
+	req := httptest.NewRequest(method, path, &buf)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	s.Router().ServeHTTP(w, req)
+	return w
+}
+
+func TestProjectCRUD(t *testing.T) {
+	s := setupTestServer(t)
+
+	// Add
+	cfg := project.Config{
+		ProjectName: "resnet50",
+		WorkingDir:  "/tmp/resnet",
+		CmdTemplate: "python train.py {{args}}",
+	}
+	w := doRequest(s, "POST", "/api/projects", cfg)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("Add: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// List
+	w = doRequest(s, "GET", "/api/projects", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("List: expected 200, got %d", w.Code)
+	}
+	var configs []project.Config
+	json.NewDecoder(w.Body).Decode(&configs)
+	if len(configs) != 1 || configs[0].ProjectName != "resnet50" {
+		t.Errorf("List: unexpected result: %+v", configs)
+	}
+
+	// Get
+	w = doRequest(s, "GET", "/api/projects/resnet50", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("Get: expected 200, got %d", w.Code)
+	}
+
+	// Get not found
+	w = doRequest(s, "GET", "/api/projects/nonexistent", nil)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("Get missing: expected 404, got %d", w.Code)
+	}
+
+	// Delete
+	w = doRequest(s, "DELETE", "/api/projects/resnet50", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("Delete: expected 200, got %d", w.Code)
+	}
+
+	// Verify deleted
+	w = doRequest(s, "GET", "/api/projects/resnet50", nil)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("Get after delete: expected 404, got %d", w.Code)
+	}
+}
+
+func TestTaskListDefault(t *testing.T) {
+	s := setupTestServer(t)
+
+	s.deps.Queue.Push(&scheduler.Task{ID: "t1", GPUsNeeded: 1, Status: scheduler.StatusPending})
+	s.deps.Queue.Push(&scheduler.Task{ID: "t2", GPUsNeeded: 1, Status: scheduler.StatusPending})
+
+	w := doRequest(s, "GET", "/api/tasks", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var tasks []scheduler.Task
+	json.NewDecoder(w.Body).Decode(&tasks)
+	if len(tasks) != 2 {
+		t.Errorf("expected 2 tasks, got %d", len(tasks))
+	}
+}
+
+func TestGPUStatus(t *testing.T) {
+	s := setupTestServer(t)
+
+	w := doRequest(s, "GET", "/api/gpu", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var gpus []scheduler.GPUState
+	json.NewDecoder(w.Body).Decode(&gpus)
+	if len(gpus) != 2 {
+		t.Errorf("expected 2 GPUs, got %d", len(gpus))
+	}
+}
+
+func TestStatus(t *testing.T) {
+	s := setupTestServer(t)
+
+	w := doRequest(s, "GET", "/api/status", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var status map[string]any
+	json.NewDecoder(w.Body).Decode(&status)
+	if status["gpus_free"] != float64(2) {
+		t.Errorf("expected 2 free GPUs, got %v", status["gpus_free"])
+	}
+}
