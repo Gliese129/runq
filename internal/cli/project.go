@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -207,13 +206,6 @@ func runProjectRm(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Println(resp["message"])
 	return nil
-}
-
-// decodeJSONMap is a helper for quick map[string]any decoding.
-func decodeJSONMap(data []byte) map[string]any {
-	var m map[string]any
-	json.Unmarshal(data, &m)
-	return m
 }
 
 func init() {

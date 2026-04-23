@@ -1,10 +1,12 @@
 package gpu
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Info holds parsed data from nvidia-smi for one GPU.
@@ -19,12 +21,19 @@ type Info struct {
 // Detect queries nvidia-smi and returns info for all GPUs on this machine.
 // Returns an error if nvidia-smi is not found or returns a non-zero exit code.
 func Detect() ([]Info, error) {
-	cmd := exec.Command("nvidia-smi",
+	// 10s timeout prevents daemon startup from hanging if GPU driver is stuck.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "nvidia-smi",
 		"--query-gpu=index,name,memory.free,memory.used,utilization.gpu",
 		"--format=csv,noheader,nounits",
 	)
 	out, err := cmd.Output()
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return nil, fmt.Errorf("nvidia-smi timed out after 10s (GPU driver may be stuck)")
+		}
 		return nil, fmt.Errorf("nvidia-smi failed: %w", err)
 	}
 	return Parse(string(out))

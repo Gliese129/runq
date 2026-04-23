@@ -70,13 +70,6 @@ func printJSON(v any) {
 	enc.Encode(v)
 }
 
-// printError formats an API error for the user.
-// Used when doAndDecode returns an error — Cobra will print it, but if you
-// want to customize the format, wrap through here.
-func printError(err error) {
-	fmt.Fprintf(os.Stderr, "error: %v\n", err)
-}
-
 // newTable creates a tab-aligned writer for CLI table output.
 // Call w.Flush() after writing all rows.
 func newTable() *tabwriter.Writer {

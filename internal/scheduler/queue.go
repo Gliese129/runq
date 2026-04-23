@@ -41,6 +41,14 @@ type Task struct {
 	// Resume support
 	Resumable bool   // from project config
 	ExtraArgs string // appended to command on resume restart
+
+	// L2 multi-user support (populated when Linux user/group model is enabled)
+	UID   int    `json:"uid,omitempty"`
+	User  string `json:"user,omitempty"`
+	Group string `json:"group,omitempty"`
+
+	// L3 checkpoint support (directory organized by project, inherited on requeue)
+	CheckpointDir string `json:"checkpoint_dir,omitempty"`
 }
 
 // Queue is a FIFO task queue with backfill + aging support. Thread-safe.
@@ -226,7 +234,7 @@ func (q *Queue) FetchAll() []Task {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
-	results := make([]Task, 0, q.Len())
+	results := make([]Task, 0, len(q.tasks))
 	for _, task := range q.tasks {
 		results = append(results, Task{
 			ID:          task.ID,

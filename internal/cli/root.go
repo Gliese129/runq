@@ -27,7 +27,6 @@ Quick start:
 
 func init() {
 	rootCmd.PersistentFlags().String("socket", "", "path to daemon unix socket")
-
 }
 
 // Execute is the entry point called from main.
