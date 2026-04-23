@@ -1,0 +1,33 @@
+# Binary
+/runq
+
+demo/
+
+# Go
+*.exe
+*.test
+*.out
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# runq runtime data
+*.db
+*.db-journal
+*.db-wal
+logs/
+*.pid
+*.sock
+
+# local progress tracking
+progress/
+.cache

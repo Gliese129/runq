@@ -3,7 +3,6 @@ package cli
 import (
 	"fmt"
 
-	"github.com/gliese129/runq/internal/scheduler"
 	"github.com/spf13/cobra"
 )
 
@@ -21,7 +20,7 @@ var taskShowCmd = &cobra.Command{
 
 func runTaskShow(cmd *cobra.Command, args []string) error {
 	id := args[0]
-	var task scheduler.Task
+	var task map[string]any
 	if err := doAndDecode("GET", "/api/tasks/"+id, nil, &task); err != nil {
 		return err
 	}
@@ -33,10 +32,17 @@ var taskRetryCmd = &cobra.Command{
 	Use:   "retry <task_id>",
 	Short: "Manually retry a failed task",
 	Args:  cobra.ExactArgs(1),
-	// TODO: needs API endpoint (POST /api/tasks/:id/retry)
-	RunE: func(cmd *cobra.Command, args []string) error {
-		return fmt.Errorf("task retry: not implemented (needs API endpoint)")
-	},
+	RunE:  runTaskRetry,
+}
+
+func runTaskRetry(cmd *cobra.Command, args []string) error {
+	id := args[0]
+	var resp map[string]any
+	if err := doAndDecode("POST", "/api/tasks/"+id+"/retry", nil, &resp); err != nil {
+		return err
+	}
+	fmt.Printf("task %s re-enqueued\n", id)
+	return nil
 }
 
 func init() {

@@ -100,7 +100,7 @@ func (s *Server) isDaemonRunning() (bool, bool, error) {
 			s.logger.Warn("PID file exists but can't be read, treating as stale. Consider removing: " + pidPath)
 			return false, true, nil
 		}
-		if IsProcessAlive(pid, startedTime) {
+		if utils.IsProcessAlive(pid, startedTime) {
 			return true, true, nil
 		}
 		s.logger.Warn("Socket file exists but process is not alive, treating as stale. Consider removing: " + pidPath)
@@ -129,6 +129,34 @@ func (s *Server) Start() error {
 	// no running + has file -> remove first
 	if hasSocketFile {
 		_ = os.Remove(s.socketPath)
+	}
+
+	// Phase 3: Reclaim previously-running tasks.
+	// Reclaimer checks if their processes are still alive and updates DB accordingly.
+	// Alive tasks get reattached (monitored via signal 0 polling).
+	// Dead tasks get their DB status set to pending (retry) or failed.
+	reclaimer := &executor.Reclaimer{
+		Store:  s.deps.Store,
+		Exec:   s.deps.Executor,
+		Logger: s.logger,
+	}
+	if err := reclaimer.Reclaim(); err != nil {
+		s.logger.Error("reclaim failed", "error", err)
+	}
+
+	// Restore pending tasks from DB into the in-memory Queue.
+	// This includes tasks that were originally pending AND dead tasks that
+	// Reclaimer just set back to pending (resumable retry).
+	pendingTasks, err := s.deps.Store.ListTasks(context.Background(), store.TaskFilter{Status: "pending"})
+	if err != nil {
+		return fmt.Errorf("load pending tasks from DB: %w", err)
+	}
+	for _, row := range pendingTasks {
+		task := taskRowToSchedulerTask(&row)
+		s.deps.Queue.Push(task)
+	}
+	if len(pendingTasks) > 0 {
+		s.logger.Info("restored pending tasks", "count", len(pendingTasks))
 	}
 
 	// no running + no file -> create listener
@@ -196,35 +224,6 @@ func ReadPID(path string) (int, time.Time, error) {
 	return pid, startTime, nil
 }
 
-// IsProcessAlive checks if a process with the given PID exists.
-func IsProcessAlive(pid int, correctStartTime time.Time) bool {
-	if pid <= 0 {
-		return false
-	}
-	p, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	// Signal 0 checks existence without actually sending a signal.
-	err = p.Signal(os.Signal(nil))
-	if err != nil {
-		return false
-	}
-	// if alive, check if reused by another process
-	startTime, err := utils.ReadProcessStartTime(pid)
-	if err != nil {
-		// fallback to signal 0 result if we can't read /proc (e.g. on macOS)
-		return true
-	}
-	// set 10 seconds tolerance
-	tolerance := time.Second * 10
-	diff := startTime.Sub(correctStartTime)
-	if diff < -tolerance || diff > tolerance {
-		return false
-	}
-	return true
-}
-
 // DiagnoseDaemon checks daemon health and returns a human-readable diagnostic.
 // Used by CLI when connection to daemon fails, to give the user actionable guidance.
 // Cleans up stale socket/PID files if the process is confirmed dead.
@@ -236,7 +235,7 @@ func DiagnoseDaemon(socketPath, pidPath string) string {
 	if pid == 0 {
 		return "runq daemon is not running.\nStart it with: runq daemon start"
 	}
-	if IsProcessAlive(pid, startTime) {
+	if utils.IsProcessAlive(pid, startTime) {
 		return fmt.Sprintf("daemon process (PID %d) exists but is not responding.\nTry: runq daemon restart", pid)
 	}
 	// Process is dead — clean up stale files.
@@ -284,4 +283,34 @@ func (c *Client) Do(method, path string, body interface{}) (*http.Response, erro
 		httpReq.Header.Set("Content-Type", "application/json")
 	}
 	return c.httpc.Do(httpReq)
+}
+
+// taskRowToSchedulerTask converts a store.TaskRow to a scheduler.Task for Queue insertion.
+// JSON fields (params, env) are decoded back to maps.
+func taskRowToSchedulerTask(row *store.TaskRow) *scheduler.Task {
+	var params map[string]any
+	if row.ParamsJSON != "" {
+		_ = json.Unmarshal([]byte(row.ParamsJSON), &params)
+	}
+	var env map[string]string
+	if row.EnvJSON != "" {
+		_ = json.Unmarshal([]byte(row.EnvJSON), &env)
+	}
+	return &scheduler.Task{
+		ID:          row.ID,
+		JobID:       row.JobID,
+		ProjectName: row.ProjectName,
+		Command:     row.Command,
+		Params:      params,
+		GPUsNeeded:  row.GPUsNeeded,
+		Status:      scheduler.StatusPending,
+		RetryCount:  row.RetryCount,
+		MaxRetry:    row.MaxRetry,
+		LogPath:     row.LogPath,
+		WorkingDir:  row.WorkingDir,
+		Env:         env,
+		EnqueuedAt:  row.EnqueuedAt,
+		Resumable:   row.Resumable,
+		ExtraArgs:   row.ExtraArgs,
+	}
 }

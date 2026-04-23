@@ -15,6 +15,7 @@ import (
 	"github.com/gliese129/runq/internal/project"
 	"github.com/gliese129/runq/internal/scheduler"
 	"github.com/gliese129/runq/internal/store"
+	"github.com/gliese129/runq/internal/utils"
 	"github.com/spf13/cobra"
 )
 
@@ -29,31 +30,26 @@ var daemonStartCmd = &cobra.Command{
 	Example: `  runq daemon start
   runq daemon start --config ~/.runq/config.yaml`,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// Open DB (schema migration runs automatically).
 		s, err := store.Open(store.DEFAULT_DB_PATH)
 		if err != nil {
 			return err
 		}
-		if err := s.Migrate(); err != nil {
-			return err
-		}
+
 		gpus, err := gpu.Detect()
 		if err != nil {
 			return err
 		}
+
 		pool := scheduler.NewGPUPool(gpus)
-		db := s.DB()
 		cfg := scheduler.DefaultConfig()
 		queue := scheduler.NewQueue()
 		exec_ := executor.New()
-
-		handler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-			Level: slog.LevelInfo,
-		})
-		logger := slog.New(handler)
+		logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 		deps := api.Deps{
 			Store:     s,
-			Registry:  project.NewRegistry(db),
-			Scheduler: scheduler.New(cfg, queue, pool, exec_, logger),
+			Registry:  project.NewRegistry(s.DB()),
+			Scheduler: scheduler.New(cfg, queue, pool, exec_, s, logger),
 			Queue:     queue,
 			Pool:      pool,
 			Executor:  exec_,
@@ -67,15 +63,13 @@ var daemonStartCmd = &cobra.Command{
 		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 		go func() {
 			<-sigChan
-			logger.Info("Received shutdown signal. Shutting down server...")
+			logger.Info("shutdown signal received")
 			deps.Scheduler.Shutdown()
-			err := server.Shutdown()
-			if err != nil {
-				logger.Error("Could not shutdown server!")
+			if err := server.Shutdown(); err != nil {
+				logger.Error("server shutdown failed", "error", err)
 			}
-			err = s.Close()
-			if err != nil {
-				logger.Error("Could not close db!")
+			if err := s.Close(); err != nil {
+				logger.Error("db close failed", "error", err)
 			}
 		}()
 
@@ -111,7 +105,7 @@ var daemonStopCmd = &cobra.Command{
 			case <-ctx.Done():
 				return fmt.Errorf("process no response in 10s")
 			case <-ticker.C:
-				if !api.IsProcessAlive(pid, startTime) {
+				if !utils.IsProcessAlive(pid, startTime) {
 					return nil
 				}
 			}

@@ -2,12 +2,14 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gliese129/runq/internal/executor"
@@ -116,16 +118,29 @@ func TestProjectCRUD(t *testing.T) {
 
 func TestTaskListDefault(t *testing.T) {
 	s := setupTestServer(t)
+	ctx := context.Background()
 
-	s.deps.Queue.Push(&scheduler.Task{ID: "t1", GPUsNeeded: 1, Status: scheduler.StatusPending})
-	s.deps.Queue.Push(&scheduler.Task{ID: "t2", GPUsNeeded: 1, Status: scheduler.StatusPending})
+	// Seed project + job + tasks in DB (handleTaskList now reads from Store).
+	st := s.deps.Store
+	st.DB().Exec(`INSERT INTO projects (name, config_json) VALUES ('test', '{}')`)
+	st.InsertJob(ctx, &store.JobRow{
+		ID: "j1", ProjectName: "test", ConfigJSON: "{}",
+		Status: "pending", TotalTasks: 2, CreatedAt: time.Now(),
+	})
+	for _, id := range []string{"t1", "t2"} {
+		st.InsertTask(ctx, &store.TaskRow{
+			ID: id, JobID: "j1", ProjectName: "test",
+			Command: "echo hi", ParamsJSON: "{}", GPUsNeeded: 1,
+			Status: "pending", EnqueuedAt: time.Now(),
+		})
+	}
 
 	w := doRequest(s, "GET", "/api/tasks", nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 
-	var tasks []scheduler.Task
+	var tasks []store.TaskRow
 	json.NewDecoder(w.Body).Decode(&tasks)
 	if len(tasks) != 2 {
 		t.Errorf("expected 2 tasks, got %d", len(tasks))

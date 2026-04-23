@@ -68,3 +68,32 @@ func ReadProcessStartTime(pid int) (time.Time, error) {
 	nanoRemainder := (tick % clkTick) * (1e9 / clkTick)
 	return time.Unix(bootTime+seconds, nanoRemainder), nil
 }
+
+// IsProcessAlive checks if a process with the given PID exists.
+func IsProcessAlive(pid int, expectedStartTime time.Time) bool {
+	if pid <= 0 {
+		return false
+	}
+	p, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	// Signal 0 checks existence without actually sending a signal.
+	err = p.Signal(os.Signal(nil))
+	if err != nil {
+		return false
+	}
+	// if alive, check if reused by another process
+	startTime, err := ReadProcessStartTime(pid)
+	if err != nil {
+		// fallback to signal 0 result if we can't read /proc (e.g. on macOS)
+		return true
+	}
+	// set 10 seconds tolerance
+	tolerance := time.Second * 10
+	diff := startTime.Sub(expectedStartTime)
+	if diff < -tolerance || diff > tolerance {
+		return false
+	}
+	return true
+}

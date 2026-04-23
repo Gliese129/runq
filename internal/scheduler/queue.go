@@ -92,12 +92,13 @@ func (q *Queue) Peek() *Task {
 
 // PeekSchedulable returns the first pending task that fits within freeGPUs.
 // Used for backfill when the head task is too large.
-func (q *Queue) PeekSchedulable(freeGPUs int) *Task {
+func (q *Queue) PeekSchedulable(freeGPUs int, jobFilter map[string]bool) *Task {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
 	for _, t := range q.tasks {
-		if t.Status == StatusPending && t.GPUsNeeded <= freeGPUs {
+		filtered := jobFilter[t.JobID]
+		if t.Status == StatusPending && t.GPUsNeeded <= freeGPUs && !filtered {
 			return t
 		}
 	}

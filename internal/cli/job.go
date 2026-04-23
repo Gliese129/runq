@@ -22,6 +22,8 @@ var jobLsCmd = &cobra.Command{
 type jobSummary struct {
 	JobID       string         `json:"job_id"`
 	Project     string         `json:"project"`
+	Status      string         `json:"status"`
+	TotalTasks  int            `json:"total_tasks"`
 	StatusCount map[string]int `json:"status_count"`
 	CreatedAt   time.Time      `json:"created_at"`
 }
@@ -37,11 +39,11 @@ func runJobLs(cmd *cobra.Command, args []string) error {
 	}
 
 	w := newTable()
-	fmt.Fprintf(w, "JOB_ID\tPROJECT\tRUN\tPEND\tFAIL\tOK\tAGE\n")
+	fmt.Fprintf(w, "JOB_ID\tPROJECT\tSTATUS\tRUN\tPEND\tFAIL\tOK\tAGE\n")
 	for _, j := range jobs {
 		age := time.Since(j.CreatedAt).Truncate(time.Second)
-		fmt.Fprintf(w, "%s\t%s\t%d\t%d\t%d\t%d\t%s\n",
-			j.JobID, j.Project,
+		fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%d\t%d\t%d\t%s\n",
+			j.JobID, j.Project, j.Status,
 			j.StatusCount["running"],
 			j.StatusCount["pending"],
 			j.StatusCount["failed"],
@@ -57,10 +59,17 @@ var jobShowCmd = &cobra.Command{
 	Use:   "show <job_id>",
 	Short: "Show job details and its tasks",
 	Args:  cobra.ExactArgs(1),
-	// TODO: needs GET /api/jobs/:id endpoint (not yet implemented in API)
-	RunE: func(cmd *cobra.Command, args []string) error {
-		return fmt.Errorf("job show: not implemented (needs API endpoint)")
-	},
+	RunE:  runJobShow,
+}
+
+func runJobShow(cmd *cobra.Command, args []string) error {
+	jobID := args[0]
+	var result map[string]any
+	if err := doAndDecode("GET", "/api/jobs/"+jobID, nil, &result); err != nil {
+		return err
+	}
+	printJSON(result)
+	return nil
 }
 
 var jobKillCmd = &cobra.Command{
@@ -84,20 +93,34 @@ var jobPauseCmd = &cobra.Command{
 	Use:   "pause <job_id>",
 	Short: "Pause a job (stop dispatching new tasks, running tasks continue)",
 	Args:  cobra.ExactArgs(1),
-	// TODO: needs API endpoint
-	RunE: func(cmd *cobra.Command, args []string) error {
-		return fmt.Errorf("job pause: not implemented (needs API endpoint)")
-	},
+	RunE:  runJobPause,
+}
+
+func runJobPause(cmd *cobra.Command, args []string) error {
+	jobID := args[0]
+	var resp map[string]any
+	if err := doAndDecode("POST", "/api/jobs/"+jobID+"/pause", nil, &resp); err != nil {
+		return err
+	}
+	fmt.Printf("job %s paused\n", jobID)
+	return nil
 }
 
 var jobResumeCmd = &cobra.Command{
 	Use:   "resume <job_id>",
 	Short: "Resume a paused job",
 	Args:  cobra.ExactArgs(1),
-	// TODO: needs API endpoint
-	RunE: func(cmd *cobra.Command, args []string) error {
-		return fmt.Errorf("job resume: not implemented (needs API endpoint)")
-	},
+	RunE:  runJobResume,
+}
+
+func runJobResume(cmd *cobra.Command, args []string) error {
+	jobID := args[0]
+	var resp map[string]any
+	if err := doAndDecode("POST", "/api/jobs/"+jobID+"/resume", nil, &resp); err != nil {
+		return err
+	}
+	fmt.Printf("job %s resumed\n", jobID)
+	return nil
 }
 
 var jobRmCmd = &cobra.Command{
@@ -105,10 +128,17 @@ var jobRmCmd = &cobra.Command{
 	Aliases: []string{"remove", "delete"},
 	Short:   "Remove a completed job record",
 	Args:    cobra.ExactArgs(1),
-	// TODO: needs API endpoint
-	RunE: func(cmd *cobra.Command, args []string) error {
-		return fmt.Errorf("job rm: not implemented (needs API endpoint)")
-	},
+	RunE:    runJobRm,
+}
+
+func runJobRm(cmd *cobra.Command, args []string) error {
+	jobID := args[0]
+	var resp map[string]any
+	if err := doAndDecode("POST", "/api/jobs/"+jobID+"/rm", nil, &resp); err != nil {
+		return err
+	}
+	fmt.Printf("job %s removed\n", jobID)
+	return nil
 }
 
 func init() {

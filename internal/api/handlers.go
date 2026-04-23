@@ -1,18 +1,19 @@
 package api
 
 import (
+	"context"
 	"crypto/rand"
+	"encoding/json"
 	"fmt"
 	"io"
-	"maps"
 	"net/http"
-	"slices"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/project"
 	"github.com/gliese129/runq/internal/scheduler"
+	"github.com/gliese129/runq/internal/store"
 	"gopkg.in/yaml.v3"
 )
 
@@ -35,7 +36,11 @@ func (s *Server) registerRoutes() {
 	{
 		jobs.POST("", s.handleJobSubmit)
 		jobs.GET("", s.handleJobList)
+		jobs.GET("/:id", s.handleJobShow)
 		jobs.DELETE("/:id", s.handleJobKill)
+		jobs.POST("/:id/pause", s.handleJobPause)
+		jobs.POST("/:id/resume", s.handleJobResume)
+		jobs.POST("/:id/rm", s.handleJobRm)
 	}
 
 	// Task
@@ -44,6 +49,7 @@ func (s *Server) registerRoutes() {
 		tasks.GET("", s.handleTaskList)
 		tasks.GET("/:id", s.handleTaskGet)
 		tasks.POST("/:id/kill", s.handleTaskKill)
+		tasks.POST("/:id/retry", s.handleTaskRetry)
 	}
 
 	// System
@@ -214,7 +220,57 @@ func (s *Server) handleJobSubmit(c *gin.Context) {
 		})
 	}
 
-	// Enqueue all tasks.
+	// Persist job + all tasks to DB atomically (single transaction).
+	// If DB write fails, we do NOT push to Queue — no partial state.
+	ctx := context.Background()
+	cfgJSON, err := json.Marshal(jobCfg)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("failed to marshal job config: %v", err)})
+		return
+	}
+
+	now := time.Now()
+	jobRow := store.JobRow{
+		ID:          jobID,
+		ProjectName: jobCfg.Project,
+		Description: jobCfg.Description,
+		ConfigJSON:  string(cfgJSON),
+		Status:      "pending",
+		TotalTasks:  len(tasks),
+		CreatedAt:   now,
+	}
+
+	// Convert scheduler.Task → store.TaskRow for persistence.
+	taskRows := make([]store.TaskRow, 0, len(tasks))
+	for _, t := range tasks {
+		paramsJSON, _ := json.Marshal(t.Params)
+		envJSON, _ := json.Marshal(t.Env)
+		taskRows = append(taskRows, store.TaskRow{
+			ID:          t.ID,
+			JobID:       t.JobID,
+			ProjectName: t.ProjectName,
+			Command:     t.Command,
+			ParamsJSON:  string(paramsJSON),
+			GPUsNeeded:  t.GPUsNeeded,
+			Status:      "pending",
+			MaxRetry:    t.MaxRetry,
+			LogPath:     t.LogPath,
+			WorkingDir:  t.WorkingDir,
+			EnvJSON:     string(envJSON),
+			Resumable:   t.Resumable,
+			ExtraArgs:   t.ExtraArgs,
+			EnqueuedAt:  now,
+		})
+	}
+
+	// Atomic insert: job + tasks in one transaction.
+	// On failure the entire batch rolls back — no orphan job rows.
+	if err := s.deps.Store.InsertJobWithTasks(ctx, &jobRow, taskRows); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to persist job: %v", err)})
+		return
+	}
+
+	// DB succeeded — now push to in-memory Queue for scheduling.
 	s.deps.Queue.PushBatch(tasks)
 
 	s.logger.Info("job submitted",
@@ -229,39 +285,42 @@ func (s *Server) handleJobSubmit(c *gin.Context) {
 	})
 }
 
-// handleJobList returns a per-job summary with status breakdown.
+// handleJobList returns jobs from DB with per-task status breakdown.
 func (s *Server) handleJobList(c *gin.Context) {
-	tasks := s.deps.Queue.FetchAll()
-	type Res struct {
+	ctx := context.Background()
+	jobs, err := s.deps.Store.ListJobs(ctx, c.Query("project"))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	type JobSummary struct {
 		JobID       string         `json:"job_id"`
 		Project     string         `json:"project"`
+		Status      string         `json:"status"`
+		TotalTasks  int            `json:"total_tasks"`
 		StatusCount map[string]int `json:"status_count"`
 		CreatedAt   time.Time      `json:"created_at"`
 	}
-	mp := map[string]Res{}
 
-	for _, t := range tasks {
-		if _, ok := mp[t.JobID]; !ok {
-			mp[t.JobID] = Res{
-				JobID:   t.JobID,
-				Project: t.ProjectName,
-				StatusCount: map[string]int{
-					"running": 0,
-					"pending": 0,
-					"failed":  0,
-					"killed":  0,
-					"success": 0,
-				},
-				CreatedAt: t.EnqueuedAt,
-			}
-			mp[t.JobID].StatusCount[string(t.Status)] = 1
-		} else {
-			mp[t.JobID].StatusCount[string(t.Status)]++
+	results := make([]JobSummary, 0, len(jobs))
+	for _, j := range jobs {
+		// Aggregate task statuses for this job.
+		tasks, _ := s.deps.Store.ListTasks(ctx, store.TaskFilter{JobID: j.ID})
+		counts := map[string]int{"pending": 0, "running": 0, "success": 0, "failed": 0, "killed": 0}
+		for _, t := range tasks {
+			counts[t.Status]++
 		}
+		results = append(results, JobSummary{
+			JobID:       j.ID,
+			Project:     j.ProjectName,
+			Status:      j.Status,
+			TotalTasks:  j.TotalTasks,
+			StatusCount: counts,
+			CreatedAt:   j.CreatedAt,
+		})
 	}
-
-	res := slices.Collect(maps.Values(mp))
-	c.JSON(http.StatusOK, res)
+	c.JSON(http.StatusOK, results)
 }
 
 func (s *Server) handleJobKill(c *gin.Context) {
@@ -289,31 +348,154 @@ func (s *Server) handleJobKill(c *gin.Context) {
 	})
 }
 
+// handleJobShow returns job details along with all its tasks.
+func (s *Server) handleJobShow(c *gin.Context) {
+	ctx := context.Background()
+	jobID := c.Param("id")
+
+	job, err := s.deps.Store.GetJob(ctx, jobID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if job == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": fmt.Sprintf("job %q not found", jobID)})
+		return
+	}
+
+	tasks, err := s.deps.Store.ListTasks(ctx, store.TaskFilter{JobID: jobID})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"job": job, "tasks": tasks})
+}
+
+// handleJobPause pauses a job — scheduler skips its pending tasks.
+func (s *Server) handleJobPause(c *gin.Context) {
+	ctx := context.Background()
+	jobID := c.Param("id")
+
+	job, err := s.deps.Store.GetJob(ctx, jobID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if job == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": fmt.Sprintf("job %q not found", jobID)})
+		return
+	}
+	if job.Status == "done" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("job %q is already done", jobID)})
+		return
+	}
+
+	s.deps.Scheduler.PauseJob(jobID)
+	if err := s.deps.Store.UpdateJobStatus(ctx, jobID, "paused"); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": fmt.Sprintf("job %q paused", jobID)})
+}
+
+// handleJobResume resumes a paused job.
+func (s *Server) handleJobResume(c *gin.Context) {
+	ctx := context.Background()
+	jobID := c.Param("id")
+
+	job, err := s.deps.Store.GetJob(ctx, jobID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if job == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": fmt.Sprintf("job %q not found", jobID)})
+		return
+	}
+	if job.Status != "paused" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("job %q is %s, not paused", jobID, job.Status)})
+		return
+	}
+
+	s.deps.Scheduler.ResumeJob(jobID)
+	if err := s.deps.Store.UpdateJobStatus(ctx, jobID, "running"); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": fmt.Sprintf("job %q resumed", jobID)})
+}
+
+// handleJobRm removes a completed job and its tasks from DB.
+func (s *Server) handleJobRm(c *gin.Context) {
+	ctx := context.Background()
+	jobID := c.Param("id")
+
+	job, err := s.deps.Store.GetJob(ctx, jobID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if job == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": fmt.Sprintf("job %q not found", jobID)})
+		return
+	}
+	if job.Status != "done" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("job %q is %s, only completed jobs can be removed", jobID, job.Status)})
+		return
+	}
+
+	if err := s.deps.Store.DeleteJob(ctx, jobID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": fmt.Sprintf("job %q removed", jobID)})
+}
+
 // ── Task handlers ──
 
+// handleTaskList queries tasks from DB. Supports ?status= and ?job= filters.
+// Default (no filter): returns running + pending tasks.
 func (s *Server) handleTaskList(c *gin.Context) {
+	ctx := context.Background()
 	status := c.Query("status")
 	jobID := c.Query("job")
 
-	var tasks []*scheduler.Task
-	if jobID != "" {
-		tasks = s.deps.Queue.ListByJob(jobID)
-	} else if status != "" {
-		tasks = s.deps.Queue.ListByStatus(scheduler.TaskStatus(status))
-	} else {
-		// Default: running + pending.
-		tasks = append(
-			s.deps.Queue.ListByStatus(scheduler.StatusRunning),
-			s.deps.Queue.ListByStatus(scheduler.StatusPending)...,
-		)
+	filter := store.TaskFilter{Status: status, JobID: jobID}
+	// Default: show active tasks only.
+	if status == "" && jobID == "" {
+		filter.Status = "" // ListTasks with empty filter returns all; we want active only
+	}
+
+	tasks, err := s.deps.Store.ListTasks(ctx, filter)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	// If no explicit filter, return only active tasks (backward compatible).
+	if status == "" && jobID == "" {
+		active := make([]store.TaskRow, 0, len(tasks))
+		for _, t := range tasks {
+			if t.Status == "pending" || t.Status == "running" {
+				active = append(active, t)
+			}
+		}
+		tasks = active
 	}
 
 	c.JSON(http.StatusOK, tasks)
 }
 
+// handleTaskGet returns a single task from DB with all fields.
 func (s *Server) handleTaskGet(c *gin.Context) {
+	ctx := context.Background()
 	id := c.Param("id")
-	task := s.deps.Queue.Get(id)
+	task, err := s.deps.Store.GetTask(ctx, id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
 	if task == nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": fmt.Sprintf("task %q not found", id)})
 		return
@@ -341,6 +523,44 @@ func (s *Server) handleTaskKill(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"message": fmt.Sprintf("task %q killed", id),
 	})
+}
+
+// handleTaskRetry re-enqueues a failed or killed task for another attempt.
+func (s *Server) handleTaskRetry(c *gin.Context) {
+	ctx := context.Background()
+	id := c.Param("id")
+
+	row, err := s.deps.Store.GetTask(ctx, id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if row == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": fmt.Sprintf("task %q not found", id)})
+		return
+	}
+	if row.Status != "failed" && row.Status != "killed" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("task %q is %s, only failed/killed tasks can be retried", id, row.Status)})
+		return
+	}
+
+	// Reset task state in DB.
+	if err := s.deps.Store.UpdateTaskStatus(ctx, id, "pending", map[string]any{
+		"gpus":        nil,
+		"pid":         nil,
+		"started_at":  nil,
+		"finished_at": nil,
+	}); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Re-read the updated row and push to Queue.
+	row, _ = s.deps.Store.GetTask(ctx, id)
+	task := taskRowToSchedulerTask(row)
+	s.deps.Queue.Push(task)
+
+	c.JSON(http.StatusOK, gin.H{"message": fmt.Sprintf("task %q re-enqueued", id)})
 }
 
 // ── System handlers ──

@@ -340,7 +340,7 @@ var logsCmd = &cobra.Command{
 						if err != nil {
 							return err
 						}
-						fmt.Fprintf(writer.Bypass(), line)
+						fmt.Fprintf(writer.Bypass(), "%s", line)
 					}
 				}
 			case err, ok := <-watcher.Errors:

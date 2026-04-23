@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/gliese129/runq/internal/utils"
@@ -63,6 +64,7 @@ func (e *Executor) Start(parentCtx context.Context, spec RunSpec) (Result, error
 	cmd := exec.CommandContext(ctx, "sh", "-c", spec.Command)
 	cmd.Dir = spec.WorkingDir
 	cmd.Env = buildEnv(spec.GPUs, spec.Env)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	// Redirect stdout+stderr to log file.
 	logFile, err := os.Create(spec.LogPath)
@@ -85,6 +87,11 @@ func (e *Executor) Start(parentCtx context.Context, spec RunSpec) (Result, error
 	}
 
 	err = cmd.Wait()
+
+	// Kill the entire process group to clean up child processes (e.g. DataLoader
+	// workers) that may still be holding GPU memory.
+	killProcessGroup(pid)
+
 	exitCode := 0
 	if err != nil {
 		var exitErr *exec.ExitError
@@ -130,4 +137,13 @@ func buildEnv(gpus []int, extra map[string]string) []string {
 		env = append(env, k+"="+v)
 	}
 	return env
+}
+
+// killProcessGroup sends SIGKILL to the entire process group of the given PID.
+// Ensures child processes (DataLoader workers, etc.) don't linger holding GPU memory.
+func killProcessGroup(pid int) {
+	pgid, err := syscall.Getpgid(pid)
+	if err == nil {
+		_ = syscall.Kill(-pgid, syscall.SIGKILL)
+	}
 }

@@ -14,8 +14,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     config_json  TEXT NOT NULL,       -- serialized job.JobConfig as JSON
     status       TEXT NOT NULL DEFAULT 'pending',  -- pending/running/paused/done
     total_tasks  INTEGER NOT NULL DEFAULT 0,
-    created_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
-    finished_at  DATETIME
+    created_at   INTEGER,             -- Unix timestamp
+    finished_at  INTEGER              -- Unix timestamp, nullable
 );
 
 CREATE TABLE IF NOT EXISTS tasks (
@@ -32,9 +32,13 @@ CREATE TABLE IF NOT EXISTS tasks (
     pid          INTEGER,
     start_time   INTEGER,            -- /proc starttime for reclaim validation
     log_path     TEXT,
-    enqueued_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
-    started_at   DATETIME,
-    finished_at  DATETIME
+    working_dir  TEXT,               -- working directory for the task
+    env_json     TEXT,               -- environment variables as JSON, e.g. {"WANDB_PROJECT":"myproj"}
+    resumable    INTEGER NOT NULL DEFAULT 0,  -- 0=false, 1=true
+    extra_args   TEXT DEFAULT '',     -- extra args appended to command on resume
+    enqueued_at  INTEGER,            -- Unix timestamp
+    started_at   INTEGER,            -- Unix timestamp, nullable
+    finished_at  INTEGER             -- Unix timestamp, nullable
 );
 
 CREATE INDEX IF NOT EXISTS idx_tasks_job_id ON tasks(job_id);

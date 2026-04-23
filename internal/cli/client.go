@@ -32,7 +32,7 @@ func doAndDecode(method, path string, body any, v any) error {
 	resp, err := client.Do(method, path, body)
 	if err != nil {
 		msg := api.DiagnoseDaemon(getSocketPath(), api.DefaultPIDPath())
-		return fmt.Errorf(msg)
+		return fmt.Errorf("%s", msg)
 	}
 
 	defer resp.Body.Close()
@@ -46,7 +46,7 @@ func doAndDecode(method, path string, body any, v any) error {
 		if err != nil {
 			return err
 		}
-		return fmt.Errorf(errResp.Error)
+		return fmt.Errorf("%s", errResp.Error)
 	}
 	if v == nil {
 		if _, err := io.Copy(io.Discard, resp.Body); err != nil {
