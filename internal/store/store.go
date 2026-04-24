@@ -6,10 +6,15 @@ import (
 	"time"
 
 	_ "modernc.org/sqlite" // register "sqlite" driver
+
+	"github.com/gliese129/runq/internal/utils"
 )
 
-// Store provides persistence via SQLite.
-const DEFAULT_DB_PATH = "~/.runq/runq.db"
+// DefaultDBPath returns the resolved database path based on ResolveDataDir().
+func DefaultDBPath() string {
+	_, dataDir := utils.ResolveDataDir()
+	return utils.PathsFromDataDir(dataDir).DBPath
+}
 
 type Store struct {
 	db *sql.DB

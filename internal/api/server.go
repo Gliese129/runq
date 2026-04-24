@@ -25,17 +25,17 @@ import (
 	"github.com/gliese129/runq/internal/utils"
 )
 
-// DefaultSocketPath returns the default unix socket path (~/.runq/runq.sock).
-func DefaultSocketPath() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".runq", "runq.sock")
+// DefaultPaths returns the standard daemon file paths based on ResolveDataDir().
+func DefaultPaths() utils.DataDirPaths {
+	_, dataDir := utils.ResolveDataDir()
+	return utils.PathsFromDataDir(dataDir)
 }
 
-// DefaultPIDPath returns the default PID file path (~/.runq/daemon.pid).
-func DefaultPIDPath() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".runq", "daemon.pid")
-}
+// DefaultSocketPath returns the resolved unix socket path.
+func DefaultSocketPath() string { return DefaultPaths().SocketPath }
+
+// DefaultPIDPath returns the resolved PID file path.
+func DefaultPIDPath() string { return DefaultPaths().PIDPath }
 
 // Deps holds all dependencies the API handlers need.
 type Deps struct {
@@ -159,13 +159,25 @@ func (s *Server) Start() error {
 		s.logger.Info("restored pending tasks", "count", len(pendingTasks))
 	}
 
+	// Restore paused job set from DB so pause semantics survive daemon restart.
+	pausedJobs, err := s.deps.Store.ListJobs(context.Background(), "")
+	if err != nil {
+		s.logger.Warn("failed to load jobs for pause restore", "error", err)
+	} else {
+		for _, j := range pausedJobs {
+			if j.Status == "paused" {
+				s.deps.Scheduler.PauseJob(j.ID)
+			}
+		}
+	}
+
 	// no running + no file -> create listener
 	l, err := net.Listen("unix", s.socketPath)
 	if err != nil {
 		return fmt.Errorf("failed to listen on unix socket: %w", err)
 	}
 	s.listener = l
-	_ = os.Chmod(s.socketPath, 0666)
+	_ = os.Chmod(s.socketPath, 0660)
 
 	if err := writePID(s.pidPath, time.Now()); err != nil {
 		_ = s.listener.Close()

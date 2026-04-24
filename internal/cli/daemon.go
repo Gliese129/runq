@@ -28,10 +28,19 @@ var daemonStartCmd = &cobra.Command{
 	Use:   "start",
 	Short: "Start the scheduler daemon",
 	Example: `  runq daemon start
-  runq daemon start --config ~/.runq/config.yaml`,
+  RUNQ_DATA_DIR=/data/runq runq daemon start`,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// Resolve data directory: RUNQ_DATA_DIR env > euid auto-detect.
+		_, dataDir := utils.ResolveDataDir()
+		paths := utils.PathsFromDataDir(dataDir)
+
+		// Ensure data and log directories exist.
+		if err := os.MkdirAll(paths.LogDir, 0o755); err != nil {
+			return fmt.Errorf("create data dir: %w", err)
+		}
+
 		// Open DB (schema migration runs automatically).
-		s, err := store.Open(store.DEFAULT_DB_PATH)
+		s, err := store.Open(paths.DBPath)
 		if err != nil {
 			return err
 		}
@@ -46,6 +55,8 @@ var daemonStartCmd = &cobra.Command{
 		queue := scheduler.NewQueue()
 		exec_ := executor.New()
 		logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+		logger.Info("daemon starting", "data_dir", dataDir, "db", paths.DBPath, "socket", paths.SocketPath)
+
 		deps := api.Deps{
 			Store:     s,
 			Registry:  project.NewRegistry(s.DB()),
@@ -55,7 +66,7 @@ var daemonStartCmd = &cobra.Command{
 			Executor:  exec_,
 			Logger:    logger,
 		}
-		server := api.NewServer(deps, getSocketPath(), api.DefaultPIDPath())
+		server := api.NewServer(deps, paths.SocketPath, paths.PIDPath)
 
 		deps.Scheduler.Start()
 

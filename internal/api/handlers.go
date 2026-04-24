@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path/filepath"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -170,9 +171,6 @@ func (s *Server) handleJobSubmit(c *gin.Context) {
 
 	// Determine effective settings (job overrides > project defaults).
 	gpusPerTask := proj.Defaults.GPUsPerTask
-	if gpusPerTask == 0 {
-		gpusPerTask = 1
-	}
 	maxRetry := proj.Defaults.MaxRetry
 	if jobCfg.Overrides != nil {
 		if jobCfg.Overrides.GPUsPerTask != nil {
@@ -181,6 +179,10 @@ func (s *Server) handleJobSubmit(c *gin.Context) {
 		if jobCfg.Overrides.MaxRetry != nil {
 			maxRetry = *jobCfg.Overrides.MaxRetry
 		}
+	}
+	// Enforce minimum 1 GPU — 0 would skip CUDA_VISIBLE_DEVICES and expose all GPUs.
+	if gpusPerTask <= 0 {
+		gpusPerTask = 1
 	}
 
 	// Merge env: project env + job override env.
@@ -212,7 +214,7 @@ func (s *Server) handleJobSubmit(c *gin.Context) {
 			Params:      params,
 			GPUsNeeded:  gpusPerTask,
 			MaxRetry:    maxRetry,
-			LogPath:     fmt.Sprintf("logs/%s.log", taskID),
+			LogPath:     filepath.Join(proj.WorkingDir, "logs", taskID+".log"),
 			WorkingDir:  proj.WorkingDir,
 			Env:         env,
 			Resumable:   proj.Resume.Enabled,
@@ -331,6 +333,7 @@ func (s *Server) handleJobKill(c *gin.Context) {
 		return
 	}
 
+	ctx := context.Background()
 	killed := 0
 	for _, t := range tasks {
 		if t.Status == scheduler.StatusRunning {
@@ -338,6 +341,10 @@ func (s *Server) handleJobKill(c *gin.Context) {
 			killed++
 		} else if t.Status == scheduler.StatusPending {
 			s.deps.Queue.Complete(t.ID, scheduler.StatusKilled)
+			// Persist to DB so the kill survives daemon restart.
+			_ = s.deps.Store.UpdateTaskStatus(ctx, t.ID, "killed", map[string]any{
+				"finished_at": time.Now().Unix(),
+			})
 			killed++
 		}
 	}
@@ -515,6 +522,9 @@ func (s *Server) handleTaskKill(c *gin.Context) {
 		s.deps.Executor.Stop(id)
 	} else if task.Status == scheduler.StatusPending {
 		s.deps.Queue.Complete(id, scheduler.StatusKilled)
+		_ = s.deps.Store.UpdateTaskStatus(context.Background(), id, "killed", map[string]any{
+			"finished_at": time.Now().Unix(),
+		})
 	} else {
 		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("task %q is %s, cannot kill", id, task.Status)})
 		return
