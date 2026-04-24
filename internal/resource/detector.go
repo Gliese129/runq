@@ -1,7 +1,6 @@
-package gpu
+package resource
 
 // Detector abstracts GPU discovery for testability.
-// Production uses NvidiaSMIDetector; tests use MockDetector.
 type Detector interface {
 	Detect() ([]Info, error)
 }

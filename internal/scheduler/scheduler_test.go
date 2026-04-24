@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/gliese129/runq/internal/executor"
-	"github.com/gliese129/runq/internal/gpu"
+	"github.com/gliese129/runq/internal/resource"
 	"github.com/gliese129/runq/internal/store"
 )
 
@@ -17,12 +17,12 @@ func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 }
 
-func testPool(n int) *GPUPool {
-	infos := make([]gpu.Info, n)
+func testPool(n int) *resource.GPUPool {
+	infos := make([]resource.Info, n)
 	for i := range infos {
-		infos[i] = gpu.Info{Index: i, MemFree: 80000}
+		infos[i] = resource.Info{Index: i, MemFree: 80000}
 	}
-	return NewGPUPool(infos)
+	return resource.NewGPUPool(infos)
 }
 
 // testStore opens an in-memory SQLite store for testing.

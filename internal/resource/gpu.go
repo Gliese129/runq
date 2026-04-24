@@ -1,4 +1,4 @@
-package gpu
+package resource
 
 import (
 	"context"
@@ -19,9 +19,8 @@ type Info struct {
 }
 
 // Detect queries nvidia-smi and returns info for all GPUs on this machine.
-// Returns an error if nvidia-smi is not found or returns a non-zero exit code.
+// 10s timeout prevents daemon startup from hanging if the GPU driver is stuck.
 func Detect() ([]Info, error) {
-	// 10s timeout prevents daemon startup from hanging if GPU driver is stuck.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -40,12 +39,7 @@ func Detect() ([]Info, error) {
 }
 
 // Parse parses the CSV output of nvidia-smi into []Info.
-// This is a pure function — Detect calls it internally, tests call it directly.
-//
-// Expected input format (one line per GPU):
-//
-//	0, NVIDIA A100-SXM4-80GB, 79000, 1000, 5
-//	1, NVIDIA A100-SXM4-80GB, 80000, 0, 0
+// Pure function — Detect calls it internally, tests call it directly.
 func Parse(output string) ([]Info, error) {
 	output = strings.TrimSpace(output)
 	if output == "" {
@@ -85,18 +79,13 @@ func Parse(output string) ([]Info, error) {
 		}
 
 		infos = append(infos, Info{
-			Index:   index,
-			Name:    name,
-			MemFree: memFree,
-			MemUsed: memUsed,
-			UtilPct: utilPct,
+			Index: index, Name: name,
+			MemFree: memFree, MemUsed: memUsed, UtilPct: utilPct,
 		})
 	}
-
 	return infos, nil
 }
 
-// parseIntField is a helper that wraps strconv.Atoi with a contextual error message.
 func parseIntField(s string, fieldName string, lineNum int) (int, error) {
 	v, err := strconv.Atoi(strings.TrimSpace(s))
 	if err != nil {

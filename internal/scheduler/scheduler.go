@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gliese129/runq/internal/executor"
+	"github.com/gliese129/runq/internal/resource"
 	"github.com/gliese129/runq/internal/store"
 )
 
@@ -34,7 +35,7 @@ func DefaultConfig() Config {
 type Scheduler struct {
 	cfg    Config
 	queue  *Queue
-	pool   *GPUPool
+	pool   resource.Allocator
 	exec   *executor.Executor
 	store  *store.Store
 	logger *slog.Logger
@@ -50,7 +51,7 @@ type Scheduler struct {
 }
 
 // New creates a Scheduler with all its dependencies.
-func New(cfg Config, queue *Queue, pool *GPUPool, exec *executor.Executor, store *store.Store, logger *slog.Logger) *Scheduler {
+func New(cfg Config, queue *Queue, pool resource.Allocator, exec *executor.Executor, store *store.Store, logger *slog.Logger) *Scheduler {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Scheduler{
 		cfg:        cfg,

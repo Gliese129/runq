@@ -16,6 +16,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	job2 "github.com/gliese129/runq/internal/job"
+	"github.com/gliese129/runq/internal/resource"
 	"github.com/gliese129/runq/internal/scheduler"
 	"github.com/gosuri/uilive"
 	"github.com/olekukonko/tablewriter"
@@ -394,7 +395,7 @@ var gpuCmd = &cobra.Command{
 }
 
 func runGPU(cmd *cobra.Command, args []string) error {
-	var gpus []scheduler.GPUState
+	var gpus []resource.GPUState
 	if err := doAndDecode("GET", "/api/gpu", nil, &gpus); err != nil {
 		return err
 	}

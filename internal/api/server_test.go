@@ -13,9 +13,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gliese129/runq/internal/executor"
-	"github.com/gliese129/runq/internal/gpu"
 	"github.com/gliese129/runq/internal/project"
+	"github.com/gliese129/runq/internal/resource"
 	"github.com/gliese129/runq/internal/scheduler"
+	"github.com/gliese129/runq/internal/service"
 	"github.com/gliese129/runq/internal/store"
 )
 
@@ -34,10 +35,7 @@ func setupTestServer(t *testing.T) *Server {
 
 	reg := project.NewRegistry(st.DB())
 	q := scheduler.NewQueue()
-	pool := scheduler.NewGPUPool([]gpu.Info{
-		{Index: 0, MemFree: 80000},
-		{Index: 1, MemFree: 80000},
-	})
+	pool := resource.NewMockAllocator(2)
 	exec := executor.New()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
@@ -48,6 +46,12 @@ func setupTestServer(t *testing.T) *Server {
 		Pool:     pool,
 		Executor: exec,
 		Logger:   logger,
+		JobService: &service.JobService{
+			Store: st, Queue: q, Exec: exec, Registry: reg,
+		},
+		TaskService: &service.TaskService{
+			Store: st, Queue: q, Exec: exec,
+		},
 	}
 
 	return NewServer(deps, "", "")
@@ -155,7 +159,7 @@ func TestGPUStatus(t *testing.T) {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 
-	var gpus []scheduler.GPUState
+	var gpus []resource.GPUState
 	json.NewDecoder(w.Body).Decode(&gpus)
 	if len(gpus) != 2 {
 		t.Errorf("expected 2 GPUs, got %d", len(gpus))

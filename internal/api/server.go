@@ -19,8 +19,11 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gliese129/runq/internal/executor"
+	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/project"
+	"github.com/gliese129/runq/internal/resource"
 	"github.com/gliese129/runq/internal/scheduler"
+	"github.com/gliese129/runq/internal/service"
 	"github.com/gliese129/runq/internal/store"
 	"github.com/gliese129/runq/internal/utils"
 )
@@ -43,9 +46,24 @@ type Deps struct {
 	Registry  *project.Registry
 	Scheduler *scheduler.Scheduler
 	Queue     *scheduler.Queue
-	Pool      *scheduler.GPUPool
+	Pool      resource.Allocator
 	Executor  *executor.Executor
 	Logger    *slog.Logger
+
+	// Service layer — handlers delegate business logic here.
+	JobService interface {
+		SubmitJob(ctx context.Context, jobCfg job.JobConfig) (string, int, error)
+		ListJobs(ctx context.Context, project string) ([]service.JobSummary, error)
+		ShowJob(ctx context.Context, jobID string) (*service.JobDetail, error)
+		KillJob(ctx context.Context, jobID string) (int, error)
+		PauseJob(ctx context.Context, jobID string) error
+		ResumeJob(ctx context.Context, jobID string) error
+		RemoveJob(ctx context.Context, jobID string) error
+	}
+	TaskService interface {
+		KillTask(ctx context.Context, taskID string) error
+		RetryTask(ctx context.Context, taskID string) error
+	}
 }
 
 // Server exposes the scheduler API over a unix domain socket.
@@ -299,30 +317,7 @@ func (c *Client) Do(method, path string, body interface{}) (*http.Response, erro
 
 // taskRowToSchedulerTask converts a store.TaskRow to a scheduler.Task for Queue insertion.
 // JSON fields (params, env) are decoded back to maps.
+// taskRowToSchedulerTask delegates to service.TaskRowToSchedulerTask.
 func taskRowToSchedulerTask(row *store.TaskRow) *scheduler.Task {
-	var params map[string]any
-	if row.ParamsJSON != "" {
-		_ = json.Unmarshal([]byte(row.ParamsJSON), &params)
-	}
-	var env map[string]string
-	if row.EnvJSON != "" {
-		_ = json.Unmarshal([]byte(row.EnvJSON), &env)
-	}
-	return &scheduler.Task{
-		ID:          row.ID,
-		JobID:       row.JobID,
-		ProjectName: row.ProjectName,
-		Command:     row.Command,
-		Params:      params,
-		GPUsNeeded:  row.GPUsNeeded,
-		Status:      scheduler.StatusPending,
-		RetryCount:  row.RetryCount,
-		MaxRetry:    row.MaxRetry,
-		LogPath:     row.LogPath,
-		WorkingDir:  row.WorkingDir,
-		Env:         env,
-		EnqueuedAt:  row.EnqueuedAt,
-		Resumable:   row.Resumable,
-		ExtraArgs:   row.ExtraArgs,
-	}
+	return service.TaskRowToSchedulerTask(row)
 }
