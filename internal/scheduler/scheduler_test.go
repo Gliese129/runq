@@ -1,10 +1,12 @@
 package scheduler
 
 import (
+	"bytes"
 	"context"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -142,6 +144,43 @@ func TestSchedulerRetry(t *testing.T) {
 	}
 	if got.RetryCount != 2 {
 		t.Errorf("expected 2 retries, got %d", got.RetryCount)
+	}
+}
+
+func TestHandleFailureLogsNextRetryOnce(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	q := NewQueue()
+	st := testStore(t)
+	task := &Task{
+		ID: "t-fail", JobID: "j1", ProjectName: "test",
+		Command: "exit 1", GPUsNeeded: 1, MaxRetry: 1,
+	}
+	seedJob(t, st, "j1", "test", 1)
+	seedTask(t, st, task)
+	q.Push(task)
+
+	s := New(DefaultConfig(), q, testPool(1), executor.New(), st, logger)
+	s.handleFailure(task)
+
+	logs := buf.String()
+	if !strings.Contains(logs, "retry=1") {
+		t.Fatalf("expected retry=1 in logs, got %q", logs)
+	}
+	if strings.Contains(logs, "retry=2") {
+		t.Fatalf("unexpected retry=2 in logs: %q", logs)
+	}
+
+	row, err := st.GetTask(context.Background(), "t-fail")
+	if err != nil {
+		t.Fatalf("get task: %v", err)
+	}
+	if row.RetryCount != 1 {
+		t.Fatalf("expected DB retry_count 1, got %d", row.RetryCount)
+	}
+	if got := q.Get("t-fail").RetryCount; got != 1 {
+		t.Fatalf("expected queue retry count 1, got %d", got)
 	}
 }
 

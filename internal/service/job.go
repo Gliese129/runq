@@ -187,6 +187,7 @@ func (s *JobService) KillJob(ctx context.Context, jobID string) (int, error) {
 	killed := 0
 	for _, t := range tasks {
 		if t.Status == scheduler.StatusRunning {
+			s.Scheduler.RequestKill(t.ID)
 			s.Exec.Stop(t.ID)
 			killed++
 		} else if t.Status == scheduler.StatusPending {

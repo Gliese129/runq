@@ -50,7 +50,7 @@ func setupTestServer(t *testing.T) *Server {
 			Store: st, Queue: q, Exec: exec, Registry: reg,
 		},
 		TaskService: &service.TaskService{
-			Store: st, Queue: q, Exec: exec,
+			Store: st, Queue: q, Exec: exec, Scheduler: nil,
 		},
 	}
 

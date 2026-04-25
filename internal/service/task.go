@@ -14,9 +14,10 @@ import (
 // TaskService handles task-level state transitions.
 // All mutations go through here so DB + Queue stay in sync.
 type TaskService struct {
-	Store *store.Store
-	Queue *scheduler.Queue
-	Exec  *executor.Executor
+	Store     *store.Store
+	Queue     *scheduler.Queue
+	Exec      *executor.Executor
+	Scheduler *scheduler.Scheduler
 }
 
 // KillTask terminates a running or pending task.
@@ -29,8 +30,9 @@ func (s *TaskService) KillTask(ctx context.Context, taskID string) error {
 
 	switch task.Status {
 	case scheduler.StatusRunning:
+		s.Scheduler.RequestKill(taskID)
 		s.Exec.Stop(taskID)
-		// DB update happens in scheduler's runTask → completeTask path.
+		// DB update happens in scheduler's runTask → consumeKillRequest → completeTask(killed).
 	case scheduler.StatusPending:
 		s.Queue.Complete(taskID, scheduler.StatusKilled)
 		_ = s.Store.UpdateTaskStatus(ctx, taskID, "killed", map[string]any{

@@ -45,6 +45,12 @@ type Scheduler struct {
 	pausedJobs map[string]bool
 	pauseMu    sync.RWMutex
 
+	// killRequested tracks tasks that were explicitly killed by the user.
+	// When runTask sees a non-zero exit, it checks this set before deciding
+	// retry vs killed. Prevents user-killed tasks from being auto-retried.
+	killRequested map[string]bool
+	killMu        sync.Mutex
+
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -54,15 +60,16 @@ type Scheduler struct {
 func New(cfg Config, queue *Queue, pool resource.Allocator, exec *executor.Executor, store *store.Store, logger *slog.Logger) *Scheduler {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Scheduler{
-		cfg:        cfg,
-		queue:      queue,
-		pool:       pool,
-		exec:       exec,
-		store:      store,
-		logger:     logger,
-		pausedJobs: make(map[string]bool),
-		ctx:        ctx,
-		cancel:     cancel,
+		cfg:           cfg,
+		queue:         queue,
+		pool:          pool,
+		exec:          exec,
+		store:         store,
+		logger:        logger,
+		pausedJobs:    make(map[string]bool),
+		killRequested: make(map[string]bool),
+		ctx:           ctx,
+		cancel:        cancel,
 	}
 }
 
@@ -225,6 +232,14 @@ func (s *Scheduler) runTask(task *Task) {
 	// Persist PID (available only after process starts).
 	s.persistFields(task.ID, map[string]any{"pid": result.PID, "start_time": result.StartTime.Unix()})
 
+	// Check user-kill flag FIRST — even exit 0 after kill is treated as killed.
+	if s.consumeKillRequest(task.ID) {
+		s.completeTask(task, StatusKilled)
+		s.refreshJobStatus(task.JobID)
+		s.logger.Info("task killed by user", "task", task.ID)
+		return
+	}
+
 	if result.ExitCode == 0 {
 		s.completeTask(task, StatusSuccess)
 		s.refreshJobStatus(task.JobID)
@@ -232,10 +247,11 @@ func (s *Scheduler) runTask(task *Task) {
 		return
 	}
 
+	// Global shutdown — mark remaining running tasks as killed.
 	if s.ctx.Err() != nil {
 		s.completeTask(task, StatusKilled)
 		s.refreshJobStatus(task.JobID)
-		s.logger.Warn("task killed", "task", task.ID)
+		s.logger.Warn("task killed by shutdown", "task", task.ID)
 		return
 	}
 
@@ -263,10 +279,11 @@ func (s *Scheduler) completeTask(task *Task, status TaskStatus) {
 func (s *Scheduler) handleFailure(task *Task) {
 	canRetry := task.MaxRetry == 0 || task.RetryCount < task.MaxRetry
 	if canRetry {
+		nextRetry := task.RetryCount + 1
 		dbCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := s.store.UpdateTaskStatus(dbCtx, task.ID, "pending", map[string]any{
-			"retry_count": task.RetryCount + 1,
+			"retry_count": nextRetry,
 			"gpus":        nil,
 			"started_at":  nil,
 			"finished_at": nil,
@@ -276,7 +293,7 @@ func (s *Scheduler) handleFailure(task *Task) {
 		if err := s.queue.Requeue(task.ID); err != nil {
 			s.logger.Error("requeue failed", "task", task.ID, "error", err)
 		} else {
-			s.logger.Info("task re-queued", "task", task.ID, "retry", task.RetryCount+1, "max_retry", task.MaxRetry)
+			s.logger.Info("task re-queued", "task", task.ID, "retry", nextRetry, "max_retry", task.MaxRetry)
 		}
 		return
 	}
@@ -329,6 +346,25 @@ func (s *Scheduler) isJobPaused(jobID string) bool {
 	s.pauseMu.RLock()
 	defer s.pauseMu.RUnlock()
 	return s.pausedJobs[jobID]
+}
+
+// RequestKill marks a task as user-killed. Call before Executor.Stop().
+// runTask checks this flag to decide killed vs retry.
+func (s *Scheduler) RequestKill(taskID string) {
+	s.killMu.Lock()
+	defer s.killMu.Unlock()
+	s.killRequested[taskID] = true
+}
+
+// consumeKillRequest checks and clears the kill flag for a task.
+func (s *Scheduler) consumeKillRequest(taskID string) bool {
+	s.killMu.Lock()
+	defer s.killMu.Unlock()
+	if s.killRequested[taskID] {
+		delete(s.killRequested, taskID)
+		return true
+	}
+	return false
 }
 
 // refreshJobStatus checks all tasks of a job and updates the job status in DB.

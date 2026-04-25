@@ -89,14 +89,16 @@ var daemonStopCmd = &cobra.Command{
 
 var daemonRestartCmd = &cobra.Command{
 	Use:   "restart",
-	Short: "Restart the scheduler daemon",
+	Short: "Restart the scheduler daemon (always starts in background)",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		fmt.Println("Stopping daemon...")
 		if err := daemonStopCmd.RunE(cmd, args); err != nil {
 			return err
 		}
+		// Force detach mode — restart should never block the terminal.
 		fmt.Println("Starting daemon...")
-		return daemonStartCmd.RunE(cmd, args)
+		_ = daemonStartCmd.Flags().Set("detach", "true")
+		return daemonStartCmd.RunE(daemonStartCmd, args)
 	},
 }
 

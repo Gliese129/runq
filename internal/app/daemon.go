@@ -64,7 +64,7 @@ func NewDaemon() (*Daemon, error) {
 		Store: st, Queue: queue, Scheduler: sched, Exec: exec, Registry: reg,
 	}
 	taskSvc := &service.TaskService{
-		Store: st, Queue: queue, Exec: exec,
+		Store: st, Queue: queue, Exec: exec, Scheduler: sched,
 	}
 
 	deps := api.Deps{
