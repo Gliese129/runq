@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -67,6 +68,9 @@ func (e *Executor) Start(parentCtx context.Context, spec RunSpec) (Result, error
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	// Redirect stdout+stderr to log file.
+	if err := os.MkdirAll(filepath.Dir(spec.LogPath), 0o755); err != nil {
+		return Result{}, fmt.Errorf("create log directory for %q: %w", spec.LogPath, err)
+	}
 	logFile, err := os.Create(spec.LogPath)
 	if err != nil {
 		return Result{}, fmt.Errorf("create log file %q: %w", spec.LogPath, err)

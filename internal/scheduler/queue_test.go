@@ -121,6 +121,40 @@ func TestRequeue(t *testing.T) {
 	}
 }
 
+func TestRetryExistingUpdatesInPlace(t *testing.T) {
+	q := NewQueue()
+	task := makeTask("t1", 1)
+	q.Push(task)
+	q.MarkRunning("t1")
+	q.Complete("t1", StatusFailed)
+
+	updated := makeTask("t1", 2)
+	updated.JobID = "job-2"
+	updated.RetryCount = 3
+	updated.MaxRetry = 5
+	updated.GPUs = []int{0}
+	if !q.RetryExisting(updated) {
+		t.Fatal("expected existing task to be updated")
+	}
+	if q.Len() != 1 {
+		t.Fatalf("expected queue length 1, got %d", q.Len())
+	}
+
+	got := q.Get("t1")
+	if got.Status != StatusPending {
+		t.Fatalf("expected pending, got %s", got.Status)
+	}
+	if got.JobID != "job-2" {
+		t.Fatalf("expected job-2, got %s", got.JobID)
+	}
+	if got.GPUs != nil {
+		t.Fatal("expected GPUs to be cleared")
+	}
+	if got.RetryCount != 3 || got.MaxRetry != 5 || got.GPUsNeeded != 2 {
+		t.Fatalf("unexpected retry task: %+v", got)
+	}
+}
+
 func TestListByStatus(t *testing.T) {
 	q := NewQueue()
 	q.Push(makeTask("t1", 1))

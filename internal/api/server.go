@@ -149,46 +149,6 @@ func (s *Server) Start() error {
 		_ = os.Remove(s.socketPath)
 	}
 
-	// Phase 3: Reclaim previously-running tasks.
-	// Reclaimer checks if their processes are still alive and updates DB accordingly.
-	// Alive tasks get reattached (monitored via signal 0 polling).
-	// Dead tasks get their DB status set to pending (retry) or failed.
-	reclaimer := &executor.Reclaimer{
-		Store:  s.deps.Store,
-		Exec:   s.deps.Executor,
-		Logger: s.logger,
-	}
-	if err := reclaimer.Reclaim(); err != nil {
-		s.logger.Error("reclaim failed", "error", err)
-	}
-
-	// Restore pending tasks from DB into the in-memory Queue.
-	// This includes tasks that were originally pending AND dead tasks that
-	// Reclaimer just set back to pending (resumable retry).
-	pendingTasks, err := s.deps.Store.ListTasks(context.Background(), store.TaskFilter{Status: "pending"})
-	if err != nil {
-		return fmt.Errorf("load pending tasks from DB: %w", err)
-	}
-	for _, row := range pendingTasks {
-		task := taskRowToSchedulerTask(&row)
-		s.deps.Queue.Push(task)
-	}
-	if len(pendingTasks) > 0 {
-		s.logger.Info("restored pending tasks", "count", len(pendingTasks))
-	}
-
-	// Restore paused job set from DB so pause semantics survive daemon restart.
-	pausedJobs, err := s.deps.Store.ListJobs(context.Background(), "")
-	if err != nil {
-		s.logger.Warn("failed to load jobs for pause restore", "error", err)
-	} else {
-		for _, j := range pausedJobs {
-			if j.Status == "paused" {
-				s.deps.Scheduler.PauseJob(j.ID)
-			}
-		}
-	}
-
 	// no running + no file -> create listener
 	l, err := net.Listen("unix", s.socketPath)
 	if err != nil {

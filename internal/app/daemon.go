@@ -26,6 +26,8 @@ type Daemon struct {
 	Scheduler *scheduler.Scheduler
 	Logger    *slog.Logger
 	PidFile   *os.File
+	Executor  *executor.Executor
+	Queue     *scheduler.Queue
 }
 
 // NewDaemon creates and wires all daemon components.
@@ -86,6 +88,8 @@ func NewDaemon() (*Daemon, error) {
 		Server:    server,
 		Scheduler: sched,
 		Logger:    logger,
+		Executor:  exec,
+		Queue:     queue,
 	}, nil
 }
 
@@ -100,6 +104,11 @@ func (d *Daemon) Run() error {
 		return err
 	}
 	d.PidFile = pidFile
+
+	if err := d.restoreRuntimeState(); err != nil {
+		return err
+	}
+
 	d.Scheduler.Start()
 
 	sigChan := make(chan os.Signal, 1)
@@ -110,6 +119,49 @@ func (d *Daemon) Run() error {
 	}()
 
 	return d.Server.Start()
+}
+
+func (d *Daemon) restoreRuntimeState() error {
+	// Phase 3: Reclaim previously-running tasks.
+	// Reclaimer checks if their processes are still alive and updates DB accordingly.
+	// Alive tasks get reattached (monitored via signal 0 polling).
+	// Dead tasks get their DB status set to pending (retry) or failed.
+	reclaimer := &executor.Reclaimer{
+		Store:  d.Store,
+		Exec:   d.Executor,
+		Logger: d.Logger,
+	}
+	if err := reclaimer.Reclaim(); err != nil {
+		d.Logger.Error("reclaim failed", "error", err)
+	}
+
+	// Restore paused job set from DB so pause semantics survive daemon restart.
+	pausedJobs, err := d.Store.ListJobs(context.Background(), "")
+	if err != nil {
+		d.Logger.Warn("failed to load jobs for pause restore", "error", err)
+	} else {
+		for _, j := range pausedJobs {
+			if j.Status == "paused" {
+				d.Scheduler.PauseJob(j.ID)
+			}
+		}
+	}
+
+	// Restore pending tasks from DB into the in-memory Queue.
+	// This includes tasks that were originally pending AND dead tasks that
+	// Reclaimer just set back to pending (resumable retry).
+	pendingTasks, err := d.Store.ListTasks(context.Background(), store.TaskFilter{Status: "pending"})
+	if err != nil {
+		return fmt.Errorf("load pending tasks from DB: %w", err)
+	}
+	for _, row := range pendingTasks {
+		task := service.TaskRowToSchedulerTask(&row)
+		d.Queue.Push(task)
+	}
+	if len(pendingTasks) > 0 {
+		d.Logger.Info("restored pending tasks", "count", len(pendingTasks))
+	}
+	return nil
 }
 
 // Shutdown gracefully stops all daemon components.

@@ -163,6 +163,42 @@ func (q *Queue) Requeue(taskID string) error {
 	return nil
 }
 
+// RetryExisting updates an existing terminal task in-place for manual retry.
+// Returns false if the task is not currently in the queue.
+func (q *Queue) RetryExisting(task *Task) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	existing := q.findLocked(task.ID)
+	if existing == nil {
+		return false
+	}
+	existing.JobID = task.JobID
+	existing.ProjectName = task.ProjectName
+	existing.Command = task.Command
+	existing.Params = task.Params
+	existing.GPUsNeeded = task.GPUsNeeded
+	existing.GPUs = nil
+	existing.Status = StatusPending
+	existing.RetryCount = task.RetryCount
+	existing.MaxRetry = task.MaxRetry
+	existing.PID = 0
+	existing.StartTime = time.Time{}
+	existing.LogPath = task.LogPath
+	existing.WorkingDir = task.WorkingDir
+	existing.Env = task.Env
+	existing.EnqueuedAt = time.Now()
+	existing.StartedAt = nil
+	existing.FinishedAt = nil
+	existing.Resumable = task.Resumable
+	existing.ExtraArgs = task.ExtraArgs
+	existing.UID = task.UID
+	existing.User = task.User
+	existing.Group = task.Group
+	existing.CheckpointDir = task.CheckpointDir
+	return true
+}
+
 // Get returns a task by ID. Returns nil if not found.
 func (q *Queue) Get(taskID string) *Task {
 	q.mu.Lock()

@@ -71,7 +71,9 @@ func (s *TaskService) RetryTask(ctx context.Context, taskID string) error {
 	// Re-read updated row, convert to scheduler.Task, push to queue.
 	row, _ = s.Store.GetTask(ctx, taskID)
 	task := TaskRowToSchedulerTask(row)
-	s.Queue.Push(task)
+	if !s.Queue.RetryExisting(task) {
+		s.Queue.Push(task)
+	}
 	return nil
 }
 

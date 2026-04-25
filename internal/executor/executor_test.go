@@ -40,6 +40,30 @@ func TestStartSuccess(t *testing.T) {
 	}
 }
 
+func TestStartCreatesLogDirectory(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "missing", "nested", "test.log")
+
+	e := New()
+	_, err := e.Start(context.Background(), RunSpec{
+		TaskID:     "t-mkdir",
+		Command:    `echo "created"`,
+		WorkingDir: dir,
+		LogPath:    logPath,
+	})
+	if err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("failed to read log: %v", err)
+	}
+	if !strings.Contains(string(data), "created") {
+		t.Fatalf("unexpected log content: %q", string(data))
+	}
+}
+
 func TestStartFailure(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "test.log")
