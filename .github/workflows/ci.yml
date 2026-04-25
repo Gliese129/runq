@@ -1,0 +1,44 @@
+name: Go CI
+on:
+  push:
+    branches:
+      - main
+      - master
+      - dev
+  pull_request:
+    branches:
+      - main
+      - master
+      - dev
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: 'true'
+
+      - name: Install dependencies
+        run: go mod download
+
+      - name: Static Analysis
+        run: go vet ./...
+
+      - name: Run staticcheck
+        uses: dominikh/staticcheck-action@v1.3.1
+        with:
+          install-go: 'false'
+
+      - name: Compilation Check
+        run: go build ./...
+
+      - name: Run unit test
+        run: go test -v -race ./...
+        env:
+          USE_MOCK_ALLOCATOR: "true" # for future mock test
