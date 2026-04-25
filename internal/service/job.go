@@ -197,7 +197,43 @@ func (s *JobService) KillJob(ctx context.Context, jobID string) (int, error) {
 			killed++
 		}
 	}
+	if err := s.refreshJobStatus(ctx, jobID); err != nil {
+		return killed, err
+	}
 	return killed, nil
+}
+
+func (s *JobService) refreshJobStatus(ctx context.Context, jobID string) error {
+	tasks, err := s.Store.ListTasks(ctx, store.TaskFilter{JobID: jobID})
+	if err != nil {
+		return err
+	}
+
+	counts := map[string]int{"running": 0, "pending": 0, "done": 0}
+	for _, t := range tasks {
+		switch t.Status {
+		case "running":
+			counts["running"]++
+		case "pending":
+			counts["pending"]++
+		case "success", "failed", "killed":
+			counts["done"]++
+		}
+	}
+
+	isStarted := (counts["running"] + counts["done"]) > 0
+	isEnded := (counts["pending"] + counts["running"]) == 0
+
+	var newStatus string
+	if isEnded {
+		newStatus = "done"
+	} else if isStarted {
+		newStatus = "running"
+	} else {
+		newStatus = "pending"
+	}
+
+	return s.Store.UpdateJobStatus(ctx, jobID, newStatus)
 }
 
 // PauseJob pauses a job — scheduler skips its pending tasks.

@@ -151,6 +151,61 @@ func TestTaskListDefault(t *testing.T) {
 	}
 }
 
+func TestTaskListStatusAll(t *testing.T) {
+	s := setupTestServer(t)
+	ctx := context.Background()
+
+	st := s.deps.Store
+	st.DB().Exec(`INSERT INTO projects (name, config_json) VALUES ('test', '{}')`)
+	st.InsertJob(ctx, &store.JobRow{
+		ID: "j1", ProjectName: "test", ConfigJSON: "{}",
+		Status: "pending", TotalTasks: 2, CreatedAt: time.Now(),
+	})
+	for _, tt := range []struct {
+		id     string
+		status string
+	}{
+		{id: "t1", status: "pending"},
+		{id: "t2", status: "success"},
+	} {
+		st.InsertTask(ctx, &store.TaskRow{
+			ID: tt.id, JobID: "j1", ProjectName: "test",
+			Command: "echo hi", ParamsJSON: "{}", GPUsNeeded: 1,
+			Status: tt.status, EnqueuedAt: time.Now(),
+		})
+	}
+
+	w := doRequest(s, "GET", "/api/tasks", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("default list: expected 200, got %d", w.Code)
+	}
+	var active []store.TaskRow
+	json.NewDecoder(w.Body).Decode(&active)
+	if len(active) != 1 || active[0].ID != "t1" {
+		t.Fatalf("default list: expected only active task t1, got %+v", active)
+	}
+
+	w = doRequest(s, "GET", "/api/tasks?status=all", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=all: expected 200, got %d", w.Code)
+	}
+	var all []store.TaskRow
+	json.NewDecoder(w.Body).Decode(&all)
+	if len(all) != 2 {
+		t.Fatalf("status=all: expected 2 tasks, got %+v", all)
+	}
+
+	w = doRequest(s, "GET", "/api/tasks?status=all&job=j1", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=all&job: expected 200, got %d", w.Code)
+	}
+	all = nil
+	json.NewDecoder(w.Body).Decode(&all)
+	if len(all) != 2 {
+		t.Fatalf("status=all&job: expected 2 tasks, got %+v", all)
+	}
+}
+
 func TestGPUStatus(t *testing.T) {
 	s := setupTestServer(t)
 

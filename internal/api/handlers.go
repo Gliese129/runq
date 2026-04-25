@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -130,14 +131,25 @@ func (s *Server) handleJobSubmit(c *gin.Context) {
 			return
 		}
 	} else {
-		var req struct {
-			JobConfig job.JobConfig `json:"job_config"`
-		}
-		if err := c.ShouldBindJSON(&req); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		// Accept both {"job_config": {...}} (wrapped) and {...} (raw JobConfig).
+		body, err := io.ReadAll(c.Request.Body)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "failed to read body"})
 			return
 		}
-		jobCfg = req.JobConfig
+		// Try wrapped format first.
+		var wrapped struct {
+			JobConfig job.JobConfig `json:"job_config"`
+		}
+		if err := json.Unmarshal(body, &wrapped); err == nil && wrapped.JobConfig.Project != "" {
+			jobCfg = wrapped.JobConfig
+		} else {
+			// Fall back to raw JobConfig.
+			if err := json.Unmarshal(body, &jobCfg); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			}
+		}
 	}
 
 	jobID, taskCount, err := s.deps.JobService.SubmitJob(context.Background(), jobCfg)
@@ -207,6 +219,10 @@ func (s *Server) handleTaskList(c *gin.Context) {
 	ctx := context.Background()
 	status := c.Query("status")
 	jobID := c.Query("job")
+	includeAll := status == "all"
+	if includeAll {
+		status = ""
+	}
 
 	tasks, err := s.deps.Store.ListTasks(ctx, store.TaskFilter{Status: status, JobID: jobID})
 	if err != nil {
@@ -215,7 +231,7 @@ func (s *Server) handleTaskList(c *gin.Context) {
 	}
 
 	// Default: return only active tasks.
-	if status == "" && jobID == "" {
+	if status == "" && jobID == "" && !includeAll {
 		active := make([]store.TaskRow, 0, len(tasks))
 		for _, t := range tasks {
 			if t.Status == "pending" || t.Status == "running" {

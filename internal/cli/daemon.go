@@ -3,7 +3,10 @@ package cli
 import (
 	"context"
 	"fmt"
+	"os"
+	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -24,6 +27,23 @@ var daemonStartCmd = &cobra.Command{
 	Example: `  runq daemon start
   RUNQ_DATA_DIR=/data/runq runq daemon start`,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		bg, _ := cmd.Flags().GetBool("detach")
+		if bg {
+			_, dataDir := utils.ResolveDataDir()
+			logFile, _ := os.OpenFile(filepath.Join(dataDir, "daemon.log"), os.O_CREATE|os.O_APPEND|os.O_RDWR, 0644)
+			subp := exec.Command(os.Args[0], "daemon", "start")
+			subp.Stdin = nil
+			subp.Stdout = logFile
+			subp.Stderr = logFile
+			subp.Dir = "/"                                     // set to root for background
+			subp.Env = append(os.Environ(), "RUNQ_IS_CHILD=1") // maybe useful
+			if err := subp.Start(); err != nil {
+				return err
+			}
+			fmt.Printf("daemon started at backend with pid %d!", subp.Process.Pid)
+			return nil
+		}
+
 		d, err := app.NewDaemon()
 		if err != nil {
 			return err
@@ -81,6 +101,7 @@ var daemonRestartCmd = &cobra.Command{
 }
 
 func init() {
+	daemonStartCmd.Flags().BoolP("detach", "d", false, "run daemon in background")
 	daemonCmd.AddCommand(daemonStartCmd)
 	daemonCmd.AddCommand(daemonStopCmd)
 	daemonCmd.AddCommand(daemonRestartCmd)

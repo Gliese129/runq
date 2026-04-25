@@ -74,9 +74,9 @@ func (s *Scheduler) Start() {
 		s.loop()
 	}()
 	s.logger.Info("scheduler started",
-		"aging_threshold", s.cfg.AgingThreshold,
+		"aging_threshold", s.cfg.AgingThreshold.String(),
 		"backfill", s.cfg.BackfillEnabled,
-		"tick", s.cfg.TickInterval,
+		"tick", s.cfg.TickInterval.String(),
 	)
 }
 

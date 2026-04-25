@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -17,12 +18,37 @@ import (
 	"github.com/fsnotify/fsnotify"
 	job2 "github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/resource"
-	"github.com/gliese129/runq/internal/scheduler"
 	"github.com/gosuri/uilive"
 	"github.com/olekukonko/tablewriter"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )
+
+// taskRowView mirrors the task DTO returned by /api/tasks.
+// It intentionally keeps StartTime as int64 because the DB stores the
+// /proc start tick separately from wall-clock timestamps.
+type taskRowView struct {
+	ID          string
+	JobID       string
+	ProjectName string
+	Command     string
+	ParamsJSON  string
+	GPUsNeeded  int
+	GPUs        string
+	Status      string
+	RetryCount  int
+	MaxRetry    int
+	PID         int
+	StartTime   int64
+	LogPath     string
+	WorkingDir  string
+	EnvJSON     string
+	Resumable   bool
+	ExtraArgs   string
+	EnqueuedAt  time.Time
+	StartedAt   *time.Time
+	FinishedAt  *time.Time
+}
 
 // ── runq submit (shortcut for job submit) ──
 
@@ -118,7 +144,7 @@ job.yaml in the current directory.`,
 					fmt.Println("Kill signal received!")
 					return nil
 				case <-ticker.C:
-					var tasks []scheduler.Task
+					var tasks []taskRowView
 					query := fmt.Sprintf("/api/tasks?job=%s", resp.JobId)
 					if err := doAndDecode("GET", query, nil, &tasks); err != nil {
 						return err
@@ -243,21 +269,21 @@ func runPs(cmd *cobra.Command, args []string) error {
 	output, _ := cmd.Flags().GetString("output")
 	noHeader, _ := cmd.Flags().GetBool("no-header")
 
-	path := "/api/tasks"
-	sep := "?"
-	if status != "" {
-		path += sep + "status=" + status
-		sep = "&"
+	values := url.Values{}
+	if all {
+		values.Set("status", "all")
+	} else if status != "" {
+		values.Set("status", status)
 	}
 	if jobID != "" {
-		path += sep + "job=" + jobID
+		values.Set("job", jobID)
 	}
-	// -a is a convenience: override status filter to show all
-	if all {
-		path = "/api/tasks?status=all"
+	path := "/api/tasks"
+	if encoded := values.Encode(); encoded != "" {
+		path += "?" + encoded
 	}
 
-	var tasks []scheduler.Task
+	var tasks []taskRowView
 	if err := doAndDecode("GET", path, nil, &tasks); err != nil {
 		return err
 	}
@@ -290,7 +316,7 @@ var logsCmd = &cobra.Command{
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		id := args[0]
-		var task scheduler.Task
+		var task taskRowView
 		if err := doAndDecode("GET", fmt.Sprintf("/api/tasks/%s", id), nil, &task); err != nil {
 			return err
 		}

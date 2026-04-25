@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/gliese129/runq/internal/api"
 	"github.com/gliese129/runq/internal/executor"
@@ -24,6 +25,7 @@ type Daemon struct {
 	Server    *api.Server
 	Scheduler *scheduler.Scheduler
 	Logger    *slog.Logger
+	PidFile   *os.File
 }
 
 // NewDaemon creates and wires all daemon components.
@@ -89,6 +91,15 @@ func NewDaemon() (*Daemon, error) {
 
 // Run starts the scheduler and API server, blocks until SIGINT/SIGTERM.
 func (d *Daemon) Run() error {
+	pidFile, err := utils.LockFile(api.DefaultPIDPath())
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(pidFile, "%d,%s", os.Getpid(), time.Now().Format(time.RFC3339Nano))
+	if err != nil {
+		return err
+	}
+	d.PidFile = pidFile
 	d.Scheduler.Start()
 
 	sigChan := make(chan os.Signal, 1)
@@ -104,6 +115,9 @@ func (d *Daemon) Run() error {
 // Shutdown gracefully stops all daemon components.
 func (d *Daemon) Shutdown(_ context.Context) {
 	d.Logger.Info("shutdown signal received")
+	if err := d.PidFile.Close(); err != nil {
+		d.Logger.Warn("failed to close pid file!")
+	}
 	d.Scheduler.Shutdown()
 	if err := d.Server.Shutdown(); err != nil {
 		d.Logger.Error("server shutdown failed", "error", err)
