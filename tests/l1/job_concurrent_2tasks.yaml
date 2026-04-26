@@ -1,0 +1,10 @@
+project: runq_gpu_probe
+description: concurrent submit light job
+sweep:
+  - method: grid
+    parameters:
+      name: [concurrent_light_0, concurrent_light_1]
+      sleep: [2]
+overrides:
+  gpus_per_task: 1
+  max_retry: 1

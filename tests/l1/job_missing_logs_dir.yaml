@@ -1,0 +1,10 @@
+project: runq_gpu_probe
+description: missing logs directory should be auto-created
+sweep:
+  - method: grid
+    parameters:
+      name: [missing_logs]
+      sleep: [1]
+overrides:
+  gpus_per_task: 1
+  max_retry: 1

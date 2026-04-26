@@ -1,0 +1,9 @@
+project: runq_gpu_probe
+description: long 2-gpu blocker
+sweep:
+  - method: grid
+    parameters:
+      name: [long2]
+      sleep: [20]
+overrides:
+  gpus_per_task: 2

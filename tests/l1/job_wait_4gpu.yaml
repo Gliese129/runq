@@ -1,0 +1,9 @@
+project: runq_gpu_probe
+description: waiting 4-gpu task
+sweep:
+  - method: grid
+    parameters:
+      name: [wait4]
+      sleep: [5]
+overrides:
+  gpus_per_task: 4

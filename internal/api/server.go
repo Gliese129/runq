@@ -274,10 +274,3 @@ func (c *Client) Do(method, path string, body interface{}) (*http.Response, erro
 	}
 	return c.httpc.Do(httpReq)
 }
-
-// taskRowToSchedulerTask converts a store.TaskRow to a scheduler.Task for Queue insertion.
-// JSON fields (params, env) are decoded back to maps.
-// taskRowToSchedulerTask delegates to service.TaskRowToSchedulerTask.
-func taskRowToSchedulerTask(row *store.TaskRow) *scheduler.Task {
-	return service.TaskRowToSchedulerTask(row)
-}

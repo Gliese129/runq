@@ -1,0 +1,6 @@
+project: runq_gpu_probe
+sweep:
+  - method: list
+    parameters:
+      name: [a, b]
+      sleep: [1]

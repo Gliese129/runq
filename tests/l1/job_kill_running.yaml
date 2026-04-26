@@ -1,0 +1,10 @@
+project: runq_gpu_probe
+description: kill running task should not retry and should free gpu
+sweep:
+  - method: grid
+    parameters:
+      name: [kill_running_0, kill_running_1, kill_running_2, kill_running_3, kill_running_4]
+      sleep: [12]
+overrides:
+  gpus_per_task: 1
+  max_retry: 3

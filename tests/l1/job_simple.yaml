@@ -1,0 +1,7 @@
+project: runq_gpu_probe
+description: "single 1-gpu probe task"
+sweep:
+  - method: grid
+    parameters:
+      name: [simple]
+      sleep: [2]

@@ -1,0 +1,10 @@
+project: runq_gpu_probe
+description: concurrent submit pressure job
+sweep:
+  - method: grid
+    parameters:
+      name: [concurrent_pressure_0, concurrent_pressure_1, concurrent_pressure_2, concurrent_pressure_3]
+      sleep: [2]
+overrides:
+  gpus_per_task: 1
+  max_retry: 1

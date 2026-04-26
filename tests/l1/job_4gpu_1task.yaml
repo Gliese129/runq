@@ -1,0 +1,10 @@
+project: runq_gpu_probe
+description: one 4-gpu task
+sweep:
+  - method: grid
+    parameters:
+      name: [all4]
+      sleep: [6]
+overrides:
+  gpus_per_task: 4
+  max_retry: 1

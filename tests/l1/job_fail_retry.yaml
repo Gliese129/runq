@@ -1,0 +1,11 @@
+project: runq_gpu_probe
+description: intentional failure with max_retry 1
+sweep:
+  - method: grid
+    parameters:
+      name: [fail_once]
+      sleep: [1]
+      fail: [3]
+overrides:
+  gpus_per_task: 1
+  max_retry: 1

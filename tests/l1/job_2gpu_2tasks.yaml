@@ -1,0 +1,10 @@
+project: runq_gpu_probe
+description: two 2-gpu tasks should fill four cards
+sweep:
+  - method: grid
+    parameters:
+      name: [pair0, pair1]
+      sleep: [8]
+overrides:
+  gpus_per_task: 2
+  max_retry: 1

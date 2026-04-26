@@ -1,0 +1,6 @@
+project: runq_bad_template
+sweep:
+  - method: grid
+    parameters:
+      name: [bad_template]
+      sleep: [1]

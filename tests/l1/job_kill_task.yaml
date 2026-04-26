@@ -1,0 +1,9 @@
+project: runq_gpu_probe
+description: kill one running task
+sweep:
+  - method: grid
+    parameters:
+      name: [kill0, kill1, kill2, kill3]
+      sleep: [30]
+overrides:
+  gpus_per_task: 1

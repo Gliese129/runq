@@ -1,0 +1,10 @@
+project_name: runq_gpu_probe
+working_dir: /tmp/runq-mvp-4gpu-e2e/project
+command_template: python3 gpu_probe.py {{args}}
+environment:
+  RUNQ_E2E_ENV: remote_4gpu
+defaults:
+  gpus_per_task: 1
+  max_retry: 1
+resume:
+  enabled: false

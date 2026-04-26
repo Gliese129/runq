@@ -1,0 +1,10 @@
+project: runq_gpu_probe
+description: pause and resume pending tasks
+sweep:
+  - method: grid
+    parameters:
+      name: [pause0, pause1, pause2, pause3, pause4, pause5, pause6, pause7]
+      sleep: [15]
+overrides:
+  gpus_per_task: 1
+  max_retry: 1

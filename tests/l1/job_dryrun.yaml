@@ -1,0 +1,10 @@
+project: runq_gpu_probe
+description: dry-run expansion check
+sweep:
+  - method: grid
+    parameters:
+      name: [a, b]
+      sleep: [1, 2]
+  - method: list
+    parameters:
+      marker: [x, y]

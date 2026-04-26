@@ -1,0 +1,6 @@
+project: runq_missing_project
+sweep:
+  - method: grid
+    parameters:
+      name: [bad]
+      sleep: [1]

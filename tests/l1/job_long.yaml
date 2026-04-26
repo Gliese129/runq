@@ -1,0 +1,7 @@
+project: runq_gpu_probe
+description: "long running probe task for kill test"
+sweep:
+  - method: grid
+    parameters:
+      name: [long]
+      sleep: [60]

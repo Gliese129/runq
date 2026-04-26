@@ -1,0 +1,10 @@
+project: runq_gpu_probe
+description: daemon restart restores pending tasks
+sweep:
+  - method: grid
+    parameters:
+      name: [restart0, restart1, restart2, restart3, restart4, restart5, restart6, restart7]
+      sleep: [10]
+overrides:
+  gpus_per_task: 1
+  max_retry: 1

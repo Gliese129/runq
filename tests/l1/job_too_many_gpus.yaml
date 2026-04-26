@@ -1,0 +1,10 @@
+project: runq_gpu_probe
+description: unschedulable gpu request
+sweep:
+  - method: grid
+    parameters:
+      name: [too_many]
+      sleep: [5]
+overrides:
+  gpus_per_task: 5
+  max_retry: 1

@@ -1,0 +1,7 @@
+project: runq_gpu_probe
+description: "small grid probe sweep"
+sweep:
+  - method: grid
+    parameters:
+      name: [sweep0, sweep1, sweep2, sweep3]
+      sleep: 3

@@ -1,0 +1,10 @@
+project: runq_gpu_probe
+description: pause survives daemon stop start
+sweep:
+  - method: grid
+    parameters:
+      name: [pause_restart_0, pause_restart_1, pause_restart_2, pause_restart_3, pause_restart_4, pause_restart_5, pause_restart_6, pause_restart_7]
+      sleep: [6]
+overrides:
+  gpus_per_task: 1
+  max_retry: 1
