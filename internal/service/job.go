@@ -10,6 +10,7 @@ import (
 	"github.com/gliese129/runq/internal/executor"
 	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/project"
+	"github.com/gliese129/runq/internal/resource"
 	"github.com/gliese129/runq/internal/scheduler"
 	"github.com/gliese129/runq/internal/store"
 )
@@ -22,6 +23,7 @@ type JobService struct {
 	Scheduler *scheduler.Scheduler
 	Exec      *executor.Executor
 	Registry  *project.Registry
+	Pool      resource.Allocator
 }
 
 // JobSummary is the API response for job listing.
@@ -68,6 +70,14 @@ func (s *JobService) SubmitJob(ctx context.Context, jobCfg job.JobConfig) (strin
 	}
 	if gpusPerTask <= 0 {
 		gpusPerTask = 1
+	}
+
+	// A6: reject if gpus_per_task exceeds total available GPUs.
+	if s.Pool != nil {
+		total := s.Pool.TotalCount()
+		if gpusPerTask > total {
+			return "", 0, fmt.Errorf("gpus_per_task (%d) exceeds total GPUs (%d)", gpusPerTask, total)
+		}
 	}
 
 	// Merge env: project env + job override env.

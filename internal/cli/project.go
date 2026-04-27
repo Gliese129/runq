@@ -219,5 +219,6 @@ func init() {
 	projectCmd.AddCommand(projectShowCmd)
 	projectCmd.AddCommand(projectEditCmd)
 	projectCmd.AddCommand(projectRmCmd)
+	projectCmd.GroupID = groupManagement
 	rootCmd.AddCommand(projectCmd)
 }

@@ -159,7 +159,13 @@ func (s *Server) handleJobSubmit(c *gin.Context) {
 	}
 
 	s.logger.Info("job submitted", "job_id", jobID, "tasks", taskCount)
-	c.JSON(http.StatusCreated, gin.H{"job_id": jobID, "total_tasks": taskCount})
+
+	resp := gin.H{"job_id": jobID, "total_tasks": taskCount}
+	if s.deps.Pool != nil {
+		resp["free_gpus"] = s.deps.Pool.FreeCount()
+		resp["total_gpus"] = s.deps.Pool.TotalCount()
+	}
+	c.JSON(http.StatusCreated, resp)
 }
 
 func (s *Server) handleJobList(c *gin.Context) {

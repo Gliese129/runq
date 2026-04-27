@@ -86,6 +86,13 @@ func (p *GPUPool) Status() []GPUState {
 	return copied
 }
 
+// TotalCount returns the total number of GPUs in the pool.
+func (p *GPUPool) TotalCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.gpus)
+}
+
 // FreeCount returns the number of unallocated GPUs.
 func (p *GPUPool) FreeCount() int {
 	p.mu.Lock()

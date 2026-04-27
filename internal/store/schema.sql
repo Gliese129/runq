@@ -41,6 +41,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     finished_at  INTEGER             -- Unix timestamp, nullable
 );
 
-CREATE INDEX IF NOT EXISTS idx_tasks_job_id ON tasks(job_id);
-CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
-CREATE INDEX IF NOT EXISTS idx_jobs_status  ON jobs(status);
+CREATE INDEX IF NOT EXISTS idx_tasks_job_id      ON tasks(job_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_status      ON tasks(status);
+CREATE INDEX IF NOT EXISTS idx_tasks_finished_at ON tasks(finished_at);
+CREATE INDEX IF NOT EXISTS idx_jobs_status       ON jobs(status);
+CREATE INDEX IF NOT EXISTS idx_jobs_finished_at  ON jobs(finished_at);

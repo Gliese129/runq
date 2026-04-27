@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/gliese129/runq/internal/utils"
 	"github.com/spf13/cobra"
 )
 
@@ -43,7 +44,7 @@ func runJobLs(cmd *cobra.Command, args []string) error {
 	for _, j := range jobs {
 		age := time.Since(j.CreatedAt).Truncate(time.Second)
 		fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%d\t%d\t%d\t%s\n",
-			j.JobID, j.Project, j.Status,
+			utils.IDColor(j.JobID), j.Project, utils.StatusColor(j.Status),
 			j.StatusCount["running"],
 			j.StatusCount["pending"],
 			j.StatusCount["failed"],
@@ -85,7 +86,7 @@ func runJobKill(cmd *cobra.Command, args []string) error {
 	if err := doAndDecode("DELETE", "/api/jobs/"+jobID, nil, &resp); err != nil {
 		return err
 	}
-	fmt.Printf("job %s: %.0f tasks killed\n", jobID, resp["tasks_killed"])
+	fmt.Printf("job %s: %.0f tasks killed\n", utils.IDColor(jobID), resp["tasks_killed"])
 	return nil
 }
 
@@ -102,7 +103,7 @@ func runJobPause(cmd *cobra.Command, args []string) error {
 	if err := doAndDecode("POST", "/api/jobs/"+jobID+"/pause", nil, &resp); err != nil {
 		return err
 	}
-	fmt.Printf("job %s paused\n", jobID)
+	fmt.Printf("job %s paused\n", utils.IDColor(jobID))
 	return nil
 }
 
@@ -119,7 +120,7 @@ func runJobResume(cmd *cobra.Command, args []string) error {
 	if err := doAndDecode("POST", "/api/jobs/"+jobID+"/resume", nil, &resp); err != nil {
 		return err
 	}
-	fmt.Printf("job %s resumed\n", jobID)
+	fmt.Printf("job %s resumed\n", utils.IDColor(jobID))
 	return nil
 }
 
@@ -137,7 +138,7 @@ func runJobRm(cmd *cobra.Command, args []string) error {
 	if err := doAndDecode("POST", "/api/jobs/"+jobID+"/rm", nil, &resp); err != nil {
 		return err
 	}
-	fmt.Printf("job %s removed\n", jobID)
+	fmt.Printf("job %s removed\n", utils.IDColor(jobID))
 	return nil
 }
 
@@ -148,5 +149,6 @@ func init() {
 	jobCmd.AddCommand(jobPauseCmd)
 	jobCmd.AddCommand(jobResumeCmd)
 	jobCmd.AddCommand(jobRmCmd)
+	jobCmd.GroupID = groupManagement
 	rootCmd.AddCommand(jobCmd)
 }

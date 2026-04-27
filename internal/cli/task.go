@@ -48,5 +48,6 @@ func runTaskRetry(cmd *cobra.Command, args []string) error {
 func init() {
 	taskCmd.AddCommand(taskShowCmd)
 	taskCmd.AddCommand(taskRetryCmd)
+	taskCmd.GroupID = groupManagement
 	rootCmd.AddCommand(taskCmd)
 }

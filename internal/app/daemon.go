@@ -41,7 +41,7 @@ func NewDaemon() (*Daemon, error) {
 		return nil, fmt.Errorf("create data dir: %w", err)
 	}
 
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	logger.Info("initializing daemon", "data_dir", dataDir)
 
 	// Open DB (auto-migrates schema).
@@ -63,7 +63,7 @@ func NewDaemon() (*Daemon, error) {
 	// Build service layer.
 	reg := project.NewRegistry(st.DB())
 	jobSvc := &service.JobService{
-		Store: st, Queue: queue, Scheduler: sched, Exec: exec, Registry: reg,
+		Store: st, Queue: queue, Scheduler: sched, Exec: exec, Registry: reg, Pool: pool,
 	}
 	taskSvc := &service.TaskService{
 		Store: st, Queue: queue, Exec: exec, Scheduler: sched,

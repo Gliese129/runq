@@ -8,6 +8,7 @@ type Allocator interface {
 	Allocate(n int, taskID string) ([]int, error)
 	Release(taskID string)
 	FreeCount() int
+	TotalCount() int
 	Status() []GPUState
 }
 
@@ -53,6 +54,10 @@ func (m *MockAllocator) FreeCount() int {
 		usedCount += len(indices)
 	}
 	return m.Total - usedCount
+}
+
+func (m *MockAllocator) TotalCount() int {
+	return m.Total
 }
 
 func (m *MockAllocator) Status() []GPUState {

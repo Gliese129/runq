@@ -23,7 +23,7 @@ type Config struct {
 // DefaultConfig returns sensible defaults for a research lab.
 func DefaultConfig() Config {
 	return Config{
-		AgingThreshold:  1 * time.Hour,
+		AgingThreshold:  15 * time.Minute,
 		BackfillEnabled: true,
 		TickInterval:    1 * time.Second,
 	}

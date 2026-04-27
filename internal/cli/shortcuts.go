@@ -18,6 +18,7 @@ import (
 	"github.com/fsnotify/fsnotify"
 	job2 "github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/resource"
+	"github.com/gliese129/runq/internal/utils"
 	"github.com/gosuri/uilive"
 	"github.com/olekukonko/tablewriter"
 	"github.com/spf13/cobra"
@@ -64,7 +65,7 @@ job.yaml in the current directory.`,
   runq submit .
 
   # Preview expanded tasks without submitting
-  runq submit job.yaml --dry-run
+  runq submit job.yaml --dry
 
   # Submit and watch progress
   runq submit job.yaml --watch`,
@@ -74,7 +75,7 @@ job.yaml in the current directory.`,
 		if file == "" {
 			return fmt.Errorf("no job file")
 		}
-		dryRun, _ := cmd.Flags().GetBool("dry-run")
+		dryRun, _ := cmd.Flags().GetBool("dry")
 		watch, _ := cmd.Flags().GetBool("watch")
 
 		if file == "." {
@@ -123,12 +124,19 @@ job.yaml in the current directory.`,
 		type JobResp struct {
 			JobId      string `json:"job_id"`
 			TotalTasks int    `json:"total_tasks"`
+			FreeGPUs   int    `json:"free_gpus"`
+			TotalGPUs  int    `json:"total_gpus"`
 		}
 		var resp JobResp
 		if err := doAndDecode("POST", "/api/jobs", job, &resp); err != nil {
 			return err
 		}
 		fmt.Printf("Job submitted: id=%s tasks=%d\n", resp.JobId, resp.TotalTasks)
+		if resp.TotalGPUs > 0 && resp.FreeGPUs == 0 {
+			fmt.Printf("  queued: waiting for GPUs (0/%d free)\n", resp.TotalGPUs)
+		} else if resp.TotalGPUs > 0 && resp.FreeGPUs < resp.TotalGPUs {
+			fmt.Printf("  %d/%d GPUs free — some tasks may queue\n", resp.FreeGPUs, resp.TotalGPUs)
+		}
 		// watch
 		if watch {
 			writer := uilive.New()
@@ -300,7 +308,8 @@ func runPs(cmd *cobra.Command, args []string) error {
 	for _, t := range tasks {
 		age := time.Since(t.EnqueuedAt).Truncate(time.Second)
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%d\t%s\n",
-			t.ID, t.JobID, t.ProjectName, t.Status, t.GPUsNeeded, t.RetryCount, age)
+			utils.IDColor(t.ID), t.JobID, t.ProjectName,
+			utils.StatusColor(t.Status), t.GPUsNeeded, t.RetryCount, age)
 	}
 	w.Flush()
 	return nil
@@ -320,6 +329,12 @@ var logsCmd = &cobra.Command{
 		if err := doAndDecode("GET", fmt.Sprintf("/api/tasks/%s", id), nil, &task); err != nil {
 			return err
 		}
+
+		// Print a colored header before tailing.
+		fmt.Printf("%s  %s  %s\n",
+			utils.IDColor(task.ID),
+			utils.StatusColor(task.Status),
+			utils.Dimf(task.LogPath))
 
 		logfile := task.LogPath
 		noFollow, _ := cmd.Flags().GetBool("no-follow")
@@ -461,7 +476,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 
 func init() {
 	// submit flags
-	submitCmd.Flags().Bool("dry-run", false, "Expand sweep and print tasks without submitting")
+	submitCmd.Flags().Bool("dry", false, "Expand sweep and print tasks without submitting")
 	submitCmd.Flags().Bool("watch", false, "Block and show live progress after submit")
 	submitCmd.Flags().String("project", "", "Override the project name in the YAML")
 
@@ -480,6 +495,21 @@ func init() {
 	// logs flags
 	logsCmd.Flags().Bool("no-follow", false, "Print log and exit (no tail -f)")
 
+	// Core commands.
+	submitCmd.GroupID = groupCore
+	sweepCmd.GroupID = groupCore
+	runCmd.GroupID = groupCore
+	psCmd.GroupID = groupCore
+	logsCmd.GroupID = groupCore
+	killCmd.GroupID = groupCore
+
+	// Diagnostics.
+	gpuCmd.GroupID = groupDiag
+	statusCmd.GroupID = groupDiag
+	doctorCmd.GroupID = groupDiag
+	cleanCmd.GroupID = groupDiag
+	initCmd.GroupID = groupDiag
+
 	rootCmd.AddCommand(submitCmd)
 	rootCmd.AddCommand(runCmd)
 	rootCmd.AddCommand(psCmd)
@@ -487,4 +517,8 @@ func init() {
 	rootCmd.AddCommand(killCmd)
 	rootCmd.AddCommand(gpuCmd)
 	rootCmd.AddCommand(statusCmd)
+	rootCmd.AddCommand(doctorCmd)
+	rootCmd.AddCommand(cleanCmd)
+	rootCmd.AddCommand(sweepCmd)
+	rootCmd.AddCommand(initCmd)
 }

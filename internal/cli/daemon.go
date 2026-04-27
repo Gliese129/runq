@@ -107,5 +107,6 @@ func init() {
 	daemonCmd.AddCommand(daemonStartCmd)
 	daemonCmd.AddCommand(daemonStopCmd)
 	daemonCmd.AddCommand(daemonRestartCmd)
+	daemonCmd.GroupID = groupManagement
 	rootCmd.AddCommand(daemonCmd)
 }
