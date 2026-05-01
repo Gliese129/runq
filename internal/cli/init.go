@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/gliese129/runq/internal/job"
+	"github.com/gliese129/runq/internal/utils"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )
@@ -143,6 +144,27 @@ func writeProjectYAML(path, projectName, workingDir, scriptFile string) error {
 			"gpus_per_task": 1,
 			"max_retry":     0,
 		},
+	}
+
+	// Auto-detect Python environment.
+	envType, envPath, envName := utils.DetectPythonEnv(workingDir)
+	if envType != "" {
+		pyenv := map[string]any{"type": envType}
+		if envPath != "" {
+			pyenv["path"] = envPath
+		}
+		if envName != "" {
+			pyenv["name"] = envName
+		}
+		proj["python_env"] = pyenv
+		fmt.Printf("  Detected Python env: %s", envType)
+		if envPath != "" {
+			fmt.Printf(" (%s)", envPath)
+		}
+		if envName != "" {
+			fmt.Printf(" (%s)", envName)
+		}
+		fmt.Println()
 	}
 
 	return writeYAML(path, proj, projectYAMLHeader)

@@ -119,6 +119,8 @@ func (s *JobService) SubmitJob(ctx context.Context, jobCfg job.JobConfig) (strin
 		if err != nil {
 			return "", 0, fmt.Errorf("render command failed: %w", err)
 		}
+		// B4: wrap command with Python environment activation.
+		cmd = utils.WrapCommand(proj.PythonEnv.Type, proj.PythonEnv.Path, proj.PythonEnv.Name, cmd, proj.WorkingDir)
 		taskID := GenerateID()
 		tasks = append(tasks, &scheduler.Task{
 			ID:          taskID,
