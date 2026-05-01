@@ -42,6 +42,9 @@ type Task struct {
 	Resumable bool   // from project config
 	ExtraArgs string // appended to command on resume restart
 
+	// B1: task timeout (seconds); 0 = no timeout
+	Timeout int `json:"timeout,omitempty"`
+
 	// L2 multi-user support (populated when Linux user/group model is enabled)
 	UID   int    `json:"uid,omitempty"`
 	User  string `json:"user,omitempty"`

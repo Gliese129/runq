@@ -23,24 +23,22 @@ type Reclaimer struct {
 
 // Reclaim processes all previously-running tasks.
 // Alive tasks get reattached; dead tasks get their DB status updated.
-// Pending tasks are not touched here (handled by server.go restore path).
-func (r *Reclaimer) Reclaim() error {
+// Returns the list of alive task rows so the caller can Reserve their GPUs in the pool.
+// Pending tasks are not touched here (handled by daemon.go restore path).
+func (r *Reclaimer) Reclaim() ([]store.TaskRow, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	tasks, err := r.Store.ListTasks(ctx, store.TaskFilter{Status: "running"})
 	if err != nil {
-		return err
+		return nil, err
 	}
 
+	var alive []store.TaskRow
 	for _, t := range tasks {
-		alive, _ := r.ReclaimTask(&t)
-		if alive {
+		ok, _ := r.ReclaimTask(&t)
+		if ok {
 			// Process still running — reattach monitoring.
-			// TODO: when GPU memory monitoring is added (L3), use GPUPool.AllocateSpecific()
-			// to reserve the exact GPUs (from t.GPUs) rather than pool.Allocate() which
-			// may assign different ones. For now, the alive task's GPU slots are not
-			// re-registered in the pool — the caller (server.go) should handle this.
 			resCh, err := r.Exec.Reattach(t.ID, t.PID)
 			if err != nil {
 				r.Logger.Warn("reattach failed, treating as dead", "task", t.ID, "error", err)
@@ -49,11 +47,12 @@ func (r *Reclaimer) Reclaim() error {
 			}
 			r.Logger.Info("task reattached", "task", t.ID, "pid", t.PID)
 			go r.waitReattached(t.ID, resCh)
+			alive = append(alive, t)
 		} else {
 			r.markDead(&t)
 		}
 	}
-	return nil
+	return alive, nil
 }
 
 // markDead updates a dead task's DB status: resumable → pending, otherwise → failed.

@@ -1,7 +1,9 @@
 package resource
 
 import (
+	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strconv"
@@ -18,6 +20,13 @@ type Info struct {
 	UtilPct int // %
 }
 
+type ResidualProcess struct {
+	GPUIndex int
+	PID      int
+	Command  string
+	MemMB    int
+}
+
 // Detect queries nvidia-smi and returns info for all GPUs on this machine.
 // 10s timeout prevents daemon startup from hanging if the GPU driver is stuck.
 func Detect() ([]Info, error) {
@@ -30,7 +39,7 @@ func Detect() ([]Info, error) {
 	)
 	out, err := cmd.Output()
 	if err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return nil, fmt.Errorf("nvidia-smi timed out after 10s (GPU driver may be stuck)")
 		}
 		return nil, fmt.Errorf("nvidia-smi failed: %w", err)
@@ -48,6 +57,7 @@ func Parse(output string) ([]Info, error) {
 
 	lines := strings.Split(output, "\n")
 	infos := make([]Info, 0, len(lines))
+	var errs error
 
 	for lineNum, line := range lines {
 		line = strings.TrimSpace(line)
@@ -62,20 +72,24 @@ func Parse(output string) ([]Info, error) {
 
 		index, err := parseIntField(fields[0], "index", lineNum)
 		if err != nil {
-			return nil, err
+			errs = errors.Join(errs, err)
+			continue
 		}
 		name := strings.TrimSpace(fields[1])
 		memFree, err := parseIntField(fields[2], "mem_free", lineNum)
 		if err != nil {
-			return nil, err
+			errs = errors.Join(errs, err)
+			continue
 		}
 		memUsed, err := parseIntField(fields[3], "mem_used", lineNum)
 		if err != nil {
-			return nil, err
+			errs = errors.Join(errs, err)
+			continue
 		}
 		utilPct, err := parseIntField(fields[4], "util_pct", lineNum)
 		if err != nil {
-			return nil, err
+			errs = errors.Join(errs, err)
+			continue
 		}
 
 		infos = append(infos, Info{
@@ -83,7 +97,113 @@ func Parse(output string) ([]Info, error) {
 			MemFree: memFree, MemUsed: memUsed, UtilPct: utilPct,
 		})
 	}
-	return infos, nil
+	return infos, errs
+}
+
+func CheckResidualProcesses(gpuIndices []int) ([]ResidualProcess, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "nvidia-smi",
+		"pmon", "-c", "1", "-s", "m")
+	out, err := cmd.Output()
+	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return nil, fmt.Errorf("nvidia-smi timed out after 10s (GPU driver may be stuck)")
+		}
+		return nil, err
+	}
+	output := strings.TrimSpace(string(out))
+	if output == "" {
+		return []ResidualProcess{}, nil
+	}
+	scanner := bufio.NewScanner(strings.NewReader(output))
+	targetGPUs := make(map[int]bool, len(gpuIndices))
+	for _, idx := range gpuIndices {
+		targetGPUs[idx] = true
+	}
+	var processes []ResidualProcess
+	var errs error
+	lineIdx := -1
+	gpuIdx, pidIdx, cmdIdx, memIdx := -1, -1, -1, -1
+	hasHeader := false
+	for scanner.Scan() {
+		lineIdx++
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "#") {
+			if !hasHeader {
+				hasHeader = true
+				fields := strings.Fields(strings.TrimSpace(line[1:]))
+				for idx, field := range fields {
+					switch field {
+					case "gpu":
+						gpuIdx = idx
+					case "pid":
+						pidIdx = idx
+					case "fb":
+						memIdx = idx
+					case "command":
+						cmdIdx = idx
+					}
+				}
+			}
+			continue
+		}
+		fields := strings.Fields(line)
+		if gpuIdx == -1 || pidIdx == -1 || memIdx == -1 || cmdIdx == -1 {
+			errs = errors.Join(errs, fmt.Errorf("required header field not found"))
+			continue
+		}
+
+		maxIdx := gpuIdx
+		for _, idx := range []int{gpuIdx, pidIdx, memIdx, cmdIdx} {
+			if idx > maxIdx {
+				maxIdx = idx
+			}
+		}
+		if len(fields) <= maxIdx {
+			errs = errors.Join(errs, fmt.Errorf("line %d has too few fields: %q", lineIdx, line))
+			continue
+		}
+
+		var cmd_ string
+		var pid, gpu, mem int
+
+		gpu, err = parseIntField(fields[gpuIdx], "gpu", lineIdx)
+		if err != nil {
+			errs = errors.Join(errs, err)
+			continue
+		}
+		mem, err = parseIntField(fields[memIdx], "memory", lineIdx)
+		if err != nil {
+			errs = errors.Join(errs, err)
+			continue
+		}
+		if fields[pidIdx] == "-" {
+			continue
+		}
+		pid, err = parseIntField(fields[pidIdx], "pid", lineIdx)
+		if err != nil {
+			errs = errors.Join(errs, err)
+			continue
+		}
+
+		cmd_ = strings.Join(fields[cmdIdx:], " ")
+		if !targetGPUs[gpu] {
+			continue
+		}
+		process := ResidualProcess{
+			GPUIndex: gpu,
+			MemMB:    mem,
+			Command:  cmd_,
+			PID:      pid,
+		}
+		processes = append(processes, process)
+	}
+	return processes, errs
 }
 
 func parseIntField(s string, fieldName string, lineNum int) (int, error) {

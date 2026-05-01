@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -28,6 +30,7 @@ type Daemon struct {
 	PidFile   *os.File
 	Executor  *executor.Executor
 	Queue     *scheduler.Queue
+	Pool      resource.Allocator
 }
 
 // NewDaemon creates and wires all daemon components.
@@ -90,6 +93,7 @@ func NewDaemon() (*Daemon, error) {
 		Logger:    logger,
 		Executor:  exec,
 		Queue:     queue,
+		Pool:      pool,
 	}, nil
 }
 
@@ -122,7 +126,7 @@ func (d *Daemon) Run() error {
 }
 
 func (d *Daemon) restoreRuntimeState() error {
-	// Phase 3: Reclaim previously-running tasks.
+	// Phase 1: Reclaim previously-running tasks.
 	// Reclaimer checks if their processes are still alive and updates DB accordingly.
 	// Alive tasks get reattached (monitored via signal 0 polling).
 	// Dead tasks get their DB status set to pending (retry) or failed.
@@ -131,8 +135,23 @@ func (d *Daemon) restoreRuntimeState() error {
 		Exec:   d.Executor,
 		Logger: d.Logger,
 	}
-	if err := reclaimer.Reclaim(); err != nil {
+	aliveTasks, err := reclaimer.Reclaim()
+	if err != nil {
 		d.Logger.Error("reclaim failed", "error", err)
+	}
+
+	// Phase 2: Reserve GPUs for alive tasks so the pool reflects actual usage.
+	for _, t := range aliveTasks {
+		gpuIndices := parseGPUIndices(t.GPUs)
+		if len(gpuIndices) == 0 {
+			continue
+		}
+		if err := d.Pool.Reserve(gpuIndices, t.ID); err != nil {
+			d.Logger.Warn("GPU reserve failed for alive task",
+				"task", t.ID, "gpus", t.GPUs, "error", err)
+		} else {
+			d.Logger.Info("GPUs reserved for alive task", "task", t.ID, "gpus", gpuIndices)
+		}
 	}
 
 	// Restore paused job set from DB so pause semantics survive daemon restart.
@@ -162,6 +181,27 @@ func (d *Daemon) restoreRuntimeState() error {
 		d.Logger.Info("restored pending tasks", "count", len(pendingTasks))
 	}
 	return nil
+}
+
+// parseGPUIndices converts a comma-separated GPU string (e.g. "0,1,3") to []int.
+func parseGPUIndices(s string) []int {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	indices := make([]int, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		v, err := strconv.Atoi(p)
+		if err != nil {
+			continue
+		}
+		indices = append(indices, v)
+	}
+	return indices
 }
 
 // Shutdown gracefully stops all daemon components.

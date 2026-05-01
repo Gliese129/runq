@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/gliese129/runq/internal/resource"
 	"github.com/gliese129/runq/internal/scheduler"
 	"github.com/gliese129/runq/internal/store"
+	"github.com/gliese129/runq/internal/utils"
 )
 
 // JobService handles job-level operations.
@@ -72,6 +74,23 @@ func (s *JobService) SubmitJob(ctx context.Context, jobCfg job.JobConfig) (strin
 		gpusPerTask = 1
 	}
 
+	// Parse timeout: job override > project default > 0 (no timeout).
+	var timeoutSec int
+	timeoutStr := proj.Defaults.Timeout
+	if jobCfg.Overrides != nil && jobCfg.Overrides.Timeout != nil {
+		timeoutStr = *jobCfg.Overrides.Timeout
+	}
+	if timeoutStr != "" {
+		d, err := utils.ParseHumanDuration(timeoutStr)
+		if err != nil {
+			return "", 0, fmt.Errorf("invalid timeout %q: %w", timeoutStr, err)
+		}
+		timeoutSec = int(d.Seconds())
+	}
+
+	// Caller UID — used for fair-scheduling and audit.
+	callerUID := os.Getuid()
+
 	// A6: reject if gpus_per_task exceeds total available GPUs.
 	if s.Pool != nil {
 		total := s.Pool.TotalCount()
@@ -114,6 +133,8 @@ func (s *JobService) SubmitJob(ctx context.Context, jobCfg job.JobConfig) (strin
 			Env:         env,
 			Resumable:   proj.Resume.Enabled,
 			ExtraArgs:   proj.Resume.ExtraArgs,
+			Timeout:     timeoutSec,
+			UID:         callerUID,
 		})
 	}
 
@@ -136,7 +157,8 @@ func (s *JobService) SubmitJob(ctx context.Context, jobCfg job.JobConfig) (strin
 			Command: t.Command, ParamsJSON: string(paramsJSON), GPUsNeeded: t.GPUsNeeded,
 			Status: "pending", MaxRetry: t.MaxRetry, LogPath: t.LogPath,
 			WorkingDir: t.WorkingDir, EnvJSON: string(envJSON),
-			Resumable: t.Resumable, ExtraArgs: t.ExtraArgs, EnqueuedAt: now,
+			Resumable: t.Resumable, ExtraArgs: t.ExtraArgs,
+			UID: t.UID, Timeout: t.Timeout, EnqueuedAt: now,
 		})
 	}
 

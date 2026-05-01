@@ -334,7 +334,7 @@ var logsCmd = &cobra.Command{
 		fmt.Printf("%s  %s  %s\n",
 			utils.IDColor(task.ID),
 			utils.StatusColor(task.Status),
-			utils.Dimf(task.LogPath))
+			utils.Dimf("%s", task.LogPath))
 
 		logfile := task.LogPath
 		noFollow, _ := cmd.Flags().GetBool("no-follow")

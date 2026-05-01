@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"strconv"
 	"strings"
@@ -208,7 +209,10 @@ func (s *Scheduler) dispatch(task *Task) {
 // runTask executes a single task and handles the result.
 // GPU is always released on exit via defer.
 func (s *Scheduler) runTask(task *Task) {
-	defer s.pool.Release(task.ID)
+	defer func() {
+		s.checkGPUResidual(task)
+		s.pool.Release(task.ID)
+	}()
 
 	spec := executor.RunSpec{
 		TaskID:     task.ID,
@@ -219,7 +223,13 @@ func (s *Scheduler) runTask(task *Task) {
 		LogPath:    task.LogPath,
 	}
 
-	result, err := s.exec.Start(s.ctx, spec)
+	ctx := s.ctx
+	var cancel context.CancelFunc
+	if task.Timeout > 0 {
+		ctx, cancel = context.WithTimeout(s.ctx, time.Second*time.Duration(task.Timeout))
+		defer cancel()
+	}
+	result, err := s.exec.Start(ctx, spec)
 	if err != nil {
 		s.logger.Error("task start failed", "task", task.ID, "error", err)
 		s.handleFailure(task)
@@ -244,6 +254,13 @@ func (s *Scheduler) runTask(task *Task) {
 		s.completeTask(task, StatusSuccess)
 		s.refreshJobStatus(task.JobID)
 		s.logger.Info("task completed", "task", task.ID, "job", task.JobID)
+		return
+	}
+
+	if task.Timeout > 0 && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		s.completeTask(task, StatusKilled)
+		s.refreshJobStatus(task.JobID)
+		s.logger.Warn("task timed out", "task", task.ID, "timeout", task.Timeout)
 		return
 	}
 
@@ -412,6 +429,26 @@ func (s *Scheduler) refreshJobStatus(jobID string) {
 }
 
 // ── Helpers ──
+
+// checkGPUResidual uses nvidia-smi pmon to detect processes still occupying
+// the GPUs that were assigned to a task after it exited. Logs a warning for
+// each residual process found. Best-effort: errors are logged, never fatal.
+func (s *Scheduler) checkGPUResidual(task *Task) {
+	if len(task.GPUs) == 0 {
+		return
+	}
+	procs, err := resource.CheckResidualProcesses(task.GPUs)
+	if err != nil {
+		s.logger.Warn("GPU residual check failed", "task", task.ID, "error", err)
+		return
+	}
+	for _, p := range procs {
+		s.logger.Warn("GPU residual process detected after task exit",
+			"task", task.ID, "gpu", p.GPUIndex,
+			"residual_pid", p.PID, "mem_mb", p.MemMB, "command", p.Command,
+		)
+	}
+}
 
 // gpuString converts a GPU index slice to a comma-separated string (e.g. "0,1,3").
 func gpuString(gpus []int) string {

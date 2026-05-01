@@ -30,6 +30,8 @@ type TaskRow struct {
 	EnvJSON     string // JSON-serialized environment variable map
 	Resumable   bool
 	ExtraArgs   string
+	UID         int // submitting user's UID
+	Timeout     int // timeout in seconds, 0 = no timeout
 	EnqueuedAt  time.Time
 	StartedAt   *time.Time
 	FinishedAt  *time.Time
@@ -47,7 +49,8 @@ type TaskFilter struct {
 const allTaskColumns = `id, job_id, project_name, command, params_json,
 	gpus_needed, gpus, status, retry_count, max_retry,
 	pid, start_time, log_path, working_dir, env_json,
-	resumable, extra_args, enqueued_at, started_at, finished_at`
+	resumable, extra_args, uid, timeout,
+	enqueued_at, started_at, finished_at`
 
 // scanTask reads one result row into a TaskRow.
 // Column order must match allTaskColumns.
@@ -62,6 +65,8 @@ func scanTask(scanner interface{ Scan(dest ...any) error }) (*TaskRow, error) {
 		envJSON    sql.NullString
 		resumable  int
 		extraArgs  sql.NullString
+		uid        sql.NullInt64
+		timeout    sql.NullInt64
 		enqueuedAt int64
 		startedAt  sql.NullInt64
 		finishedAt sql.NullInt64
@@ -71,7 +76,7 @@ func scanTask(scanner interface{ Scan(dest ...any) error }) (*TaskRow, error) {
 		&t.ID, &t.JobID, &t.ProjectName, &t.Command, &t.ParamsJSON,
 		&t.GPUsNeeded, &gpus, &t.Status, &t.RetryCount, &t.MaxRetry,
 		&pid, &startTime, &logPath, &workingDir, &envJSON,
-		&resumable, &extraArgs, &enqueuedAt, &startedAt, &finishedAt,
+		&resumable, &extraArgs, &uid, &timeout, &enqueuedAt, &startedAt, &finishedAt,
 	)
 	if err != nil {
 		return nil, err
@@ -85,6 +90,8 @@ func scanTask(scanner interface{ Scan(dest ...any) error }) (*TaskRow, error) {
 	t.EnvJSON = envJSON.String
 	t.Resumable = resumable != 0
 	t.ExtraArgs = extraArgs.String
+	t.UID = int(uid.Int64)
+	t.Timeout = int(timeout.Int64)
 	t.EnqueuedAt = time.Unix(enqueuedAt, 0)
 	t.StartedAt = unixToNullTime(startedAt)
 	t.FinishedAt = unixToNullTime(finishedAt)
@@ -98,8 +105,9 @@ func (s *Store) InsertTask(ctx context.Context, t *TaskRow) error {
 		id, job_id, project_name, command, params_json,
 		gpus_needed, gpus, status, retry_count, max_retry,
 		pid, start_time, log_path, working_dir, env_json,
-		resumable, extra_args, enqueued_at, started_at, finished_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+		resumable, extra_args, uid, timeout,
+		enqueued_at, started_at, finished_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	resumable := 0
 	if t.Resumable {
@@ -111,7 +119,8 @@ func (s *Store) InsertTask(ctx context.Context, t *TaskRow) error {
 		t.GPUsNeeded, nullString(t.GPUs), t.Status, t.RetryCount, t.MaxRetry,
 		nullInt(t.PID), nullInt64(t.StartTime), nullString(t.LogPath),
 		nullString(t.WorkingDir), nullString(t.EnvJSON),
-		resumable, t.ExtraArgs, t.EnqueuedAt.Unix(),
+		resumable, t.ExtraArgs, nullInt(t.UID), nullInt(t.Timeout),
+		t.EnqueuedAt.Unix(),
 		nullTimeToUnix(t.StartedAt), nullTimeToUnix(t.FinishedAt),
 	)
 	return err
@@ -123,8 +132,9 @@ func (s *Store) InsertTaskTx(ctx context.Context, tx *sql.Tx, t *TaskRow) error 
 		id, job_id, project_name, command, params_json,
 		gpus_needed, gpus, status, retry_count, max_retry,
 		pid, start_time, log_path, working_dir, env_json,
-		resumable, extra_args, enqueued_at, started_at, finished_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+		resumable, extra_args, uid, timeout,
+		enqueued_at, started_at, finished_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	resumable := 0
 	if t.Resumable {
@@ -136,7 +146,8 @@ func (s *Store) InsertTaskTx(ctx context.Context, tx *sql.Tx, t *TaskRow) error 
 		t.GPUsNeeded, nullString(t.GPUs), t.Status, t.RetryCount, t.MaxRetry,
 		nullInt(t.PID), nullInt64(t.StartTime), nullString(t.LogPath),
 		nullString(t.WorkingDir), nullString(t.EnvJSON),
-		resumable, t.ExtraArgs, t.EnqueuedAt.Unix(),
+		resumable, t.ExtraArgs, nullInt(t.UID), nullInt(t.Timeout),
+		t.EnqueuedAt.Unix(),
 		nullTimeToUnix(t.StartedAt), nullTimeToUnix(t.FinishedAt),
 	)
 	return err

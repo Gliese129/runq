@@ -39,6 +39,7 @@ type ParameterSpec struct {
 type Overrides struct {
 	GPUsPerTask *int              `yaml:"gpus_per_task,omitempty"`
 	MaxRetry    *int              `yaml:"max_retry,omitempty"`
+	Timeout     *string           `yaml:"timeout,omitempty"` // human duration, e.g. "3h"
 	Env         map[string]string `yaml:"env,omitempty"`
 }
 

@@ -10,6 +10,11 @@ type Allocator interface {
 	FreeCount() int
 	TotalCount() int
 	Status() []GPUState
+
+	// Reserve marks specific GPU indices as allocated to taskID.
+	// Used at daemon startup to restore running task assignments from DB.
+	// Atomic: if any index is invalid or already occupied, no state is modified.
+	Reserve(indices []int, taskID string) error
 }
 
 // MockAllocator is a test double that simulates GPU allocation without real hardware.
@@ -58,6 +63,25 @@ func (m *MockAllocator) FreeCount() int {
 
 func (m *MockAllocator) TotalCount() int {
 	return m.Total
+}
+
+func (m *MockAllocator) Reserve(indices []int, taskID string) error {
+	usedSet := make(map[int]bool)
+	for _, idxs := range m.used {
+		for _, idx := range idxs {
+			usedSet[idx] = true
+		}
+	}
+	for _, idx := range indices {
+		if idx < 0 || idx >= m.Total {
+			return fmt.Errorf("GPU index %d out of range [0, %d)", idx, m.Total)
+		}
+		if usedSet[idx] {
+			return fmt.Errorf("GPU %d already allocated", idx)
+		}
+	}
+	m.used[taskID] = append([]int{}, indices...)
+	return nil
 }
 
 func (m *MockAllocator) Status() []GPUState {

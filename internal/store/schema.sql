@@ -36,6 +36,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     env_json     TEXT,               -- environment variables as JSON, e.g. {"WANDB_PROJECT":"myproj"}
     resumable    INTEGER NOT NULL DEFAULT 0,  -- 0=false, 1=true
     extra_args   TEXT DEFAULT '',     -- extra args appended to command on resume
+    uid          INTEGER,            -- submitting user's UID (os.Getuid)
+    timeout      INTEGER,            -- task timeout in seconds, nullable (0 = no timeout)
     enqueued_at  INTEGER,            -- Unix timestamp
     started_at   INTEGER,            -- Unix timestamp, nullable
     finished_at  INTEGER             -- Unix timestamp, nullable

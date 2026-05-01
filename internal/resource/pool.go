@@ -107,6 +107,25 @@ func (p *GPUPool) FreeCount() int {
 	return n
 }
 
+func (p *GPUPool) Reserve(indices []int, taskID string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	for _, idx := range indices {
+		g, ok := p.gpus[idx]
+		if !ok {
+			return fmt.Errorf("GPU %d not found in pool", idx)
+		}
+		if g.TaskID != "" {
+			return fmt.Errorf("GPU %d already used by task %s", idx, g.TaskID)
+		}
+	}
+	for _, idx := range indices {
+		p.gpus[idx].TaskID = taskID
+	}
+	return nil
+}
+
 func (p *GPUPool) sortedIndices() []int {
 	indices := make([]int, 0, len(p.gpus))
 	for idx := range p.gpus {
