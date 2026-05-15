@@ -10,11 +10,23 @@ import (
 	"github.com/gliese129/runq/internal/utils"
 )
 
+// AliveTask pairs a DB row with its reattach monitoring channel.
+// The caller (daemon.go) is responsible for:
+//  1. Reserving GPUs and registering the task in the Queue.
+//  2. Passing DoneCh to the scheduler so it owns the lifecycle (cleanup on exit).
+type AliveTask struct {
+	Row    store.TaskRow
+	DoneCh <-chan ReattachResult
+}
+
 // Reclaimer handles daemon-restart recovery.
 // It scans DB for tasks that were "running" when the daemon died, checks if
 // their processes are still alive, and either re-attaches monitoring or updates
-// DB state for retry/failure. Queue/Pool registration is handled by the caller
-// (server.go) to avoid circular imports with the scheduler package.
+// DB state for retry/failure.
+//
+// Reclaimer does NOT manage task lifecycle after reattach — it returns the
+// monitoring channels and lets the scheduler handle cleanup (GPU release, queue
+// update, job status refresh) through the same path as normally dispatched tasks.
 type Reclaimer struct {
 	Store  *store.Store
 	Exec   *Executor
@@ -22,10 +34,10 @@ type Reclaimer struct {
 }
 
 // Reclaim processes all previously-running tasks.
-// Alive tasks get reattached; dead tasks get their DB status updated.
-// Returns the list of alive task rows so the caller can Reserve their GPUs in the pool.
+// Alive tasks get reattached and returned with their monitoring channels.
+// Dead tasks get their DB status updated (pending for retry, or failed).
 // Pending tasks are not touched here (handled by daemon.go restore path).
-func (r *Reclaimer) Reclaim() ([]store.TaskRow, error) {
+func (r *Reclaimer) Reclaim() ([]AliveTask, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -34,20 +46,19 @@ func (r *Reclaimer) Reclaim() ([]store.TaskRow, error) {
 		return nil, err
 	}
 
-	var alive []store.TaskRow
+	var alive []AliveTask
 	for _, t := range tasks {
 		ok, _ := r.ReclaimTask(&t)
 		if ok {
 			// Process still running — reattach monitoring.
-			resCh, err := r.Exec.Reattach(t.ID, t.PID)
+			ch, err := r.Exec.Reattach(t.ID, t.PID)
 			if err != nil {
 				r.Logger.Warn("reattach failed, treating as dead", "task", t.ID, "error", err)
 				r.markDead(&t)
 				continue
 			}
 			r.Logger.Info("task reattached", "task", t.ID, "pid", t.PID)
-			go r.waitReattached(t.ID, resCh)
-			alive = append(alive, t)
+			alive = append(alive, AliveTask{Row: t, DoneCh: ch})
 		} else {
 			r.markDead(&t)
 		}
@@ -80,34 +91,6 @@ func (r *Reclaimer) markDead(t *store.TaskRow) {
 		} else {
 			r.Logger.Info("dead task marked failed", "task", t.ID)
 		}
-	}
-}
-
-// waitReattached waits for a reattached process to exit and updates DB.
-func (r *Reclaimer) waitReattached(taskID string, ch <-chan ReattachResult) {
-	res, ok := <-ch
-	if !ok {
-		return
-	}
-
-	var status string
-	switch {
-	case res.Killed:
-		status = "killed"
-	default:
-		// Signal 0 polling can't retrieve real exit code.
-		// Treat non-killed exit as failed; user can inspect logs and retry.
-		status = "failed"
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := r.Store.UpdateTaskStatus(ctx, taskID, status, map[string]any{
-		"finished_at": time.Now().Unix(),
-	}); err != nil {
-		r.Logger.Warn("update reattached task failed", "task", taskID, "error", err)
-	} else {
-		r.Logger.Info("reattached task exited", "task", taskID, "status", status)
 	}
 }
 

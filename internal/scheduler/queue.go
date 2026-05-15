@@ -75,6 +75,15 @@ func (q *Queue) Push(task *Task) {
 	q.tasks = append(q.tasks, task)
 }
 
+// Restore inserts a task preserving its existing Status and EnqueuedAt.
+// Used only at daemon restart to rebuild the queue from DB without resetting wait times.
+// The caller is responsible for setting all fields correctly before calling Restore.
+func (q *Queue) Restore(task *Task) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.tasks = append(q.tasks, task)
+}
+
 // PushBatch adds multiple tasks at once (e.g. from a job expansion).
 func (q *Queue) PushBatch(tasks []*Task) {
 	q.mu.Lock()

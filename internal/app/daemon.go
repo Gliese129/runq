@@ -6,8 +6,6 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"strconv"
-	"strings"
 	"syscall"
 	"time"
 
@@ -147,18 +145,23 @@ func (d *Daemon) restoreRuntimeState() error {
 		d.Logger.Error("reclaim failed", "error", err)
 	}
 
-	// Phase 2: Reserve GPUs for alive tasks so the pool reflects actual usage.
-	for _, t := range aliveTasks {
-		gpuIndices := parseGPUIndices(t.GPUs)
-		if len(gpuIndices) == 0 {
+	// Phase 2: Reserve GPUs, register alive tasks in Queue, and hand their
+	// monitoring channels to the scheduler. The scheduler owns the lifecycle
+	// from here — same cleanup path as normally dispatched tasks.
+	for _, at := range aliveTasks {
+		task := service.TaskRowToSchedulerTask(&at.Row)
+		if len(task.GPUs) == 0 {
 			continue
 		}
-		if err := d.Pool.Reserve(gpuIndices, t.ID); err != nil {
+		if err := d.Pool.Reserve(task.GPUs, at.Row.ID); err != nil {
 			d.Logger.Warn("GPU reserve failed for alive task",
-				"task", t.ID, "gpus", t.GPUs, "error", err)
-		} else {
-			d.Logger.Info("GPUs reserved for alive task", "task", t.ID, "gpus", gpuIndices)
+				"task", at.Row.ID, "gpus", at.Row.GPUs, "error", err)
+			continue
 		}
+		d.Queue.Restore(task)
+		d.Scheduler.MonitorReattached(task, at.DoneCh)
+		d.Logger.Info("alive task restored",
+			"task", at.Row.ID, "pid", at.Row.PID, "gpus", task.GPUs)
 	}
 
 	// Restore paused job set from DB so pause semantics survive daemon restart.
@@ -182,33 +185,12 @@ func (d *Daemon) restoreRuntimeState() error {
 	}
 	for _, row := range pendingTasks {
 		task := service.TaskRowToSchedulerTask(&row)
-		d.Queue.Push(task)
+		d.Queue.Restore(task)
 	}
 	if len(pendingTasks) > 0 {
 		d.Logger.Info("restored pending tasks", "count", len(pendingTasks))
 	}
 	return nil
-}
-
-// parseGPUIndices converts a comma-separated GPU string (e.g. "0,1,3") to []int.
-func parseGPUIndices(s string) []int {
-	if s == "" {
-		return nil
-	}
-	parts := strings.Split(s, ",")
-	indices := make([]int, 0, len(parts))
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p == "" {
-			continue
-		}
-		v, err := strconv.Atoi(p)
-		if err != nil {
-			continue
-		}
-		indices = append(indices, v)
-	}
-	return indices
 }
 
 // Shutdown gracefully stops all daemon components.

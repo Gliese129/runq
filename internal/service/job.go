@@ -300,7 +300,10 @@ func (s *JobService) ResumeJob(ctx context.Context, jobID string) error {
 		return fmt.Errorf("job %q is %s, not paused", jobID, j.Status)
 	}
 	s.Scheduler.ResumeJob(jobID)
-	return s.Store.UpdateJobStatus(ctx, jobID, "running")
+	// Derive correct status from actual task states instead of hardcoding "running".
+	// e.g. if all tasks are still pending, job should be "pending" not "running".
+	s.Scheduler.RefreshJobStatus(jobID)
+	return nil
 }
 
 // RemoveJob deletes a completed job and its tasks from DB.

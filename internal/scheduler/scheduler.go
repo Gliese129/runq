@@ -212,7 +212,6 @@ func (s *Scheduler) dispatch(task *Task) {
 	}
 	task.GPUs = gpus
 
-	// Persist to DB before updating queue.
 	now := time.Now()
 	dbCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -224,6 +223,12 @@ func (s *Scheduler) dispatch(task *Task) {
 		s.pool.Release(task.ID)
 		return
 	}
+
+	// Set wall-clock start time AFTER successful DB write.
+	// FairShare reads task.StartTime from the queue to compute running occupation;
+	// waiting until Executor.Start() returns (blocking) would leave it as zero value.
+	// Setting it before DB write would leave stale state if the write fails.
+	task.StartTime = now
 
 	if err := s.queue.MarkRunning(task.ID); err != nil {
 		s.logger.Error("mark running in queue failed", "task", task.ID, "error", err)
@@ -278,21 +283,21 @@ func (s *Scheduler) runTask(task *Task) {
 	// Check user-kill flag FIRST — even exit 0 after kill is treated as killed.
 	if s.consumeKillRequest(task.ID) {
 		s.completeTask(task, StatusKilled)
-		s.refreshJobStatus(task.JobID)
+		s.RefreshJobStatus(task.JobID)
 		s.logger.Info("task killed by user", "task", task.ID)
 		return
 	}
 
 	if result.ExitCode == 0 {
 		s.completeTask(task, StatusSuccess)
-		s.refreshJobStatus(task.JobID)
+		s.RefreshJobStatus(task.JobID)
 		s.logger.Info("task completed", "task", task.ID, "job", task.JobID)
 		return
 	}
 
 	if task.Timeout > 0 && errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		s.completeTask(task, StatusKilled)
-		s.refreshJobStatus(task.JobID)
+		s.RefreshJobStatus(task.JobID)
 		s.logger.Warn("task timed out", "task", task.ID, "timeout", task.Timeout)
 		return
 	}
@@ -300,7 +305,7 @@ func (s *Scheduler) runTask(task *Task) {
 	// Global shutdown — mark remaining running tasks as killed.
 	if s.ctx.Err() != nil {
 		s.completeTask(task, StatusKilled)
-		s.refreshJobStatus(task.JobID)
+		s.RefreshJobStatus(task.JobID)
 		s.logger.Warn("task killed by shutdown", "task", task.ID)
 		return
 	}
@@ -322,6 +327,36 @@ func (s *Scheduler) completeTask(task *Task, status TaskStatus) {
 	if err := s.queue.Complete(task.ID, status); err != nil {
 		s.logger.Error("complete in queue failed", "task", task.ID, "error", err)
 	}
+}
+
+// MonitorReattached monitors a reattached (daemon-restart) task until it exits.
+// Follows the same lifecycle as runTask: GPU residual check → release GPU →
+// complete task → refresh job status. Called from daemon.go after Reclaim.
+func (s *Scheduler) MonitorReattached(task *Task, ch <-chan executor.ReattachResult) {
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		defer func() {
+			s.checkGPUResidual(task)
+			s.pool.Release(task.ID)
+		}()
+
+		res, ok := <-ch
+		if !ok {
+			return // channel closed without result (shouldn't happen)
+		}
+
+		// Check user-kill flag first, same as runTask.
+		if s.consumeKillRequest(task.ID) || res.Killed {
+			s.completeTask(task, StatusKilled)
+		} else {
+			// Signal 0 polling can't get real exit code.
+			// Treat non-killed exit as failed; user can inspect logs and retry.
+			s.completeTask(task, StatusFailed)
+		}
+		s.RefreshJobStatus(task.JobID)
+		s.logger.Info("reattached task exited", "task", task.ID, "status", task.Status)
+	}()
 }
 
 // handleFailure decides whether to retry or permanently fail a task.
@@ -349,7 +384,7 @@ func (s *Scheduler) handleFailure(task *Task) {
 	}
 
 	s.completeTask(task, StatusFailed)
-	s.refreshJobStatus(task.JobID)
+	s.RefreshJobStatus(task.JobID)
 	s.logger.Warn("task failed permanently", "task", task.ID, "retry", task.RetryCount, "max_retry", task.MaxRetry)
 }
 
@@ -415,14 +450,14 @@ func (s *Scheduler) consumeKillRequest(taskID string) bool {
 	return false
 }
 
-// refreshJobStatus checks all tasks of a job and updates the job status in DB.
+// RefreshJobStatus checks all tasks of a job and updates the job status in DB.
 // Called after every task state transition (complete, fail, requeue).
 //
 // Rules:
 //   - any task running → job = "running"
 //   - all tasks terminal (success/failed/killed) → job = "done"
 //   - otherwise (some pending, none running) → keep current status
-func (s *Scheduler) refreshJobStatus(jobID string) {
+func (s *Scheduler) RefreshJobStatus(jobID string) {
 	ctx := context.Background()
 	tasks, err := s.store.ListTasks(ctx, store.TaskFilter{JobID: jobID})
 	if err != nil {

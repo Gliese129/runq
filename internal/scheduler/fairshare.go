@@ -24,13 +24,13 @@ func (f *FairSharePrioritizer) Prioritize(ctx ScheduleContext) []Priority {
 	// Score each user on three normalized dimensions:
 	//   1. Pending demand   (weight -0.1): total GPUs requested by queued tasks
 	//   2. Running occupation (weight -0.3): GPU-seconds consumed by in-flight tasks
-	//   3. Historical usage   (weight -0.5): GPU-seconds consumed in sliding window (from DB)
+	//   3. Historical usage   (weight -0.5): GPU-seconds consumed in sliding window (finished only)
 	//
 	// Combined score = -0.1*pending - 0.3*running - 0.5*consumed
 	// Lower historical consumption → higher score → scheduled first.
 	// Within the same user, tasks are ordered FIFO by EnqueuedAt.
 	userPending, userRunning := make(map[int]float64), make(map[int]float64)
-	userConsumed := f.computeUsage(time.Now())
+	userConsumed := f.computeUsage(ctx.Now)
 	for _, task := range ctx.Pending {
 		_, ok := userPending[task.UID]
 		if !ok {
@@ -75,10 +75,14 @@ func (f *FairSharePrioritizer) Prioritize(ctx ScheduleContext) []Priority {
 	return result
 }
 
-// computeUsage calculates per-UID GPU-seconds consumed in [now-window, now].
-// Counts both finished tasks (from DB) and currently running tasks (in-progress time).
+// computeUsage calculates per-UID GPU-seconds consumed by FINISHED tasks in [now-window, now].
+// Running task occupation is handled separately by Prioritize() via ctx.Running (userRunning dimension),
+// so this method intentionally excludes running tasks to avoid double-counting.
 func (f *FairSharePrioritizer) computeUsage(now time.Time) map[int]float64 {
 	usage := make(map[int]float64)
+	if f.Store == nil {
+		return usage
+	}
 
 	cutoff := now.Add(-f.Window)
 	dbCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -98,25 +102,6 @@ func (f *FairSharePrioritizer) computeUsage(now time.Time) map[int]float64 {
 			start = cutoff // clamp to window boundary
 		}
 		duration := t.FinishedAt.Sub(start).Seconds()
-		usage[t.UID] += float64(t.GPUsNeeded) * duration
-	}
-
-	// Running tasks: count in-progress GPU-time up to now.
-	// We query DB rather than using ScheduleContext.Running because we need UID,
-	// which is stored in the DB but not on the in-memory Task struct.
-	runningTasks, err := f.Store.ListTasks(dbCtx, store.TaskFilter{Status: "running"})
-	if err != nil {
-		return usage
-	}
-	for _, t := range runningTasks {
-		if t.StartedAt == nil {
-			continue
-		}
-		start := *t.StartedAt
-		if start.Before(cutoff) {
-			start = cutoff
-		}
-		duration := now.Sub(start).Seconds()
 		usage[t.UID] += float64(t.GPUsNeeded) * duration
 	}
 

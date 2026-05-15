@@ -76,12 +76,14 @@ job.yaml in the current directory.`,
 			return fmt.Errorf("no job file")
 		}
 		dryRun, _ := cmd.Flags().GetBool("dry")
+		dryRunAlias, _ := cmd.Flags().GetBool("dry-run")
 		watch, _ := cmd.Flags().GetBool("watch")
+		projectOverride, _ := cmd.Flags().GetString("project")
 
 		if file == "." {
 			file = "job.yaml"
 		}
-		if wd, err := os.Getwd(); err == nil {
+		if wd, err := os.Getwd(); err == nil && !filepath.IsAbs(file) {
 			file = filepath.Join(wd, file)
 		}
 		var job job2.JobConfig
@@ -92,8 +94,11 @@ job.yaml in the current directory.`,
 		if err := yaml.Unmarshal(fs, &job); err != nil {
 			return err
 		}
+		if projectOverride != "" {
+			job.Project = projectOverride
+		}
 		// dry-run
-		if dryRun {
+		if dryRun || dryRunAlias {
 			tasks, err := job2.Expand(&job)
 			if err != nil {
 				return err
@@ -477,6 +482,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 func init() {
 	// submit flags
 	submitCmd.Flags().Bool("dry", false, "Expand sweep and print tasks without submitting")
+	submitCmd.Flags().Bool("dry-run", false, "Expand sweep and print tasks without submitting")
 	submitCmd.Flags().Bool("watch", false, "Block and show live progress after submit")
 	submitCmd.Flags().String("project", "", "Override the project name in the YAML")
 

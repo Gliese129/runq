@@ -24,14 +24,14 @@ func WrapCommand(envType, envPath, envName, cmd, workingDir string) string {
 		if !filepath.IsAbs(path) {
 			path = filepath.Join(workingDir, path)
 		}
-		return "source " + path + "/bin/activate && " + cmd
+		return ". " + shellQuote(filepath.Join(path, "bin", "activate")) + " && " + cmd
 	case "conda":
 		name := envName
 		if name == "" {
 			name = "base"
 		}
 		// conda activate requires shell initialization first.
-		return `eval "$(conda shell.bash hook)" && conda activate ` + name + " && " + cmd
+		return `eval "$(conda shell.bash hook)" && conda activate ` + shellQuote(name) + " && " + cmd
 	default:
 		// "system", "", or unknown — run as-is.
 		return cmd
@@ -74,4 +74,8 @@ func DetectPythonEnv(workingDir string) (string, string, string) {
 		}
 	}
 	return "", "", ""
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }

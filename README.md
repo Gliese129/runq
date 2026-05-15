@@ -1,54 +1,121 @@
 # runq
 
-A lightweight, single-machine GPU job scheduler for research labs.
+A lightweight GPU job scheduler for research labs. One binary, no containers, no cloud — just `runq submit` and your GPUs stay busy.
 
-runq manages GPU allocation, parameter sweep expansion, and task lifecycle with minimal configuration. It runs as a local daemon and is controlled entirely via CLI.
+runq manages GPU allocation, parameter sweeps, task retry, and fair scheduling across users on a single multi-GPU machine. It runs as a local daemon controlled via CLI.
 
-## Data Model
-
-```
-Project → Job → Task
-```
-
-- **Project** — a registered experiment type: command template, GPU defaults, resume config.
-- **Job** — a submitted sweep that expands into multiple tasks via grid/list parameter combinations.
-- **Task** — the smallest schedulable unit: one command on N GPUs.
-
-## Quick Start
+## Install
 
 ```bash
-# Build
+go install github.com/gliese129/runq/cmd/runq@latest
+# or build from source
+git clone https://github.com/gliese129/runq.git && cd runq
 go build -o runq ./cmd/runq
+```
 
-# Start the daemon
+Requires `nvidia-smi` on PATH. Run `runq doctor` to verify your environment.
+
+## 5-Minute Quickstart
+
+```bash
+# 1. Start the daemon (detects GPUs automatically)
 runq daemon start
 
-# Register a project
-runq project add .              # reads ./project.yaml
+# 2. Scaffold a project config in your experiment directory
+cd ~/experiments/resnet50
+runq init train.py          # generates project.yaml + job.yaml
 
-# Submit a sweep job
-runq submit .                   # reads ./job.yaml
+# 3. Edit the generated job.yaml to define your sweep
+#    (or just use the defaults for a single run)
 
-# Monitor
-runq ps                         # running + pending tasks
-runq gpu                        # GPU allocation
-runq status                     # queue summary
-runq logs <task_id>             # tail task output
+# 4. Submit
+runq submit .
 
-# Kill
-runq kill <task_id>             # kill one task
-runq kill <job_id>              # kill all tasks in a job
+# 5. Watch
+runq ps                     # task status
+runq gpu                    # GPU allocation
+runq logs <task_id>         # live output
+```
+
+That's it. runq expands your parameter sweep, queues the tasks, assigns GPUs, and handles retries.
+
+## Core Concepts
+
+```
+Project  →  Job  →  Task
+```
+
+A **project** is a registered experiment type (command template, GPU defaults, retry policy). A **job** is a submitted sweep that expands into **tasks** — the actual GPU processes.
+
+## Usage Examples
+
+### Quick one-off run (no YAML)
+
+```bash
+runq run resnet50 --gpus 2 -- --lr 0.01 --epochs 100
+```
+
+### Parameter sweep from CLI
+
+```bash
+runq sweep --project resnet50 lr=0.001,0.01,0.1 batch_size=32,64
+# Creates 6 tasks (cartesian product), submits as a job
+```
+
+### Parameter sweep from YAML
+
+```yaml
+# job.yaml
+project: resnet50
+
+sweep:
+  - method: grid
+    parameters:
+      lr: [0.001, 0.01, 0.1]
+      optimizer: [adam, sgd]
+
+  - method: list
+    parameters:
+      batch_size: [32, 64, 128]
+      num_workers: [4, 8, 16]
+```
+
+Sweep blocks combine via cross-product. This example produces 6 × 3 = 18 tasks.
+
+```bash
+runq submit .                # reads ./job.yaml
+runq submit --dry-run .      # preview tasks without submitting
+```
+
+### Job control
+
+```bash
+runq job pause <job_id>      # pause scheduling (running tasks continue)
+runq job resume <job_id>     # resume
+runq job kill <job_id>       # kill all tasks
+runq kill <task_id>          # kill one task
+runq task retry <task_id>    # retry a failed task
+```
+
+### Monitoring
+
+```bash
+runq ps                      # running + pending
+runq ps -a                   # include completed
+runq ps --status failed      # filter by status
+runq ps --job <job_id>       # filter by job
+runq status                  # daemon summary
+runq gpu                     # per-GPU allocation
+runq logs <task_id>          # tail output
 ```
 
 ## Configuration
 
 ### project.yaml
 
-Defines an experiment type. Register with `runq project add .`.
-
 ```yaml
 project_name: resnet50
-working_dir: /home/user/projects/resnet50
+working_dir: /home/user/experiments/resnet50
 command_template: python train.py {{args}}
 
 environment:
@@ -56,156 +123,91 @@ environment:
 
 defaults:
   gpus_per_task: 1
-  max_retry: 3          # 0 = unlimited
+  max_retry: 3
 
 resume:
   enabled: true
   extra_args: --resume --ckpt latest
 ```
 
-### job.yaml
+**Command templates** support `{{args}}` (auto-generates `--key=value` for all parameters) and `{{param_name}}` (inserts a specific parameter). Mixed mode works: `python train.py --lr {{lr}} {{args}}`.
 
-Defines a parameter sweep. Submit with `runq submit .`.
+### Python environment
 
-```yaml
-project: resnet50
+runq auto-detects uv, venv, and conda environments in your project directory and activates them before running tasks. Detection runs during `runq init` and can be overridden in project.yaml.
 
-sweep:
-  # Grid: cartesian product within the block
-  - method: grid
-    parameters:
-      lr: [0.001, 0.01, 0.1]
-      optimizer: [adam, sgd]
+### Config priority
 
-  # List: zip parameters 1-to-1 (must be same length)
-  - method: list
-    parameters:
-      batch_size: [32, 64, 128]
-      num_workers: [4, 8, 16]
-```
-
-Blocks are combined via cross-product. The example above produces 6 × 3 = 18 tasks.
-
-### Command Templates
-
-Templates in `command_template` support two modes:
-
-- `{{args}}` — auto-generates `--key=value` for all parameters, sorted by key.
-- `{{param_name}}` — inserts a specific parameter by name. Unconsumed parameters go to `{{args}}` if present.
-
-Mixed mode is supported: `python train.py --lr {{lr}} {{args}}`.
-
-### Config Priority
-
-CLI flag > YAML field > built-in default. Per-job overrides in `job.yaml` take precedence over project defaults.
+CLI flag > job.yaml override > project.yaml default > built-in default.
 
 ## Scheduling
 
-runq uses a FIFO queue with three enhancements:
+runq supports two scheduling strategies, selectable at daemon startup:
 
-- **Reservation** — large multi-GPU tasks reserve a slot so they aren't starved by small tasks.
-- **Aging** — tasks waiting longer than 1 hour get priority boost.
-- **Backfill** — while a large task waits for enough GPUs, smaller tasks that fit in the remaining slots can run.
+**FIFO** (default for simplicity) — first submitted, first scheduled.
 
-GPU isolation is soft (via `CUDA_VISIBLE_DEVICES`). Each task gets its assigned GPU indices and cannot see other GPUs.
+**Fair-share** (default in production) — users who have consumed fewer GPU-hours get priority. Scored on three dimensions: pending demand, running occupation, and historical usage in a 24-hour sliding window.
+
+Both strategies include:
+
+- **Backfill** — while a large task waits for GPUs, smaller tasks that fit in remaining slots can run.
+- **Reservation** — tasks waiting longer than 15 minutes get exclusive reservation, preventing starvation.
+
+GPU isolation uses `CUDA_VISIBLE_DEVICES`. Each task sees only its assigned GPUs.
+
+## Reliability
+
+runq is designed to survive failures without losing work:
+
+- **Task retry** — failed tasks are automatically retried up to `max_retry` times.
+- **Task timeout** — optional per-task timeout auto-kills runaway processes.
+- **Daemon restart recovery** — if the daemon crashes, it reclaims still-running processes and restores the full queue from SQLite.
+- **GPU leak detection** — after each task exits, runq checks for residual processes still occupying GPUs.
+- **External GPU awareness** — periodically scans for non-runq processes using GPUs and blocks those slots from scheduling.
 
 ## Architecture
 
 ```
-┌────────┐     unix socket     ┌─────────────────────────┐
-│  CLI   │ ◄──────────────────► │       Daemon            │
-│ (cobra)│                      │                         │
-└────────┘                      │  Gin Router (API)       │
-                                │  ├── Project Registry   │
-                                │  ├── Queue              │
-                                │  ├── Scheduler          │
-                                │  │   ├── GPUPool        │
-                                │  │   └── Executor       │
-                                │  └── Store (SQLite)     │
-                                └─────────────────────────┘
+CLI (cobra)  ──unix socket──►  Daemon
+                                ├── API (gin)
+                                ├── Scheduler
+                                │   ├── Queue
+                                │   ├── Prioritizer (FIFO / Fair-share)
+                                │   └── GPU Pool
+                                ├── Executor (os/exec)
+                                └── Store (SQLite)
 ```
 
-The daemon exposes a REST API over a unix domain socket. The CLI communicates with the daemon via HTTP over this socket. This same API can later serve a web UI.
-
-### Internal Packages
-
-| Package | Role |
-|---|---|
-| `cli` | Cobra commands, Client wrapper, table output |
-| `api` | Gin handlers, Server lifecycle, unix socket Client |
-| `scheduler` | Queue (FIFO + aging + backfill), GPUPool, scheduling loop |
-| `executor` | Process management (`os/exec`), log redirection, PID reclaim |
-| `job` | Sweep expansion (grid/list), command template rendering |
-| `project` | Project config struct, SQLite-backed Registry |
-| `store` | SQLite connection (WAL mode), schema migrations |
-| `gpu` | `nvidia-smi` detection and parsing |
-| `utils` | Process start time reader, atomic file writes |
-
-### Tech Stack
-
-- **CLI**: Cobra
-- **API**: Gin
-- **Storage**: modernc.org/sqlite (pure Go, no CGO)
-- **Config**: gopkg.in/yaml.v3
-- **Logging**: log/slog (stdlib)
+The daemon exposes a REST API over a unix domain socket. All state is persisted to SQLite; the in-memory queue is rebuilt from DB on restart.
 
 ## CLI Reference
 
-### Shortcuts
-
 | Command | Description |
 |---|---|
-| `runq submit <path>` | Submit a job from YAML |
-| `runq run <project> -- <args>` | Quick single task without YAML |
-| `runq ps` | List running + pending tasks |
-| `runq logs <task_id>` | Tail task output |
-| `runq kill <id>` | Kill a task or job |
-| `runq gpu` | GPU allocation status |
+| `runq init [script.py]` | Scaffold project.yaml + job.yaml |
+| `runq submit [path]` | Submit a job from YAML |
+| `runq sweep` | Submit a sweep from CLI args |
+| `runq run <project> -- <args>` | Quick single-task run |
+| `runq ps` | List tasks |
+| `runq gpu` | GPU allocation |
 | `runq status` | Daemon/queue summary |
-
-### Resource Management
-
-| Command | Description |
-|---|---|
-| `runq project add .` | Register project from YAML |
-| `runq project ls` | List projects |
-| `runq project show <name>` | Show project details |
-| `runq project edit <name>` | Edit in $EDITOR |
-| `runq project rm <name>` | Remove project |
-
-### Job & Task
-
-| Command | Description |
-|---|---|
-| `runq job ls` | List jobs with status breakdown |
-| `runq job kill <job_id>` | Kill all tasks in a job |
-| `runq task show <task_id>` | Show task details |
-
-### Daemon
-
-| Command | Description |
-|---|---|
-| `runq daemon start` | Start scheduler daemon |
-| `runq daemon stop` | Stop daemon (SIGTERM) |
-| `runq daemon restart` | Stop + start |
-
-### Common Flags
-
-- `runq ps -a` — include completed tasks
-- `runq ps --status failed` — filter by status
-- `runq ps --job <id>` — filter by job
-- `runq ps -o json` — JSON output
-- `runq ps --no-header` — suppress table header
-- `runq submit --dry-run` — preview expanded tasks without submitting
+| `runq logs <task_id>` | Tail task output |
+| `runq kill <id>` | Kill task or job |
+| `runq job ls/show/pause/resume/kill/rm` | Job management |
+| `runq task show/retry` | Task management |
+| `runq project add/ls/show/edit/rm` | Project management |
+| `runq daemon start/stop/restart` | Daemon lifecycle |
+| `runq doctor` | Environment check |
+| `runq clean` | Remove finished tasks and orphan jobs |
 
 ## File Locations
 
 | Path | Description |
 |---|---|
+| `~/.runq/runq.db` | SQLite database (all state) |
 | `~/.runq/runq.sock` | Unix domain socket |
 | `~/.runq/daemon.pid` | PID file |
-| `~/.runq/runq.db` | SQLite database |
-| `logs/<task_id>.log` | Task output (relative to project working_dir) |
+| `<working_dir>/logs/<task_id>.log` | Task output |
 
 ## License
 
