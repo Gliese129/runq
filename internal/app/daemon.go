@@ -61,7 +61,14 @@ func NewDaemon() (*Daemon, error) {
 	pool := resource.NewGPUPool(gpus)
 	queue := scheduler.NewQueue()
 	exec := executor.New()
-	sched := scheduler.New(scheduler.DefaultConfig(), queue, pool, exec, st, logger)
+
+	// Default to fair-share scheduling with 24h sliding window.
+	// TODO: make configurable via runq config (fifo / fair).
+	prioritizer := &scheduler.FairSharePrioritizer{
+		Store:  st,
+		Window: 24 * time.Hour,
+	}
+	sched := scheduler.New(scheduler.DefaultConfig(), queue, pool, exec, st, logger, prioritizer)
 
 	// Build service layer.
 	reg := project.NewRegistry(st.DB())

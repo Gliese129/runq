@@ -223,6 +223,12 @@ func (q *Queue) ListByStatus(status TaskStatus) []*Task {
 	return result
 }
 
+// ListPending returns all pending tasks. Used by Prioritizer.
+func (q *Queue) ListPending() []*Task { return q.ListByStatus(StatusPending) }
+
+// ListRunning returns all running tasks. Used by Prioritizer.
+func (q *Queue) ListRunning() []*Task { return q.ListByStatus(StatusRunning) }
+
 // ListByJob returns all tasks belonging to a job.
 func (q *Queue) ListByJob(jobID string) []*Task {
 	q.mu.Lock()

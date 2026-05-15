@@ -96,7 +96,7 @@ func TestSchedulerDispatchSingle(t *testing.T) {
 	seedJob(t, st, "j1", "test", 1)
 	seedTask(t, st, task)
 
-	s := New(cfg, q, pool, exec, st, logger)
+	s := New(cfg, q, pool, exec, st, logger, nil)
 	s.Start()
 	q.Push(task)
 
@@ -131,7 +131,7 @@ func TestSchedulerRetry(t *testing.T) {
 	seedJob(t, st, "j1", "test", 1)
 	seedTask(t, st, task)
 
-	s := New(cfg, q, pool, exec, st, logger)
+	s := New(cfg, q, pool, exec, st, logger, nil)
 	s.Start()
 	q.Push(task)
 
@@ -161,7 +161,7 @@ func TestHandleFailureLogsNextRetryOnce(t *testing.T) {
 	seedTask(t, st, task)
 	q.Push(task)
 
-	s := New(DefaultConfig(), q, testPool(1), executor.New(), st, logger)
+	s := New(DefaultConfig(), q, testPool(1), executor.New(), st, logger, nil)
 	s.handleFailure(task)
 
 	logs := buf.String()
@@ -211,7 +211,7 @@ func TestSchedulerBackfill(t *testing.T) {
 	seedTask(t, st, big)
 	seedTask(t, st, small)
 
-	s := New(cfg, q, pool, exec, st, logger)
+	s := New(cfg, q, pool, exec, st, logger, nil)
 	s.Start()
 	q.Push(big)
 	q.Push(small)
@@ -259,7 +259,7 @@ func TestSchedulerReservation(t *testing.T) {
 	// Occupy 2 GPUs so big task can't fit.
 	pool.Allocate(2, "external-task")
 
-	s := New(cfg, q, pool, exec, st, logger)
+	s := New(cfg, q, pool, exec, st, logger, nil)
 	s.Start()
 	q.Push(big)
 	q.Push(small)

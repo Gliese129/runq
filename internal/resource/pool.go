@@ -126,6 +126,45 @@ func (p *GPUPool) Reserve(indices []int, taskID string) error {
 	return nil
 }
 
+// externalTaskID is a sentinel value marking GPUs occupied by non-runq processes.
+// Allocate skips GPUs with any non-empty TaskID, so this effectively blocks them.
+const externalTaskID = "_external"
+
+// RefreshExternalUsage calls nvidia-smi pmon to detect GPUs occupied by processes
+// not managed by runq. Blocked GPUs are marked with "_external"; GPUs that were
+// previously blocked but are now free get unmarked.
+//
+// allIndices: all GPU indices in the pool (for scanning).
+// managedTaskIDs: set of taskIDs currently managed by runq (from the queue).
+func (p *GPUPool) RefreshExternalUsage(procs []ResidualProcess, managedTaskIDs map[string]bool) (blocked, unblocked []int) {
+	// Build set of GPU indices that have external processes.
+	externalGPUs := make(map[int]bool)
+	for _, proc := range procs {
+		externalGPUs[proc.GPUIndex] = true
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	for idx, g := range p.gpus {
+		hasExternal := externalGPUs[idx]
+		isManagedTask := g.TaskID != "" && g.TaskID != externalTaskID && managedTaskIDs[g.TaskID]
+
+		if hasExternal && !isManagedTask && g.TaskID == "" {
+			// Free GPU now has external process → block it.
+			g.TaskID = externalTaskID
+			blocked = append(blocked, idx)
+		} else if !hasExternal && g.TaskID == externalTaskID {
+			// Previously blocked GPU is now free → unblock it.
+			g.TaskID = ""
+			unblocked = append(unblocked, idx)
+		}
+		// If GPU has a managed task AND external process, leave it alone —
+		// we don't block GPUs that runq is actively using.
+	}
+	return
+}
+
 func (p *GPUPool) sortedIndices() []int {
 	indices := make([]int, 0, len(p.gpus))
 	for idx := range p.gpus {

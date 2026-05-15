@@ -20,6 +20,8 @@ type Info struct {
 	UtilPct int // %
 }
 
+// ResidualProcess represents a process still occupying a GPU after its owning task exited.
+// Detected via nvidia-smi pmon.
 type ResidualProcess struct {
 	GPUIndex int
 	PID      int
@@ -100,6 +102,9 @@ func Parse(output string) ([]Info, error) {
 	return infos, errs
 }
 
+// CheckResidualProcesses runs nvidia-smi pmon to find processes on the given GPUs.
+// Returns only processes on GPUs listed in gpuIndices; skips idle entries (pid="-").
+// Used after task exit to detect leaked processes and during periodic GPU refresh.
 func CheckResidualProcesses(gpuIndices []int) ([]ResidualProcess, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
 	defer cancel()
@@ -169,7 +174,7 @@ func CheckResidualProcesses(gpuIndices []int) ([]ResidualProcess, error) {
 			continue
 		}
 
-		var cmd_ string
+		var cmdName string
 		var pid, gpu, mem int
 
 		gpu, err = parseIntField(fields[gpuIdx], "gpu", lineIdx)
@@ -191,14 +196,14 @@ func CheckResidualProcesses(gpuIndices []int) ([]ResidualProcess, error) {
 			continue
 		}
 
-		cmd_ = strings.Join(fields[cmdIdx:], " ")
+		cmdName = strings.Join(fields[cmdIdx:], " ")
 		if !targetGPUs[gpu] {
 			continue
 		}
 		process := ResidualProcess{
 			GPUIndex: gpu,
 			MemMB:    mem,
-			Command:  cmd_,
+			Command:  cmdName,
 			PID:      pid,
 		}
 		processes = append(processes, process)

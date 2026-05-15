@@ -38,34 +38,39 @@ func WrapCommand(envType, envPath, envName, cmd, workingDir string) string {
 	}
 }
 
+// DetectPythonEnv auto-detects the Python environment for a project directory.
+// Returns (envType, envPath, envName):
+//   - envType: "uv", "venv", "conda", or "" (system/unknown)
+//   - envPath: relative venv directory (e.g. ".venv"); empty for conda/system
+//   - envName: conda environment name; empty for venv/system
+//
+// Detection order: uv (.venv/pyvenv.cfg contains "uv") → venv (.venv/bin/activate)
+// → conda ($CONDA_DEFAULT_ENV) → uv (pyproject.toml [tool.uv]).
 func DetectPythonEnv(workingDir string) (string, string, string) {
-	// uv first
 	uvPath := filepath.Join(workingDir, ".venv", "pyvenv.cfg")
 	if data, err := os.ReadFile(uvPath); err == nil {
 		if strings.Contains(string(data), "uv") {
 			return "uv", ".venv", ""
 		}
 	}
-	// then venv
+	// Standard venv (no uv marker).
 	venvPath := filepath.Join(workingDir, ".venv", "bin", "activate")
-	_, err := os.Stat(venvPath)
-	if err == nil {
+	if _, err := os.Stat(venvPath); err == nil {
 		return "venv", ".venv", ""
 	}
-	// conda from env
+	// Conda: check $CONDA_DEFAULT_ENV (set by conda activate).
 	if condaEnv := os.Getenv("CONDA_DEFAULT_ENV"); condaEnv != "" {
 		return "conda", "", condaEnv
 	}
-	// poetry/uv from tomlPath (this is a little bit complex)
-	// poetry not support yet
+	// Fallback: pyproject.toml with [tool.uv] section (no .venv created yet).
+	// Returns ".venv" as conventional path — WrapCommand will try to activate it.
+	// If user hasn't run `uv sync` yet, activation will fail at runtime.
+	// TODO: add poetry support when WrapCommand learns poetry shell activation.
 	tomlPath := filepath.Join(workingDir, "pyproject.toml")
 	if content, err := os.ReadFile(tomlPath); err == nil {
 		strContent := string(content)
-		//if strings.Contains(strContent, "[tool.poetry]") {
-		//	return "poetry", "", ""
-		//}
 		if strings.Contains(strContent, "[tool.uv]") {
-			return "uv", "", ""
+			return "uv", ".venv", ""
 		}
 	}
 	return "", "", ""

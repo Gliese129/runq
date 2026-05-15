@@ -16,17 +16,19 @@ import (
 
 // Config holds scheduler tuning parameters.
 type Config struct {
-	AgingThreshold  time.Duration // how long head-of-queue waits before reservation mode
-	BackfillEnabled bool
-	TickInterval    time.Duration // how often the scheduler loop runs
+	AgingThreshold     time.Duration // how long head-of-queue waits before reservation mode
+	BackfillEnabled    bool
+	TickInterval       time.Duration // how often the scheduler loop runs
+	GPURefreshInterval time.Duration // how often to scan for external GPU usage (0 = disabled)
 }
 
 // DefaultConfig returns sensible defaults for a research lab.
 func DefaultConfig() Config {
 	return Config{
-		AgingThreshold:  15 * time.Minute,
-		BackfillEnabled: true,
-		TickInterval:    1 * time.Second,
+		AgingThreshold:     15 * time.Minute,
+		BackfillEnabled:    true,
+		TickInterval:       1 * time.Second,
+		GPURefreshInterval: 30 * time.Second,
 	}
 }
 
@@ -34,12 +36,13 @@ func DefaultConfig() Config {
 // It pulls tasks from the queue, allocates GPUs, and dispatches to the executor.
 // All state transitions are persisted to store BEFORE updating the in-memory queue.
 type Scheduler struct {
-	cfg    Config
-	queue  *Queue
-	pool   resource.Allocator
-	exec   *executor.Executor
-	store  *store.Store
-	logger *slog.Logger
+	cfg         Config
+	queue       *Queue
+	pool        resource.Allocator
+	exec        *executor.Executor
+	store       *store.Store
+	logger      *slog.Logger
+	prioritizer Prioritizer
 
 	// pausedJobs tracks which jobs are paused. Scheduler skips pending tasks
 	// belonging to paused jobs. Synced via PauseJob/ResumeJob API calls.
@@ -58,15 +61,20 @@ type Scheduler struct {
 }
 
 // New creates a Scheduler with all its dependencies.
-func New(cfg Config, queue *Queue, pool resource.Allocator, exec *executor.Executor, store *store.Store, logger *slog.Logger) *Scheduler {
+// If prioritizer is nil, defaults to FIFO.
+func New(cfg Config, queue *Queue, pool resource.Allocator, exec *executor.Executor, st *store.Store, logger *slog.Logger, prioritizer Prioritizer) *Scheduler {
+	if prioritizer == nil {
+		prioritizer = FIFOPrioritizer{}
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Scheduler{
 		cfg:           cfg,
 		queue:         queue,
 		pool:          pool,
 		exec:          exec,
-		store:         store,
+		store:         st,
 		logger:        logger,
+		prioritizer:   prioritizer,
 		pausedJobs:    make(map[string]bool),
 		killRequested: make(map[string]bool),
 		ctx:           ctx,
@@ -81,10 +89,19 @@ func (s *Scheduler) Start() {
 		defer s.wg.Done()
 		s.loop()
 	}()
+	if s.cfg.GPURefreshInterval > 0 {
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			s.gpuRefreshLoop()
+		}()
+	}
 	s.logger.Info("scheduler started",
+		"strategy", s.prioritizer.Name(),
 		"aging_threshold", s.cfg.AgingThreshold.String(),
 		"backfill", s.cfg.BackfillEnabled,
 		"tick", s.cfg.TickInterval.String(),
+		"gpu_refresh", s.cfg.GPURefreshInterval.String(),
 	)
 }
 
@@ -112,60 +129,76 @@ func (s *Scheduler) loop() {
 
 // tick is one iteration of the scheduling loop.
 //
-// Algorithm (Reservation + Aging):
-//  1. Peek the head pending task.
-//  2. If it fits → dispatch it.
-//  3. If it doesn't fit:
-//     - Waited > AgingThreshold → reservation mode (block all, wait for GPUs).
-//     - Otherwise + backfill enabled → find a smaller task that fits.
+// Algorithm (Prioritizer + Reservation + Backfill):
+//  1. Ask Prioritizer to rank all pending tasks.
+//  2. Find head = highest-priority non-paused task.
+//  3. Head fits → dispatch it immediately.
+//  4. Head doesn't fit + waited > AgingThreshold → reservation mode (block all).
+//  5. Head doesn't fit + backfill enabled → dispatch the first smaller task that fits.
 func (s *Scheduler) tick() {
-	head := s.queue.Peek()
-	if head == nil {
-		return
-	}
-	// Skip paused jobs — treat as if no pending task exists for this job.
-	if s.isJobPaused(head.JobID) {
-		// Try backfill with a non-paused task instead.
-		if s.cfg.BackfillEnabled {
-			if task := s.peekSchedulableUnpaused(s.pool.FreeCount()); task != nil {
-				s.dispatch(task)
-			}
-		}
+	pending := s.queue.ListPending()
+	if len(pending) == 0 {
 		return
 	}
 
-	if head.GPUsNeeded <= s.pool.FreeCount() {
+	running := s.queue.ListRunning()
+	sctx := ScheduleContext{
+		Pending:  pending,
+		Running:  running,
+		FreeGPUs: s.pool.FreeCount(),
+		Now:      time.Now(),
+	}
+	ranked := s.prioritizer.Prioritize(sctx)
+
+	// Build a quick task lookup from pending list.
+	taskMap := make(map[string]*Task, len(pending))
+	for _, t := range pending {
+		taskMap[t.ID] = t
+	}
+
+	// Find head: the highest-priority non-paused task.
+	var head *Task
+	for _, p := range ranked {
+		t := taskMap[p.TaskID]
+		if t != nil && !s.isJobPaused(t.JobID) {
+			head = t
+			break
+		}
+	}
+	if head == nil {
+		return // all pending tasks are paused
+	}
+
+	// Head fits → dispatch it.
+	if head.GPUsNeeded <= sctx.FreeGPUs {
 		s.dispatch(head)
 		return
 	}
 
+	// Head doesn't fit — check aging / reservation.
 	if s.shouldReserve(head) {
 		s.logger.Debug("reservation mode",
 			"task", head.ID, "need", head.GPUsNeeded,
-			"free", s.pool.FreeCount(),
+			"free", sctx.FreeGPUs,
 			"wait", time.Since(head.EnqueuedAt).Round(time.Second),
 		)
 		return
 	}
 
+	// Backfill: find a smaller task that fits.
 	if s.cfg.BackfillEnabled {
-		if task := s.peekSchedulableUnpaused(s.pool.FreeCount()); task != nil {
-			s.logger.Debug("backfill", "task", task.ID, "gpus", task.GPUsNeeded, "blocked_by", head.ID)
-			s.dispatch(task)
+		for _, p := range ranked {
+			t := taskMap[p.TaskID]
+			if t == nil || t.ID == head.ID || s.isJobPaused(t.JobID) {
+				continue
+			}
+			if t.GPUsNeeded <= sctx.FreeGPUs {
+				s.logger.Debug("backfill", "task", t.ID, "gpus", t.GPUsNeeded, "blocked_by", head.ID)
+				s.dispatch(t)
+				return
+			}
 		}
 	}
-}
-
-// peekSchedulableUnpaused returns the first pending task that fits in freeGPUs
-// and whose parent job is not paused.
-func (s *Scheduler) peekSchedulableUnpaused(freeGPUs int) *Task {
-	s.pauseMu.RLock()
-	paused := make(map[string]bool, len(s.pausedJobs))
-	for k, v := range s.pausedJobs {
-		paused[k] = v
-	}
-	s.pauseMu.RUnlock()
-	return s.queue.PeekSchedulable(freeGPUs, paused)
 }
 
 // dispatch allocates GPUs, persists the running state, then launches the task.
@@ -320,13 +353,11 @@ func (s *Scheduler) handleFailure(task *Task) {
 	s.logger.Warn("task failed permanently", "task", task.ID, "retry", task.RetryCount, "max_retry", task.MaxRetry)
 }
 
-// persistFields updates arbitrary columns in DB. Non-critical — logs on error.
+// persistFields updates arbitrary columns on a running task in DB. Non-critical — logs on error.
+// Reuses UpdateTaskStatus with status="running" so only the extra fields change.
 func (s *Scheduler) persistFields(taskID string, fields map[string]any) {
 	dbCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	// UpdateTaskStatus with same status = only update the extra fields.
-	// Use empty status trick: we read current status to avoid overwriting.
-	// Simpler approach: just call a lightweight update.
 	if err := s.store.UpdateTaskStatus(dbCtx, taskID, "running", fields); err != nil {
 		s.logger.Warn("persist fields failed", "task", taskID, "error", err)
 	}
@@ -447,6 +478,55 @@ func (s *Scheduler) checkGPUResidual(task *Task) {
 			"task", task.ID, "gpu", p.GPUIndex,
 			"residual_pid", p.PID, "mem_mb", p.MemMB, "command", p.Command,
 		)
+	}
+}
+
+// gpuRefreshLoop periodically scans for external GPU usage and updates the pool.
+func (s *Scheduler) gpuRefreshLoop() {
+	ticker := time.NewTicker(s.cfg.GPURefreshInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-ticker.C:
+			s.refreshGPUUsage()
+		}
+	}
+}
+
+// refreshGPUUsage scans all GPUs via pmon and marks externally-occupied ones.
+func (s *Scheduler) refreshGPUUsage() {
+	pool, ok := s.pool.(*resource.GPUPool)
+	if !ok {
+		return // MockAllocator — skip
+	}
+
+	status := pool.Status()
+	gpuIndices := make([]int, len(status))
+	for i, g := range status {
+		gpuIndices[i] = g.Index
+	}
+
+	procs, err := resource.CheckResidualProcesses(gpuIndices)
+	if err != nil {
+		s.logger.Debug("GPU refresh: pmon failed", "error", err)
+		return
+	}
+
+	// Build set of task IDs managed by runq.
+	managedIDs := make(map[string]bool)
+	for _, t := range s.queue.ListRunning() {
+		managedIDs[t.ID] = true
+	}
+
+	blocked, unblocked := pool.RefreshExternalUsage(procs, managedIDs)
+	if len(blocked) > 0 {
+		s.logger.Warn("GPUs blocked by external processes", "gpus", blocked)
+	}
+	if len(unblocked) > 0 {
+		s.logger.Info("GPUs unblocked (external processes gone)", "gpus", unblocked)
 	}
 }
 

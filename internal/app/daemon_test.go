@@ -53,6 +53,7 @@ func TestRestoreRuntimeStateRestoresPausedJobsBeforeScheduling(t *testing.T) {
 		exec,
 		st,
 		slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		nil, // FIFO prioritizer
 	)
 	d := &Daemon{
 		Store:     st,

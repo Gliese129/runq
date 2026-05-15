@@ -260,6 +260,33 @@ func (s *Store) ListActiveTasks(ctx context.Context) ([]TaskRow, error) {
 	return result, rows.Err()
 }
 
+// ListFinishedTasksAfter returns tasks in terminal states finished after the cutoff.
+// Used by fair-share scheduling to compute per-user GPU-hours in a sliding window.
+func (s *Store) ListFinishedTasksAfter(ctx context.Context, cutoff time.Time) ([]TaskRow, error) {
+	query := fmt.Sprintf(
+		`SELECT %s FROM tasks
+		 WHERE status IN ('success', 'failed', 'killed')
+		   AND finished_at IS NOT NULL
+		   AND finished_at >= ?
+		 ORDER BY finished_at ASC`, allTaskColumns)
+
+	rows, err := s.db.QueryContext(ctx, query, cutoff.Unix())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []TaskRow
+	for rows.Next() {
+		t, err := scanTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, *t)
+	}
+	return result, rows.Err()
+}
+
 // ListFinishedTasksBefore returns tasks in terminal states finished before the cutoff.
 // Terminal states: success, failed, killed.
 func (s *Store) ListFinishedTasksBefore(ctx context.Context, cutoff time.Time) ([]TaskRow, error) {
