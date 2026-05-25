@@ -1,55 +1,101 @@
 # runq
 
-A lightweight GPU job scheduler for research labs. One binary, no containers, no cloud — just `runq submit` and your GPUs stay busy.
+A lightweight GPU job scheduler for research labs.
 
-runq manages GPU allocation, parameter sweeps, task retry, and fair scheduling across users on a single multi-GPU machine. It runs as a local daemon controlled via CLI.
+If your lab's GPU workflow looks like this:
+
+```bash
+# The "I hope nobody takes GPU 3" workflow
+export CUDA_VISIBLE_DEVICES=3
+nohup python train.py --lr 0.001 --batch_size 32 > log1.txt &
+# wait... check... done?
+export CUDA_VISIBLE_DEVICES=3
+nohup python train.py --lr 0.01 --batch_size 32 > log2.txt &
+# repeat 4 more times, mass Ctrl+C when something goes wrong
+# go to bed, wake up to 6 hours of idle GPUs
+# next morning: which log was the lr=0.01 run again?
+```
+
+Or on an HPC cluster:
+
+```bash
+# The "I need 6 runs with different hyperparameters" workflow
+for lr in 0.001 0.01 0.1; do
+  for bs in 32 64; do
+    sed "s/{{LR}}/$lr/g; s/{{BS}}/$bs/g" submit.sh.tmpl > submit_${lr}_${bs}.sh
+    qsub submit_${lr}_${bs}.sh
+  done
+done
+# 6 scripts generated, 6 qsub calls, hope you didn't typo the template
+# later: which job ID was the lr=0.01, bs=64 run?
+```
+
+runq turns both into:
+
+```bash
+runq sweep lr=0.001,0.01,0.1 batch_size=32,64
+# 6 tasks queued. GPUs assigned. Failures retried. You go to sleep.
+# Each task has its own log, tagged with the exact params that produced it.
+```
+
+One binary, no containers, no cluster admin. runq is not an ops tool — it just helps you stop copy-pasting shell commands, stop digging through logs to figure out which run used which hyperparameters, and stop wasting GPU hours overnight.
+
+## Why not just...
+
+| | runq | tmux + nohup | SLURM / PBS |
+|---|---|---|---|
+| Setup | One binary, zero config | Already there | Need a cluster admin |
+| GPU assignment | Automatic, no conflicts | Manual `CUDA_VISIBLE_DEVICES` | Automatic |
+| Parameter sweep | One command or YAML | Hand-written for loop | sbatch arrays |
+| "Which log had lr=0.01?" | `runq task show <id>` | Good luck with `log37_lr_1e-2--batch_32--20250514_0347.txt` | Job name conventions |
+| Task fails at 3 AM | Auto-retry, next task starts | Dead. GPUs idle till morning | Depends on config |
+| Lab has 3 users | Fair scheduling by GPU-hours | "Hey, are you using GPU 2?" | Built-in, but overkill |
+| Disk fills up | Auto-pause + alert (planned) | Everything dies, good morning | Rarely an issue (dedicated storage) |
+| Works on HPC / SLURM | Yes (template mode) | Nope (login node thread limits) | It *is* SLURM |
+
+runq fills the gap between "everyone just runs stuff manually" and "we need a full cluster scheduler." If your lab has one machine with a few GPUs and a few students, this is probably the right level of tooling.
+
+It also works on HPC clusters (SLURM, PBS, SGE) — runq doesn't replace the cluster scheduler, it just handles sweep expansion, param injection, and log management on top of it. Same workflow, whether you're on a lab machine or submitting to TSUBAME.
 
 ## Install
 
 ```bash
 go install github.com/gliese129/runq/cmd/runq@latest
-# or build from source
+```
+
+Or build from source:
+
+```bash
 git clone https://github.com/gliese129/runq.git && cd runq
 go build -o runq ./cmd/runq
 ```
 
-Requires `nvidia-smi` on PATH. Run `runq doctor` to verify your environment.
+Requires `nvidia-smi` on PATH. Run `runq doctor` to check your setup.
 
-## 5-Minute Quickstart
+## Quickstart
 
 ```bash
-# 1. Start the daemon (detects GPUs automatically)
+# 1. Start the daemon (auto-detects your GPUs)
 runq daemon start
 
-# 2. Scaffold a project config in your experiment directory
+# 2. Set up your experiment directory
 cd ~/experiments/resnet50
-runq init train.py          # generates project.yaml + job.yaml
+runq init train.py          # scans argparse, generates project.yaml + job.yaml
 
-# 3. Edit the generated job.yaml to define your sweep
-#    (or just use the defaults for a single run)
+# 3. Submit
+runq submit .               # or just: runq sweep lr=0.001,0.01,0.1 batch_size=32,64
 
-# 4. Submit
-runq submit .
-
-# 5. Watch
+# 4. Check on things
 runq ps                     # task status
 runq gpu                    # GPU allocation
-runq logs <task_id>         # live output
+runq logs <task_id>         # tail output
 ```
 
-That's it. runq expands your parameter sweep, queues the tasks, assigns GPUs, and handles retries.
+That's it. runq expands the parameter sweep, queues the tasks, assigns GPUs, and retries failures.
 
-## Core Concepts
+## Usage
 
-```
-Project  →  Job  →  Task
-```
-
-A **project** is a registered experiment type (command template, GPU defaults, retry policy). A **job** is a submitted sweep that expands into **tasks** — the actual GPU processes.
-
-## Usage Examples
-
-### Quick one-off run (no YAML)
+### Quick one-off run
 
 ```bash
 runq run resnet50 --gpus 2 -- --lr 0.01 --epochs 100
@@ -80,7 +126,7 @@ sweep:
       num_workers: [4, 8, 16]
 ```
 
-Sweep blocks combine via cross-product. This example produces 6 × 3 = 18 tasks.
+Sweep blocks combine via cross-product. This produces 6 × 3 = 18 tasks.
 
 ```bash
 runq submit .                # reads ./job.yaml
@@ -91,8 +137,8 @@ runq submit --dry-run .      # preview tasks without submitting
 
 ```bash
 runq job pause <job_id>      # pause scheduling (running tasks continue)
-runq job resume <job_id>     # resume
-runq job kill <job_id>       # kill all tasks
+runq job resume <job_id>
+runq job kill <job_id>       # kill all tasks in a job
 runq kill <task_id>          # kill one task
 runq task retry <task_id>    # retry a failed task
 ```
@@ -102,11 +148,10 @@ runq task retry <task_id>    # retry a failed task
 ```bash
 runq ps                      # running + pending
 runq ps -a                   # include completed
-runq ps --status failed      # filter by status
-runq ps --job <job_id>       # filter by job
-runq status                  # daemon summary
+runq ps --status failed      # filter
 runq gpu                     # per-GPU allocation
 runq logs <task_id>          # tail output
+runq task show <task_id>     # params, status, timing, log path
 ```
 
 ## Configuration
@@ -130,11 +175,11 @@ resume:
   extra_args: --resume --ckpt latest
 ```
 
-**Command templates** support `{{args}}` (auto-generates `--key=value` for all parameters) and `{{param_name}}` (inserts a specific parameter). Mixed mode works: `python train.py --lr {{lr}} {{args}}`.
+Command templates support `{{args}}` (auto-generates `--key=value` for all parameters) and `{{param_name}}` (inserts a specific parameter). You can mix both: `python train.py --lr {{lr}} {{args}}`.
 
-### Python environment
+### Python environments
 
-runq auto-detects uv, venv, and conda environments in your project directory and activates them before running tasks. Detection runs during `runq init` and can be overridden in project.yaml.
+runq auto-detects uv, venv, and conda environments in your project directory and activates them before running tasks. Detection happens during `runq init` and can be overridden in project.yaml.
 
 ### Config priority
 
@@ -142,30 +187,28 @@ CLI flag > job.yaml override > project.yaml default > built-in default.
 
 ## Scheduling
 
-runq supports two scheduling strategies, selectable at daemon startup:
+Two strategies, selectable at daemon startup:
 
-**FIFO** (default for simplicity) — first submitted, first scheduled.
+**FIFO** — first submitted, first scheduled. Simple.
 
-**Fair-share** (default in production) — users who have consumed fewer GPU-hours get priority. Scored on three dimensions: pending demand, running occupation, and historical usage in a 24-hour sliding window.
+**Fair-share** — users who have consumed fewer GPU-hours get priority. If one person submits a 50-task sweep, everyone else doesn't have to wait till next week.
 
-Both strategies include:
-
-- **Backfill** — while a large task waits for GPUs, smaller tasks that fit in remaining slots can run.
-- **Reservation** — tasks waiting longer than 15 minutes get exclusive reservation, preventing starvation.
+Both include backfill (small tasks run in gaps while big tasks wait for GPUs) and reservation (tasks waiting longer than 15 minutes get priority, preventing starvation).
 
 GPU isolation uses `CUDA_VISIBLE_DEVICES`. Each task sees only its assigned GPUs.
 
 ## Reliability
 
-runq is designed to survive failures without losing work:
+runq is designed for the "submit before going home" workflow:
 
-- **Task retry** — failed tasks are automatically retried up to `max_retry` times.
-- **Task timeout** — optional per-task timeout auto-kills runaway processes.
-- **Daemon restart recovery** — if the daemon crashes, it reclaims still-running processes and restores the full queue from SQLite.
-- **GPU leak detection** — after each task exits, runq checks for residual processes still occupying GPUs.
-- **External GPU awareness** — periodically scans for non-runq processes using GPUs and blocks those slots from scheduling.
+- **Auto-retry** — failed tasks retry up to `max_retry` times.
+- **Timeout** — optional per-task timeout kills runaway processes.
+- **Daemon crash recovery** — restarts reclaim still-running processes and restore the full queue from SQLite. Nothing is lost.
+- **GPU leak detection** — checks for residual processes after each task exits.
+- **External GPU awareness** — detects non-runq processes on GPUs and avoids those slots.
 
-## Architecture
+<details>
+<summary><strong>Architecture</strong></summary>
 
 ```
 CLI (cobra)  ──unix socket──►  Daemon
@@ -180,7 +223,10 @@ CLI (cobra)  ──unix socket──►  Daemon
 
 The daemon exposes a REST API over a unix domain socket. All state is persisted to SQLite; the in-memory queue is rebuilt from DB on restart.
 
-## CLI Reference
+</details>
+
+<details>
+<summary><strong>CLI Reference</strong></summary>
 
 | Command | Description |
 |---|---|
@@ -200,7 +246,10 @@ The daemon exposes a REST API over a unix domain socket. All state is persisted 
 | `runq doctor` | Environment check |
 | `runq clean` | Remove finished tasks and orphan jobs |
 
-## File Locations
+</details>
+
+<details>
+<summary><strong>File Locations</strong></summary>
 
 | Path | Description |
 |---|---|
@@ -208,6 +257,8 @@ The daemon exposes a REST API over a unix domain socket. All state is persisted 
 | `~/.runq/runq.sock` | Unix domain socket |
 | `~/.runq/daemon.pid` | PID file |
 | `<working_dir>/logs/<task_id>.log` | Task output |
+
+</details>
 
 ## License
 

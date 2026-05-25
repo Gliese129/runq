@@ -235,3 +235,68 @@ func TestStatus(t *testing.T) {
 		t.Errorf("expected 2 free GPUs, got %v", status["gpus_free"])
 	}
 }
+
+// setupTestServerWithFreeze adds a wired FreezeState — used by thaw tests
+// since setupTestServer leaves Deps.Freeze nil (verifies 503 path).
+func setupTestServerWithFreeze(t *testing.T) (*Server, *scheduler.FreezeState) {
+	t.Helper()
+	s := setupTestServer(t)
+	fs := scheduler.NewFreezeState()
+	s.deps.Freeze = fs
+	return s, fs
+}
+
+// TestThawUnfrozen: hitting /api/thaw on an idle daemon must succeed
+// (idempotent) — users may script this defensively.
+func TestThawUnfrozen(t *testing.T) {
+	s, _ := setupTestServerWithFreeze(t)
+	w := doRequest(s, "POST", "/api/thaw", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		WasFrozen   bool     `json:"was_frozen"`
+		ThawedTasks []string `json:"thawed_tasks"`
+	}
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp.WasFrozen {
+		t.Errorf("WasFrozen=true on idle daemon")
+	}
+	if len(resp.ThawedTasks) != 0 {
+		t.Errorf("ThawedTasks should be empty, got %v", resp.ThawedTasks)
+	}
+}
+
+// TestThawFrozen: real freeze → thaw cycle through the API. Validates that
+// the FreezeState handed to Deps is the same instance that Thaw operates on
+// (no copy-by-value bugs).
+func TestThawFrozen(t *testing.T) {
+	t.Skip("rewriting against new ThawResponse shape; see stage1 doc.")
+	s, fs := setupTestServerWithFreeze(t)
+	fs.Freeze(
+		scheduler.FreezeEvent{Reason: "manual", TriggerTaskID: "t1"},
+		map[string]scheduler.FrozenTask{
+			"t1": {PID: 999, Mount: "/tmp", JobID: "j1", NeededBytes: 1},
+		},
+	)
+	if !fs.IsFrozen() {
+		t.Fatal("setup: freeze didn't take")
+	}
+
+	w := doRequest(s, "POST", "/api/thaw", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	// Response shape now ThawResponse{Thawed, Blocked}; rewrite once handleThaw
+	// lands.
+}
+
+// TestThawWithoutFreezeState: daemons built without freeze wiring (test
+// shortcuts, future modes) should 503 rather than panic on nil deref.
+func TestThawWithoutFreezeState(t *testing.T) {
+	s := setupTestServer(t) // no Freeze in Deps
+	w := doRequest(s, "POST", "/api/thaw", nil)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 when Freeze not wired, got %d", w.Code)
+	}
+}

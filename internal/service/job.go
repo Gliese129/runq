@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -110,6 +111,16 @@ func (s *JobService) SubmitJob(ctx context.Context, jobCfg job.JobConfig) (strin
 		}
 	}
 
+	// L2-C: fail fast if working_dir is misconfigured.
+	// Silent mkdir on a typo would push the error onto the running task itself,
+	// which is harder to debug than failing at submission time.
+	if _, err := os.Stat(proj.WorkingDir); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", 0, fmt.Errorf("working_dir %q does not exist", proj.WorkingDir)
+		}
+		return "", 0, fmt.Errorf("stat working_dir %q: %w", proj.WorkingDir, err)
+	}
+
 	// Generate job ID and build task list.
 	jobID := GenerateID()
 	now := time.Now()
@@ -122,6 +133,18 @@ func (s *JobService) SubmitJob(ctx context.Context, jobCfg job.JobConfig) (strin
 		// B4: wrap command with Python environment activation.
 		cmd = utils.WrapCommand(proj.PythonEnv.Type, proj.PythonEnv.Path, proj.PythonEnv.Name, cmd, proj.WorkingDir)
 		taskID := GenerateID()
+
+		// L2-C: per-task workspace at <working_dir>/.runq/<task_id>/.
+		// Holds params.json (always), wandb_config.json (when configured),
+		// metrics.jsonl (SDK writes), checkpoints/ (SDK writes).
+		// Created BEFORE the DB insert so that if mkdir fails, no half-state
+		// is persisted. Residual dirs on later failures are tolerated — the
+		// next submission uses a fresh task_id.
+		taskDir := filepath.Join(proj.WorkingDir, ".runq", taskID)
+		if err := writeTaskWorkspace(taskDir, params, proj.Wandb); err != nil {
+			return "", 0, fmt.Errorf("prepare task workspace for %s: %w", taskID, err)
+		}
+
 		tasks = append(tasks, &scheduler.Task{
 			ID:          taskID,
 			JobID:       jobID,
@@ -137,6 +160,7 @@ func (s *JobService) SubmitJob(ctx context.Context, jobCfg job.JobConfig) (strin
 			ExtraArgs:   proj.Resume.ExtraArgs,
 			Timeout:     timeoutSec,
 			UID:         callerUID,
+			TaskDir:     taskDir,
 		})
 	}
 
@@ -161,6 +185,7 @@ func (s *JobService) SubmitJob(ctx context.Context, jobCfg job.JobConfig) (strin
 			WorkingDir: t.WorkingDir, EnvJSON: string(envJSON),
 			Resumable: t.Resumable, ExtraArgs: t.ExtraArgs,
 			UID: t.UID, Timeout: t.Timeout, EnqueuedAt: now,
+			TaskDir: t.TaskDir,
 		})
 	}
 
@@ -319,4 +344,40 @@ func (s *JobService) RemoveJob(ctx context.Context, jobID string) error {
 		return fmt.Errorf("job %q is %s, only completed jobs can be removed", jobID, j.Status)
 	}
 	return s.Store.DeleteJob(ctx, jobID)
+}
+
+// writeTaskWorkspace creates <taskDir>/checkpoints/, writes params.json, and
+// (when wandb is configured at project level) writes wandb_config.json. All
+// writes are atomic via utils.AtomicWriteFile so the Python SDK never observes
+// a half-written file.
+//
+// Layout:
+//
+//	<taskDir>/
+//	├── params.json           sweep-expanded parameter map for this task
+//	├── wandb_config.json     optional, mirrors project.Config.Wandb
+//	└── checkpoints/          empty; SDK populates via @runq.safe_save
+func writeTaskWorkspace(taskDir string, params job.TaskParams, wandb *project.WandbConfig) error {
+	if err := os.MkdirAll(filepath.Join(taskDir, "checkpoints"), 0o755); err != nil {
+		return fmt.Errorf("mkdir %s: %w", taskDir, err)
+	}
+
+	paramsJSON, err := json.MarshalIndent(params, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal params: %w", err)
+	}
+	if err := utils.AtomicWriteFile(filepath.Join(taskDir, "params.json"), paramsJSON, 0o644); err != nil {
+		return fmt.Errorf("write params.json: %w", err)
+	}
+
+	if wandb != nil {
+		wandbJSON, err := json.MarshalIndent(wandb, "", "  ")
+		if err != nil {
+			return fmt.Errorf("marshal wandb config: %w", err)
+		}
+		if err := utils.AtomicWriteFile(filepath.Join(taskDir, "wandb_config.json"), wandbJSON, 0o644); err != nil {
+			return fmt.Errorf("write wandb_config.json: %w", err)
+		}
+	}
+	return nil
 }

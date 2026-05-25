@@ -52,6 +52,12 @@ type Task struct {
 
 	// L3 checkpoint support (directory organized by project, inherited on requeue)
 	CheckpointDir string `json:"checkpoint_dir,omitempty"`
+
+	// L2-C: per-task workspace at <project.WorkingDir>/.runq/<task_id>.
+	// Mirrors store.TaskRow.TaskDir; populated by service.JobService.SubmitJob.
+	// Used to inject RUNQ_TASK_DIR / RUNQ_PARAMS_FILE / etc. into the task env,
+	// and to locate metrics.jsonl during reap.
+	TaskDir string `json:"task_dir,omitempty"`
 }
 
 // Queue is a FIFO task queue with backfill + aging support. Thread-safe.
@@ -208,6 +214,7 @@ func (q *Queue) RetryExisting(task *Task) bool {
 	existing.User = task.User
 	existing.Group = task.Group
 	existing.CheckpointDir = task.CheckpointDir
+	existing.TaskDir = task.TaskDir
 	return true
 }
 

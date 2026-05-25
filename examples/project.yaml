@@ -24,3 +24,20 @@ defaults:
 resume:
   enabled: true
   extra_args: --resume --ckpt latest
+
+# L2-C: optional wandb integration.
+# When this block is present, daemon writes <task_dir>/wandb_config.json and
+# injects RUNQ_WANDB_CONFIG_FILE into the task env. The Python SDK reads it
+# via ctx.wandb_cfg and the user can spread it into wandb.init:
+#
+#     import wandb, runq
+#     ctx = runq.context()
+#     wandb.init(**ctx.wandb_cfg)
+#
+# Omit the entire block to disable wandb integration; the SDK will still log
+# metrics locally to metrics.jsonl, just without forwarding to wandb.
+# wandb:
+#   project: my-experiment
+#   entity:  my-team             # optional
+#   tags:    [vision, baseline]  # optional; SDK may append more via with_tags
+#   mode:    online              # online / offline / disabled (optional)

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -12,7 +14,31 @@ import (
 	"github.com/gliese129/runq/internal/executor"
 	"github.com/gliese129/runq/internal/resource"
 	"github.com/gliese129/runq/internal/store"
+	"github.com/gliese129/runq/internal/utils"
+	"github.com/shirou/gopsutil/v4/disk"
 )
+
+// DiskConfig groups disk-freeze related tuning. These values are exposed to
+// the SDK via RUNQ_* env vars — the daemon itself doesn't enforce them; the
+// SDK uses them to compute NeededBytes for self-freeze decisions.
+//
+// `AutoThawCheckInterval` is the only purely-daemon-side field — it controls
+// how often the scheduler polls disk usage on frozen mounts to issue
+// SIGCONTs for tasks that can safely resume.
+type DiskConfig struct {
+	// SafetyFactorPercent is multiplied into upcoming-ckpt-size to compute
+	// the free-bytes threshold needed for a save. 110 = 10% headroom over
+	// the actual ckpt size.
+	SafetyFactorPercent int `yaml:"safety_factor_percent"`
+
+	// SafetyExtraGB is an additional absolute buffer (gigabytes) added on
+	// top of the percentage. Useful for filesystems where small writes
+	// (logs, tmp files) might land alongside the ckpt and starve it.
+	SafetyExtraGB int `yaml:"safety_extra_gb"`
+
+	// AutoThawCheckInterval is the auto-thaw poll cadence.
+	AutoThawCheckInterval time.Duration `yaml:"auto_thaw_check_interval"`
+}
 
 // Config holds scheduler tuning parameters.
 type Config struct {
@@ -20,6 +46,11 @@ type Config struct {
 	BackfillEnabled    bool
 	TickInterval       time.Duration // how often the scheduler loop runs
 	GPURefreshInterval time.Duration // how often to scan for external GPU usage (0 = disabled)
+
+	// L2-C: disk-freeze tuning. autoThawLoop runs when freeze != nil (no
+	// separate enable flag — the auto-thaw goroutine is part of the
+	// freeze feature, not an opt-in extra).
+	Disk DiskConfig
 }
 
 // DefaultConfig returns sensible defaults for a research lab.
@@ -29,6 +60,11 @@ func DefaultConfig() Config {
 		BackfillEnabled:    true,
 		TickInterval:       1 * time.Second,
 		GPURefreshInterval: 30 * time.Second,
+		Disk: DiskConfig{
+			SafetyFactorPercent:   110, // 10% headroom over raw ckpt size
+			SafetyExtraGB:         0,   // no extra absolute buffer by default
+			AutoThawCheckInterval: 60 * time.Second,
+		},
 	}
 }
 
@@ -55,14 +91,88 @@ type Scheduler struct {
 	killRequested map[string]bool
 	killMu        sync.Mutex
 
+	// L2-C: optional disk-freeze state machine. nil means freeze disabled.
+	// When set, tick() should short-circuit while freeze.IsFrozen(), and
+	// runTask should call freeze.RemoveTask on every exit so auto-thaw fires
+	// when the last frozen task dies.
+	freeze *FreezeState
+
+	// L2-C: daemon socket path injected as RUNQ_SOCKET_PATH into task env.
+	// Reserved for stage 2+ SDK control-plane calls.
+	socketPath string
+
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 }
 
+// FreezeState returns the configured FreezeState, or nil if none was wired.
+// Exposed for the API thaw handler and tests.
+func (s *Scheduler) FreezeState() *FreezeState {
+	return s.freeze
+}
+
+// buildTaskEnv merges task.Env with the RUNQ_* environment variables the SDK
+// expects to find. RUNQ_* are written last so they win against any user-set
+// keys with the same name (RUNQ_* are an internal contract; user overrides
+// of e.g. RUNQ_TASK_ID would silently break the SDK).
+//
+// Non-RUNQ user env (e.g. WANDB_API_KEY) is preserved as-is.
+//
+// RUNQ_WANDB_CONFIG_FILE is only injected when the file exists, so that the
+// SDK can use the env's presence/absence as a binary signal for "wandb is
+// configured for this task" without needing to stat the path itself.
+func (s *Scheduler) buildTaskEnv(task *Task) map[string]string {
+	env := make(map[string]string, len(task.Env)+10)
+	for k, v := range task.Env {
+		env[k] = v
+	}
+	env["RUNQ_TASK_ID"] = task.ID
+	env["RUNQ_JOB_ID"] = task.JobID
+	env["RUNQ_PROJECT_NAME"] = task.ProjectName
+	if task.TaskDir != "" {
+		env["RUNQ_TASK_DIR"] = task.TaskDir
+		env["RUNQ_PARAMS_FILE"] = filepath.Join(task.TaskDir, "params.json")
+		env["RUNQ_METRICS_FILE"] = filepath.Join(task.TaskDir, "metrics.jsonl")
+		env["RUNQ_CHECKPOINT_DIR"] = filepath.Join(task.TaskDir, "checkpoints")
+
+		wandbCfg := filepath.Join(task.TaskDir, "wandb_config.json")
+		if _, err := os.Stat(wandbCfg); err == nil {
+			env["RUNQ_WANDB_CONFIG_FILE"] = wandbCfg
+		}
+	}
+	if s.socketPath != "" {
+		env["RUNQ_SOCKET_PATH"] = s.socketPath
+	}
+
+	// SDK contract for self-freeze: SDK reads these and computes
+	//   needed = upcoming_ckpt_size × percent / 100 + extra_gb × 1GiB
+	// Always injected (never optional) so the SDK doesn't need fallback
+	// defaults — if the field is missing it's a daemon-side bug.
+	env["RUNQ_SAFETY_FACTOR_PERCENT"] = strconv.Itoa(s.cfg.Disk.SafetyFactorPercent)
+	env["RUNQ_SAFETY_EXTRA_GB"] = strconv.Itoa(s.cfg.Disk.SafetyExtraGB)
+
+	return env
+}
+
 // New creates a Scheduler with all its dependencies.
 // If prioritizer is nil, defaults to FIFO.
-func New(cfg Config, queue *Queue, pool resource.Allocator, exec *executor.Executor, st *store.Store, logger *slog.Logger, prioritizer Prioritizer) *Scheduler {
+//
+// socketPath is injected into each task's env as RUNQ_SOCKET_PATH (empty
+// string disables injection). freeze may be nil to disable the disk-freeze
+// feature; when set, the same instance should be wired into api.Deps.Freeze
+// so the thaw endpoint operates on it.
+func New(
+	cfg Config,
+	queue *Queue,
+	pool resource.Allocator,
+	exec *executor.Executor,
+	st *store.Store,
+	logger *slog.Logger,
+	prioritizer Prioritizer,
+	socketPath string,
+	freeze *FreezeState,
+) *Scheduler {
 	if prioritizer == nil {
 		prioritizer = FIFOPrioritizer{}
 	}
@@ -77,6 +187,8 @@ func New(cfg Config, queue *Queue, pool resource.Allocator, exec *executor.Execu
 		prioritizer:   prioritizer,
 		pausedJobs:    make(map[string]bool),
 		killRequested: make(map[string]bool),
+		freeze:        freeze,
+		socketPath:    socketPath,
 		ctx:           ctx,
 		cancel:        cancel,
 	}
@@ -94,6 +206,16 @@ func (s *Scheduler) Start() {
 		go func() {
 			defer s.wg.Done()
 			s.gpuRefreshLoop()
+		}()
+	}
+	// autoThawLoop is part of the freeze feature; launch whenever freeze
+	// is wired. No separate "enable" knob — if you have freeze you need
+	// auto-thaw to ever recover without manual intervention.
+	if s.freeze != nil {
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			s.autoThawLoop()
 		}()
 	}
 	s.logger.Info("scheduler started",
@@ -127,6 +249,48 @@ func (s *Scheduler) loop() {
 	}
 }
 
+// autoThawLoop periodically tries to release frozen tasks whose mount has
+// recovered enough free space for that task's NeededBytes. Per-task
+// threshold is set by the SDK at freeze time (FrozenTask.NeededBytes), so
+// freeze and thaw decisions are physically symmetric.
+//
+// ThawTasks handles per-mount aggregation internally — we just pass it
+// all frozen IDs and let it figure out which mounts to query.
+func (s *Scheduler) autoThawLoop() {
+	interval := s.cfg.Disk.AutoThawCheckInterval
+	if interval <= 0 {
+		interval = 60 * time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	// Wrap disk.Usage once; reused on every tick.
+	freeFn := func(mount string) (uint64, error) {
+		u, err := disk.Usage(mount)
+		if err != nil {
+			return 0, err
+		}
+		return u.Free, nil
+	}
+
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-ticker.C:
+			if s.freeze == nil || !s.freeze.IsFrozen() {
+				continue
+			}
+			result := s.freeze.ThawTasks(s.freeze.FrozenTaskIDs(), freeFn)
+			if len(result.Thawed) > 0 {
+				s.logger.Info("autoThaw released",
+					"tasks", result.Thawed,
+					"still_blocked", len(result.Blocked))
+			}
+		}
+	}
+}
+
 // tick is one iteration of the scheduling loop.
 //
 // Algorithm (Prioritizer + Reservation + Backfill):
@@ -150,20 +314,43 @@ func (s *Scheduler) tick() {
 	}
 	ranked := s.prioritizer.Prioritize(sctx)
 
+	// check if tasks need to freeze
+	var frozenJobs, frozenMounts map[string]struct{}
+	if s.freeze != nil {
+		frozenJobs = s.freeze.FrozenJobs()
+		frozenMounts = s.freeze.FrozenMounts()
+	}
+	parts, _ := utils.LoadMountTable()
+
 	// Build a quick task lookup from pending list.
 	taskMap := make(map[string]*Task, len(pending))
 	for _, t := range pending {
 		taskMap[t.ID] = t
 	}
 
-	// Find head: the highest-priority non-paused task.
+	// Find head: the highest-priority non-paused, non-frozen-sibling,
+	// non-frozen-mount task. `ranked` is in priority-desc order; first
+	// match wins.
 	var head *Task
 	for _, p := range ranked {
 		t := taskMap[p.TaskID]
-		if t != nil && !s.isJobPaused(t.JobID) {
-			head = t
-			break
+		if t == nil || s.isJobPaused(t.JobID) {
+			continue
 		}
+		// Sibling task already frozen on this job → skip; the pending
+		// task would just self-freeze on its own first save.
+		if _, ok := frozenJobs[t.JobID]; ok {
+			continue
+		}
+		// Mount has a frozen task on it → skip; dispatching to the same
+		// stressed disk just compounds the problem.
+		if mount := utils.MountOf(t.CheckpointDir, parts); mount != "" {
+			if _, ok := frozenMounts[mount]; ok {
+				continue
+			}
+		}
+		head = t
+		break
 	}
 	if head == nil {
 		return // all pending tasks are paused
@@ -248,6 +435,10 @@ func (s *Scheduler) dispatch(task *Task) {
 // GPU is always released on exit via defer.
 func (s *Scheduler) runTask(task *Task) {
 	defer func() {
+		if s.freeze != nil {
+			s.freeze.RemoveTask(task.ID)
+		}
+		s.reapMetrics(task)
 		s.checkGPUResidual(task)
 		s.pool.Release(task.ID)
 	}()
@@ -256,7 +447,7 @@ func (s *Scheduler) runTask(task *Task) {
 		TaskID:     task.ID,
 		Command:    task.Command,
 		WorkingDir: task.WorkingDir,
-		Env:        task.Env,
+		Env:        s.buildTaskEnv(task),
 		GPUs:       task.GPUs,
 		LogPath:    task.LogPath,
 	}
@@ -329,6 +520,25 @@ func (s *Scheduler) completeTask(task *Task, status TaskStatus) {
 	}
 }
 
+// reapMetrics ingests a finished task's metrics.jsonl into the store
+// (metric and checkpoint rows). No freeze logic — freeze is SDK-driven
+// via /api/internal/freeze-self; daemon never decides based on reap.
+//
+// Best-effort: errors are logged, never propagated. Called from runTask's
+// defer and from MonitorReattached's defer, so any panic here would
+// orphan a task. Keep this function dumb.
+func (s *Scheduler) reapMetrics(task *Task) {
+	result, err := ReapTaskOutputs(s.ctx, s.store, task)
+	if err != nil {
+		s.logger.Warn("reap failed", "task", task.ID, "error", err)
+		return
+	}
+	s.logger.Info("reap data",
+		"task", task.ID,
+		"metric", result.MetricCount,
+		"ckpt", result.CheckpointCount)
+}
+
 // MonitorReattached monitors a reattached (daemon-restart) task until it exits.
 // Follows the same lifecycle as runTask: GPU residual check → release GPU →
 // complete task → refresh job status. Called from daemon.go after Reclaim.
@@ -337,6 +547,10 @@ func (s *Scheduler) MonitorReattached(task *Task, ch <-chan executor.ReattachRes
 	go func() {
 		defer s.wg.Done()
 		defer func() {
+			if s.freeze != nil {
+				s.freeze.RemoveTask(task.ID)
+			}
+			s.reapMetrics(task)
 			s.checkGPUResidual(task)
 			s.pool.Release(task.ID)
 		}()

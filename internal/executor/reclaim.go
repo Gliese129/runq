@@ -58,6 +58,19 @@ func (r *Reclaimer) Reclaim() ([]AliveTask, error) {
 				continue
 			}
 			r.Logger.Info("task reattached", "task", t.ID, "pid", t.PID)
+
+			// If the previous daemon had SIGSTOPped this task (L2-C freeze),
+			// the in-memory FreezeState is gone now. Reattach treats the task
+			// as alive (signal 0 succeeds on stopped processes), but the
+			// new daemon won't know to thaw it — `runq thaw` will be a no-op.
+			// WARN so the operator notices, and recommend manual recovery.
+			if state, err := utils.ReadProcessState(t.PID); err == nil && state == "T" {
+				r.Logger.Warn("reclaimed task is in stopped state (T); "+
+					"freeze metadata was lost when daemon restarted — "+
+					"use `runq kill` to terminate or `kill -CONT <pid>` to resume manually",
+					"task", t.ID, "pid", t.PID)
+			}
+
 			alive = append(alive, AliveTask{Row: t, DoneCh: ch})
 		} else {
 			r.markDead(&t)

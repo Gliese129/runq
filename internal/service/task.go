@@ -114,6 +114,7 @@ func TaskRowToSchedulerTask(row *store.TaskRow) *scheduler.Task {
 		ExtraArgs:   row.ExtraArgs,
 		Timeout:     row.Timeout,
 		UID:         row.UID,
+		TaskDir:     row.TaskDir,
 	}
 }
 

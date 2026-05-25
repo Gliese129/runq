@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -67,6 +69,54 @@ func ReadProcessStartTime(pid int) (time.Time, error) {
 	seconds := tick / clkTick
 	nanoRemainder := (tick % clkTick) * (1e9 / clkTick)
 	return time.Unix(bootTime+seconds, nanoRemainder), nil
+}
+
+// ReadProcessState returns the single-letter process state for the given PID:
+//
+//	R = running, S = sleeping, D = uninterruptible sleep,
+//	T = stopped (SIGSTOP), t = traced, Z = zombie, X = dead, I = idle.
+//
+// Linux reads /proc/<pid>/stat; macOS/BSD shells out to `ps -o state= -p`.
+// Returns ("", err) when the process is gone or we can't read the state.
+//
+// Used by daemon reclaim to detect tasks that were SIGSTOPped when the
+// previous daemon died — the new daemon has no record of their freeze
+// state, so it can only WARN the operator.
+func ReadProcessState(pid int) (string, error) {
+	if pid <= 0 {
+		return "", fmt.Errorf("invalid pid %d", pid)
+	}
+	switch runtime.GOOS {
+	case "linux":
+		data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+		if err != nil {
+			return "", err
+		}
+		s := string(data)
+		// /proc/<pid>/stat fields: pid (comm) state ppid ...
+		// "comm" can contain spaces/parens, so split after the last ')'.
+		idx := strings.LastIndex(s, ")")
+		if idx < 0 || idx+2 >= len(s) {
+			return "", fmt.Errorf("malformed /proc/%d/stat", pid)
+		}
+		fields := strings.Fields(s[idx+2:])
+		if len(fields) == 0 {
+			return "", fmt.Errorf("no state field in /proc/%d/stat", pid)
+		}
+		return fields[0], nil
+	default:
+		// macOS / BSD: `ps -o state= -p <pid>` returns lines like "T", "S",
+		// "R+", "Ss" — the first char is the state. Empty output ⇒ gone.
+		out, err := exec.Command("ps", "-o", "state=", "-p", strconv.Itoa(pid)).Output()
+		if err != nil {
+			return "", err
+		}
+		s := strings.TrimSpace(string(out))
+		if s == "" {
+			return "", fmt.Errorf("no such process %d", pid)
+		}
+		return s[:1], nil
+	}
 }
 
 // IsProcessAlive checks if a process with the given PID exists.

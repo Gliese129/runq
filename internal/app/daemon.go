@@ -66,7 +66,15 @@ func NewDaemon() (*Daemon, error) {
 		Store:  st,
 		Window: 24 * time.Hour,
 	}
-	sched := scheduler.New(scheduler.DefaultConfig(), queue, pool, exec, st, logger, prioritizer)
+	// L2-C: FreezeState shared with the API server so `runq thaw` operates
+	// on the same instance the scheduler manages. SocketPath is injected
+	// into each task as RUNQ_SOCKET_PATH (reserved for stage 2+ SDK).
+	freeze := scheduler.NewFreezeState()
+	sched := scheduler.New(
+		scheduler.DefaultConfig(),
+		queue, pool, exec, st, logger, prioritizer,
+		paths.SocketPath, freeze,
+	)
 
 	// Build service layer.
 	reg := project.NewRegistry(st.DB())
@@ -87,6 +95,7 @@ func NewDaemon() (*Daemon, error) {
 		Logger:      logger,
 		JobService:  jobSvc,
 		TaskService: taskSvc,
+		Freeze:      freeze,
 	}
 
 	server := api.NewServer(deps, paths.SocketPath, paths.PIDPath)

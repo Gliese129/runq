@@ -64,6 +64,10 @@ type Deps struct {
 		KillTask(ctx context.Context, taskID string) error
 		RetryTask(ctx context.Context, taskID string) error
 	}
+
+	// L2-C: optional FreezeState wired by the daemon. nil disables the
+	// thaw endpoint (returns 503). Same instance lives on Scheduler.
+	Freeze *scheduler.FreezeState
 }
 
 // Server exposes the scheduler API over a unix domain socket.

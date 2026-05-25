@@ -9,6 +9,14 @@ type Config struct {
 	Defaults    Defaults          `yaml:"defaults,omitempty"`
 	Resume      ResumeConfig      `yaml:"resume,omitempty"`
 	PythonEnv   PythonEnvConfig   `yaml:"python_env,omitempty"`
+	Wandb       *WandbConfig      `yaml:"wandb,omitempty"`
+}
+
+type WandbConfig struct {
+	Project string   `yaml:"project"`
+	Entity  string   `yaml:"entity,omitempty"`
+	Tags    []string `yaml:"tags,omitempty"`
+	Mode    string   `yaml:"mode,omitempty"` // "online" / "offline" / "disabled"
 }
 
 // Defaults are project-level defaults that can be overridden per-job.

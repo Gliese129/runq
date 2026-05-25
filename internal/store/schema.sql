@@ -40,7 +40,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     timeout      INTEGER,            -- task timeout in seconds, nullable (0 = no timeout)
     enqueued_at  INTEGER,            -- Unix timestamp
     started_at   INTEGER,            -- Unix timestamp, nullable
-    finished_at  INTEGER             -- Unix timestamp, nullable
+    finished_at  INTEGER,            -- Unix timestamp, nullable
+    task_dir     TEXT                 -- L2-C: <working_dir>/.runq/<task_id>, holds params.json / metrics.jsonl / checkpoints/
 );
 
 CREATE INDEX IF NOT EXISTS idx_tasks_job_id      ON tasks(job_id);
@@ -48,3 +49,33 @@ CREATE INDEX IF NOT EXISTS idx_tasks_status      ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_finished_at ON tasks(finished_at);
 CREATE INDEX IF NOT EXISTS idx_jobs_status       ON jobs(status);
 CREATE INDEX IF NOT EXISTS idx_jobs_finished_at  ON jobs(finished_at);
+
+-- ── L2-C: metrics and checkpoints ─────────────────────────────────────────
+-- Populated by daemon during `runTask` reap: read <task_dir>/metrics.jsonl,
+-- dispatch each event by type (metric / checkpoint / disk_low).
+-- Both tables carry job_id as a redundant column to avoid joining on `tasks`
+-- when querying by job (e.g. `runq log search --job <id> --key loss`).
+
+CREATE TABLE IF NOT EXISTS metrics (
+    task_id  TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    job_id   TEXT NOT NULL,                  -- denormalized for fast filtering
+    key      TEXT NOT NULL,                  -- e.g. "loss" or "train/loss"
+    value    REAL,
+    step     INTEGER,                        -- nullable: scripts that don't track step
+    ts       INTEGER NOT NULL,               -- Unix timestamp from SDK at log time
+    PRIMARY KEY (task_id, key, step, ts)
+);
+CREATE INDEX IF NOT EXISTS idx_metrics_job_key  ON metrics(job_id, key);
+CREATE INDEX IF NOT EXISTS idx_metrics_task_key ON metrics(task_id, key, step);
+
+CREATE TABLE IF NOT EXISTS checkpoints (
+    task_id     TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    job_id      TEXT NOT NULL,
+    path        TEXT NOT NULL,
+    size_bytes  INTEGER,
+    step        INTEGER,
+    is_best     INTEGER NOT NULL DEFAULT 0,  -- SQLite has no native boolean
+    ts          INTEGER NOT NULL,
+    PRIMARY KEY (task_id, step)
+);
+CREATE INDEX IF NOT EXISTS idx_checkpoints_job ON checkpoints(job_id);
