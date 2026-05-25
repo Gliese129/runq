@@ -18,9 +18,7 @@ func ParseHumanSize(s string) (int64, error) {
 	}
 	raw := strings.ToLower(strings.TrimSpace(s))
 	// Strip optional trailing "b" (e.g. "GB" → "G").
-	if strings.HasSuffix(raw, "b") {
-		raw = raw[:len(raw)-1]
-	}
+	raw = strings.TrimSuffix(raw, "b")
 
 	multiplier := int64(1)
 	if n := len(raw); n > 0 {

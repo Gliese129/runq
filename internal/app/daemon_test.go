@@ -5,7 +5,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -230,16 +229,5 @@ func TestL2CStage1EndToEnd(t *testing.T) {
 	// ── freeze was NOT triggered (no disk_low in jsonl in the new model) ──
 	if freeze.IsFrozen() {
 		t.Error("FreezeState should remain empty — freeze is SDK-driven via HTTP, not reap")
-	}
-}
-
-// stringsContainsAll fails the test if any expected substring is missing
-// from the haystack. Used by other tests to assert log output.
-func stringsContainsAll(t *testing.T, haystack string, needles ...string) {
-	t.Helper()
-	for _, n := range needles {
-		if !strings.Contains(haystack, n) {
-			t.Errorf("expected substring %q in:\n%s", n, haystack)
-		}
 	}
 }
