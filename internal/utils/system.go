@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -119,7 +120,27 @@ func ReadProcessState(pid int) (string, error) {
 	}
 }
 
-// IsProcessAlive checks if a process with the given PID exists.
+// IsProcessAlive checks if a process with the given PID is still running.
+//
+// Two checks:
+//  1. signal-0 to verify the kernel sees the PID.
+//  2. start-time comparison to defend against PID reuse — if the recorded
+//     start time and the current one differ by more than 10s, the PID has
+//     been recycled into a different process and we report it dead.
+//
+// The start-time check is skipped in two cases:
+//   - expectedStartTime.IsZero(): caller doesn't have a start time to
+//     compare (legacy DB rows pre-StartTime, fresh inserts where the
+//     column wasn't populated, test setups). Treat signal-0 as
+//     authoritative — caller has accepted the PID-reuse risk by passing
+//     zero.
+//   - ReadProcessStartTime fails: typically macOS / non-Linux where there
+//     is no /proc. Same fallback: trust signal-0.
+//
+// The zero-time semantic matters because the daemon-restart freeze case
+// re-uses this for tasks whose StartTime column may not have been
+// populated reliably; passing zero is the explicit way to say "I don't
+// have a baseline".
 func IsProcessAlive(pid int, expectedStartTime time.Time) bool {
 	if pid <= 0 {
 		return false
@@ -129,18 +150,26 @@ func IsProcessAlive(pid int, expectedStartTime time.Time) bool {
 		return false
 	}
 	// Signal 0 checks existence without actually sending a signal.
-	err = p.Signal(os.Signal(nil))
-	if err != nil {
+	//
+	// Must be syscall.Signal(0) — NOT os.Signal(nil). The latter is a nil
+	// interface; the stdlib's Process.Signal does a type assertion to
+	// syscall.Signal and returns "unsupported signal type" for nil
+	// interfaces. The previous version of this code used os.Signal(nil)
+	// and effectively made IsProcessAlive always return false, which
+	// silently broke daemon reclaim of live tasks.
+	if err := p.Signal(syscall.Signal(0)); err != nil {
 		return false
 	}
-	// if alive, check if reused by another process
-	startTime, err := ReadProcessStartTime(pid)
-	if err != nil {
-		// fallback to signal 0 result if we can't read /proc (e.g. on macOS)
+	// Caller opted out of PID-reuse check.
+	if expectedStartTime.IsZero() {
 		return true
 	}
-	// set 10 seconds tolerance
-	tolerance := time.Second * 10
+	startTime, err := ReadProcessStartTime(pid)
+	if err != nil {
+		// /proc not readable (macOS / BSD) — can't verify, trust signal-0.
+		return true
+	}
+	const tolerance = 10 * time.Second
 	diff := startTime.Sub(expectedStartTime)
 	if diff < -tolerance || diff > tolerance {
 		return false

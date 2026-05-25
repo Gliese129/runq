@@ -8,6 +8,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
+	"runtime"
+	"syscall"
 	"testing"
 	"time"
 
@@ -248,35 +251,58 @@ func setupTestServerWithFreeze(t *testing.T) (*Server, *scheduler.FreezeState) {
 
 // TestThawUnfrozen: hitting /api/thaw on an idle daemon must succeed
 // (idempotent) — users may script this defensively.
+//
+// Returns ThawResponse with empty Thawed and Blocked.
 func TestThawUnfrozen(t *testing.T) {
 	s, _ := setupTestServerWithFreeze(t)
 	w := doRequest(s, "POST", "/api/thaw", nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
-	var resp struct {
-		WasFrozen   bool     `json:"was_frozen"`
-		ThawedTasks []string `json:"thawed_tasks"`
-	}
+	var resp ThawResponse
 	json.NewDecoder(w.Body).Decode(&resp)
-	if resp.WasFrozen {
-		t.Errorf("WasFrozen=true on idle daemon")
+	if len(resp.Thawed) != 0 {
+		t.Errorf("Thawed should be empty on idle daemon, got %v", resp.Thawed)
 	}
-	if len(resp.ThawedTasks) != 0 {
-		t.Errorf("ThawedTasks should be empty, got %v", resp.ThawedTasks)
+	if len(resp.Blocked) != 0 {
+		t.Errorf("Blocked should be empty on idle daemon, got %v", resp.Blocked)
 	}
 }
 
-// TestThawFrozen: real freeze → thaw cycle through the API. Validates that
-// the FreezeState handed to Deps is the same instance that Thaw operates on
-// (no copy-by-value bugs).
-func TestThawFrozen(t *testing.T) {
-	t.Skip("rewriting against new ThawResponse shape; see stage1 doc.")
+// startTestSleeper forks `sleep 60` in its own pgroup so Freeze can SIGSTOP
+// it. Used by the freeze/thaw e2e tests below.
+func startTestSleeper(t *testing.T) *exec.Cmd {
+	t.Helper()
+	cmd := exec.Command("sh", "-c", "sleep 60")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start sleeper: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+	return cmd
+}
+
+// TestThawFrozenBlocked: checked thaw with an impossibly-large NeededBytes
+// must return the task in Blocked, not Thawed. Verifies the
+// ThawResponse{Thawed, Blocked} shape end-to-end and confirms the daemon
+// preserves the per-task threshold from FrozenTask.NeededBytes.
+func TestThawFrozenBlocked(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("SIGSTOP not available on Windows")
+	}
 	s, fs := setupTestServerWithFreeze(t)
+	cmd := startTestSleeper(t)
+
 	fs.Freeze(
 		scheduler.FreezeEvent{Reason: "manual", TriggerTaskID: "t1"},
 		map[string]scheduler.FrozenTask{
-			"t1": {PID: 999, Mount: "/tmp", JobID: "j1", NeededBytes: 1},
+			"t1": {
+				PID: cmd.Process.Pid, Mount: "/tmp", JobID: "j1",
+				NeededBytes: 1 << 60, // 1 EiB — guaranteed to exceed disk
+			},
 		},
 	)
 	if !fs.IsFrozen() {
@@ -287,8 +313,64 @@ func TestThawFrozen(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
-	// Response shape now ThawResponse{Thawed, Blocked}; rewrite once handleThaw
-	// lands.
+	var resp ThawResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Thawed) != 0 {
+		t.Errorf("Thawed should be empty when threshold exceeds disk: got %v", resp.Thawed)
+	}
+	br, ok := resp.Blocked["t1"]
+	if !ok {
+		t.Fatalf("t1 missing from Blocked: %+v", resp.Blocked)
+	}
+	if br.Mount != "/tmp" {
+		t.Errorf("Blocked.Mount = %q, want /tmp", br.Mount)
+	}
+	if br.Threshold != 1<<60 {
+		t.Errorf("Blocked.Threshold = %d, want 1<<60 (per-task NeededBytes)", br.Threshold)
+	}
+	if !fs.IsFrozen() {
+		t.Error("FreezeState should remain frozen — nothing thawed")
+	}
+}
+
+// TestThawFrozenForce: ?force=true releases tasks regardless of disk state.
+// Verifies the wiring between the query param and FreezeState.ThawForce.
+func TestThawFrozenForce(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("SIGSTOP not available on Windows")
+	}
+	s, fs := setupTestServerWithFreeze(t)
+	cmd := startTestSleeper(t)
+
+	fs.Freeze(
+		scheduler.FreezeEvent{Reason: "manual", TriggerTaskID: "t1"},
+		map[string]scheduler.FrozenTask{
+			"t1": {
+				PID: cmd.Process.Pid, Mount: "/tmp", JobID: "j1",
+				NeededBytes: 1 << 60, // same impossible threshold
+			},
+		},
+	)
+
+	w := doRequest(s, "POST", "/api/thaw?force=true", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp ThawResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Thawed) != 1 || resp.Thawed[0] != "t1" {
+		t.Errorf("Thawed = %v, want [t1]", resp.Thawed)
+	}
+	if len(resp.Blocked) != 0 {
+		t.Errorf("Blocked should be empty under --force: %+v", resp.Blocked)
+	}
+	if fs.IsFrozen() {
+		t.Error("FreezeState should drain after force-thaw of last task")
+	}
 }
 
 // TestThawWithoutFreezeState: daemons built without freeze wiring (test

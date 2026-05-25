@@ -62,7 +62,7 @@ func TestReapNormal(t *testing.T) {
 	taskDir := t.TempDir()
 	writeMetricsFile(t, taskDir, []string{
 		`{"type":"metric","key":"loss","value":0.42,"step":100,"ts":1700000000}`,
-		`{"type":"checkpoint","path":"/p","size":1024,"step":100,"is_best":true,"ts":1700000001}`,
+		`{"type":"checkpoint","path":"/p","size_bytes":1024,"step":100,"is_best":true,"ts":1700000001}`,
 	})
 	st := openMemoryStoreAndSeed(t, "t1", "j1", taskDir)
 
@@ -82,8 +82,17 @@ func TestReapNormal(t *testing.T) {
 		t.Errorf("metrics row mismatch: %+v", got)
 	}
 	ckpts, _ := st.ListCheckpoints(context.Background(), "t1")
-	if len(ckpts) != 1 || !ckpts[0].IsBest {
-		t.Errorf("checkpoint row mismatch: %+v", ckpts)
+	if len(ckpts) != 1 {
+		t.Fatalf("checkpoint row count = %d, want 1: %+v", len(ckpts), ckpts)
+	}
+	if !ckpts[0].IsBest {
+		t.Errorf("checkpoint is_best = false, want true: %+v", ckpts[0])
+	}
+	if ckpts[0].SizeBytes != 1024 {
+		t.Errorf("checkpoint size_bytes = %d, want 1024 (verifies size_bytes JSON tag)", ckpts[0].SizeBytes)
+	}
+	if ckpts[0].TaskID != "t1" || ckpts[0].JobID != "j1" {
+		t.Errorf("checkpoint task/job not filled from context: %+v", ckpts[0])
 	}
 }
 

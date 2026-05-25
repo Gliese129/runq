@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -24,6 +25,11 @@ type TaskService struct {
 
 // KillTask terminates a running or pending task.
 // Running: cancels the process via executor. Pending: marks killed in queue + DB.
+//
+// For pending tasks, we also call Scheduler.RefreshJobStatus — without it,
+// killing the last pending task in a job would leave the job stuck in
+// "pending" even though no task can ever run. Running tasks already get a
+// refresh via runTask's completeTask → RefreshJobStatus path on exit.
 func (s *TaskService) KillTask(ctx context.Context, taskID string) error {
 	task := s.Queue.Get(taskID)
 	if task == nil {
@@ -40,6 +46,9 @@ func (s *TaskService) KillTask(ctx context.Context, taskID string) error {
 		_ = s.Store.UpdateTaskStatus(ctx, taskID, "killed", map[string]any{
 			"finished_at": time.Now().Unix(),
 		})
+		if s.Scheduler != nil {
+			s.Scheduler.RefreshJobStatus(task.JobID)
+		}
 	default:
 		return fmt.Errorf("task %q is %s, cannot kill", taskID, task.Status)
 	}
@@ -76,6 +85,11 @@ func (s *TaskService) RetryTask(ctx context.Context, taskID string) error {
 	if !s.Queue.RetryExisting(task) {
 		s.Queue.Push(task)
 	}
+	// Job aggregate may be "done" if all siblings completed earlier. Refresh
+	// it so the resurrected task flips the job back to running/pending.
+	if s.Scheduler != nil {
+		s.Scheduler.RefreshJobStatus(task.JobID)
+	}
 	return nil
 }
 
@@ -91,30 +105,38 @@ func TaskRowToSchedulerTask(row *store.TaskRow) *scheduler.Task {
 	if row.EnvJSON != "" {
 		_ = json.Unmarshal([]byte(row.EnvJSON), &env)
 	}
+	// CheckpointDir is derived from TaskDir rather than stored separately —
+	// keeps the schema simple, and the value never diverges from
+	// RUNQ_CHECKPOINT_DIR (computed the same way in buildTaskEnv).
+	var ckptDir string
+	if row.TaskDir != "" {
+		ckptDir = filepath.Join(row.TaskDir, "checkpoints")
+	}
 	return &scheduler.Task{
-		ID:          row.ID,
-		JobID:       row.JobID,
-		ProjectName: row.ProjectName,
-		Command:     row.Command,
-		Params:      params,
-		GPUsNeeded:  row.GPUsNeeded,
-		GPUs:        parseGPUIndices(row.GPUs),
-		Status:      mapTaskStatus(row.Status),
-		RetryCount:  row.RetryCount,
-		MaxRetry:    row.MaxRetry,
-		PID:         row.PID,
-		StartTime:   time.Unix(row.StartTime, 0),
-		LogPath:     row.LogPath,
-		WorkingDir:  row.WorkingDir,
-		Env:         env,
-		EnqueuedAt:  row.EnqueuedAt,
-		StartedAt:   row.StartedAt,
-		FinishedAt:  row.FinishedAt,
-		Resumable:   row.Resumable,
-		ExtraArgs:   row.ExtraArgs,
-		Timeout:     row.Timeout,
-		UID:         row.UID,
-		TaskDir:     row.TaskDir,
+		ID:            row.ID,
+		JobID:         row.JobID,
+		ProjectName:   row.ProjectName,
+		Command:       row.Command,
+		Params:        params,
+		GPUsNeeded:    row.GPUsNeeded,
+		GPUs:          parseGPUIndices(row.GPUs),
+		Status:        mapTaskStatus(row.Status),
+		RetryCount:    row.RetryCount,
+		MaxRetry:      row.MaxRetry,
+		PID:           row.PID,
+		StartTime:     time.Unix(row.StartTime, 0),
+		LogPath:       row.LogPath,
+		WorkingDir:    row.WorkingDir,
+		Env:           env,
+		EnqueuedAt:    row.EnqueuedAt,
+		StartedAt:     row.StartedAt,
+		FinishedAt:    row.FinishedAt,
+		Resumable:     row.Resumable,
+		ExtraArgs:     row.ExtraArgs,
+		Timeout:       row.Timeout,
+		UID:           row.UID,
+		TaskDir:       row.TaskDir,
+		CheckpointDir: ckptDir,
 	}
 }
 

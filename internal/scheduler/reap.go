@@ -19,17 +19,43 @@ type ReapResult struct {
 	CheckpointCount int
 }
 
+// SDK contract for metrics.jsonl events:
+//
+//	{"type":"metric","key":"loss","value":0.42,"step":100,"ts":1700000000}
+//	{"type":"checkpoint","path":"...","size_bytes":1024,"step":100,"is_best":true,"ts":...}
+//
+// `task_id` / `job_id` are NOT in the SDK payload — daemon fills them
+// from the running Task context, because the SDK already has enough
+// trouble computing the rest. Keeping the SDK ignorant of internal IDs
+// also means we can rename store.MetricRow / store.CheckpointRow without
+// breaking the SDK.
+type metricEvent struct {
+	Key   string  `json:"key"`
+	Value float64 `json:"value"`
+	Step  *int64  `json:"step"`
+	TS    int64   `json:"ts"`
+}
+
+type checkpointEvent struct {
+	Path      string `json:"path"`
+	SizeBytes int64  `json:"size_bytes"`
+	Step      *int64 `json:"step"`
+	IsBest    bool   `json:"is_best"`
+	TS        int64  `json:"ts"`
+}
+
 // ReapTaskOutputs reads <task.TaskDir>/metrics.jsonl, parses each line as a
 // typed event, and batch-inserts metric / checkpoint rows into the store.
 //
 // Recognized event shapes (line-delimited JSON):
 //
-//	{"type":"metric",     "data": {...store.MetricRow JSON...}}
-//	{"type":"checkpoint", "data": {...store.CheckpointRow JSON...}}
+//	{"type":"metric",     ...metricEvent fields...}
+//	{"type":"checkpoint", ...checkpointEvent fields...}
 //
-// Any other "type" value is logged at debug and skipped — forward compat
-// for SDK additions. Per-line JSON parse errors are logged at warn and the
-// line is skipped (the rest of the file still gets processed).
+// `type` is required; any other value is logged at debug and skipped —
+// forward compat for SDK additions. Per-line JSON parse errors are logged
+// at warn and the line is skipped (the rest of the file still gets
+// processed).
 //
 // Notes:
 //   - Missing file → (ReapResult{}, nil). Empty / no-SDK tasks are normal.
@@ -40,10 +66,10 @@ type ReapResult struct {
 //   - Reap MUST NOT propagate errors that would change the task's terminal
 //     status. The caller (reapMetrics) treats any error as warn-only.
 //
-// Note: disk_low events are NOT consumed here anymore. In the SDK-driven
-// freeze model the SDK posts /api/internal/freeze-self at runtime; by the
-// time metrics.jsonl is reaped the freeze decision is long gone. If an
-// old metrics.jsonl from a pre-pivot task still has a disk_low line, it
+// disk_low events are NOT consumed here — in the SDK-driven freeze model
+// the SDK posts /api/internal/freeze-self at runtime; by the time
+// metrics.jsonl is reaped the freeze decision is long gone. If an old
+// metrics.jsonl from a pre-pivot task still has a disk_low line, it
 // falls through to the "unknown type" branch and gets logged at debug.
 func ReapTaskOutputs(ctx context.Context, st *store.Store, task *Task) (ReapResult, error) {
 	path := filepath.Join(task.TaskDir, "metrics.jsonl")
@@ -63,6 +89,11 @@ func ReapTaskOutputs(ctx context.Context, st *store.Store, task *Task) (ReapResu
 	ckpts := make([]store.CheckpointRow, 0)
 	result := ReapResult{}
 
+	// Decode just the type discriminator first, then a typed struct.
+	type typeOnly struct {
+		Type string `json:"type"`
+	}
+
 	lineN := 0
 	for scanner.Scan() {
 		lineN++
@@ -70,35 +101,45 @@ func ReapTaskOutputs(ctx context.Context, st *store.Store, task *Task) (ReapResu
 		if len(lineBytes) == 0 {
 			continue
 		}
-		var raw map[string]json.RawMessage
-		if err := json.Unmarshal(lineBytes, &raw); err != nil {
-			logger.Warnf("reap %s line %d: parse event failed: %v", path, lineN, err)
+		var t typeOnly
+		if err := json.Unmarshal(lineBytes, &t); err != nil {
+			logger.Warnf("reap %s line %d: parse type discriminator failed: %v", path, lineN, err)
 			continue
 		}
-		var typ string
-		if err := json.Unmarshal(raw["type"], &typ); err != nil {
-			logger.Warnf("reap %s line %d: parse type failed: %v", path, lineN, err)
-			continue
-		}
-		switch typ {
+		switch t.Type {
 		case "metric":
-			var data store.MetricRow
-			if err := json.Unmarshal(raw["data"], &data); err != nil {
-				logger.Warnf("reap %s line %d: parse metric data failed: %v", path, lineN, err)
+			var e metricEvent
+			if err := json.Unmarshal(lineBytes, &e); err != nil {
+				logger.Warnf("reap %s line %d: parse metric event failed: %v", path, lineN, err)
 				continue
 			}
-			metrics = append(metrics, data)
+			metrics = append(metrics, store.MetricRow{
+				TaskID: task.ID,
+				JobID:  task.JobID,
+				Key:    e.Key,
+				Value:  e.Value,
+				Step:   e.Step,
+				TS:     e.TS,
+			})
 			result.MetricCount++
 		case "checkpoint":
-			var data store.CheckpointRow
-			if err := json.Unmarshal(raw["data"], &data); err != nil {
-				logger.Warnf("reap %s line %d: parse checkpoint data failed: %v", path, lineN, err)
+			var e checkpointEvent
+			if err := json.Unmarshal(lineBytes, &e); err != nil {
+				logger.Warnf("reap %s line %d: parse checkpoint event failed: %v", path, lineN, err)
 				continue
 			}
-			ckpts = append(ckpts, data)
+			ckpts = append(ckpts, store.CheckpointRow{
+				TaskID:    task.ID,
+				JobID:     task.JobID,
+				Path:      e.Path,
+				SizeBytes: e.SizeBytes,
+				Step:      e.Step,
+				IsBest:    e.IsBest,
+				TS:        e.TS,
+			})
 			result.CheckpointCount++
 		default:
-			logger.Debugf("reap %s line %d: unknown event type %q (skipped)", path, lineN, typ)
+			logger.Debugf("reap %s line %d: unknown event type %q (skipped)", path, lineN, t.Type)
 		}
 	}
 	if err := scanner.Err(); err != nil {

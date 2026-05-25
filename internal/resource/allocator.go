@@ -1,6 +1,9 @@
 package resource
 
-import "fmt"
+import (
+	"fmt"
+	"sync"
+)
 
 // Allocator abstracts GPU allocation for the scheduler.
 // Production uses *GPUPool; tests use MockAllocator.
@@ -20,6 +23,7 @@ type Allocator interface {
 // MockAllocator is a test double that simulates GPU allocation without real hardware.
 type MockAllocator struct {
 	Total int
+	mu    sync.Mutex
 	used  map[string][]int // taskID → GPU indices
 }
 
@@ -28,7 +32,10 @@ func NewMockAllocator(n int) *MockAllocator {
 }
 
 func (m *MockAllocator) Allocate(n int, taskID string) ([]int, error) {
-	free := m.FreeCount()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	free := m.freeCountLocked()
 	if free < n {
 		return nil, fmt.Errorf("not enough free GPUs: requested %d, available %d", n, free)
 	}
@@ -50,10 +57,19 @@ func (m *MockAllocator) Allocate(n int, taskID string) ([]int, error) {
 }
 
 func (m *MockAllocator) Release(taskID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	delete(m.used, taskID)
 }
 
 func (m *MockAllocator) FreeCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.freeCountLocked()
+}
+
+func (m *MockAllocator) freeCountLocked() int {
 	usedCount := 0
 	for _, indices := range m.used {
 		usedCount += len(indices)
@@ -66,6 +82,9 @@ func (m *MockAllocator) TotalCount() int {
 }
 
 func (m *MockAllocator) Reserve(indices []int, taskID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	usedSet := make(map[int]bool)
 	for _, idxs := range m.used {
 		for _, idx := range idxs {
@@ -85,6 +104,9 @@ func (m *MockAllocator) Reserve(indices []int, taskID string) error {
 }
 
 func (m *MockAllocator) Status() []GPUState {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	// Build a task map for quick lookup.
 	taskMap := make(map[int]string)
 	for taskID, indices := range m.used {

@@ -24,6 +24,7 @@ type RunSpec struct {
 	Env        map[string]string // extra env vars (merged with os.Environ)
 	GPUs       []int             // GPU indices → CUDA_VISIBLE_DEVICES
 	LogPath    string            // stdout+stderr are redirected here
+	OnStart    func(Result)      // called after cmd.Start, before waiting
 }
 
 // Result is returned after a process exits.
@@ -88,6 +89,9 @@ func (e *Executor) Start(parentCtx context.Context, spec RunSpec) (Result, error
 	if err != nil {
 		// Non-fatal: /proc may not exist (e.g. macOS). Log and continue.
 		startTime = time.Time{}
+	}
+	if spec.OnStart != nil {
+		spec.OnStart(Result{PID: pid, StartTime: startTime})
 	}
 
 	err = cmd.Wait()

@@ -161,6 +161,13 @@ func (s *JobService) SubmitJob(ctx context.Context, jobCfg job.JobConfig) (strin
 			Timeout:     timeoutSec,
 			UID:         callerUID,
 			TaskDir:     taskDir,
+			// CheckpointDir is the SDK-visible default ckpt path. Same value
+			// the daemon injects as RUNQ_CHECKPOINT_DIR (see buildTaskEnv).
+			// Scheduler's freeze-mount filter and the thaw mount-mate listing
+			// both call utils.MountOf on this path, so it MUST be populated
+			// at submit time — otherwise pending tasks have CheckpointDir==""
+			// and the filters silently no-op.
+			CheckpointDir: filepath.Join(taskDir, "checkpoints"),
 		})
 	}
 

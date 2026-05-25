@@ -93,25 +93,23 @@ func TestRestoreRuntimeStateRestoresPausedJobsBeforeScheduling(t *testing.T) {
 	}
 }
 
-// TestL2CStage1EndToEnd exercises the full pipeline introduced in L2-C stage 1:
-//  1. SubmitJob creates <working_dir>/.runq/<task_id>/ with params.json
-//     and wandb_config.json.
-//  2. Scheduler dispatches the task with the L2-C env block injected, so the
-//     command can find RUNQ_METRICS_FILE.
-//  3. The task writes a metric, a checkpoint, and a disk_low event to
-//     metrics.jsonl via redirected shell echo.
-//  4. After the task exits, scheduler.runTask invokes ReapTaskOutputs which
-//     parses metrics.jsonl, batch-inserts into store, and reports disk_low
-//     so the daemon enters freeze state.
-//  5. POST /api/thaw releases the freeze.
+// TestL2CStage1EndToEnd exercises the post-pivot pipeline (artifacts + env
+// injection + reap). The freeze path is exercised separately in
+// api/server_test.go via the HTTP layer because freeze is SDK-driven now
+// (not reap-driven from metrics.jsonl).
 //
-// Requires the stage 1 core (reap + freeze wiring) to be implemented; will
-// panic-as-test-failure on the stubs.
+// What this test covers:
+//  1. SubmitJob creates <working_dir>/.runq/<task_id>/ with params.json
+//     and wandb_config.json artifacts.
+//  2. Scheduler dispatches the task with the L2-C env block injected, so
+//     the command can find RUNQ_METRICS_FILE / RUNQ_TASK_DIR.
+//  3. The task writes a metric and a checkpoint to metrics.jsonl using
+//     the flat SDK event format (no `data` wrapper).
+//  4. After the task exits, scheduler.runTask invokes ReapTaskOutputs
+//     which parses metrics.jsonl and batch-inserts metric + checkpoint
+//     rows into the store. TaskID and JobID are filled by the daemon
+//     from the task context (not by the SDK).
 func TestL2CStage1EndToEnd(t *testing.T) {
-	t.Skip("rewriting: stage1 pivoted to SDK-driven freeze (HTTP), this test " +
-		"assumes reap-driven freeze and disk_low-in-metrics.jsonl which are " +
-		"gone. New e2e will fake an SDK POST to /api/internal/freeze-self. " +
-		"See stage1_backend_prep.md test plan.")
 	ctx := context.Background()
 	workDir := t.TempDir()
 
@@ -126,9 +124,10 @@ func TestL2CStage1EndToEnd(t *testing.T) {
 	if err := reg.Add(project.Config{
 		ProjectName: "p",
 		WorkingDir:  workDir,
-		// Echo three jsonl lines into RUNQ_METRICS_FILE then exit. The path
-		// is set by the env-injection glue, so this exercises Task 1.4.
-		CmdTemplate: `sh -c 'printf %s\n {"type":"metric","key":"loss","value":0.4,"step":1,"ts":1700000000} {"type":"checkpoint","path":"/p","size":1024,"step":1,"is_best":true,"ts":1700000001} {"type":"disk_low","free_bytes":100,"needed_est":200,"ts":1700000002} > "$RUNQ_METRICS_FILE"'`,
+		// Write two flat SDK events into RUNQ_METRICS_FILE then exit.
+		// Field names match the post-pivot contract: snake_case, no `data`
+		// wrapper, no task_id/job_id (daemon fills those).
+		CmdTemplate: `printf '%s\n' '{"type":"metric","key":"loss","value":0.4,"step":1,"ts":1700000000}' '{"type":"checkpoint","path":"/p","size_bytes":1024,"step":1,"is_best":true,"ts":1700000001}' > "$RUNQ_METRICS_FILE" # {{args}}`,
 		Defaults:    project.Defaults{GPUsPerTask: 1},
 		Wandb:       &project.WandbConfig{Project: "my-exp", Entity: "me"},
 	}); err != nil {
@@ -215,28 +214,22 @@ func TestL2CStage1EndToEnd(t *testing.T) {
 
 	checkpoints, _ := st.ListCheckpoints(ctx, taskID)
 	if len(checkpoints) != 1 {
-		t.Errorf("expected 1 checkpoint row, got %d (%+v)", len(checkpoints), checkpoints)
-	} else if !checkpoints[0].IsBest {
+		t.Fatalf("expected 1 checkpoint row, got %d (%+v)", len(checkpoints), checkpoints)
+	}
+	if !checkpoints[0].IsBest {
 		t.Errorf("checkpoint is_best = false, want true")
 	}
-
-	// ── verify disk_low triggered freeze ──
-	// (Allow a brief grace period for reap → freeze wiring in runTask.)
-	frozenDeadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(frozenDeadline) {
-		if freeze.IsFrozen() {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
+	if checkpoints[0].SizeBytes != 1024 {
+		t.Errorf("checkpoint size_bytes = %d, want 1024", checkpoints[0].SizeBytes)
 	}
-	if !freeze.IsFrozen() {
-		t.Error("disk_low event should have entered freeze state")
+	// Daemon-filled fields (NOT in the SDK payload).
+	if checkpoints[0].TaskID != taskID || checkpoints[0].JobID != jobID {
+		t.Errorf("checkpoint task/job not filled from context: %+v", checkpoints[0])
 	}
 
-	// ── thaw releases the freeze ──
-	_ = freeze.ThawForce(freeze.FrozenTaskIDs())
+	// ── freeze was NOT triggered (no disk_low in jsonl in the new model) ──
 	if freeze.IsFrozen() {
-		t.Error("Thaw failed to clear frozen flag")
+		t.Error("FreezeState should remain empty — freeze is SDK-driven via HTTP, not reap")
 	}
 }
 

@@ -1,0 +1,58 @@
+L2-C stage 1: SDK-driven disk freeze backend
+
+Pivot the freeze model from reap-driven (parse disk_low events out of
+metrics.jsonl after task exit) to SDK-driven (live HTTP call from inside
+the running task). Daemon becomes a passive SIGSTOP/SIGCONT state
+machine; the SDK owns all disk-policy decisions.
+
+Backend
+- FreezeState carries FrozenTask{PID, Mount, NeededBytes, JobID} and
+  drives per-mount partial thaw + per-task threshold checks. Threshold
+  symmetry is physical: NeededBytes set at freeze time is reused as the
+  thaw bar, no policy drift possible.
+- New POST /api/internal/freeze-self (SDK-only) and POST /api/thaw with
+  structured ThawResponse{Thawed, Blocked[].DiskUsers}. The mount-mate
+  listing tells the user whose checkpoints to ask about deleting.
+- Scheduler tick + backfill share an isDispatchBlocked closure
+  (frozen-job sibling skip + frozen-mount skip).
+- autoThawLoop runs whenever FreezeState is wired and uses per-task
+  NeededBytes, not a global threshold.
+
+Plumbing
+- utils.LoadMountTable + utils.MountOf — flat fns, no struct, no
+  global state. Caller decides cache scope.
+- Task.CheckpointDir = TaskDir/checkpoints, populated at submit and
+  derived on reclaim so the mount filter is usable on pending tasks.
+- reap.go protocol switched to flat events; daemon fills TaskID/JobID
+  from context so the SDK never sees internal DTOs.
+- runq thaw CLI rewritten for ThawResponse + --force + ?owner=<uid>.
+- Executor gained an OnStart hook so PID/start_time persist at process
+  start (not after exit).
+
+Bugs uncovered along the way
+- IsProcessAlive used os.Signal(nil), a nil interface that always
+  failed Process.Signal's syscall.Signal type assertion. Returned false
+  for every pid. Daemon reclaim silently never reattached any live
+  task. Fixed with syscall.Signal(0). Regression test added.
+- KillTask (pending) and RetryTask did not refresh job aggregate
+  status; the job could stay "pending" forever or "done" after retry.
+- Backfill loop bypassed the freeze filter, so small tasks could land
+  on a frozen mount even after head was correctly skipped.
+
+Refactor (pure code movement, no logic change)
+- scheduler.go 789 -> 208 lines, split into config.go, tick.go,
+  task_lifecycle.go, controls.go, gpu.go.
+- handlers.go 566 -> 311 lines; freeze/thaw types + handlers moved to
+  handlers_freeze.go.
+
+Tests
+- 12 new or rewritten unit tests covering FreezeState transitions,
+  ThawTasks per-mount semantics, ThawForce, scheduler freeze filters
+  (job + mount + backfill), reclaim WARN, IsProcessAlive regression,
+  ReadProcessState across Linux /proc and macOS ps paths.
+- Manual e2e doc at demo/l2c/stage1_manual_test.md for Codex to run.
+
+Known limitation
+- FreezeState is in-memory; daemon restart loses frozen-task tracking.
+  Reclaim emits a WARN when it sees a stopped process; recovery is
+  `runq kill` or manual `kill -CONT`. Persistence deferred to L3.

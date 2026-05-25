@@ -108,8 +108,18 @@ func (r *Reclaimer) markDead(t *store.TaskRow) {
 }
 
 // ReclaimTask checks if a previously-running task's process is still alive.
+//
+// row.StartTime == 0 means the daemon never wrote it (older row, macOS
+// fallback, or a test row). We pass time.Time{} in that case so
+// IsProcessAlive skips the PID-reuse check rather than comparing against
+// 1970. time.Unix(0, 0) would be the unix epoch — not the zero time —
+// which would always trigger the tolerance failure on Linux.
 func (r *Reclaimer) ReclaimTask(row *store.TaskRow) (alive bool, err error) {
-	return utils.IsProcessAlive(row.PID, time.Unix(row.StartTime, 0)), nil
+	var expected time.Time
+	if row.StartTime != 0 {
+		expected = time.Unix(row.StartTime, 0)
+	}
+	return utils.IsProcessAlive(row.PID, expected), nil
 }
 
 // Reattach registers an already-running process for monitoring via signal 0 polling.

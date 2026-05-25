@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"runtime"
@@ -95,23 +96,26 @@ func TestThawIdempotent(t *testing.T) {
 // tasks each emitting disk_low before user thaws) all land in Events(), even
 // when Reason strings collide. Webhook + audit rely on this.
 func TestFreezeEventsAccumulate(t *testing.T) {
-	t.Skip("rewriting: events test now needs real sleepers since the new " +
-		"Freeze() drops entries whose SIGSTOP fails. See stage1 doc.")
-	fs := NewFreezeState()
+	if runtime.GOOS == "windows" {
+		t.Skip("SIGSTOP not available on Windows; Freeze rejects entries")
+	}
+	cmd1 := startSleeper(t)
+	cmd2 := startSleeper(t)
 
+	fs := NewFreezeState()
 	fs.Freeze(FreezeEvent{
 		Reason:        "disk_low",
 		TriggerTaskID: "t1",
 		FreeBytes:     1000,
 		NeededEst:     2000,
-	}, map[string]FrozenTask{"t1": {PID: 999, Mount: "/tmp", JobID: "j1"}})
+	}, map[string]FrozenTask{"t1": {PID: cmd1.Process.Pid, Mount: "/tmp", JobID: "j1", NeededBytes: 2000}})
 
 	fs.Freeze(FreezeEvent{
 		Reason:        "disk_low",
 		TriggerTaskID: "t2",
 		FreeBytes:     500,
 		NeededEst:     2000,
-	}, map[string]FrozenTask{"t2": {PID: 998, Mount: "/tmp", JobID: "j1"}})
+	}, map[string]FrozenTask{"t2": {PID: cmd2.Process.Pid, Mount: "/tmp", JobID: "j1", NeededBytes: 2000}})
 
 	events := fs.Events()
 	if len(events) != 2 {
@@ -167,13 +171,17 @@ func TestFreezeEventEnteredAtAutoStamped(t *testing.T) {
 // implementation has to release mu before calling Thaw to avoid the obvious
 // deadlock.
 func TestAutoThawOnLastTaskRemoved(t *testing.T) {
-	t.Skip("rewriting: needs real sleepers in new model since fake PIDs no " +
-		"longer get registered (no trigger-task special case). See stage1 doc.")
+	if runtime.GOOS == "windows" {
+		t.Skip("SIGSTOP not available on Windows")
+	}
+	cmd1 := startSleeper(t)
+	cmd2 := startSleeper(t)
+
 	fs := NewFreezeState()
 	fs.Freeze(FreezeEvent{Reason: "test", TriggerTaskID: "t1"},
-		map[string]FrozenTask{"t1": {PID: 999, Mount: "/tmp", JobID: "j1"}})
+		map[string]FrozenTask{"t1": {PID: cmd1.Process.Pid, Mount: "/tmp", JobID: "j1"}})
 	fs.Freeze(FreezeEvent{Reason: "test", TriggerTaskID: "t2"},
-		map[string]FrozenTask{"t2": {PID: 998, Mount: "/tmp", JobID: "j1"}})
+		map[string]FrozenTask{"t2": {PID: cmd2.Process.Pid, Mount: "/tmp", JobID: "j1"}})
 	if got := fs.Events(); len(got) != 2 {
 		t.Errorf("expected 2 events accumulated, got %d", len(got))
 	}
@@ -190,6 +198,143 @@ func TestAutoThawOnLastTaskRemoved(t *testing.T) {
 	if fs.IsFrozen() {
 		t.Error("last task removed → expected auto-thaw")
 	}
+
+	// RemoveTask is pure state cleanup — it doesn't SIGCONT. The sleepers
+	// remain stopped; t.Cleanup will kill them via cmd.Process.Kill which
+	// works through SIGSTOP.
+	_ = cmd1
+	_ = cmd2
+}
+
+// TestThawTasksPerMount verifies per-mount partial thaw. Three frozen tasks
+// across two mounts; only the mount whose free bytes exceed the per-task
+// threshold should release its tasks. The other mount's tasks stay frozen
+// and appear in result.Blocked with FreeBytes / Threshold populated.
+//
+// Uses a fake diskUsage closure so the test is hermetic — no real disk
+// state matters.
+func TestThawTasksPerMount(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("SIGSTOP not available on Windows")
+	}
+	cmd1 := startSleeper(t)
+	cmd2 := startSleeper(t)
+	cmd3 := startSleeper(t)
+
+	fs := NewFreezeState()
+	fs.Freeze(FreezeEvent{Reason: "disk_low"}, map[string]FrozenTask{
+		"t1": {PID: cmd1.Process.Pid, Mount: "/disk_a", JobID: "j1", NeededBytes: 5 << 30},
+		"t2": {PID: cmd2.Process.Pid, Mount: "/disk_a", JobID: "j1", NeededBytes: 5 << 30},
+		"t3": {PID: cmd3.Process.Pid, Mount: "/disk_b", JobID: "j2", NeededBytes: 5 << 30},
+	})
+	waitForState(t, cmd1.Process.Pid, true)
+	waitForState(t, cmd2.Process.Pid, true)
+	waitForState(t, cmd3.Process.Pid, true)
+
+	// Disk B has plenty of space; disk A is still tight.
+	fakeFree := func(mount string) (uint64, error) {
+		switch mount {
+		case "/disk_a":
+			return 1 << 30, nil // 1 GiB free, below 5 GiB needed
+		case "/disk_b":
+			return 100 << 30, nil // 100 GiB free
+		}
+		return 0, fmt.Errorf("unknown mount %q", mount)
+	}
+
+	result := fs.ThawTasks(fs.FrozenTaskIDs(), fakeFree)
+
+	// t3 (on /disk_b) should be thawed; t1 and t2 (on /disk_a) blocked.
+	if len(result.Thawed) != 1 || result.Thawed[0] != "t3" {
+		t.Errorf("expected only t3 thawed, got %v", result.Thawed)
+	}
+	if len(result.Blocked) != 2 {
+		t.Errorf("expected 2 blocked, got %d (%v)", len(result.Blocked), result.Blocked)
+	}
+	for _, tid := range []string{"t1", "t2"} {
+		br, ok := result.Blocked[tid]
+		if !ok {
+			t.Errorf("%s missing from Blocked", tid)
+			continue
+		}
+		if br.Mount != "/disk_a" || br.FreeBytes != 1<<30 || br.Threshold != 5<<30 {
+			t.Errorf("%s BlockReason mismatch: %+v", tid, br)
+		}
+	}
+	waitForState(t, cmd3.Process.Pid, false)
+	waitForState(t, cmd1.Process.Pid, true) // still frozen
+	waitForState(t, cmd2.Process.Pid, true)
+
+	// Disk A recovers — second call should release the remaining two.
+	fakeFreeRecovered := func(mount string) (uint64, error) {
+		return 100 << 30, nil
+	}
+	result = fs.ThawTasks(fs.FrozenTaskIDs(), fakeFreeRecovered)
+	if len(result.Thawed) != 2 || len(result.Blocked) != 0 {
+		t.Fatalf("second pass: expected 2 thawed / 0 blocked, got %+v", result)
+	}
+	if fs.IsFrozen() {
+		t.Error("FreezeState should be empty after both passes")
+	}
+	waitForState(t, cmd1.Process.Pid, false)
+	waitForState(t, cmd2.Process.Pid, false)
+}
+
+// TestThawTasksBlockedOnUsageErr verifies that when diskUsage itself fails,
+// every task on that mount stays frozen with FreeBytes=-1 sentinel — caller
+// can distinguish "stat failed" from "stat OK, disk full".
+func TestThawTasksBlockedOnUsageErr(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("SIGSTOP not available on Windows")
+	}
+	cmd := startSleeper(t)
+	fs := NewFreezeState()
+	fs.Freeze(FreezeEvent{Reason: "disk_low"}, map[string]FrozenTask{
+		"t1": {PID: cmd.Process.Pid, Mount: "/broken", JobID: "j1", NeededBytes: 1 << 30},
+	})
+
+	failingFn := func(mount string) (uint64, error) {
+		return 0, fmt.Errorf("stat failed")
+	}
+	result := fs.ThawTasks([]string{"t1"}, failingFn)
+	if len(result.Thawed) != 0 {
+		t.Errorf("expected no thawed when stat fails, got %v", result.Thawed)
+	}
+	br, ok := result.Blocked["t1"]
+	if !ok {
+		t.Fatal("t1 missing from Blocked")
+	}
+	if br.FreeBytes != -1 {
+		t.Errorf("FreeBytes = %d, want -1 sentinel for stat failure", br.FreeBytes)
+	}
+	// Task itself stays in frozenTasks — caller can retry.
+	if !fs.IsFrozen() {
+		t.Error("FreezeState should remain frozen when all tasks blocked")
+	}
+}
+
+// TestThawForceSkipsDiskCheck verifies that --force releases tasks even
+// when NeededBytes is impossibly large — caller accepts the ENOSPC risk.
+func TestThawForceSkipsDiskCheck(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("SIGSTOP not available on Windows")
+	}
+	cmd := startSleeper(t)
+	fs := NewFreezeState()
+	fs.Freeze(FreezeEvent{Reason: "manual"}, map[string]FrozenTask{
+		"t1": {PID: cmd.Process.Pid, Mount: "/tmp", JobID: "j1",
+			NeededBytes: 1 << 60}, // 1 EiB — guaranteed to exceed any real disk
+	})
+	waitForState(t, cmd.Process.Pid, true)
+
+	thawed := fs.ThawForce([]string{"t1"})
+	if len(thawed) != 1 || thawed[0] != "t1" {
+		t.Errorf("expected force-thaw of t1, got %v", thawed)
+	}
+	if fs.IsFrozen() {
+		t.Error("FreezeState should clear after force-thaw of last task")
+	}
+	waitForState(t, cmd.Process.Pid, false)
 }
 
 // TestSIGTERMPenetratesSIGSTOP — `runq kill <task>` must work even on a
@@ -248,38 +393,50 @@ func startSleeper(t *testing.T) *exec.Cmd {
 func waitForState(t *testing.T, pid int, wantStopped bool) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
+	var lastErr error
 	for time.Now().Before(deadline) {
-		if isStopped(pid) == wantStopped {
+		stopped, err := isStopped(pid)
+		if err != nil {
+			if os.IsPermission(err) {
+				t.Skipf("process state inspection unavailable in this sandbox: %v", err)
+			}
+			lastErr = err
+		}
+		if err == nil && stopped == wantStopped {
 			return
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Errorf("pid %d: wantStopped=%v after 2s, actual=%v", pid, wantStopped, isStopped(pid))
+	stopped, err := isStopped(pid)
+	if err != nil && os.IsPermission(err) {
+		t.Skipf("process state inspection unavailable in this sandbox: %v", err)
+	}
+	t.Errorf("pid %d: wantStopped=%v after 2s, actual=%v err=%v", pid, wantStopped, stopped, lastErr)
 }
 
 // isStopped inspects the OS to determine whether the process is in stopped
 // (T) state. Uses /proc on Linux and `ps -o state=` on macOS/BSD.
-func isStopped(pid int) bool {
+func isStopped(pid int) (bool, error) {
 	switch runtime.GOOS {
 	case "linux":
 		data, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
 		if err != nil {
-			return false
+			return false, err
 		}
 		// /proc/<pid>/stat fields: pid (comm) state ppid ...
 		// "comm" may contain spaces, so find the closing paren first.
 		s := string(data)
 		idx := strings.LastIndex(s, ")")
 		if idx < 0 || idx+2 >= len(s) {
-			return false
+			return false, nil
 		}
-		return s[idx+2] == 'T'
+		return s[idx+2] == 'T', nil
 	default:
 		// macOS / BSD: ps reports state in column 1, e.g. "T", "S", "R+".
 		out, err := exec.Command("ps", "-o", "state=", "-p", strconv.Itoa(pid)).Output()
 		if err != nil {
-			return false
+			return false, err
 		}
-		return strings.HasPrefix(strings.TrimSpace(string(out)), "T")
+		return strings.HasPrefix(strings.TrimSpace(string(out)), "T"), nil
 	}
 }
