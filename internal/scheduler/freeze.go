@@ -89,8 +89,9 @@ type ThawResult struct {
 //     ThawTasks (checked) or ThawForce (--force flag).
 //   - task exit / kill: scheduler calls RemoveTask in runTask's defer.
 //
-// Kill-during-freeze: SIGTERM/SIGKILL penetrate SIGSTOP semantics, so
-// `runq kill` works on a frozen task. The exit path triggers RemoveTask.
+// Kill-during-freeze: SIGKILL penetrates SIGSTOP semantics, so `runq kill`
+// works on a frozen task through Executor.Stop's hard-kill path. The exit
+// path triggers RemoveTask.
 //
 // IMPORTANT:
 //   - SIGSTOP/SIGCONT MUST target the process group (-pgid), not the bare

@@ -1,0 +1,68 @@
+Metadata-Version: 2.4
+Name: runq
+Version: 0.1.0
+Summary: Lab GPU scheduler — in-task Python SDK
+Author: runq contributors
+License: MIT
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: httpx>=0.24
+Provides-Extra: dev
+Requires-Dist: pytest>=7.0; extra == "dev"
+Provides-Extra: wandb
+Requires-Dist: wandb>=0.15; extra == "wandb"
+
+# runq Python SDK
+
+In-task SDK for the [runq](../../README.md) GPU scheduler.
+
+## Install
+
+From the repo root:
+
+```sh
+pip install -e ./sdk/python
+```
+
+Optional extras:
+
+```sh
+pip install -e "./sdk/python[wandb]"   # auto wandb integration
+pip install -e "./sdk/python[dev]"     # for pytest
+```
+
+## Quick start
+
+```python
+import runq
+
+ctx = runq.context()
+runq.log_metric("loss", 0.42, step=epoch)
+```
+
+See `demo/l2c/stage2_sdk_design.md` for the full API design.
+
+## Three modes
+
+Detected automatically at `runq.context()`:
+
+- `daemon` — running under a runq daemon (`RUNQ_TASK_ID` + `RUNQ_SOCKET_PATH` set)
+- `no_daemon` — running on HPC compute node (`RUNQ_TASK_ID` set, no socket / `RUNQ_NO_DAEMON=1`)
+- `manual` — running outside runq (no `RUNQ_TASK_ID`); useful for local debugging
+
+`ctx.mode` exposes which mode is active.
+
+## Stage 2 status
+
+This is incremental — Tier A first, Tier B/C as we go.
+
+- [x] **Step 1**: package skeleton + `context()` + tri-mode + `log_metric`
+- [ ] Step 2: `transport.py` (unix socket HTTP client)
+- [ ] Step 3: `safe_save` core (path resolution + TOCTOU + freeze)
+- [ ] Step 4: `safe_save` decorator + size walker
+- [ ] Step 5: `safe_save` manifest + keep_last_n / keep_best
+- [ ] Step 6: `report` + `Decision` + `@early_stop`
+- [ ] Step 7: YAML early_stop policies
+- [ ] Step 8: `loop` + `@epoch` + `@log_group`
+- [ ] Step 9: wandb integration (L3)
+- [ ] Step 10: daemon-side preflight (Go side, parallel track)

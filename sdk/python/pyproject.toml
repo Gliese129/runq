@@ -1,0 +1,42 @@
+[project]
+name = "runq"
+version = "0.1.0"
+description = "Lab GPU scheduler — in-task Python SDK"
+readme = "README.md"
+# 3.10 floor: matches PyTorch's current support window and is widely
+# deployed in lab conda envs. 3.9 EOL is Oct 2025 — not worth carrying.
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [{name = "runq contributors"}]
+
+# httpx for HTTP-over-unix-socket. Pulls in httpcore + h11 + anyio +
+# idna + sniffio — about 1 MB total. Lab user envs almost always have
+# these already (transitively via wandb / transformers / fastapi).
+# Worth the dep for cleaner code than hand-rolled framing.
+#
+# torch is intentionally NOT pinned — safe_save's size estimator
+# imports it lazily, missing torch falls back to size_hint requirement.
+dependencies = [
+    "httpx>=0.24",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+]
+# Convenience: pip install -e ".[wandb]" pulls wandb for users who want
+# the L3 mirror integration. Core SDK still works without it.
+wandb = [
+    "wandb>=0.15",
+]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["runq*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
