@@ -8,25 +8,29 @@ JSONL contract (matches what the daemon's ``ReapTaskOutputs`` expects):
 those in on reap from its own task context. This keeps the SDK ignorant
 of internal DB schemas and lets us rename store columns without
 breaking users.
+
+Step resolution
+---------------
+Step 6 retired the hidden monotonic auto-step counter. The single
+source of truth for "what step is this?" is ``ctx._current_step``,
+maintained by:
+
+- ``report(metrics, step=N)`` — explicit step writes back to ctx.
+- ``log_metric(..., step=N)`` — same; keeps the two helpers in sync.
+- ``loop()`` (step 8) — sets it once per iteration.
+
+When the caller omits ``step`` and ctx has never been written to,
+``step=None`` lands in the jsonl event. Daemon-side reap tolerates that
+(orders by ts as fallback).
 """
 from __future__ import annotations
 
 import json
 import sys
 import time
-from typing import Any, Optional
+from typing import Optional
 
 from ._context import get_ctx
-
-# Module-level monotonic counter used when the caller omits step.
-# Reset is provided for tests only — see _reset_for_tests().
-_auto_step = 0
-
-
-def _next_auto_step() -> int:
-    global _auto_step
-    _auto_step += 1
-    return _auto_step
 
 
 def _append_event(event: dict) -> None:
@@ -60,10 +64,28 @@ def log_metric(key: str, value: float, step: Optional[int] = None) -> None:
     Low-level helper. For training loops, prefer :func:`runq.report`
     which handles multiple metrics + early-stop check in one call.
 
-    ``step=0`` is a legitimate value; only ``None`` triggers SDK
-    auto-assignment (Codex review #6 — never use ``step or X`` here).
+    Step semantics (step 6 contract)
+    --------------------------------
+    - ``step=N`` (explicit) — written to jsonl AND saved back to
+      ``ctx._current_step``. Future ``report`` / ``log_metric`` calls
+      without ``step=`` will see ``N`` until it's updated.
+    - ``step=None`` — read ``ctx._current_step`` as fallback. If the ctx
+      step has never been set, ``step=null`` ends up in jsonl. There is
+      NO auto-increment counter.
+
+    Why the write-back: it keeps log_metric (side-channel) consistent
+    with report (canonical) so the two helpers can be interleaved
+    without their step views drifting apart.
+
+    ``step=0`` is a legitimate value; only ``None`` triggers the ctx
+    fallback (Codex review #6 — never use ``step or X`` here).
     """
-    resolved_step = step if step is not None else _next_auto_step()
+    ctx = get_ctx()
+    if step is not None:
+        ctx._current_step = step
+        resolved_step: Optional[int] = step
+    else:
+        resolved_step = ctx._current_step
     _append_event(
         {
             "type": "metric",
@@ -77,6 +99,10 @@ def log_metric(key: str, value: float, step: Optional[int] = None) -> None:
 
 # ---- testing helper ----
 def _reset_for_tests() -> None:
-    """Reset the auto-step counter. Tests only."""
-    global _auto_step
-    _auto_step = 0
+    """No-op now that the auto-step counter is gone (step 6).
+
+    Kept for conftest.py compatibility — removing the call sites would
+    just create churn. Future per-module module-level state can hang
+    off here.
+    """
+    return

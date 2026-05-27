@@ -210,7 +210,7 @@ def to_manifest_key(checkpoint_dir: Union[str, Path], final_path: Union[str, Pat
     return str(rel)
 
 
-# ---- core operations (USER WRITES BODIES) --------------------------
+# ---- core operations ----------------------------------------------
 
 def append_entry(
     checkpoint_dir: Union[str, Path],
@@ -220,20 +220,10 @@ def append_entry(
 
     Invariant — single best
     ~~~~~~~~~~~~~~~~~~~~~~~
-    If ``entry["is_best"]`` is True, the flag MUST be cleared on every
+    If ``entry["is_best"]`` is True, the flag is cleared on every
     existing entry BEFORE appending. At most one entry has
-    ``is_best=True`` at any time. (The new entry is the "current
-    best"; older bests demote to plain entries.)
-
-    Algorithm (write this body)::
-
-        m = load_manifest(checkpoint_dir)
-        if entry.get("is_best"):
-            for e in m["entries"]:
-                e["is_best"] = False
-        m["entries"].append(entry)
-        save_manifest(checkpoint_dir, m)
-        return m
+    ``is_best=True`` at any time (the new entry is the "current
+    best"; older bests demote to plain entries).
 
     Returns
     -------

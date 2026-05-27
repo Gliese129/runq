@@ -7,7 +7,7 @@ counter before every test.
 """
 import pytest
 
-from runq import _context, _events
+from runq import _context, _events, _report
 
 
 @pytest.fixture(autouse=True)
@@ -15,9 +15,11 @@ def _reset_sdk():
     """Reset all SDK module-level state before each test."""
     _context._reset_for_tests()
     _events._reset_for_tests()
+    _report._reset_for_tests()
     yield
     _context._reset_for_tests()
     _events._reset_for_tests()
+    _report._reset_for_tests()
 
 
 @pytest.fixture

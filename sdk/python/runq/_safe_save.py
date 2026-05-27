@@ -89,7 +89,7 @@ def _default_save(path: str, obj: Any) -> None:
     torch.save(obj, path)
 
 
-# ---- helpers (TODO: implement bodies) ----
+# ---- helpers ----
 
 def _resolve_path(path: Union[str, Path]) -> str:
     """Resolve `path` to an absolute filesystem path.

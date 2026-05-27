@@ -1,4 +1,10 @@
-"""Tests for runq.log_metric — jsonl format, step handling, auto-step counter."""
+"""Tests for runq.log_metric — jsonl format, step handling.
+
+Step 6 changed the step semantics: the hidden auto-step counter is
+gone. ``step=None`` falls back to ``ctx._current_step`` (which may
+itself be None). Explicit ``step=N`` writes back to ctx so log_metric
+and report stay in sync.
+"""
 import json
 
 import runq
@@ -27,10 +33,10 @@ def test_log_metric_basic_format(clean_env, tmp_path, monkeypatch):
 
 
 def test_log_metric_step_zero_preserved(clean_env, tmp_path, monkeypatch):
-    """step=0 is a legitimate value and must NOT be auto-replaced.
+    """step=0 is a legitimate value and must NOT be replaced with ctx fallback.
 
-    Regression test for Codex review #6 — `step or auto` would treat 0 as
-    missing. The correct check is `step is None`.
+    Regression test for Codex review #6 — `step or ctx_step` would treat
+    0 as missing. The correct check is `step is None`.
     """
     monkeypatch.chdir(tmp_path)
     runq.context()
@@ -39,15 +45,40 @@ def test_log_metric_step_zero_preserved(clean_env, tmp_path, monkeypatch):
     assert events[0]["step"] == 0
 
 
-def test_log_metric_auto_step_monotonic(clean_env, tmp_path, monkeypatch):
+def test_log_metric_step_none_uses_ctx_fallback(clean_env, tmp_path, monkeypatch):
+    """step=None reads ctx._current_step (set by a prior explicit call)."""
+    monkeypatch.chdir(tmp_path)
+    ctx = runq.context()
+    runq.log_metric("a", 1.0, step=7)   # sets ctx._current_step=7
+    runq.log_metric("b", 2.0)           # no step → uses ctx (7)
+    runq.log_metric("c", 3.0)           # still 7
+    events = _read_events(tmp_path / "runq_metrics.jsonl")
+    assert [e["step"] for e in events] == [7, 7, 7]
+    assert ctx._current_step == 7
+
+
+def test_log_metric_step_none_with_unset_ctx_writes_null(clean_env, tmp_path, monkeypatch):
+    """When nothing ever set the step, jsonl gets step=null (not auto-1)."""
     monkeypatch.chdir(tmp_path)
     runq.context()
-    runq.log_metric("a", 1.0)  # auto 1
-    runq.log_metric("b", 2.0)  # auto 2
-    runq.log_metric("c", 3.0, step=99)  # explicit, doesn't bump counter
-    runq.log_metric("d", 4.0)  # auto 3 (NOT 100)
+    runq.log_metric("a", 1.0)
+    runq.log_metric("b", 2.0)
     events = _read_events(tmp_path / "runq_metrics.jsonl")
-    assert [e["step"] for e in events] == [1, 2, 99, 3]
+    assert events[0]["step"] is None
+    assert events[1]["step"] is None
+
+
+def test_log_metric_explicit_step_writes_back_to_ctx(clean_env, tmp_path, monkeypatch):
+    """Each explicit step= updates ctx so subsequent calls see the new value."""
+    monkeypatch.chdir(tmp_path)
+    ctx = runq.context()
+    runq.log_metric("a", 1.0, step=3)
+    assert ctx._current_step == 3
+    runq.log_metric("b", 2.0, step=10)
+    assert ctx._current_step == 10
+    runq.log_metric("c", 3.0)
+    events = _read_events(tmp_path / "runq_metrics.jsonl")
+    assert [e["step"] for e in events] == [3, 10, 10]
 
 
 def test_log_metric_appends_no_overwrite(clean_env, tmp_path, monkeypatch):

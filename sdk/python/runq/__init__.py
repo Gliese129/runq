@@ -19,6 +19,8 @@ behavior contracts.
 from ._context import Context, context, get_ctx
 from ._events import log_metric
 from ._exceptions import RunqDiskFullError, RunqEarlyStopSignal, RunqError
+from ._policies import convergence, patience, threshold
+from ._report import Decision, early_stop, report
 from ._safe_save import safe_save
 from ._transport import TransportError
 
@@ -27,6 +29,13 @@ __all__ = [
     "context",
     "get_ctx",
     "log_metric",
+    "report",
+    "early_stop",
+    "Decision",
+    # Built-in early-stop policy factories (step 7).
+    "patience",
+    "threshold",
+    "convergence",
     "safe_save",
     # Exceptions.
     "RunqError",

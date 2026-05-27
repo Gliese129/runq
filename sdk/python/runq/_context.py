@@ -57,6 +57,19 @@ class Context:
     # Loaded from RUNQ_PARAMS_FILE (or local params.json in manual mode).
     params: dict = field(default_factory=dict)
 
+    # ---- step bookkeeping (step 6) ----
+    #
+    # Single source of truth for "what step is this?". Maintained by:
+    # - ``report(metrics, step=N)`` — explicit step writes back here.
+    # - ``log_metric(..., step=N)`` — explicit step writes back here too,
+    #   so the two helpers stay in sync.
+    # - ``loop()`` (step 8) — yields & sets per iteration.
+    #
+    # When None, log_metric / report write step=None to jsonl. There is
+    # NO auto-increment counter (unlike the early step 1 implementation);
+    # if you want incrementing steps without loop(), pass step explicitly.
+    _current_step: Optional[int] = None
+
     # ---- convenience accessors ----
 
     def get(self, name: str, default: Any = None) -> Any:
@@ -200,6 +213,15 @@ def context() -> Context:
         _ctx.metrics_file.parent.mkdir(parents=True, exist_ok=True)
     if _ctx.checkpoint_dir is not None:
         _ctx.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+    # Step 7: if the user's job config carried an ``early_stopping:``
+    # block, build the matching built-in policy and register it.
+    # Done LAST so all ctx fields are populated by the time the policy
+    # factories run.
+    # Local import to keep _context.py free of a circular dep with
+    # _policies → _report → _context.
+    from . import _policies
+    _policies.maybe_register_from_params(_ctx)
 
     return _ctx
 
