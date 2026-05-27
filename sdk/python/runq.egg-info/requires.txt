@@ -1,7 +1,0 @@
-httpx>=0.24
-
-[dev]
-pytest>=7.0
-
-[wandb]
-wandb>=0.15

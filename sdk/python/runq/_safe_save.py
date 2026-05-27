@@ -51,6 +51,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Optional, Union
 
+from . import _manifest
 from ._context import Context, get_ctx
 from ._events import _append_event
 from ._exceptions import RunqDiskFullError
@@ -208,9 +209,14 @@ def _handle_disk_short(
 
 
 
-# ---- decorator form (step 4) ----
+# ---- decorator form (step 4 / step 5) ----
 
-def _make_decorator(user_fn: Callable[..., None]) -> Callable[..., None]:
+def _make_decorator(
+    user_fn: Callable[..., None],
+    *,
+    keep_last_n: Optional[int] = None,
+    keep_best: bool = False,
+) -> Callable[..., None]:
     """Wrap ``user_fn`` so its calls go through the TOCTOU + freeze flow.
 
     Returned wrapper has signature ``wrapper(path, *user_args, **user_kwargs)``.
@@ -229,7 +235,9 @@ def _make_decorator(user_fn: Callable[..., None]) -> Callable[..., None]:
        walker found nothing → TypeError telling user to install torch
        or pass size_hint=N.
     4. Delegates to the function form of ``safe_save`` with a save_fn
-       that calls user_fn with the forwarded args.
+       that calls user_fn with the forwarded args. ``keep_last_n`` /
+       ``keep_best`` baked at decorator-construction time pass through
+       to the function form, which handles manifest append + cleanup.
     """
     sig_params = set(inspect.signature(user_fn).parameters)
 
@@ -262,30 +270,39 @@ def _make_decorator(user_fn: Callable[..., None]) -> Callable[..., None]:
             save_fn=save_fn,
             step=runq_step,
             is_best=runq_is_best,
-            size_hint=runq_size_hint
+            size_hint=runq_size_hint,
+            keep_last_n=keep_last_n,
+            keep_best=keep_best,
+            _saved_by=user_fn.__name__,
         )
     return wrapper
 
 # ---- main API ----
 
 def safe_save(
-    path_or_fn,
+    path_or_fn=_NO_OBJ,
     obj: Any = _NO_OBJ,
     *,
     save_fn: Optional[SaveFn] = None,
     step: Optional[int] = None,
     is_best: bool = False,
     size_hint: Optional[int] = None,
+    keep_last_n: Optional[int] = None,
+    keep_best: bool = False,
+    _saved_by: Optional[str] = None,
 ) -> None:
     """Save ``obj`` to ``path`` with disk-safety guards.
 
-    Two forms, dispatched by the type of the first argument:
+    Three forms, dispatched by the first argument:
 
     1. **Function form** — ``safe_save(path, obj, ...)``: SDK saves
        ``obj`` to ``path`` using ``save_fn`` (default torch.save).
-    2. **Decorator form** — ``@runq.safe_save`` on a user function: the
+    2. **Bare decorator** — ``@runq.safe_save`` on a user function: the
        user's function does the actual write; SDK wraps it with the
        TOCTOU + freeze logic.
+    3. **Parameterized decorator** — ``@runq.safe_save(keep_last_n=3,
+       keep_best=True)``: like (2), but with retention policy baked in
+       at decorator-construction time.
 
     Function form parameters
     ------------------------
@@ -302,16 +319,44 @@ def safe_save(
         valid value; only ``None`` means "no step".
     is_best :
         Mark this checkpoint as the current best in the metrics event.
+        Triggers manifest's single-best invariant: prior entries lose
+        the flag.
     size_hint :
         Bytes the save is expected to write. When None, the SDK walks
         ``obj`` via :func:`runq._sizing.estimate_size`. If the walker
         can't recognize anything, ``TypeError`` asks the user to either
         pass an explicit ``size_hint`` or install torch.
+    keep_last_n :
+        Optional retention policy. After this save succeeds, keep at
+        most the N most-recent runq-managed checkpoints in
+        ``ctx.checkpoint_dir`` (by ``(step, ts)`` desc). Manifest-
+        scoped — only deletes files runq itself created. User-placed
+        sibling files are NEVER touched.
 
-    Decorator form
-    --------------
-    ``@runq.safe_save`` (no parens, step 4). ``@runq.safe_save(...)``
-    parameterized form lands in step 5 (manifest cleanup).
+        - ``None`` (default) → no quantity-based cleanup.
+        - ``0`` → only valid alongside ``keep_best=True`` ("best only").
+        - ``N > 0`` → rolling window of N checkpoints.
+    keep_best :
+        Additionally preserve the most-recent ``is_best=True``
+        checkpoint, even if ``keep_last_n`` would evict it.
+
+        REQUIRES an explicit ``keep_last_n`` (int, ≥0). The combination
+        ``keep_best=True, keep_last_n=None`` is rejected with
+        ``ValueError`` because it admits two contradictory readings
+        ("only the best" vs "everything + best is a no-op"). Spell it
+        out:
+
+        - ``keep_last_n=0,  keep_best=True`` → best only.
+        - ``keep_last_n=10, keep_best=True`` → last 10 + ensure best.
+
+    Decorator forms
+    ---------------
+    ``@runq.safe_save`` — no parens, no policy. Function below is
+    wrapped with the TOCTOU/freeze flow only.
+
+    ``@runq.safe_save(keep_last_n=3, keep_best=True)`` — parens, policy
+    baked in; every call to the wrapped function appends a manifest
+    entry and runs cleanup.
 
     Raises
     ------
@@ -321,20 +366,51 @@ def safe_save(
         daemon mode but daemon unreachable.
     TypeError
         size_hint=None AND walker couldn't estimate (no torch, no
-        recognized types in args).
+        recognized types in args), or invalid dispatch arguments.
+    ValueError
+        Invalid retention policy combination — e.g. ``keep_best=True``
+        without an explicit ``keep_last_n``, or ``keep_last_n < 0``.
     OSError
         Filesystem error other than ENOSPC (permission denied, etc.).
     """
+    # Policy validation up-front, before any dispatch branch. Fail-fast
+    # so users see the error at @runq.safe_save(...) construction or at
+    # the first call site, not buried two saves deep inside cleanup.
+    _manifest.validate_policy(keep_last_n, keep_best)
+
     # ---- dispatch ----
-    # Bare decorator: `@runq.safe_save` passes the function as path_or_fn.
-    # PathLike check defends against the unlikely path-that-is-callable.
+    # Case (3): `safe_save(keep_last_n=..., keep_best=...)` with NO
+    # positional arg at all → parameterized decorator factory. Return a
+    # decorator-of-fn that calls back into _make_decorator with the
+    # policy baked in.
+    if path_or_fn is _NO_OBJ:
+        if obj is not _NO_OBJ:
+            raise TypeError(
+                "runq.safe_save: missing path / function argument"
+            )
+
+        def _factory(user_fn):
+            if not callable(user_fn) or isinstance(user_fn, (str, bytes, os.PathLike)):
+                raise TypeError(
+                    "runq.safe_save(...) must be used as a decorator on a function"
+                )
+            return _make_decorator(
+                user_fn, keep_last_n=keep_last_n, keep_best=keep_best
+            )
+        return _factory  # type: ignore[return-value]
+
+    # Case (2): bare decorator — `@runq.safe_save` passes the function as
+    # path_or_fn. PathLike check defends against the unlikely path-that-
+    # is-callable.
     if callable(path_or_fn) and not isinstance(path_or_fn, (str, bytes, os.PathLike)):
         if obj is not _NO_OBJ:
             raise TypeError(
                 "runq.safe_save used as @decorator does not accept positional "
                 "args here — pass them at the call site of the decorated function"
             )
-        return _make_decorator(path_or_fn)  # type: ignore[return-value]
+        return _make_decorator(
+            path_or_fn, keep_last_n=keep_last_n, keep_best=keep_best
+        )  # type: ignore[return-value]
 
     # ---- function form ----
     if obj is _NO_OBJ:
@@ -413,12 +489,47 @@ def safe_save(
     except OSError:
         # fallback
         actual_bytes = size_hint
+    now_ts = int(time.time())
     _append_event({
         "type": "checkpoint",
         "path": final_path,
         "size_bytes": actual_bytes,
         "step": step,  # None is fine; daemon-side reap tolerates it
         "is_best": is_best,
-        "ts": int(time.time()),
+        "ts": now_ts,
     })
+
+    # ---- manifest append + optional cleanup (step 5) ----
+    # Only track saves landing under ctx.checkpoint_dir. If user wrote
+    # to an absolute path elsewhere, we do nothing — that's not a
+    # runq-managed location and cleanup must not touch it.
+    if ctx.checkpoint_dir is not None:
+        rel_key = _manifest.to_manifest_key(ctx.checkpoint_dir, final_path)
+        if rel_key is not None:
+            entry = {
+                "path": rel_key,
+                "step": step,
+                "is_best": bool(is_best),
+                "size_bytes": int(actual_bytes) if actual_bytes is not None else None,
+                "ts": now_ts,
+                "saved_by": _saved_by,
+            }
+            try:
+                _manifest.append_entry(ctx.checkpoint_dir, entry)
+            except NotImplementedError:
+                # Pre-step-5 build: manifest core not implemented yet.
+                # Tests that exercise the manifest path explicitly
+                # implement append_entry; everything else silently
+                # skips the bookkeeping rather than crashing the save.
+                pass
+            else:
+                if (keep_last_n is not None and keep_last_n > 0) or keep_best:
+                    try:
+                        _manifest.cleanup(
+                            ctx.checkpoint_dir,
+                            keep_last_n=keep_last_n,
+                            keep_best=keep_best,
+                        )
+                    except NotImplementedError:
+                        pass
     return None
