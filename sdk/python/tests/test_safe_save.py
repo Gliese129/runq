@@ -135,6 +135,20 @@ def test_relative_path_no_ckpt_dir_uses_cwd(clean_env, tmp_path, monkeypatch):
     assert (tmp_path / "local.pt").exists()
 
 
+def test_nested_relative_path_auto_creates_dir(daemon_ctx, monkeypatch):
+    """``safe_save("epoch-5/model.pt", ...)`` auto-creates the parent dir.
+
+    Without auto-mkdir, users had to ``os.makedirs(ctx.checkpoint_dir /
+    "epoch-5", exist_ok=True)`` before every nested save. Now safe_save
+    does it for them.
+    """
+    monkeypatch.setattr(shutil, "disk_usage", _disk_usage_seq([1 << 50]))
+    runq.safe_save("epoch-5/model.pt", "data", save_fn=_dummy_save, size_hint=100)
+    target = daemon_ctx.checkpoint_dir / "epoch-5" / "model.pt"
+    assert target.exists()
+    assert target.read_text() == "'data'"
+
+
 # ---- happy path ----
 
 def test_successful_save_appends_checkpoint_event(daemon_ctx, monkeypatch):
