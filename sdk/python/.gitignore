@@ -1,0 +1,41 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# pytest / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Type checker caches
+.mypy_cache/
+.pyre/
+.pytype/
+
+# Linter caches
+.ruff_cache/
+
+# Distributions / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+pip-wheel-metadata/
+
+# `pip install -e .` editable-install metadata
+runq.egg-info/
+
+# Virtual envs (just in case someone makes one inside sdk/python)
+.venv/
+venv/
+env/
+
+# Editor / OS
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/

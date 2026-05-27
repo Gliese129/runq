@@ -13,6 +13,15 @@ var helpFuncs = template.FuncMap{
 	"bold":      func(s string) string { return utils.Bold(s) },
 	"underline": func(s string) string { return utils.Underline(s) },
 	"dim":       func(s string) string { return utils.Dimf("%s", s) },
+	"commandsWithGroup": func(cmd *cobra.Command, groupID string) []*cobra.Command {
+		var commands []*cobra.Command
+		for _, child := range cmd.Commands() {
+			if child.GroupID == groupID && !child.Hidden && child.IsAvailableCommand() {
+				commands = append(commands, child)
+			}
+		}
+		return commands
+	},
 }
 
 // Command group IDs.
@@ -77,7 +86,7 @@ const usageTemplate = `{{bold .Short}}
 {{- range .Groups}}
 
 {{bold .Title}}
-{{- range ($.CommandsWithGroup .ID)}}
+{{- range (commandsWithGroup $ .ID)}}
   {{rpad .Name .NamePadding}}  {{.Short}}
 {{- end}}
 {{- end}}
