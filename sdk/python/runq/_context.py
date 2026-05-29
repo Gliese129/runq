@@ -68,7 +68,15 @@ class Context:
     # When None, log_metric / report write step=None to jsonl. There is
     # NO auto-increment counter (unlike the early step 1 implementation);
     # if you want incrementing steps without loop(), pass step explicitly.
-    _current_step: Optional[int] = None
+    current_step: Optional[int] = None
+
+    # ---- step-8 loop coordination ----
+    #
+    # Most-recent Decision returned by ``runq.report``. Read by
+    # ``runq.loop()`` after each iteration to decide whether to break.
+    # ``Any`` to dodge a forward ref to ``_report.Decision`` (would
+    # require a TYPE_CHECKING-only import dance).
+    _last_decision: Optional[Any] = None
 
     # ---- convenience accessors ----
 
@@ -79,6 +87,58 @@ class Context:
         deserve a shorthand.
         """
         return self.params.get(name, default)
+
+    # ---- wandb-like shape helpers (F9) ----
+    #
+    # SDK never imports wandb. These properties produce dicts shaped to
+    # be splatted into ``wandb.init(**...)`` / merged into
+    # ``wandb.log(...)``. User owns the wandb calls themselves.
+    #
+    # Kept inline (rather than delegated to a sibling module) so the
+    # only lazy import is the one ``wandb_like_metric`` needs for
+    # ``_report.latest_report_metrics``. No ``wandb`` import anywhere.
+
+    @property
+    def wandb_like_cfg(self) -> dict:
+        """Kwargs dict for ``wandb.init(**ctx.wandb_like_cfg)``. See F9.
+
+        Shape::
+
+            {
+                "project": self.project or "runq",
+                "name":    f"{job_id}/{task_id}" or task_id,
+                "group":   self.job_id or None,
+                "config":  dict(self.params),
+            }
+
+        ``entity`` / ``mode`` are intentionally NOT included — those
+        come from the user's ``WANDB_*`` env / ``~/.netrc`` and runq
+        won't second-guess.
+        """
+        name = f"{self.job_id}/{self.task_id}" if self.job_id else self.task_id
+        return {
+            "project": self.project or "runq",
+            "name": name,
+            "group": self.job_id or None,
+            "config": dict(self.params or {}),
+        }
+
+    @property
+    def wandb_like_metric(self) -> dict:
+        """Latest reported metrics for ``wandb.log({**ctx.wandb_like_metric, ...})``.
+
+        Empty dict if no report has happened yet. Caller merges their
+        own extras at the call site::
+
+            wandb.log({**ctx.wandb_like_metric, "lr": lr}, step=epoch)
+
+        The returned dict is a copy — runq's internal history is not
+        exposed to mutation.
+        """
+        # Lazy import to avoid context ↔ report cycle (_report imports
+        # from _context at module load).
+        from . import _report
+        return _report.latest_report_metrics()
 
 
 # ---- mode detection ----

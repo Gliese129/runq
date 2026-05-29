@@ -315,8 +315,12 @@ def safe_save(
         Custom save function ``(path: str, obj: Any) -> None``. Used
         primarily by tests; production users rely on the torch default.
     step :
-        Step number recorded in the checkpoint event. ``step=0`` is a
-        valid value; only ``None`` means "no step".
+        Step number recorded in the checkpoint event + manifest. F5.5
+        ownership rules: explicit ``step=N`` writes back to
+        ``ctx.current_step``; ``step=None`` falls back to
+        ``ctx.current_step`` (which ``runq.loop()`` set on the current
+        iteration). ``step=0`` is a valid explicit value; only
+        ``None`` triggers the ctx fallback.
     is_best :
         Mark this checkpoint as the current best in the metrics event.
         Triggers manifest's single-best invariant: prior entries lose
@@ -428,6 +432,14 @@ def safe_save(
         size_hint = estimated
 
     ctx = get_ctx()
+    # F5.5 step ownership: explicit step wins and writes back; missing
+    # step falls back to whatever loop()/report() last set on ctx.
+    # Mirrors the report() / log_metric() contract so all three step-
+    # aware APIs stay in sync.
+    if step is not None:
+        ctx.current_step = step
+    else:
+        step = ctx.current_step
     final_path = _resolve_path(path)
     dir_for_usage = os.path.dirname(final_path) or '/'
     # Auto-create the parent directory. Without this, users have to

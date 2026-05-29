@@ -19,9 +19,11 @@ behavior contracts.
 from ._context import Context, context, get_ctx
 from ._events import log_metric
 from ._exceptions import RunqDiskFullError, RunqEarlyStopSignal, RunqError
+from ._loop import epoch, log_group, loop
 from ._policies import convergence, patience, threshold
 from ._report import Decision, early_stop, report
 from ._safe_save import safe_save
+from ._sync import sync_now
 from ._transport import TransportError
 
 __all__ = [
@@ -36,7 +38,13 @@ __all__ = [
     "patience",
     "threshold",
     "convergence",
+    # Training-loop ergonomics (step 8).
+    "loop",
+    "epoch",
+    "log_group",
     "safe_save",
+    # Ephemeral reap (F10 β-mode).
+    "sync_now",
     # Exceptions.
     "RunqError",
     "RunqDiskFullError",

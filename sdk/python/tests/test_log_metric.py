@@ -1,7 +1,7 @@
 """Tests for runq.log_metric — jsonl format, step handling.
 
 Step 6 changed the step semantics: the hidden auto-step counter is
-gone. ``step=None`` falls back to ``ctx._current_step`` (which may
+gone. ``step=None`` falls back to ``ctx.current_step`` (which may
 itself be None). Explicit ``step=N`` writes back to ctx so log_metric
 and report stay in sync.
 """
@@ -46,15 +46,15 @@ def test_log_metric_step_zero_preserved(clean_env, tmp_path, monkeypatch):
 
 
 def test_log_metric_step_none_uses_ctx_fallback(clean_env, tmp_path, monkeypatch):
-    """step=None reads ctx._current_step (set by a prior explicit call)."""
+    """step=None reads ctx.current_step (set by a prior explicit call)."""
     monkeypatch.chdir(tmp_path)
     ctx = runq.context()
-    runq.log_metric("a", 1.0, step=7)   # sets ctx._current_step=7
+    runq.log_metric("a", 1.0, step=7)   # sets ctx.current_step=7
     runq.log_metric("b", 2.0)           # no step → uses ctx (7)
     runq.log_metric("c", 3.0)           # still 7
     events = _read_events(tmp_path / "runq_metrics.jsonl")
     assert [e["step"] for e in events] == [7, 7, 7]
-    assert ctx._current_step == 7
+    assert ctx.current_step == 7
 
 
 def test_log_metric_step_none_with_unset_ctx_writes_null(clean_env, tmp_path, monkeypatch):
@@ -73,9 +73,9 @@ def test_log_metric_explicit_step_writes_back_to_ctx(clean_env, tmp_path, monkey
     monkeypatch.chdir(tmp_path)
     ctx = runq.context()
     runq.log_metric("a", 1.0, step=3)
-    assert ctx._current_step == 3
+    assert ctx.current_step == 3
     runq.log_metric("b", 2.0, step=10)
-    assert ctx._current_step == 10
+    assert ctx.current_step == 10
     runq.log_metric("c", 3.0)
     events = _read_events(tmp_path / "runq_metrics.jsonl")
     assert [e["step"] for e in events] == [3, 10, 10]

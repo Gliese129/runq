@@ -2,7 +2,7 @@
 
 The hook-orchestration tests live in `test_early_stop.py`. These tests
 focus on report()'s mechanical contract: writes metrics to jsonl,
-appends to history, maintains ctx._current_step.
+appends to history, maintains ctx.current_step.
 
 Most tests here run with ZERO hooks registered — they exercise only
 the no-hook path of `_run_early_stop_hooks`, which still has to
@@ -95,7 +95,7 @@ def test_report_explicit_step_writes_back_to_ctx(clean_env, tmp_path, monkeypatc
     monkeypatch.chdir(tmp_path)
     ctx = runq.context()
     runq.report({"loss": 0.5}, step=7)
-    assert ctx._current_step == 7
+    assert ctx.current_step == 7
 
 
 def test_report_step_none_uses_ctx_fallback(clean_env, tmp_path, monkeypatch):
@@ -111,11 +111,11 @@ def test_report_step_zero_preserved(clean_env, tmp_path, monkeypatch):
     """step=0 is legal — does NOT fall back to ctx."""
     monkeypatch.chdir(tmp_path)
     ctx = runq.context()
-    ctx._current_step = 99  # noise that fallback would pick up if step=0 misread
+    ctx.current_step = 99  # noise that fallback would pick up if step=0 misread
     runq.report({"loss": 0.5}, step=0)
     events = _read_events(tmp_path / "runq_metrics.jsonl")
     assert events[0]["step"] == 0
-    assert ctx._current_step == 0  # writeback also went through
+    assert ctx.current_step == 0  # writeback also went through
 
 
 def test_report_step_none_with_unset_ctx_writes_null(clean_env, tmp_path, monkeypatch):
@@ -127,7 +127,7 @@ def test_report_step_none_with_unset_ctx_writes_null(clean_env, tmp_path, monkey
 
 
 def test_report_and_log_metric_share_step_view(clean_env, tmp_path, monkeypatch):
-    """Both helpers read+write the same ctx._current_step."""
+    """Both helpers read+write the same ctx.current_step."""
     monkeypatch.chdir(tmp_path)
     runq.context()
     runq.report({"a": 1.0}, step=10)

@@ -48,6 +48,7 @@ from typing import Any, Callable, List, Optional, Union
 
 from ._context import get_ctx
 from ._events import _append_event
+from ._prefix import apply_prefix
 
 
 _LOG = logging.getLogger(__name__)
@@ -163,7 +164,7 @@ def report(
     Behavior in order:
 
     1. Resolve step: explicit ``step=N`` writes back to
-       ``ctx._current_step`` and is used for this report. Otherwise
+       ``ctx.current_step`` and is used for this report. Otherwise
        the ctx value is used (may be None).
     2. Emit one ``{"type":"metric", ...}`` event per ``(key, value)``
        in ``metrics`` to jsonl. Same path / format as
@@ -198,20 +199,21 @@ def report(
 
     ctx = get_ctx()
     if step is not None:
-        ctx._current_step = step
+        ctx.current_step = step
         resolved_step: Optional[int] = step
     else:
-        resolved_step = ctx._current_step
+        resolved_step = ctx.current_step
 
     ts = int(time.time())
 
     # Emit one jsonl event per metric. Same format as log_metric so
     # daemon-side reap doesn't need to special-case report's output.
+    # Active log_group prefix (if any) is applied per-key.
     for key, value in metrics.items():
         _append_event(
             {
                 "type": "metric",
-                "key": str(key),
+                "key": apply_prefix(str(key)),
                 "value": float(value),
                 "step": resolved_step,
                 "ts": ts,
@@ -220,6 +222,8 @@ def report(
 
     # History entry — hooks see the *combined* metrics dict (not one
     # entry per key), which is what plateau / patience checks want.
+    # NB: history keeps the user-facing key names (no prefix) so hook
+    # code doesn't have to know about log_group.
     history_entry = {
         "metrics": dict(metrics),  # copy so hook mutation can't poison history
         "step": resolved_step,
@@ -227,7 +231,10 @@ def report(
     }
     _history.append(history_entry)
 
-    return _run_early_stop_hooks(metrics)
+    decision = _run_early_stop_hooks(metrics)
+    # Step 8: loop() reads this on its next iteration.
+    ctx._last_decision = decision
+    return decision
 
 
 # ---- hook orchestration -------------------------------------------
@@ -264,6 +271,31 @@ def _run_early_stop_hooks(current_metrics: dict) -> Decision:
     return Decision(should_stop=False, reason=None)
 
 
+# ---- public introspection helpers ---------------------------------
+
+def latest_report_metrics() -> dict:
+    """Return the metrics dict from the most recent :func:`report` call.
+
+    Returns ``{}`` if ``report`` has not been called yet. The dict is a
+    snapshot — the caller is free to merge / mutate without poisoning
+    runq's history. Used by ``ctx.wandb_like_metric`` and by anyone
+    else who needs "what did I just report?" without holding the
+    history list themselves.
+    """
+    if not _history:
+        return {}
+    return dict(_history[-1]["metrics"])
+
+
+def history_snapshot() -> List[dict]:
+    """Return a copy of the full report history.
+
+    Each entry is ``{"metrics": dict, "step": int|None, "ts": int}``.
+    Public for power-user inspection + tests; lazy users never need it.
+    """
+    return list(_history)
+
+
 # ---- testing helpers ----------------------------------------------
 
 def _reset_for_tests() -> None:
@@ -272,6 +304,5 @@ def _reset_for_tests() -> None:
     _history.clear()
 
 
-def _get_history_for_tests() -> List[dict]:
-    """Snapshot of the history list. Tests only."""
-    return list(_history)
+# Back-compat alias for tests that imported the old private name.
+_get_history_for_tests = history_snapshot

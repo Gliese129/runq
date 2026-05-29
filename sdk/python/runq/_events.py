@@ -12,7 +12,7 @@ breaking users.
 Step resolution
 ---------------
 Step 6 retired the hidden monotonic auto-step counter. The single
-source of truth for "what step is this?" is ``ctx._current_step``,
+source of truth for "what step is this?" is ``ctx.current_step``,
 maintained by:
 
 - ``report(metrics, step=N)`` — explicit step writes back to ctx.
@@ -31,6 +31,7 @@ import time
 from typing import Optional
 
 from ._context import get_ctx
+from ._prefix import apply_prefix
 
 
 def _append_event(event: dict) -> None:
@@ -67,9 +68,9 @@ def log_metric(key: str, value: float, step: Optional[int] = None) -> None:
     Step semantics (step 6 contract)
     --------------------------------
     - ``step=N`` (explicit) — written to jsonl AND saved back to
-      ``ctx._current_step``. Future ``report`` / ``log_metric`` calls
+      ``ctx.current_step``. Future ``report`` / ``log_metric`` calls
       without ``step=`` will see ``N`` until it's updated.
-    - ``step=None`` — read ``ctx._current_step`` as fallback. If the ctx
+    - ``step=None`` — read ``ctx.current_step`` as fallback. If the ctx
       step has never been set, ``step=null`` ends up in jsonl. There is
       NO auto-increment counter.
 
@@ -82,14 +83,14 @@ def log_metric(key: str, value: float, step: Optional[int] = None) -> None:
     """
     ctx = get_ctx()
     if step is not None:
-        ctx._current_step = step
+        ctx.current_step = step
         resolved_step: Optional[int] = step
     else:
-        resolved_step = ctx._current_step
+        resolved_step = ctx.current_step
     _append_event(
         {
             "type": "metric",
-            "key": key,
+            "key": apply_prefix(key),
             "value": float(value),
             "step": resolved_step,
             "ts": int(time.time()),

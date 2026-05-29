@@ -227,6 +227,73 @@ def test_keep_best_demotion_after_new_best(daemon_ctx, monkeypatch):
     assert _names_in(daemon_ctx.checkpoint_dir) == ["latest.pt", "new_best.pt"]
 
 
+# ---- step ownership (F5.5) ----------------------------------------
+
+def test_safe_save_explicit_step_writes_back_to_ctx(daemon_ctx, monkeypatch):
+    """Explicit step= updates ctx.current_step (matches report semantics)."""
+    monkeypatch.setattr(shutil, "disk_usage", _disk_usage_seq([1 << 50]))
+
+    def save_fn(path, obj):
+        Path(path).write_text(obj)
+
+    runq.safe_save("ckpt.pt", "x", save_fn=save_fn, size_hint=100, step=7)
+    assert daemon_ctx.current_step == 7
+
+
+def test_safe_save_no_step_falls_back_to_ctx_current_step(daemon_ctx, monkeypatch):
+    """Without explicit step, safe_save uses ctx.current_step from loop/report."""
+    monkeypatch.setattr(shutil, "disk_usage", _disk_usage_seq([1 << 50]))
+    daemon_ctx.current_step = 42
+
+    def save_fn(path, obj):
+        Path(path).write_text(obj)
+
+    runq.safe_save("ckpt.pt", "x", save_fn=save_fn, size_hint=100)
+
+    m = _load_manifest(daemon_ctx.checkpoint_dir)
+    assert m["entries"][0]["step"] == 42
+
+
+def test_safe_save_no_step_no_ctx_writes_null(daemon_ctx, monkeypatch):
+    monkeypatch.setattr(shutil, "disk_usage", _disk_usage_seq([1 << 50]))
+
+    def save_fn(path, obj):
+        Path(path).write_text(obj)
+
+    runq.safe_save("ckpt.pt", "x", save_fn=save_fn, size_hint=100)
+    m = _load_manifest(daemon_ctx.checkpoint_dir)
+    assert m["entries"][0]["step"] is None
+
+
+def test_safe_save_decorator_uses_ctx_step_fallback(daemon_ctx, monkeypatch):
+    """@safe_save decorator path should also honor ctx.current_step."""
+    monkeypatch.setattr(shutil, "disk_usage", _disk_usage_seq([1 << 50]))
+    daemon_ctx.current_step = 99
+
+    @runq.safe_save
+    def my_save(path, data):
+        Path(path).write_text(data)
+
+    my_save("ckpt.pt", "data", size_hint=100)
+    m = _load_manifest(daemon_ctx.checkpoint_dir)
+    assert m["entries"][0]["step"] == 99
+
+
+def test_safe_save_inside_loop_picks_up_loop_step(daemon_ctx, monkeypatch):
+    """The integration test: loop sets step, safe_save uses it without explicit kwarg."""
+    monkeypatch.setattr(shutil, "disk_usage", _disk_usage_seq([1 << 50]))
+
+    def save_fn(path, obj):
+        Path(path).write_text(obj)
+
+    for _ in runq.loop(range(3)):
+        runq.safe_save(f"ck-{daemon_ctx.current_step}.pt", "x",
+                       save_fn=save_fn, size_hint=100)
+
+    m = _load_manifest(daemon_ctx.checkpoint_dir)
+    assert [e["step"] for e in m["entries"]] == [0, 1, 2]
+
+
 # ---- safety invariants --------------------------------------------
 
 def test_save_outside_checkpoint_dir_not_tracked(daemon_ctx, monkeypatch, tmp_path):
