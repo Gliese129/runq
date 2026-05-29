@@ -1,20 +1,26 @@
-package scheduler
+package ingest
 
 import (
 	"bufio"
 	"context"
 	"encoding/json"
 	"os"
-	"path/filepath"
 
 	"github.com/bytedance/gopkg/util/logger"
 	"github.com/gliese129/runq/internal/store"
+	"github.com/gliese129/runq/internal/workspace"
 )
 
-// ReapResult summarizes what was ingested from <task_dir>/metrics.jsonl
-// after a task exit. Counts are informational (logged by reapMetrics);
-// no decision logic depends on them.
-type ReapResult struct {
+// Target identifies the task workspace whose SDK outputs should be ingested.
+type Target struct {
+	TaskID string
+	JobID  string
+	Dir    string
+}
+
+// Result summarizes what was ingested from <task_dir>/metrics.jsonl.
+// Counts are informational; no decision logic depends on them.
+type Result struct {
 	MetricCount     int
 	CheckpointCount int
 }
@@ -24,11 +30,8 @@ type ReapResult struct {
 //	{"type":"metric","key":"loss","value":0.42,"step":100,"ts":1700000000}
 //	{"type":"checkpoint","path":"...","size_bytes":1024,"step":100,"is_best":true,"ts":...}
 //
-// `task_id` / `job_id` are NOT in the SDK payload — daemon fills them
-// from the running Task context, because the SDK already has enough
-// trouble computing the rest. Keeping the SDK ignorant of internal IDs
-// also means we can rename store.MetricRow / store.CheckpointRow without
-// breaking the SDK.
+// `task_id` / `job_id` are NOT in the SDK payload. The caller supplies them
+// through Target, keeping the SDK ignorant of internal DB schemas.
 type metricEvent struct {
 	Key   string  `json:"key"`
 	Value float64 `json:"value"`
@@ -44,41 +47,40 @@ type checkpointEvent struct {
 	TS        int64  `json:"ts"`
 }
 
-// ReapTaskOutputs reads <task.TaskDir>/metrics.jsonl, parses each line as a
-// typed event, and batch-inserts metric / checkpoint rows into the store.
+// ReapOutputs reads <target.Dir>/metrics.jsonl, parses each line as a typed
+// event, and batch-inserts metric / checkpoint rows into the store.
 //
 // Recognized event shapes (line-delimited JSON):
 //
 //	{"type":"metric",     ...metricEvent fields...}
 //	{"type":"checkpoint", ...checkpointEvent fields...}
 //
-// `type` is required; any other value is logged at debug and skipped —
-// forward compat for SDK additions. Per-line JSON parse errors are logged
-// at warn and the line is skipped (the rest of the file still gets
-// processed).
+// `type` is required; any other value is logged at debug and skipped for
+// forward compatibility. Per-line JSON parse errors are logged at warn and the
+// line is skipped; the rest of the file still gets processed.
 //
 // Notes:
-//   - Missing file → (ReapResult{}, nil). Empty / no-SDK tasks are normal.
+//   - Missing file -> (Result{}, nil). Empty / no-SDK tasks are normal.
 //   - bufio.Scanner buffer is raised to 10 MB to tolerate long metric rows.
-//   - INSERT OR IGNORE in the batch methods makes re-reaping idempotent —
-//     matters for the MonitorReattached path after daemon restart.
-//   - `ts` from the SDK is preserved as-is; daemon does not re-stamp.
+//   - INSERT OR IGNORE in the store batch methods makes re-reaping idempotent.
+//     This is a hard dependency for future daemonless status refresh, which may
+//     reread the same jsonl multiple times.
+//   - `ts` from the SDK is preserved as-is; ingest does not re-stamp.
 //   - Reap MUST NOT propagate errors that would change the task's terminal
-//     status. The caller (reapMetrics) treats any error as warn-only.
+//     status. Callers should treat returned errors as warn-only.
 //
-// disk_low events are NOT consumed here — in the SDK-driven freeze model
-// the SDK posts /api/internal/freeze-self at runtime; by the time
-// metrics.jsonl is reaped the freeze decision is long gone. If an old
-// metrics.jsonl from a pre-pivot task still has a disk_low line, it
-// falls through to the "unknown type" branch and gets logged at debug.
-func ReapTaskOutputs(ctx context.Context, st *store.Store, task *Task) (ReapResult, error) {
-	path := filepath.Join(task.TaskDir, "metrics.jsonl")
+// disk_low events are NOT consumed here. In the SDK-driven freeze model the SDK
+// posts /api/internal/freeze-self at runtime; by the time metrics.jsonl is
+// reaped the freeze decision is long gone. If an old jsonl from a pre-pivot
+// task still has a disk_low line, it falls through to the "unknown type" branch.
+func ReapOutputs(ctx context.Context, st *store.Store, target Target) (Result, error) {
+	path := workspace.MetricsPath(target.Dir)
 	f, err := os.Open(path)
 	if os.IsNotExist(err) {
-		return ReapResult{}, nil
+		return Result{}, nil
 	}
 	if err != nil {
-		return ReapResult{}, err
+		return Result{}, err
 	}
 	defer f.Close()
 
@@ -87,9 +89,8 @@ func ReapTaskOutputs(ctx context.Context, st *store.Store, task *Task) (ReapResu
 
 	metrics := make([]store.MetricRow, 0)
 	ckpts := make([]store.CheckpointRow, 0)
-	result := ReapResult{}
+	result := Result{}
 
-	// Decode just the type discriminator first, then a typed struct.
 	type typeOnly struct {
 		Type string `json:"type"`
 	}
@@ -114,8 +115,8 @@ func ReapTaskOutputs(ctx context.Context, st *store.Store, task *Task) (ReapResu
 				continue
 			}
 			metrics = append(metrics, store.MetricRow{
-				TaskID: task.ID,
-				JobID:  task.JobID,
+				TaskID: target.TaskID,
+				JobID:  target.JobID,
 				Key:    e.Key,
 				Value:  e.Value,
 				Step:   e.Step,
@@ -129,8 +130,8 @@ func ReapTaskOutputs(ctx context.Context, st *store.Store, task *Task) (ReapResu
 				continue
 			}
 			ckpts = append(ckpts, store.CheckpointRow{
-				TaskID:    task.ID,
-				JobID:     task.JobID,
+				TaskID:    target.TaskID,
+				JobID:     target.JobID,
 				Path:      e.Path,
 				SizeBytes: e.SizeBytes,
 				Step:      e.Step,

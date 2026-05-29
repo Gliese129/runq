@@ -1,4 +1,4 @@
-package service
+package utils
 
 import (
 	"crypto/rand"
@@ -6,7 +6,7 @@ import (
 )
 
 // GenerateID returns a short, human-friendly 8-hex-char ID.
-// Format: 4 bytes random → "a3f1b20e". Collision probability is negligible
+// Format: 4 bytes random -> "a3f1b20e". Collision probability is negligible
 // at lab scale (< 10k tasks): ~1 in 4 billion per pair.
 func GenerateID() string {
 	rd := make([]byte, 4)

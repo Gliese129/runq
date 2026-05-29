@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gliese129/runq/internal/executor"
+	"github.com/gliese129/runq/internal/ingest"
 )
 
 // buildTaskEnv merges task.Env with the RUNQ_* environment variables the SDK
@@ -156,7 +157,11 @@ func (s *Scheduler) completeTask(task *Task, status TaskStatus) {
 // defer and from MonitorReattached's defer, so any panic here would
 // orphan a task. Keep this function dumb.
 func (s *Scheduler) reapMetrics(task *Task) {
-	result, err := ReapTaskOutputs(s.ctx, s.store, task)
+	result, err := ingest.ReapOutputs(s.ctx, s.store, ingest.Target{
+		TaskID: task.ID,
+		JobID:  task.JobID,
+		Dir:    task.TaskDir,
+	})
 	if err != nil {
 		s.logger.Warn("reap failed", "task", task.ID, "error", err)
 		return

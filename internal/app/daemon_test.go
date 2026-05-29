@@ -104,7 +104,7 @@ func TestRestoreRuntimeStateRestoresPausedJobsBeforeScheduling(t *testing.T) {
 //     the command can find RUNQ_METRICS_FILE / RUNQ_TASK_DIR.
 //  3. The task writes a metric and a checkpoint to metrics.jsonl using
 //     the flat SDK event format (no `data` wrapper).
-//  4. After the task exits, scheduler.runTask invokes ReapTaskOutputs
+//  4. After the task exits, scheduler.runTask invokes shared ingest
 //     which parses metrics.jsonl and batch-inserts metric + checkpoint
 //     rows into the store. TaskID and JobID are filled by the daemon
 //     from the task context (not by the SDK).

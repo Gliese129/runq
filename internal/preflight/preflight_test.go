@@ -1,4 +1,4 @@
-package service
+package preflight
 
 // Test spec for preflight.go — for Codex to flesh out.
 //
@@ -10,7 +10,7 @@ package service
 // bottom of this file).
 //
 // The cases below are the spec; the file lives here so `go test
-// ./internal/service/...` discovers it. Codex: please flesh out the
+// ./internal/preflight/...` discovers it. Codex: please flesh out the
 // bodies.
 
 import (
@@ -185,9 +185,9 @@ func withPythonScript(t *testing.T, workingDir, name, source string) string {
 	return p
 }
 
-// withFakePythonOnPath puts a tiny bash stub named ``python`` (and
-// ``python3``) at the front of $PATH for the test's lifetime. The stub
-// reads its argv and behaves according to ``behavior`` — typically
+// withFakePythonOnPath puts a tiny bash stub named “python“ (and
+// “python3“) at the front of $PATH for the test's lifetime. The stub
+// reads its argv and behaves according to “behavior“ — typically
 // "ok" (exit 0) or "missing" (exit 1 with a ModuleNotFoundError-style
 // message). Use this in checkImports / checkPipCheck tests to keep
 // the suite hermetic.
@@ -239,8 +239,8 @@ func withContext(t *testing.T, timeout time.Duration) (context.Context, context.
 	return context.WithTimeout(context.Background(), timeout)
 }
 
-// requireFinding asserts that ``findings`` contains at least one entry
-// whose Detail field substring-matches ``want``. Codex: this is the
+// requireFinding asserts that “findings“ contains at least one entry
+// whose Detail field substring-matches “want“. Codex: this is the
 // idiomatic assertion shape for the table-driven tests above.
 func requireFinding(t *testing.T, findings []PreflightFinding, want string) {
 	t.Helper()

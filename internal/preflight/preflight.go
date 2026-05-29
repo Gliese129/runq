@@ -1,4 +1,4 @@
-package service
+package preflight
 
 import (
 	"context"
@@ -59,6 +59,25 @@ func DefaultPreflight() Preflight {
 		PipCheckTimeout: 10 * time.Second,
 		ImportTimeout:   5 * time.Second,
 	}
+}
+
+// Run executes the default preflight checks against a project and expanded
+// task params. It renders the sample command internally so callers do not need
+// to duplicate the "first task is representative" convention.
+func Run(ctx context.Context, proj *project.Config, taskParams []job.TaskParams, skip bool) error {
+	pf := DefaultPreflight()
+	pf.Skip = skip
+	return pf.Run(ctx, proj, taskParams)
+}
+
+// Run executes this Preflight configuration after rendering a representative
+// sample command from the expanded task params.
+func (p Preflight) Run(ctx context.Context, proj *project.Config, taskParams []job.TaskParams) error {
+	sampleCmd, err := renderSampleCommand(proj, taskParams)
+	if err != nil {
+		return err
+	}
+	return p.RunPreflight(ctx, proj, sampleCmd)
 }
 
 // PreflightFinding is one failed check.
@@ -140,15 +159,15 @@ func (p Preflight) RunPreflight(ctx context.Context, proj *project.Config, sampl
 
 // ---- (1) writability ----------------------------------------------
 
-// checkWritable verifies that ``dir`` exists and is writable by the
+// checkWritable verifies that “dir“ exists and is writable by the
 // current user (the runqd process). Two failure modes are split into
 // distinct findings so the operator sees the actionable bit:
 //
 //   - doesn't exist → "create it"
 //   - exists but read-only → "chmod / chown it"
 //
-// We probe writability with a real ``os.CreateTemp`` because
-// ``os.Access(W_OK)`` is platform-specific (no stdlib helper) and
+// We probe writability with a real “os.CreateTemp“ because
+// “os.Access(W_OK)“ is platform-specific (no stdlib helper) and
 // unreliable on FUSE / NFS where ACLs lie.
 func checkWritable(dir, label string) []PreflightFinding {
 	if dir == "" {
