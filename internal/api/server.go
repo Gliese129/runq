@@ -53,6 +53,7 @@ type Deps struct {
 	// Service layer — handlers delegate business logic here.
 	JobService interface {
 		SubmitJob(ctx context.Context, jobCfg job.JobConfig) (string, int, error)
+		SubmitJobWithOpts(ctx context.Context, jobCfg job.JobConfig, opts service.SubmitJobOpts) (string, int, error)
 		ListJobs(ctx context.Context, project string) ([]service.JobSummary, error)
 		ShowJob(ctx context.Context, jobID string) (*service.JobDetail, error)
 		KillJob(ctx context.Context, jobID string) (int, error)

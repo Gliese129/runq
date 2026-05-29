@@ -2,6 +2,8 @@
 
 A lightweight GPU job scheduler for research labs.
 
+![runq overview poster](assets/poster-en.png)
+
 If your lab's GPU workflow looks like this:
 
 ```bash
@@ -53,7 +55,7 @@ One binary, no containers, no cluster admin. runq is not an ops tool — it just
 | Disk fills up | Auto-pause + alert (planned) | Everything dies, good morning | Rarely an issue (dedicated storage) |
 | Works on HPC / SLURM | Yes (template mode) | Nope (login node thread limits) | It *is* SLURM |
 
-runq fills the gap between "everyone just runs stuff manually" and "we need a full cluster scheduler." If your lab has one machine with a few GPUs and a few students, this is probably the right level of tooling.
+runq fills the gap between "everyone just runs stuff manually" and "we need a full cluster scheduler." If your lab moves between shared GPU machines and HPC jobs, this is meant to be the lightweight layer that keeps the workflow consistent.
 
 It also works on HPC clusters (SLURM, PBS, SGE) — runq doesn't replace the cluster scheduler, it just handles sweep expansion, param injection, and log management on top of it. Same workflow, whether you're on a lab machine or submitting to TSUBAME.
 

@@ -43,9 +43,13 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	// 2. Data directory
 	fmt.Println("Data dir:")
 	info, err := os.Stat(paths.DataDir)
-	check(err == nil && info.IsDir(),
-		fmt.Sprintf("%s (%s)", paths.DataDir, info.Mode()),
-		fmt.Sprintf("%s: %v", paths.DataDir, err))
+	if err != nil {
+		check(false, "", fmt.Sprintf("%s: %v", paths.DataDir, err))
+	} else if !info.IsDir() {
+		check(false, "", fmt.Sprintf("%s: exists but is not a directory", paths.DataDir))
+	} else {
+		check(true, fmt.Sprintf("%s (%s)", paths.DataDir, info.Mode()), "")
+	}
 
 	// 3. Database
 	fmt.Println("Database:")

@@ -337,9 +337,10 @@ func TestThawForceSkipsDiskCheck(t *testing.T) {
 	waitForState(t, cmd.Process.Pid, false)
 }
 
-// TestSIGTERMPenetratesSIGSTOP — `runq kill <task>` must work even on a
-// frozen task; SIGTERM passes through SIGSTOP semantics on Linux/Mac.
-func TestSIGTERMPenetratesSIGSTOP(t *testing.T) {
+// TestSIGKILLPenetratesSIGSTOP — `runq kill <task>` must work even on a
+// frozen task. SIGTERM can remain pending while a task is SIGSTOPped, but
+// Executor.Stop ultimately uses SIGKILL, which must terminate it promptly.
+func TestSIGKILLPenetratesSIGSTOP(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("signals differ on Windows")
 	}
@@ -347,53 +348,76 @@ func TestSIGTERMPenetratesSIGSTOP(t *testing.T) {
 	fs := NewFreezeState()
 	fs.Freeze(FreezeEvent{Reason: "test"},
 		map[string]FrozenTask{"t1": {PID: cmd.Process.Pid, Mount: "/tmp", JobID: "j1"}})
+	waitForState(t, cmd.Process.Pid, true)
 
-	// SIGTERM to process group (matches what TaskService.KillTask does
-	// indirectly via Executor.Stop → context cancel → SIGKILL on pgroup).
-	pgid, err := syscall.Getpgid(cmd.Process.Pid)
-	if err != nil {
-		t.Fatalf("Getpgid: %v", err)
+	if err := cmd.signalGroup(syscall.SIGKILL); err != nil {
+		t.Fatalf("Kill -SIGKILL: %v", err)
 	}
-	if err := syscall.Kill(-pgid, syscall.SIGTERM); err != nil {
-		t.Fatalf("Kill -SIGTERM: %v", err)
-	}
-
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
-	select {
-	case <-done:
-		// died — good
-	case <-time.After(5 * time.Second):
-		t.Fatal("SIGTERM should have killed the frozen process within 5s")
+	if !cmd.waitExited(5 * time.Second) {
+		t.Fatal("SIGKILL should have killed the frozen process within 5s")
 	}
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────
 
-// startSleeper forks a `sleep 60` in its own process group (matching how
-// Executor.Start launches user commands) so SIGSTOP/SIGCONT on -pgid behaves
-// like real tasks. The cleanup t.Cleanup kills it even if test fails.
-func startSleeper(t *testing.T) *exec.Cmd {
+type testSleeper struct {
+	Process *os.Process
+	done    chan error
+}
+
+// startSleeper forks a `sleep 60` in its own process group so
+// SIGSTOP/SIGCONT on -pgid behaves like real tasks. It starts exactly one
+// waiter goroutine; tests and cleanup observe that channel instead of calling
+// Cmd.Wait multiple times, which the race detector quite reasonably hates.
+func startSleeper(t *testing.T) *testSleeper {
 	t.Helper()
-	cmd := exec.Command("sh", "-c", "sleep 60")
+	cmd := exec.Command("sleep", "60")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start sleeper: %v", err)
 	}
+	s := &testSleeper{
+		Process: cmd.Process,
+		done:    make(chan error, 1),
+	}
+	go func() {
+		s.done <- cmd.Wait()
+		close(s.done)
+	}()
 	t.Cleanup(func() {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
+		if err := s.signalGroup(syscall.SIGKILL); err != nil {
+			_ = s.Process.Kill()
+		}
+		_ = s.waitExited(2 * time.Second)
 	})
-	return cmd
+	return s
+}
+
+func (s *testSleeper) signalGroup(sig syscall.Signal) error {
+	pgid, err := syscall.Getpgid(s.Process.Pid)
+	if err != nil {
+		return err
+	}
+	return syscall.Kill(-pgid, sig)
+}
+
+func (s *testSleeper) waitExited(timeout time.Duration) bool {
+	select {
+	case <-s.done:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
 }
 
 // waitForState polls the process state and asserts whether it is currently
-// stopped (T) or running (R/S/D). Times out after 2s — generous because
+// stopped (T) or running (R/S/D). Times out after 5s — generous because
 // SIGSTOP propagation can lag on slow CI.
 func waitForState(t *testing.T, pid int, wantStopped bool) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(5 * time.Second)
 	var lastErr error
+	var lastStopped bool
 	for time.Now().Before(deadline) {
 		stopped, err := isStopped(pid)
 		if err != nil {
@@ -402,6 +426,7 @@ func waitForState(t *testing.T, pid int, wantStopped bool) {
 			}
 			lastErr = err
 		}
+		lastStopped = stopped
 		if err == nil && stopped == wantStopped {
 			return
 		}
@@ -411,7 +436,10 @@ func waitForState(t *testing.T, pid int, wantStopped bool) {
 	if err != nil && os.IsPermission(err) {
 		t.Skipf("process state inspection unavailable in this sandbox: %v", err)
 	}
-	t.Errorf("pid %d: wantStopped=%v after 2s, actual=%v err=%v", pid, wantStopped, stopped, lastErr)
+	if err == nil {
+		lastStopped = stopped
+	}
+	t.Errorf("pid %d: wantStopped=%v after 5s, actual=%v err=%v", pid, wantStopped, lastStopped, lastErr)
 }
 
 // isStopped inspects the OS to determine whether the process is in stopped
