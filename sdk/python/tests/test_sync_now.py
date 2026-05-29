@@ -31,7 +31,6 @@ import pytest
 import runq
 from runq import _sync
 
-
 # ---- helpers ----
 
 class _FakeCompleted:

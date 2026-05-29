@@ -43,13 +43,12 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable, List, Optional, Union
 
 from ._context import get_ctx
 from ._events import _append_event
 from ._prefix import apply_prefix
-
 
 _LOG = logging.getLogger(__name__)
 
@@ -79,24 +78,24 @@ class Decision:
     """
 
     should_stop: bool = False
-    reason: Optional[str] = None
+    reason: str | None = None
 
 
 # Hook signature: (history, metrics) -> truthy stops, falsy continues.
 # Concrete: ``Callable[[list[dict], dict], Union[bool, str, None]]``.
-EarlyStopHook = Callable[[List[dict], dict], Union[bool, str, None]]
+EarlyStopHook = Callable[[list[dict], dict], bool | str | None]
 
 
 # ---- module state -------------------------------------------------
 
 # Registered hooks, in declaration order. The very first one that
 # returns truthy wins.
-_hooks: List[EarlyStopHook] = []
+_hooks: list[EarlyStopHook] = []
 
 # History of (metrics, step, ts) entries handed to ``report``. Hooks
 # see this as their first argument so they can compute moving averages
 # / plateau detection / convergence checks. Reset between tests.
-_history: List[dict] = []
+_history: list[dict] = []
 
 
 # ---- public API ---------------------------------------------------
@@ -157,7 +156,7 @@ def early_stop(fn: EarlyStopHook) -> EarlyStopHook:
 
 def report(
     metrics: dict,
-    step: Optional[int] = None,
+    step: int | None = None,
 ) -> Decision:
     """Canonical "I just finished a step" call.
 
@@ -200,7 +199,7 @@ def report(
     ctx = get_ctx()
     if step is not None:
         ctx.current_step = step
-        resolved_step: Optional[int] = step
+        resolved_step: int | None = step
     else:
         resolved_step = ctx.current_step
 
@@ -287,7 +286,7 @@ def latest_report_metrics() -> dict:
     return dict(_history[-1]["metrics"])
 
 
-def history_snapshot() -> List[dict]:
+def history_snapshot() -> list[dict]:
     """Return a copy of the full report history.
 
     Each entry is ``{"metrics": dict, "step": int|None, "ts": int}``.

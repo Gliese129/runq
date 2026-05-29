@@ -157,7 +157,7 @@ def test_short_timeout_aborts(sock_path):
             while not stop.is_set():
                 try:
                     conn, _ = s.accept()
-                except socket.timeout:
+                except TimeoutError:
                     continue
                 # Accept but never respond — until we're asked to stop.
                 while not stop.is_set():

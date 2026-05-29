@@ -26,7 +26,6 @@ import pytest
 import runq
 from runq import _manifest
 
-
 # ---- fixtures ----
 
 def _disk_usage_seq(values):

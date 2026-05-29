@@ -7,7 +7,6 @@ import pytest
 import runq
 from runq._context import _detect_mode
 
-
 # ---- mode detection ----
 
 def test_manual_mode_no_env(clean_env, tmp_path, monkeypatch):

@@ -26,7 +26,6 @@ import pytest
 
 from runq import _manifest
 
-
 # ---- helpers --------------------------------------------------------
 
 def _read_raw(checkpoint_dir: Path) -> dict:

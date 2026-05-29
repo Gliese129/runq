@@ -6,7 +6,7 @@ regardless.
 """
 import pytest
 
-from runq._sizing import estimate_size, _PICKLE_OVERHEAD
+from runq._sizing import _PICKLE_OVERHEAD, estimate_size
 
 
 def test_no_recognized_objects_returns_none():

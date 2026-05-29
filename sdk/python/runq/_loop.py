@@ -25,20 +25,20 @@ from __future__ import annotations
 
 import functools
 import time
-from typing import Any, Callable, Iterable, Iterator, Optional
+from collections.abc import Callable, Iterable, Iterator
+from typing import Any
 
 from ._context import get_ctx
 from ._events import _append_event
 from ._prefix import _prefix_stack, apply_prefix
-
 
 # ---- loop() -------------------------------------------------------
 
 def loop(
     iterable: Iterable[Any],
     *,
-    name: Optional[str] = None,
-    total: Optional[int] = None,
+    name: str | None = None,
+    total: int | None = None,
 ) -> Iterator[Any]:
     """Generator wrapping ``iterable`` with auto early-stop break.
 
@@ -236,7 +236,7 @@ class _LogGroup:
         self._token = None
     def __enter__(self):
         cur = _prefix_stack.get()
-        self._token = _prefix_stack.set(cur + (self._prefix,))
+        self._token = _prefix_stack.set((*cur, self._prefix))
         return self
     def __exit__(self, exc_type, exc, tb):
         _prefix_stack.reset(self._token)

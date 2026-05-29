@@ -26,7 +26,11 @@ from ._safe_save import safe_save
 from ._sync import sync_now
 from ._transport import TransportError
 
-__all__ = [
+# NB: __all__ is grouped by *topic* (init / metrics / policies / loop /
+# exceptions), not alphabetically. The grouping makes the API surface
+# discoverable to lazy users reading ``help(runq)``; ruff's RUF022 wants
+# alphabetical, which would scramble it. Hence the noqa.
+__all__ = [  # noqa: RUF022
     "Context",
     "context",
     "get_ctx",

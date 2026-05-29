@@ -27,6 +27,20 @@ type JobService struct {
 	Exec      *executor.Executor
 	Registry  *project.Registry
 	Pool      resource.Allocator
+
+	// Preflight controls the F8 fail-before-queue checks. Zero value
+	// = defaults (skip=false, sane timeouts). The CLI's
+	// --no-preflight flag flips Preflight.Skip on a per-call basis
+	// via SubmitJobOpts (below) — this field is the daemon-wide
+	// fallback / default.
+	Preflight Preflight
+}
+
+// SubmitJobOpts carries per-call overrides for SubmitJob. Today the
+// only knob is whether to skip preflight; future per-call flags
+// (e.g. priority) land here so the function signature doesn't bloat.
+type SubmitJobOpts struct {
+	SkipPreflight bool
 }
 
 // JobSummary is the API response for job listing.
@@ -47,7 +61,19 @@ type JobDetail struct {
 
 // SubmitJob validates, expands, persists, and enqueues a job.
 // Returns the job ID and total task count.
+//
+// Calls preflight (F8 — fail-before-queue checks) after sweep expansion
+// but before any DB writes, so an invalid env / missing path / broken
+// import surfaces at submit time rather than after a 2-hour queue wait.
+// Use SubmitJobWithOpts to pass per-call options such as --no-preflight.
 func (s *JobService) SubmitJob(ctx context.Context, jobCfg job.JobConfig) (string, int, error) {
+	return s.SubmitJobWithOpts(ctx, jobCfg, SubmitJobOpts{})
+}
+
+// SubmitJobWithOpts is SubmitJob plus the per-call options struct.
+// Lives as a separate symbol so existing callers (tests, internal
+// schedulers) don't have to learn the new arg.
+func (s *JobService) SubmitJobWithOpts(ctx context.Context, jobCfg job.JobConfig, opts SubmitJobOpts) (string, int, error) {
 	// Validate project exists.
 	proj, err := s.Registry.Get(jobCfg.Project)
 	if err != nil {
@@ -119,6 +145,20 @@ func (s *JobService) SubmitJob(ctx context.Context, jobCfg job.JobConfig) (strin
 			return "", 0, fmt.Errorf("working_dir %q does not exist", proj.WorkingDir)
 		}
 		return "", 0, fmt.Errorf("stat working_dir %q: %w", proj.WorkingDir, err)
+	}
+
+	// F8 preflight — runs after sweep expansion (so we have a sample
+	// rendered command to inspect) and before any DB write. The Skip
+	// flag is OR'd: either the daemon's default OR the per-call opt
+	// can disable.
+	pf := s.Preflight
+	if pf.PipCheckTimeout == 0 && pf.ImportTimeout == 0 {
+		pf = DefaultPreflight()
+	}
+	pf.Skip = pf.Skip || opts.SkipPreflight
+	sampleCmd, _ := renderSampleCommand(proj, taskParams)
+	if err := pf.RunPreflight(ctx, proj, sampleCmd); err != nil {
+		return "", 0, err
 	}
 
 	// Generate job ID and build task list.

@@ -36,14 +36,14 @@ by 1.1 as a conservative overhead factor inside ``estimate_size``.
 """
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any
 
 # Conservative multiplier for pickle / torch.save framing overhead.
 # 1.1 = +10% on top of raw tensor bytes.
 _PICKLE_OVERHEAD = 1.1
 
 
-def estimate_size(*args: Any, **kwargs: Any) -> Optional[int]:
+def estimate_size(*args: Any, **kwargs: Any) -> int | None:
     """Walk ``args`` + ``kwargs`` and sum bytes of recognized objects.
 
     Returns

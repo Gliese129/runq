@@ -30,7 +30,7 @@ def test_loop_yields_arbitrary_iterables(clean_env, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     runq.context()
     assert list(runq.loop([10, 20, 30])) == [10, 20, 30]
-    assert list(runq.loop((i * i for i in range(4)))) == [0, 1, 4, 9]
+    assert list(runq.loop(i * i for i in range(4))) == [0, 1, 4, 9]
 
 
 # ---- early stop integration ----

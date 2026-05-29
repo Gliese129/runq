@@ -16,7 +16,6 @@ import pytest
 
 import runq
 
-
 # ---- pure-Python guarantee ----------------------------------------
 
 def test_wandb_helpers_do_not_import_wandb(clean_env, tmp_path, monkeypatch):

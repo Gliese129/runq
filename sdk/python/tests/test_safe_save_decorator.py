@@ -24,7 +24,6 @@ import runq
 from runq._exceptions import RunqDiskFullError
 from tests._fake_daemon import FakeDaemon
 
-
 # ---- shared fixtures (mirror test_safe_save.py) ----
 
 def _disk_usage_seq(values):
@@ -131,7 +130,7 @@ def test_step_forwarded_when_user_fn_declares_it(daemon_ctx, monkeypatch):
     assert received_step == [7]
     # SDK also recorded it.
     events = _read_jsonl(daemon_ctx.metrics_file)
-    assert [e for e in events if e["type"] == "checkpoint"][0]["step"] == 7
+    assert next(e for e in events if e["type"] == "checkpoint")["step"] == 7
 
 
 def test_user_kwargs_preserved(daemon_ctx, monkeypatch):

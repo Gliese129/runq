@@ -30,10 +30,8 @@ from __future__ import annotations
 
 import logging
 import subprocess
-from typing import List
 
 from ._context import get_ctx
-
 
 _LOG = logging.getLogger(__name__)
 
@@ -49,7 +47,7 @@ _DEFAULT_TIMEOUT_S = 5.0
 _BINARY_NAME = "runq"
 
 
-def _build_argv(task_dir: str) -> List[str]:
+def _build_argv(task_dir: str) -> list[str]:
     """Construct the argv list for the ``runq sync`` invocation.
 
     Split out of :func:`sync_now` so tests can assert exactly what gets

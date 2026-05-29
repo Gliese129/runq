@@ -28,7 +28,6 @@ from __future__ import annotations
 import json
 import sys
 import time
-from typing import Optional
 
 from ._context import get_ctx
 from ._prefix import apply_prefix
@@ -59,7 +58,7 @@ def _append_event(event: dict) -> None:
         )
 
 
-def log_metric(key: str, value: float, step: Optional[int] = None) -> None:
+def log_metric(key: str, value: float, step: int | None = None) -> None:
     """Append a single metric event to ``metrics.jsonl``.
 
     Low-level helper. For training loops, prefer :func:`runq.report`
@@ -84,7 +83,7 @@ def log_metric(key: str, value: float, step: Optional[int] = None) -> None:
     ctx = get_ctx()
     if step is not None:
         ctx.current_step = step
-        resolved_step: Optional[int] = step
+        resolved_step: int | None = step
     else:
         resolved_step = ctx.current_step
     _append_event(

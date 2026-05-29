@@ -14,7 +14,6 @@ import pytest
 
 import runq
 
-
 # ---- registration --------------------------------------------------
 
 def test_early_stop_registers_and_returns_fn(clean_env, tmp_path, monkeypatch):

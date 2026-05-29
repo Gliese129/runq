@@ -48,16 +48,16 @@ import inspect
 import os
 import shutil
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable, Optional, Union
+from typing import Any
 
 from . import _manifest
 from ._context import Context, get_ctx
 from ._events import _append_event
 from ._exceptions import RunqDiskFullError
 from ._sizing import estimate_size
-from ._transport import TransportError, post_json
-
+from ._transport import post_json
 
 # A save function is anything that writes `obj` to `path`. Default in
 # production is torch.save; tests pass small lambdas to avoid the
@@ -91,7 +91,7 @@ def _default_save(path: str, obj: Any) -> None:
 
 # ---- helpers ----
 
-def _resolve_path(path: Union[str, Path]) -> str:
+def _resolve_path(path: str | Path) -> str:
     """Resolve `path` to an absolute filesystem path.
 
     Rules (per stage2_sdk_design.md §F2 "Path resolution"):
@@ -162,7 +162,10 @@ def _compute_threshold(size_bytes: int, ctx: Context) -> int:
 
     Formula: ``size_bytes × safety_factor_percent / 100 + safety_extra_gb × 1 GiB``
     """
-    return int(size_bytes * ctx.safety_factor_percent / 100) + ctx.safety_extra_gb * 1024 * 1024 * 1024
+    return (
+        int(size_bytes * ctx.safety_factor_percent / 100)
+        + ctx.safety_extra_gb * 1024 * 1024 * 1024
+    )
 
 
 def _handle_disk_short(
@@ -214,7 +217,7 @@ def _handle_disk_short(
 def _make_decorator(
     user_fn: Callable[..., None],
     *,
-    keep_last_n: Optional[int] = None,
+    keep_last_n: int | None = None,
     keep_best: bool = False,
 ) -> Callable[..., None]:
     """Wrap ``user_fn`` so its calls go through the TOCTOU + freeze flow.
@@ -244,9 +247,9 @@ def _make_decorator(
     # preserve __name__ and __doc__
     @functools.wraps(user_fn)
     def wrapper(path, *user_args, **user_kwargs):
-        runq_step = user_kwargs.get("step", None)
+        runq_step = user_kwargs.get("step")
         runq_is_best = user_kwargs.get("is_best", False)
-        runq_size_hint = user_kwargs.get("size_hint", None)
+        runq_size_hint = user_kwargs.get("size_hint")
         # strip runq managed kwargs, unless user set them manually
         forwarded = dict(user_kwargs)
         for name in _MANAGED_KWARGS:
@@ -283,13 +286,13 @@ def safe_save(
     path_or_fn=_NO_OBJ,
     obj: Any = _NO_OBJ,
     *,
-    save_fn: Optional[SaveFn] = None,
-    step: Optional[int] = None,
+    save_fn: SaveFn | None = None,
+    step: int | None = None,
     is_best: bool = False,
-    size_hint: Optional[int] = None,
-    keep_last_n: Optional[int] = None,
+    size_hint: int | None = None,
+    keep_last_n: int | None = None,
     keep_best: bool = False,
-    _saved_by: Optional[str] = None,
+    _saved_by: str | None = None,
 ) -> None:
     """Save ``obj`` to ``path`` with disk-safety guards.
 

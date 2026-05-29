@@ -41,7 +41,7 @@ unpredictable so per-call clients are simpler to reason about.
 from __future__ import annotations
 
 import json
-from typing import Any, Optional
+from typing import Any
 
 import httpx
 
@@ -60,7 +60,7 @@ class TransportError(Exception):
         self,
         message: str,
         *,
-        status: Optional[int] = None,
+        status: int | None = None,
         body: str = "",
     ) -> None:
         super().__init__(message)
@@ -98,15 +98,15 @@ def post_json(
                 return {}
             return resp.json()
     except (httpx.ConnectError, httpx.TimeoutException, OSError) as e:
-        raise TransportError(f"socket connection error: {e}", status=None)
+        raise TransportError(f"socket connection error: {e}", status=None) from e
     except httpx.HTTPStatusError as e:
         raise TransportError(
             f"daemon returned {resp.status_code}",
             status=resp.status_code,
             body=resp.text
-        )
+        ) from e
     except json.JSONDecodeError as e:
         raise TransportError(
             f"json parsed failed: {e}",
             status=resp.status_code, body=resp.text
-        )
+        ) from e

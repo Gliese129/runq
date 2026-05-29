@@ -31,7 +31,6 @@ import runq
 from runq._exceptions import RunqDiskFullError
 from tests._fake_daemon import FakeDaemon
 
-
 # ---- helpers ----
 
 def _read_jsonl(path: Path) -> list[dict]:

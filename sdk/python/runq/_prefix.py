@@ -25,13 +25,12 @@ sees its own stack).
 from __future__ import annotations
 
 import contextvars
-from typing import Tuple
 
 # Stack of active prefix segments. Empty tuple means "no active group".
 # Tuple (immutable) is the right type for ContextVar values — copying is
 # implicit when the runtime forks state for a new task / thread, and
 # nobody can accidentally mutate the previous frame's stack.
-_prefix_stack: contextvars.ContextVar[Tuple[str, ...]] = contextvars.ContextVar(
+_prefix_stack: contextvars.ContextVar[tuple[str, ...]] = contextvars.ContextVar(
     "runq_log_group_stack", default=()
 )
 

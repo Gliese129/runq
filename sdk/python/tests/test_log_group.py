@@ -211,8 +211,10 @@ def test_log_group_thread_isolation(clean_env, tmp_path, monkeypatch):
 
     t1 = threading.Thread(target=worker, args=("a",))
     t2 = threading.Thread(target=worker, args=("b",))
-    t1.start(); t2.start()
-    t1.join(); t2.join()
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
 
     # Each thread sees ONLY its own prefix — no cross-pollination.
     assert seen == {"a": "a", "b": "b"}

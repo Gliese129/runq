@@ -17,10 +17,10 @@ import os
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 # Module-level singleton. None until context() is called.
-_ctx: "Optional[Context]" = None
+_ctx: Context | None = None
 
 
 @dataclass
@@ -42,12 +42,12 @@ class Context:
     project: str = ""
 
     # Filesystem paths (None when the relevant env var wasn't set).
-    task_dir: Optional[Path] = None
-    checkpoint_dir: Optional[Path] = None
-    metrics_file: Optional[Path] = None
+    task_dir: Path | None = None
+    checkpoint_dir: Path | None = None
+    metrics_file: Path | None = None
 
     # daemon-only fields
-    socket_path: Optional[str] = None
+    socket_path: str | None = None
 
     # SDK contract: daemon always injects these, so we read them with a
     # default for the manual mode (where there's no daemon).
@@ -68,7 +68,7 @@ class Context:
     # When None, log_metric / report write step=None to jsonl. There is
     # NO auto-increment counter (unlike the early step 1 implementation);
     # if you want incrementing steps without loop(), pass step explicitly.
-    current_step: Optional[int] = None
+    current_step: int | None = None
 
     # ---- step-8 loop coordination ----
     #
@@ -76,7 +76,7 @@ class Context:
     # ``runq.loop()`` after each iteration to decide whether to break.
     # ``Any`` to dodge a forward ref to ``_report.Decision`` (would
     # require a TYPE_CHECKING-only import dance).
-    _last_decision: Optional[Any] = None
+    _last_decision: Any | None = None
 
     # ---- convenience accessors ----
 
@@ -143,7 +143,7 @@ class Context:
 
 # ---- mode detection ----
 
-def _truthy(s: Optional[str]) -> bool:
+def _truthy(s: str | None) -> bool:
     """Lenient truthy parse for env vars. Empty / "0" / "false" → False."""
     if not s:
         return False
@@ -168,7 +168,7 @@ def _detect_mode() -> str:
     return "daemon"
 
 
-def _load_params(path: Optional[Path]) -> dict:
+def _load_params(path: Path | None) -> dict:
     """Strict params.json loader. Missing file → empty dict; broken file
     → RuntimeError. We surface load failures because silent {} would let
     the user run with the wrong hyperparameters and only notice hours later.
@@ -176,7 +176,7 @@ def _load_params(path: Optional[Path]) -> dict:
     if path is None or not path.exists():
         return {}
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
     except (OSError, json.JSONDecodeError) as e:
         raise RuntimeError(f"runq: failed to load params from {path}: {e}") from e
@@ -235,9 +235,9 @@ def context() -> Context:
         # a sibling params.json (optional — most local debug runs have
         # nothing).
         task_id = "manual-" + uuid.uuid4().hex[:8]
-        task_dir: Optional[Path] = None
-        checkpoint_dir: Optional[Path] = None
-        metrics_file: Optional[Path] = Path.cwd() / "runq_metrics.jsonl"
+        task_dir: Path | None = None
+        checkpoint_dir: Path | None = None
+        metrics_file: Path | None = Path.cwd() / "runq_metrics.jsonl"
         local_params = Path.cwd() / "params.json"
         params = _load_params(local_params) if local_params.exists() else {}
     else:

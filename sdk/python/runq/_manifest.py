@@ -62,7 +62,6 @@ import os
 import shutil
 import time
 from pathlib import Path
-from typing import Any, Optional, Union
 
 _LOG = logging.getLogger(__name__)
 
@@ -72,7 +71,7 @@ MANIFEST_VERSION = 1
 
 # ---- policy validation --------------------------------------------
 
-def validate_policy(keep_last_n: Optional[int], keep_best: bool) -> None:
+def validate_policy(keep_last_n: int | None, keep_best: bool) -> None:
     """Reject ambiguous policy combinations early.
 
     Why ``keep_best=True`` REQUIRES an explicit ``keep_last_n``
@@ -112,7 +111,7 @@ def validate_policy(keep_last_n: Optional[int], keep_best: bool) -> None:
 
 # ---- mechanical: paths + atomic IO ----------------------------------
 
-def manifest_path(checkpoint_dir: Union[str, Path]) -> Path:
+def manifest_path(checkpoint_dir: str | Path) -> Path:
     return Path(checkpoint_dir) / MANIFEST_FILENAME
 
 
@@ -120,7 +119,7 @@ def _empty_manifest() -> dict:
     return {"version": MANIFEST_VERSION, "entries": []}
 
 
-def load_manifest(checkpoint_dir: Union[str, Path]) -> dict:
+def load_manifest(checkpoint_dir: str | Path) -> dict:
     """Read manifest from disk.
 
     Returns a fresh empty manifest if:
@@ -154,7 +153,7 @@ def load_manifest(checkpoint_dir: Union[str, Path]) -> dict:
     return data
 
 
-def save_manifest(checkpoint_dir: Union[str, Path], manifest: dict) -> None:
+def save_manifest(checkpoint_dir: str | Path, manifest: dict) -> None:
     """Atomic write: tmp + fsync + rename.
 
     Same pattern as ``safe_save``'s file body, scoped to the manifest
@@ -188,7 +187,7 @@ def save_manifest(checkpoint_dir: Union[str, Path], manifest: dict) -> None:
 
 # ---- helpers for path bookkeeping ----------------------------------
 
-def to_manifest_key(checkpoint_dir: Union[str, Path], final_path: Union[str, Path]) -> Optional[str]:
+def to_manifest_key(checkpoint_dir: str | Path, final_path: str | Path) -> str | None:
     """Compute the manifest's ``entries[i].path`` value for ``final_path``.
 
     Returns the path relative to ``checkpoint_dir`` if the file lives
@@ -213,7 +212,7 @@ def to_manifest_key(checkpoint_dir: Union[str, Path], final_path: Union[str, Pat
 # ---- core operations ----------------------------------------------
 
 def append_entry(
-    checkpoint_dir: Union[str, Path],
+    checkpoint_dir: str | Path,
     entry: dict,
 ) -> dict:
     """Append ``entry`` to the manifest. Persists and returns the updated manifest.
@@ -241,9 +240,9 @@ def append_entry(
 
 
 def cleanup(
-    checkpoint_dir: Union[str, Path],
+    checkpoint_dir: str | Path,
     *,
-    keep_last_n: Optional[int] = None,
+    keep_last_n: int | None = None,
     keep_best: bool = False,
 ) -> list[str]:
     """Apply retention policy. Delete checkpoints NOT in the keep set.

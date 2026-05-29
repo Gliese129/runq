@@ -20,7 +20,7 @@ import os
 import socket
 import threading
 from dataclasses import dataclass, field
-from typing import Any, List
+from typing import Any
 
 
 @dataclass
@@ -53,8 +53,8 @@ class FakeDaemon:
 
     def __init__(self, socket_path: str):
         self.socket_path = socket_path
-        self.calls: List[Recorded] = []
-        self._responses: List[_Response] = []
+        self.calls: list[Recorded] = []
+        self._responses: list[_Response] = []
         self._lock = threading.Lock()
         self._sock: socket.socket | None = None
         self._thread: threading.Thread | None = None
@@ -70,7 +70,7 @@ class FakeDaemon:
 
     # ---- lifecycle ----
 
-    def __enter__(self) -> "FakeDaemon":
+    def __enter__(self) -> FakeDaemon:
         # Pre-clean any stale socket file (tests reuse tmp paths sometimes).
         try:
             os.unlink(self.socket_path)
@@ -105,7 +105,7 @@ class FakeDaemon:
         while not self._stop.is_set():
             try:
                 conn, _ = self._sock.accept()
-            except socket.timeout:
+            except TimeoutError:
                 continue
             except OSError:
                 # socket closed during shutdown

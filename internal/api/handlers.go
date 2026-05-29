@@ -11,6 +11,7 @@ import (
 	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/project"
 	"github.com/gliese129/runq/internal/scheduler"
+	"github.com/gliese129/runq/internal/service"
 	"github.com/gliese129/runq/internal/store"
 	"gopkg.in/yaml.v3"
 )
@@ -162,9 +163,14 @@ func (s *Server) handleJobSubmit(c *gin.Context) {
 		}
 	}
 
-	jobID, taskCount, err := s.deps.JobService.SubmitJob(context.Background(), jobCfg)
+	// F8 preflight bypass — CLI's --no-preflight propagates as the
+	// ``no_preflight`` query parameter on POST /api/jobs.
+	opts := service.SubmitJobOpts{
+		SkipPreflight: c.Query("no_preflight") == "1",
+	}
+	jobID, taskCount, err := s.deps.JobService.SubmitJobWithOpts(context.Background(), jobCfg, opts)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 

@@ -35,10 +35,9 @@ from __future__ import annotations
 
 import logging
 import statistics
-from typing import Any, Optional
+from typing import Any
 
-from ._report import EarlyStopHook, _YAML_POLICY_MARK, _hooks
-
+from ._report import _YAML_POLICY_MARK, EarlyStopHook, _hooks
 
 _LOG = logging.getLogger(__name__)
 
@@ -112,7 +111,9 @@ def patience(
             if better(v, best_val):
                 best_val, best_idx = v, i
         idle = (len(values) - 1) - best_idx
-        return f"patience exhausted: {metric} no improvement in {patience} steps" if idle >= patience else False
+        if idle >= patience:
+            return f"patience exhausted: {metric} no improvement in {patience} steps"
+        return False
 
     hook.__name__ = f"patience({metric},{mode},{patience})"
     return hook
@@ -212,7 +213,7 @@ _POLICY_FACTORIES = {
 }
 
 
-def maybe_register_from_params(ctx: Any) -> Optional[str]:
+def maybe_register_from_params(ctx: Any) -> str | None:
     """Read ``ctx.params['early_stopping']`` and register a built-in hook.
 
     Returns the policy name actually registered, or ``None`` if no
@@ -273,7 +274,7 @@ def maybe_register_from_params(ctx: Any) -> Optional[str]:
     # Marker the report.early_stop decorator checks to know "this came
     # from YAML, not user code".
     setattr(hook, _YAML_POLICY_MARK, True)
-    setattr(hook, "_runq_yaml_policy_name", policy_name)
+    hook._runq_yaml_policy_name = policy_name
 
     if hook not in _hooks:
         _hooks.append(hook)

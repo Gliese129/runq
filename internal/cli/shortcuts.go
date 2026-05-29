@@ -79,6 +79,7 @@ job.yaml in the current directory.`,
 		dryRunAlias, _ := cmd.Flags().GetBool("dry-run")
 		watch, _ := cmd.Flags().GetBool("watch")
 		projectOverride, _ := cmd.Flags().GetString("project")
+		noPreflight, _ := cmd.Flags().GetBool("no-preflight")
 
 		if file == "." {
 			file = "job.yaml"
@@ -133,7 +134,14 @@ job.yaml in the current directory.`,
 			TotalGPUs  int    `json:"total_gpus"`
 		}
 		var resp JobResp
-		if err := doAndDecode("POST", "/api/jobs", job, &resp); err != nil {
+		submitPath := "/api/jobs"
+		if noPreflight {
+			// F8 preflight is daemon-side; the CLI flag tunnels through
+			// as a query string. Daemon's POST /api/jobs handler reads
+			// it and forwards into SubmitJobOpts.SkipPreflight.
+			submitPath = "/api/jobs?no_preflight=1"
+		}
+		if err := doAndDecode("POST", submitPath, job, &resp); err != nil {
 			return err
 		}
 		fmt.Printf("Job submitted: id=%s tasks=%d\n", resp.JobId, resp.TotalTasks)
@@ -485,6 +493,12 @@ func init() {
 	submitCmd.Flags().Bool("dry-run", false, "Expand sweep and print tasks without submitting")
 	submitCmd.Flags().Bool("watch", false, "Block and show live progress after submit")
 	submitCmd.Flags().String("project", "", "Override the project name in the YAML")
+	submitCmd.Flags().Bool(
+		"no-preflight",
+		false,
+		"Skip submit-time checks (imports, pip check, path args, writability). "+
+			"Use when the daemon misclassifies a runtime-only path or conditional import.",
+	)
 
 	// run flags
 	runCmd.Flags().Int("gpus", 0, "Number of GPUs (overrides project default)")
