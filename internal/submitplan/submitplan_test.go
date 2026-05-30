@@ -22,7 +22,7 @@ func TestBuildDeterministicPlan(t *testing.T) {
 	}
 	gpus := 2
 	maxRetry := 3
-	timeout := "2m"
+	timeout := "2h"
 	cfg := job.JobConfig{
 		Project:     "proj",
 		Description: "demo",
@@ -82,7 +82,7 @@ func TestBuildDeterministicPlan(t *testing.T) {
 	if first.TaskID != "task1" {
 		t.Fatalf("TaskID = %q", first.TaskID)
 	}
-	if first.GPUsNeeded != 2 || first.MaxRetry != 3 || first.Timeout != 120 {
+	if first.GPUsNeeded != 2 || first.MaxRetry != 3 || first.Timeout != 7200 {
 		t.Fatalf("numeric fields mismatch: %+v", first)
 	}
 	if first.TaskDir != filepath.Join(workDir, ".runq", "task1") {
@@ -105,5 +105,53 @@ func TestBuildDeterministicPlan(t *testing.T) {
 	}
 	if _, ok := first.Env["RUNQ_TASK_ID"]; ok {
 		t.Fatalf("Plan Env must not contain RUNQ_*: %#v", first.Env)
+	}
+}
+
+// When Deps.JobID is set, Build uses it verbatim and reserves IDGen for task
+// ids only. This is what lets HPC root its workspace on the job id
+// (~/.runq/<job_id>/<task_id>) before Build computes task dirs.
+func TestBuildUsesInjectedJobID(t *testing.T) {
+	workDir := t.TempDir()
+	ids := []string{"task1", "task2"} // no job id consumed from IDGen
+	nextID := func() string {
+		if len(ids) == 0 {
+			t.Fatalf("IDGen called too many times (job id should come from Deps.JobID)")
+		}
+		id := ids[0]
+		ids = ids[1:]
+		return id
+	}
+	cfg := job.JobConfig{
+		Project: "proj",
+		Sweep: []job.SweepBlock{{
+			Method:     "grid",
+			Parameters: map[string]job.ParameterSpec{"lr": {Values: []any{0.1, 0.2}}},
+		}},
+	}
+	proj := &project.Config{
+		ProjectName: "proj",
+		WorkingDir:  workDir,
+		CmdTemplate: "python train.py --lr {{lr}}",
+	}
+
+	jobRoot := filepath.Join(workDir, "JOBID")
+	plan, err := Build(context.Background(), cfg, proj, Deps{
+		JobID:         "JOBID",
+		IDGen:         nextID,
+		Paths:         Paths{WorkspaceRoot: jobRoot, LogRoot: jobRoot},
+		SkipPreflight: true,
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if plan.JobID != "JOBID" {
+		t.Fatalf("JobID = %q, want JOBID", plan.JobID)
+	}
+	if plan.Tasks[0].TaskID != "task1" || plan.Tasks[1].TaskID != "task2" {
+		t.Fatalf("task ids mismatch: %q %q", plan.Tasks[0].TaskID, plan.Tasks[1].TaskID)
+	}
+	if plan.Tasks[0].TaskDir != filepath.Join(jobRoot, "task1") {
+		t.Fatalf("TaskDir = %q", plan.Tasks[0].TaskDir)
 	}
 }

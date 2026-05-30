@@ -151,17 +151,21 @@ func TestL2CStage1EndToEnd(t *testing.T) {
 	}
 
 	// ── submit a 1-task job ──
-	jobID, n, err := jobSvc.SubmitJob(ctx, job.JobConfig{
-		Project: "p",
-		Sweep: []job.SweepBlock{
-			{
-				Method: "grid",
-				Parameters: map[string]job.ParameterSpec{
-					"lr": {Values: []any{1e-4}},
+	jobID, n, err := jobSvc.SubmitJobWithOpts(
+		ctx,
+		job.JobConfig{
+			Project: "p",
+			Sweep: []job.SweepBlock{
+				{
+					Method: "grid",
+					Parameters: map[string]job.ParameterSpec{
+						"lr": {Values: []any{1e-4}},
+					},
 				},
 			},
 		},
-	})
+		service.SubmitJobOpts{SkipPreflight: true},
+	)
 	if err != nil {
 		t.Fatalf("SubmitJob: %v", err)
 	}

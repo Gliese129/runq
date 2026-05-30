@@ -143,7 +143,11 @@ func TestSubmitJobCreatesTaskDir(t *testing.T) {
 	}
 	svc, jobCfg := setupSubmitJobTest(t, workDir, wandb)
 
-	jobID, n, err := svc.SubmitJob(context.Background(), jobCfg)
+	jobID, n, err := svc.SubmitJobWithOpts(
+		context.Background(),
+		jobCfg,
+		SubmitJobOpts{SkipPreflight: true},
+	)
 	if err != nil {
 		t.Fatalf("SubmitJob: %v", err)
 	}
@@ -199,7 +203,11 @@ func TestSubmitJobNoWandb(t *testing.T) {
 	workDir := t.TempDir()
 	svc, jobCfg := setupSubmitJobTest(t, workDir, nil)
 
-	jobID, _, err := svc.SubmitJob(context.Background(), jobCfg)
+	jobID, _, err := svc.SubmitJobWithOpts(
+		context.Background(),
+		jobCfg,
+		SubmitJobOpts{SkipPreflight: true},
+	)
 	if err != nil {
 		t.Fatalf("SubmitJob: %v", err)
 	}
@@ -214,7 +222,11 @@ func TestSubmitJobNoWandb(t *testing.T) {
 
 func TestSubmitJobMissingWorkingDir(t *testing.T) {
 	svc, jobCfg := setupSubmitJobTest(t, "/this/path/does/not/exist/anywhere", nil)
-	_, _, err := svc.SubmitJob(context.Background(), jobCfg)
+	_, _, err := svc.SubmitJobWithOpts(
+		context.Background(),
+		jobCfg,
+		SubmitJobOpts{SkipPreflight: true},
+	)
 	if err == nil {
 		t.Fatal("expected error for missing working_dir, got nil")
 	}

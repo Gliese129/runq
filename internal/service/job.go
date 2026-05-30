@@ -74,6 +74,7 @@ func (s *JobService) SubmitJobWithOpts(ctx context.Context, jobCfg job.JobConfig
 	}
 
 	plan, err := submitplan.Build(ctx, jobCfg, proj, submitplan.Deps{
+		JobID: utils.GenerateID(),
 		IDGen: utils.GenerateID,
 		Paths: submitplan.Paths{
 			WorkspaceRoot: filepath.Join(proj.WorkingDir, ".runq"),

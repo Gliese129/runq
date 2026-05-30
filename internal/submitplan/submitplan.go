@@ -21,7 +21,12 @@ type Paths struct {
 }
 
 type Deps struct {
-	IDGen         func() string
+	// JobID is supplied by the backend, not generated here. The backend roots
+	// its workspace on the job id (HPC uses ~/.runq/<job_id>/<task_id>), so it
+	// must know the id before Build computes task dirs. When empty, Build falls
+	// back to IDGen for backward compatibility.
+	JobID         string
+	IDGen         func() string // used for task ids (and job id only when JobID is empty)
 	Paths         Paths
 	SkipPreflight bool
 }
@@ -117,7 +122,10 @@ func Build(ctx context.Context, cfg job.JobConfig, proj *project.Config, d Deps)
 		return Plan{}, err
 	}
 
-	jobID := idGen()
+	jobID := d.JobID
+	if jobID == "" {
+		jobID = idGen()
+	}
 	callerUID := os.Getuid()
 	tasks := make([]PlannedTask, 0, len(taskParams))
 	for _, params := range taskParams {
