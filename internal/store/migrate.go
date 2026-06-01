@@ -29,7 +29,7 @@ func (s *Store) Migrate() error {
 // add this column" steps. Each addColumnIfMissing call is a no-op if the column
 // is already present, so this is safe across daemon upgrades.
 func (s *Store) addMissingColumns(ctx context.Context) error {
-	// L2-C: task_dir holds the per-task workspace at <working_dir>/.runq/<task_id>.
+	// L2-C: task_dir holds the per-task workspace at <root>/<job_id>/<task_id>.
 	// Without this, daemon restart can't locate the metrics.jsonl from reclaimed tasks.
 	if err := addColumnIfMissing(ctx, s.db, "tasks", "task_dir", "TEXT"); err != nil {
 		return fmt.Errorf("add tasks.task_dir: %w", err)

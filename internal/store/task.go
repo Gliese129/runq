@@ -36,7 +36,7 @@ type TaskRow struct {
 	StartedAt   *time.Time
 	FinishedAt  *time.Time
 
-	// L2-C: per-task workspace at <project.WorkingDir>/.runq/<task_id>.
+	// L2-C: per-task workspace at <root>/<job_id>/<task_id>.
 	// Holds params.json, wandb_config.json (optional), metrics.jsonl, checkpoints/.
 	// Created by service.JobService.SubmitJob, read by SDK via RUNQ_TASK_DIR env.
 	TaskDir string

@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gliese129/runq/internal/hpcconfig"
+	"github.com/gliese129/runq/internal/config"
 	"github.com/gliese129/runq/internal/hpccore"
 	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/project"
@@ -51,12 +51,18 @@ func (b *Backend) Submit(ctx context.Context, jobCfg job.JobConfig, proj *projec
 	}
 
 	jobID = utils.GenerateID()
+	wsRoot, err := config.ResolveRoot(b.StorageCfg, proj.WorkingDir, proj.ProjectName)
+	if err != nil {
+		return "", 0, fmt.Errorf("resolve workspace root: %w", err)
+	}
+	jobRoot := filepath.Join(wsRoot, jobID)
+
 	plan, err := submitplan.Build(ctx, jobCfg, proj, submitplan.Deps{
 		JobID: jobID,
 		IDGen: utils.GenerateID,
 		Paths: submitplan.Paths{
-			WorkspaceRoot: hpcconfig.JobDir(jobID),
-			LogRoot:       hpcconfig.JobDir(jobID),
+			WorkspaceRoot: jobRoot,
+			LogRoot:       jobRoot,
 		},
 		SkipPreflight: opts.SkipPreflight,
 	})

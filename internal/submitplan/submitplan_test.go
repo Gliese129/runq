@@ -11,10 +11,10 @@ import (
 
 func TestBuildDeterministicPlan(t *testing.T) {
 	workDir := t.TempDir()
-	ids := []string{"job1", "task1", "task2"}
+	ids := []string{"task1", "task2"}
 	nextID := func() string {
 		if len(ids) == 0 {
-			t.Fatalf("IDGen called too many times")
+			t.Fatalf("IDGen called too many times (job id should come from Deps.JobID)")
 		}
 		id := ids[0]
 		ids = ids[1:]
@@ -54,10 +54,12 @@ func TestBuildDeterministicPlan(t *testing.T) {
 		Wandb:       &project.WandbConfig{Project: "wandb-proj"},
 	}
 
+	jobRoot := filepath.Join(workDir, ".runq", "job1")
 	plan, err := Build(context.Background(), cfg, proj, Deps{
+		JobID: "job1",
 		IDGen: nextID,
 		Paths: Paths{
-			WorkspaceRoot: filepath.Join(workDir, ".runq"),
+			WorkspaceRoot: jobRoot,
 			LogRoot:       filepath.Join(workDir, "logs"),
 		},
 		SkipPreflight: true,
@@ -85,7 +87,7 @@ func TestBuildDeterministicPlan(t *testing.T) {
 	if first.GPUsNeeded != 2 || first.MaxRetry != 3 || first.Timeout != 7200 {
 		t.Fatalf("numeric fields mismatch: %+v", first)
 	}
-	if first.TaskDir != filepath.Join(workDir, ".runq", "task1") {
+	if first.TaskDir != filepath.Join(jobRoot, "task1") {
 		t.Fatalf("TaskDir = %q", first.TaskDir)
 	}
 	if first.CheckpointDir != filepath.Join(first.TaskDir, "checkpoints") {

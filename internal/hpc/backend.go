@@ -45,6 +45,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/gliese129/runq/internal/config"
 	"github.com/gliese129/runq/internal/hpcconfig"
 	"github.com/gliese129/runq/internal/store"
 )
@@ -61,14 +62,15 @@ func shellRunner(ctx context.Context, command string) (string, error) {
 
 // Backend bundles the resolved config, the HPC store, and the command runner.
 type Backend struct {
-	Cfg   *hpcconfig.Config
-	Store *store.Store
-	Run   Runner
+	Cfg        *hpcconfig.Config
+	Store      *store.Store
+	Run        Runner
+	StorageCfg *config.GlobalConfig // nil-safe: nil = project_path mode
 }
 
 // New builds a Backend with the real shell runner.
-func New(cfg *hpcconfig.Config, st *store.Store) *Backend {
-	return &Backend{Cfg: cfg, Store: st, Run: shellRunner}
+func New(cfg *hpcconfig.Config, st *store.Store, storageCfg *config.GlobalConfig) *Backend {
+	return &Backend{Cfg: cfg, Store: st, Run: shellRunner, StorageCfg: storageCfg}
 }
 
 // HPC-local filenames. These are backend artifacts, NOT part of the shared SDK

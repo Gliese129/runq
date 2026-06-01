@@ -32,7 +32,7 @@ func TestSubmitRefreshKill(t *testing.T) {
 	defer st.Close()
 
 	dataDir := t.TempDir()
-	t.Setenv("RUNQ_DATA_DIR", dataDir) // hpcconfig.JobDir lands here
+	t.Setenv("RUNQ_DATA_DIR", dataDir) // config.ConfigDir() reads this
 
 	cfg := &hpcconfig.Config{
 		SubmitTemplate: "submit {{run_sh}} gpus={{gpus}}",
@@ -86,7 +86,7 @@ func TestSubmitRefreshKill(t *testing.T) {
 	if len(tasks) != 2 {
 		t.Fatalf("ListTasks = %d, want 2", len(tasks))
 	}
-	jobRoot := filepath.Join(dataDir, jobID)
+	jobRoot := filepath.Join(workDir, ".runq", jobID)
 	for _, tk := range tasks {
 		if tk.ExternalID == "" {
 			t.Errorf("task %s missing ExternalID", tk.ID)

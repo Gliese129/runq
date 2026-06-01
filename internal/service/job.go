@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/gliese129/runq/internal/config"
 	"github.com/gliese129/runq/internal/executor"
 	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/project"
@@ -21,12 +22,13 @@ import (
 // JobService handles job-level operations.
 // All mutations go through here so DB + Queue + Scheduler stay in sync.
 type JobService struct {
-	Store     *store.Store
-	Queue     *scheduler.Queue
-	Scheduler *scheduler.Scheduler
-	Exec      *executor.Executor
-	Registry  *project.Registry
-	Pool      resource.Allocator
+	Store      *store.Store
+	Queue      *scheduler.Queue
+	Scheduler  *scheduler.Scheduler
+	Exec       *executor.Executor
+	Registry   *project.Registry
+	Pool       resource.Allocator
+	StorageCfg *config.GlobalConfig // nil-safe: nil = project_path mode
 }
 
 // SubmitJobOpts carries per-call overrides for SubmitJob. Today the
@@ -73,12 +75,20 @@ func (s *JobService) SubmitJobWithOpts(ctx context.Context, jobCfg job.JobConfig
 		return "", 0, fmt.Errorf("project %q not found", jobCfg.Project)
 	}
 
+	wsRoot, err := config.ResolveRoot(s.StorageCfg, proj.WorkingDir, proj.ProjectName)
+	if err != nil {
+		return "", 0, fmt.Errorf("resolve workspace root: %w", err)
+	}
+
+	jobID := utils.GenerateID()
+	jobRoot := filepath.Join(wsRoot, jobID)
+
 	plan, err := submitplan.Build(ctx, jobCfg, proj, submitplan.Deps{
-		JobID: utils.GenerateID(),
+		JobID: jobID,
 		IDGen: utils.GenerateID,
 		Paths: submitplan.Paths{
-			WorkspaceRoot: filepath.Join(proj.WorkingDir, ".runq"),
-			LogRoot:       filepath.Join(proj.WorkingDir, "logs"),
+			WorkspaceRoot: jobRoot,
+			LogRoot:       jobRoot,
 		},
 		SkipPreflight: opts.SkipPreflight,
 	})

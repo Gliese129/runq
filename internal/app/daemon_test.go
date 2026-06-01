@@ -98,7 +98,7 @@ func TestRestoreRuntimeStateRestoresPausedJobsBeforeScheduling(t *testing.T) {
 // (not reap-driven from metrics.jsonl).
 //
 // What this test covers:
-//  1. SubmitJob creates <working_dir>/.runq/<task_id>/ with params.json
+//  1. SubmitJob creates <root>/<job_id>/<task_id>/ with params.json
 //     and wandb_config.json artifacts.
 //  2. Scheduler dispatches the task with the L2-C env block injected, so
 //     the command can find RUNQ_METRICS_FILE / RUNQ_TASK_DIR.
@@ -179,7 +179,7 @@ func TestL2CStage1EndToEnd(t *testing.T) {
 		t.Fatalf("expected 1 task row, got %d", len(tasks))
 	}
 	taskID := tasks[0].ID
-	taskDir := filepath.Join(workDir, ".runq", taskID)
+	taskDir := filepath.Join(workDir, ".runq", jobID, taskID)
 	if got := tasks[0].TaskDir; got != taskDir {
 		t.Errorf("TaskRow.TaskDir = %q, want %q", got, taskDir)
 	}

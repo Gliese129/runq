@@ -89,7 +89,7 @@ func TestKillJobRefreshesAggregateStatusForPendingTasks(t *testing.T) {
 
 // setupSubmitJobTest spins up the minimum dependencies for SubmitJob: store,
 // registry with one project, queue, mock allocator. Project working_dir is
-// the supplied tempDir so test can inspect the .runq/<task_id>/ layout.
+// the supplied tempDir so test can inspect the .runq/<job_id>/<task_id>/ layout.
 func setupSubmitJobTest(t *testing.T, workDir string, wandb *project.WandbConfig) (*JobService, job.JobConfig) {
 	t.Helper()
 	ctx := context.Background()
@@ -164,7 +164,7 @@ func TestSubmitJobCreatesTaskDir(t *testing.T) {
 	}
 
 	for _, tr := range tasks {
-		taskDir := filepath.Join(workDir, ".runq", tr.ID)
+		taskDir := filepath.Join(workDir, ".runq", jobID, tr.ID)
 		if tr.TaskDir != taskDir {
 			t.Errorf("TaskRow.TaskDir = %q, want %q", tr.TaskDir, taskDir)
 		}
@@ -213,7 +213,7 @@ func TestSubmitJobNoWandb(t *testing.T) {
 	}
 	tasks, _ := svc.Store.ListTasks(context.Background(), store.TaskFilter{JobID: jobID})
 	for _, tr := range tasks {
-		path := filepath.Join(workDir, ".runq", tr.ID, "wandb_config.json")
+		path := filepath.Join(workDir, ".runq", jobID, tr.ID, "wandb_config.json")
 		if _, err := os.Stat(path); !os.IsNotExist(err) {
 			t.Errorf("no wandb block → wandb_config.json should not exist (path=%s, err=%v)", path, err)
 		}

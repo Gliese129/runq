@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gliese129/runq/internal/config"
 	"github.com/gliese129/runq/internal/hpc"
 	"github.com/gliese129/runq/internal/hpcconfig"
 	"github.com/gliese129/runq/internal/job"
@@ -109,6 +110,24 @@ func openHPCStore() (*store.Store, error) {
 	return store.Open(hpcconfig.DBPath())
 }
 
+// newHPCBackend loads both configs, opens the store, and returns a ready
+// Backend. The caller must defer st.Close() on the returned store.
+func newHPCBackend() (*hpc.Backend, *store.Store, error) {
+	globalCfg, err := config.Load()
+	if err != nil {
+		return nil, nil, err
+	}
+	hpcCfg, err := hpcconfig.Load()
+	if err != nil {
+		return nil, nil, err
+	}
+	st, err := openHPCStore()
+	if err != nil {
+		return nil, nil, err
+	}
+	return hpc.New(hpcCfg, st, globalCfg), st, nil
+}
+
 func runHPCInit(cmd *cobra.Command, args []string) error {
 	scheduler, _ := cmd.Flags().GetString("scheduler")
 	path, created, err := hpcconfig.WriteTemplate(scheduler)
@@ -133,11 +152,7 @@ func runHPCSubmit(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("parse %s: %w", args[0], err)
 	}
 
-	cfg, err := hpcconfig.Load()
-	if err != nil {
-		return err
-	}
-	st, err := openHPCStore()
+	b, st, err := newHPCBackend()
 	if err != nil {
 		return err
 	}
@@ -149,7 +164,6 @@ func runHPCSubmit(cmd *cobra.Command, args []string) error {
 	}
 
 	skip, _ := cmd.Flags().GetBool("no-preflight")
-	b := hpc.New(cfg, st)
 	jobID, n, err := b.Submit(context.Background(), jobCfg, proj, hpc.SubmitOpts{SkipPreflight: skip})
 	if err != nil {
 		return err
@@ -186,17 +200,13 @@ func resolveHPCProject(cmd *cobra.Command, st *store.Store, jobProject string) (
 }
 
 func runHPCStatus(cmd *cobra.Command, args []string) error {
-	cfg, err := hpcconfig.Load()
-	if err != nil {
-		return err
-	}
-	st, err := openHPCStore()
+	b, st, err := newHPCBackend()
 	if err != nil {
 		return err
 	}
 	defer st.Close()
 
-	view, err := hpc.New(cfg, st).Status(context.Background(), args[0])
+	view, err := b.Status(context.Background(), args[0])
 	if err != nil {
 		return err
 	}
@@ -222,17 +232,13 @@ func runHPCStatus(cmd *cobra.Command, args []string) error {
 }
 
 func runHPCKill(cmd *cobra.Command, args []string) error {
-	cfg, err := hpcconfig.Load()
-	if err != nil {
-		return err
-	}
-	st, err := openHPCStore()
+	b, st, err := newHPCBackend()
 	if err != nil {
 		return err
 	}
 	defer st.Close()
 
-	n, err := hpc.New(cfg, st).Kill(context.Background(), args[0])
+	n, err := b.Kill(context.Background(), args[0])
 	if err != nil {
 		return err
 	}
@@ -291,18 +297,14 @@ func hpcLeaderboard(cmd *cobra.Command, jobID string) ([]store.TaskScore, string
 	}
 	maximize, _ := cmd.Flags().GetBool("max")
 
-	cfg, err := hpcconfig.Load()
-	if err != nil {
-		return nil, "", err
-	}
-	st, err := openHPCStore()
+	b, st, err := newHPCBackend()
 	if err != nil {
 		return nil, "", err
 	}
 	defer st.Close()
 
 	ctx := context.Background()
-	if err := hpc.New(cfg, st).Refresh(ctx, jobID); err != nil {
+	if err := b.Refresh(ctx, jobID); err != nil {
 		return nil, "", err
 	}
 	scores, err := st.MetricLeaderboard(ctx, jobID, key, maximize)
