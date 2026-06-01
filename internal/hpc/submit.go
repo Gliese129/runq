@@ -78,15 +78,15 @@ func (b *Backend) Submit(ctx context.Context, jobCfg job.JobConfig, proj *projec
 	}
 
 	for _, t := range plan.Tasks {
+		// Local prep + template render first: these have no external side effect,
+		// so a failure here aborts before any cluster job or DB row exists.
 		if err := workspace.Write(t.TaskDir, t.Params, plan.Wandb); err != nil {
 			return plan.JobID, submitted, fmt.Errorf("prepare workspace for %s: %w", t.TaskID, err)
 		}
-
 		runsh := filepath.Join(t.TaskDir, runScriptName)
 		if err := os.WriteFile(runsh, []byte(b.buildRunScript(t, plan)), 0o755); err != nil {
 			return plan.JobID, submitted, fmt.Errorf("write run.sh for %s: %w", t.TaskID, err)
 		}
-
 		cmd, err := hpccore.Render(b.Cfg.SubmitTemplate, map[string]string{
 			"run_sh":   runsh,
 			"gpus":     strconv.Itoa(t.GPUsNeeded),
@@ -98,19 +98,39 @@ func (b *Backend) Submit(ctx context.Context, jobCfg job.JobConfig, proj *projec
 			return plan.JobID, submitted, fmt.Errorf("render submit_template for %s: %w", t.TaskID, err)
 		}
 
+		// Durable ledger BEFORE the external submit: insert the task (pending, no
+		// external_id yet). A sbatch that succeeds but whose id we then fail to
+		// parse/persist must NOT become an invisible orphan — the row already
+		// exists and status/kill/collect can see it.
+		row := planToTaskRow(t, plan, now, "")
+		if err := b.Store.InsertTask(ctx, &row); err != nil {
+			return plan.JobID, submitted, fmt.Errorf("persist task %s: %w", t.TaskID, err)
+		}
+
 		out, err := b.Run(ctx, cmd)
 		if err != nil {
+			// sbatch itself errored → no cluster job exists → truly terminal.
+			_ = b.Store.UpdateTaskStatus(ctx, t.TaskID, "failed",
+				map[string]any{"finished_at": nowUnix(), "status_source": hpccore.SourceSubmit})
 			return plan.JobID, submitted, fmt.Errorf("submit %s failed: %w\noutput:\n%s", t.TaskID, err, out)
 		}
 
 		extID, err := hpccore.ExtractSubmitID(out, b.Cfg.SubmitIDRegex)
 		if err != nil {
-			return plan.JobID, submitted, fmt.Errorf("extract submit id for %s: %w\noutput:\n%s", t.TaskID, err, out)
+			// Submit SUCCEEDED but the id is unparseable → a cluster job may be
+			// running untracked. LEAVE the task pending (already inserted): it is
+			// not a failure, and pending is non-terminal so Refresh won't stamp a
+			// bogus finished_at. If the job actually runs it self-reports via
+			// status.json and Reconcile heals pending→running/success. We just
+			// can't kill it (no external id). Surface the error so the user fixes
+			// submit_id_regex.
+			return plan.JobID, submitted, fmt.Errorf(
+				"submitted %s but could not parse its job id — check submit_id_regex (the cluster job may be running untracked and is not killable without its id): %w\noutput:\n%s",
+				t.TaskID, err, out)
 		}
 
-		row := planToTaskRow(t, plan, now, extID)
-		if err := b.Store.InsertTask(ctx, &row); err != nil {
-			return plan.JobID, submitted, fmt.Errorf("persist task %s: %w", t.TaskID, err)
+		if err := b.Store.UpdateTaskStatus(ctx, t.TaskID, "pending", map[string]any{"external_id": extID}); err != nil {
+			return plan.JobID, submitted, fmt.Errorf("record external id for %s: %w", t.TaskID, err)
 		}
 		submitted++
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/gliese129/runq/internal/hpc"
@@ -62,13 +63,40 @@ var hpcKillCmd = &cobra.Command{
 	RunE:  runHPCKill,
 }
 
+var hpcLsCmd = &cobra.Command{
+	Use:     "ls",
+	Aliases: []string{"list"},
+	Short:   "List HPC jobs (DB state; run `hpc status <id>` to refresh one)",
+	RunE:    runHPCLs,
+}
+
+var hpcBestCmd = &cobra.Command{
+	Use:   "best <job_id> --key <metric>",
+	Short: "Show the task with the best value of a metric",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runHPCBest,
+}
+
+var hpcCollectCmd = &cobra.Command{
+	Use:   "collect <job_id> --key <metric>",
+	Short: "Per-task params + best metric value, ranked",
+	Args:  cobra.ExactArgs(1),
+	RunE:  runHPCCollect,
+}
+
 func init() {
 	hpcInitCmd.Flags().String("scheduler", "", "preset to generate: slurm | pbs | sge (omit for generic)")
 	hpcSubmitCmd.Flags().String("project-file", "", "load project config from a YAML file instead of the HPC registry")
 	hpcSubmitCmd.Flags().Bool("no-preflight", false, "skip fail-before-submit checks (pip/import/path)")
 	hpcStatusCmd.Flags().Bool("json", false, "output raw JSON")
+	hpcLsCmd.Flags().Bool("json", false, "output raw JSON")
+	for _, c := range []*cobra.Command{hpcBestCmd, hpcCollectCmd} {
+		c.Flags().String("key", "", "metric key to rank by (e.g. loss, acc)")
+		c.Flags().Bool("max", false, "rank by maximum instead of minimum")
+		c.Flags().Bool("json", false, "output raw JSON")
+	}
 
-	hpcCmd.AddCommand(hpcInitCmd, hpcSubmitCmd, hpcStatusCmd, hpcKillCmd)
+	hpcCmd.AddCommand(hpcInitCmd, hpcSubmitCmd, hpcStatusCmd, hpcKillCmd, hpcLsCmd, hpcBestCmd, hpcCollectCmd)
 	hpcCmd.GroupID = groupCore
 	rootCmd.AddCommand(hpcCmd)
 }
@@ -183,11 +211,11 @@ func runHPCStatus(cmd *cobra.Command, args []string) error {
 		utils.StatusColor(view.Job.Status), view.Job.TotalTasks)
 
 	w := newTable()
-	fmt.Fprintf(w, "TASK_ID\tEXT_ID\tSTATUS\tAGE\n")
+	fmt.Fprintf(w, "TASK_ID\tEXT_ID\tSTATUS\tSOURCE\tAGE\n")
 	for _, t := range view.Tasks {
 		age := time.Since(t.EnqueuedAt).Truncate(time.Second)
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n",
-			utils.IDColor(t.ID), t.ExternalID, utils.StatusColor(t.Status), age)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
+			utils.IDColor(t.ID), t.ExternalID, utils.StatusColor(t.Status), t.StatusSource, age)
 	}
 	w.Flush()
 	return nil
@@ -209,5 +237,128 @@ func runHPCKill(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	fmt.Printf("killed %d task(s)\n", n)
+	return nil
+}
+
+// hpcJobItem is the stable JSON shape for `hpc ls` (also consumed by L2-D / AI).
+type hpcJobItem struct {
+	JobID      string `json:"job_id"`
+	Project    string `json:"project"`
+	Status     string `json:"status"`
+	TotalTasks int    `json:"total_tasks"`
+}
+
+func runHPCLs(cmd *cobra.Command, args []string) error {
+	st, err := openHPCStore()
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+
+	jobs, err := st.ListJobs(context.Background(), "")
+	if err != nil {
+		return err
+	}
+	items := make([]hpcJobItem, 0, len(jobs))
+	for _, j := range jobs {
+		items = append(items, hpcJobItem{JobID: j.ID, Project: j.ProjectName, Status: j.Status, TotalTasks: j.TotalTasks})
+	}
+
+	if jsonOut, _ := cmd.Flags().GetBool("json"); jsonOut {
+		printJSON(items)
+		return nil
+	}
+	if len(items) == 0 {
+		fmt.Println("no jobs")
+		return nil
+	}
+	w := newTable()
+	fmt.Fprintf(w, "JOB_ID\tPROJECT\tSTATUS\tTASKS\n")
+	for _, it := range items {
+		fmt.Fprintf(w, "%s\t%s\t%s\t%d\n",
+			utils.IDColor(it.JobID), it.Project, utils.StatusColor(it.Status), it.TotalTasks)
+	}
+	w.Flush()
+	return nil
+}
+
+// hpcLeaderboard refreshes the job then returns its tasks ranked by --key. Shared
+// by best/collect so they stay thin and consistent.
+func hpcLeaderboard(cmd *cobra.Command, jobID string) ([]store.TaskScore, string, error) {
+	key, _ := cmd.Flags().GetString("key")
+	if key == "" {
+		return nil, "", fmt.Errorf("--key is required (e.g. --key loss)")
+	}
+	maximize, _ := cmd.Flags().GetBool("max")
+
+	cfg, err := hpcconfig.Load()
+	if err != nil {
+		return nil, "", err
+	}
+	st, err := openHPCStore()
+	if err != nil {
+		return nil, "", err
+	}
+	defer st.Close()
+
+	ctx := context.Background()
+	if err := hpc.New(cfg, st).Refresh(ctx, jobID); err != nil {
+		return nil, "", err
+	}
+	scores, err := st.MetricLeaderboard(ctx, jobID, key, maximize)
+	return scores, key, err
+}
+
+func runHPCBest(cmd *cobra.Command, args []string) error {
+	scores, key, err := hpcLeaderboard(cmd, args[0])
+	if err != nil {
+		return err
+	}
+	var top *store.TaskScore
+	for i := range scores {
+		if scores[i].HasValue {
+			top = &scores[i]
+			break
+		}
+	}
+
+	if jsonOut, _ := cmd.Flags().GetBool("json"); jsonOut {
+		printJSON(top)
+		return nil
+	}
+	if top == nil {
+		fmt.Printf("no task has metric %q yet\n", key)
+		return nil
+	}
+	fmt.Printf("best %s = %v\n  task   %s (%s, source=%s)\n  params %v\n",
+		key, top.Value, utils.IDColor(top.TaskID), utils.StatusColor(top.Status), top.Source, top.Params)
+	return nil
+}
+
+func runHPCCollect(cmd *cobra.Command, args []string) error {
+	scores, key, err := hpcLeaderboard(cmd, args[0])
+	if err != nil {
+		return err
+	}
+
+	if jsonOut, _ := cmd.Flags().GetBool("json"); jsonOut {
+		printJSON(scores)
+		return nil
+	}
+	if len(scores) == 0 {
+		fmt.Println("no tasks")
+		return nil
+	}
+	w := newTable()
+	fmt.Fprintf(w, "TASK_ID\tSTATUS\tSOURCE\t%s\tPARAMS\n", strings.ToUpper(key))
+	for _, s := range scores {
+		val := "-"
+		if s.HasValue {
+			val = fmt.Sprintf("%v", s.Value)
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%v\n",
+			utils.IDColor(s.TaskID), utils.StatusColor(s.Status), s.Source, val, s.Params)
+	}
+	w.Flush()
 	return nil
 }

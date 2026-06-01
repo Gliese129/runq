@@ -70,10 +70,62 @@ func TestWriteTemplateSlurmPreset(t *testing.T) {
 	}
 }
 
+// Every shipped preset must be valid YAML and pass validation — guards against
+// quoting mistakes in the awk/sed parser stages.
+func TestAllPresetsParse(t *testing.T) {
+	for _, sched := range append([]string{""}, Presets()...) {
+		name := sched
+		if name == "" {
+			name = "generic"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("RUNQ_DATA_DIR", t.TempDir())
+			if _, _, err := WriteTemplate(sched); err != nil {
+				t.Fatalf("WriteTemplate(%q): %v", sched, err)
+			}
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load %q preset (YAML invalid?): %v", sched, err)
+			}
+			if cfg.SubmitTemplate == "" || cfg.KillTemplate == "" {
+				t.Errorf("%q preset missing required fields", sched)
+			}
+		})
+	}
+}
+
 func TestWriteTemplateUnknownScheduler(t *testing.T) {
 	t.Setenv("RUNQ_DATA_DIR", t.TempDir())
 	if _, _, err := WriteTemplate("bogus"); err == nil {
 		t.Fatal("expected error for unknown scheduler, got nil")
+	}
+}
+
+func TestValidateSubmitIDRegex(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("RUNQ_DATA_DIR", dir)
+	load := func(regex string) error {
+		body := "submit_template: x\nsubmit_id_regex: '" + regex + "'\nkill_template: y\n"
+		if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_, err := Load()
+		return err
+	}
+	if err := load(`([0-9`); err == nil {
+		t.Error("expected error for invalid regex")
+	}
+	if err := load(`[0-9]+`); err == nil {
+		t.Error("expected error for regex with no capture group")
+	}
+	if err := load(`(job) ([0-9]+)`); err == nil {
+		t.Error("expected error for regex with two capture groups (ambiguous)")
+	}
+	if err := load(`job ([0-9]+)`); err != nil {
+		t.Errorf("valid regex rejected: %v", err)
+	}
+	if err := load(`(?:job) ([0-9]+)`); err != nil {
+		t.Errorf("non-capturing group should be allowed: %v", err)
 	}
 }
 

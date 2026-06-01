@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 
 	"gopkg.in/yaml.v3"
 )
@@ -30,10 +31,17 @@ type Config struct {
 	// Must contain exactly one capture group.
 	SubmitIDRegex string `yaml:"submit_id_regex"`
 	// StatusTemplate optionally probes scheduler state. Var: {{ext_id}}.
-	// Empty → status is derived from status.json alone. Its raw output is
-	// interpreted by hpccore.ParseSignal (recognizes canonical tokens + Slurm
-	// sacct states); a present-but-unrecognized output means "alive", empty
-	// output means "gone".
+	// Empty → status comes from status.json alone.
+	//
+	// WITHOUT a status_parser: the raw output is interpreted by hpccore.ParseSignal
+	// (canonical tokens + Slurm sacct states); empty output = gone, present-but-
+	// unrecognized = alive, and a non-zero command exit = no info (SchedUnknown).
+	//
+	// WITH a status_parser: this command's exit code is IGNORED — its output
+	// (even empty, even on a non-zero exit) is handed to the parser. Deliberate:
+	// active queries like `qstat -f <id>` ERROR once the job leaves the queue, and
+	// that "error + empty output" is exactly the gone signal the parser turns into
+	// `gone`.
 	StatusTemplate string `yaml:"status_template,omitempty"`
 	// StatusParser is an OPTIONAL pipeline that translates the scheduler's raw
 	// output into a normalized token, for schedulers whose output isn't directly
@@ -43,6 +51,16 @@ type Config struct {
 	//   pending | running | success | failed | killed | gone
 	// runq assembles the pipe for you, so each stage stays a short, readable
 	// filter instead of one giant one-liner. {{ext_id}} is available in any stage.
+	//
+	// CONTRACT: the PIPELINE (not the status_template) should EXIT 0 and PRINT a
+	// token; print `gone` for an absent job. Empty pipeline output is read as
+	// `gone`; a non-zero PIPELINE exit is "no info" (SchedUnknown, status
+	// unchanged). Don't rely on `grep`'s exit code to mean gone — use an awk END
+	// block to always emit a token. For reliable terminal states
+	// (failed/timeout/oom), prefer an accounting query that always has the record
+	// (the slurm preset uses `sacct`); active-only queries like squeue/qstat can't
+	// always tell "gone" from "finished".
+	//
 	// runq ships no built-in dialect parser — this pipeline is the extension point.
 	StatusParser []string `yaml:"status_parser,omitempty"`
 	// KillTemplate cancels a queued/running job. Var: {{ext_id}}.
@@ -97,6 +115,17 @@ func (c *Config) validate() error {
 	}
 	if c.SubmitIDRegex == "" {
 		return fmt.Errorf("submit_id_regex is required")
+	}
+	// Validate the regex at load so a typo is a clear config error here, not a
+	// panic deep inside ExtractSubmitID (regexp.MustCompile) at submit time.
+	re, err := regexp.Compile(c.SubmitIDRegex)
+	if err != nil {
+		return fmt.Errorf("submit_id_regex is not a valid regular expression: %w", err)
+	}
+	if re.NumSubexp() != 1 {
+		return fmt.Errorf(
+			`submit_id_regex must contain exactly one capture group for the job id (found %d), e.g. "Submitted batch job ([0-9]+)" — use (?:...) for grouping you don't want captured`,
+			re.NumSubexp())
 	}
 	if c.KillTemplate == "" {
 		return fmt.Errorf("kill_template is required")
@@ -175,22 +204,27 @@ status_parser:
 kill_template: "scancel {{ext_id}}"
 `
 
-// pbsYAML: qstat -f exposes job_state as a single letter; map it to a token.
-// Starting point — adjust the state letters for your PBS/Torque variant.
+// pbsYAML: qstat -f exposes job_state as a single letter; the awk END block
+// always emits a token (exit 0) per the status_parser contract.
+// NOTE: this is an active-only query — when a job finishes, qstat errors on the
+// unknown id, which runq treats as "no info" (status unchanged), so terminal
+// states aren't detected here. For reliable terminal states use your PBS
+// accounting query (the slurm preset shows the pattern with sacct).
+// Starting point — adjust state letters for your PBS/Torque variant.
 const pbsYAML = configHeader + `
 submit_template: "qsub -l ngpus={{gpus}} -N {{task_id}} {{run_sh}}"
 submit_id_regex: "([0-9]+)"
 
-status_template: "qstat -f {{ext_id}}"
+status_template: "qstat -f {{ext_id}} 2>/dev/null"
 status_parser:
-  - grep -o 'job_state = .'
-  - awk '{print $3}'
+  - awk -F'= ' '/job_state/{print $2; f=1} END{if(!f) print "gone"}'
   - sed -e s/R/running/ -e s/E/running/ -e s/Q/pending/ -e s/H/pending/
 
 kill_template: "qdel {{ext_id}}"
 `
 
-// sgeYAML: qstat lists active jobs; grep our id, read the state column, map it.
+// sgeYAML: qstat lists active jobs (exit 0 even when ours is absent); awk matches
+// our id, prints its state column, and emits gone via END otherwise (exit 0).
 // Starting point — adjust columns/states for your SGE variant.
 const sgeYAML = configHeader + `
 submit_template: "qsub -l gpu={{gpus}} -N {{task_id}} {{run_sh}}"
@@ -198,8 +232,7 @@ submit_id_regex: "Your job ([0-9]+)"
 
 status_template: "qstat"
 status_parser:
-  - grep {{ext_id}}
-  - awk '{print $5}'
+  - awk -v id={{ext_id}} '$1==id{print $5; f=1} END{if(!f) print "gone"}'
   - sed -e s/r/running/ -e s/qw/pending/ -e s/Eqw/failed/
 
 kill_template: "qdel {{ext_id}}"

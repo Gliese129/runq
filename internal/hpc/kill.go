@@ -3,41 +3,78 @@ package hpc
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/gliese129/runq/internal/hpccore"
 	"github.com/gliese129/runq/internal/store"
 )
 
 // Kill cancels a job (all its tasks) or a single task. target is matched as a
-// job id first, then as a task id. For each non-terminal task it runs the
-// kill_template against the external id (best-effort) and marks the task killed
-// in the DB (the source of truth). Returns how many tasks were killed.
-func (b *Backend) Kill(ctx context.Context, target string) (int, error) {
-	tasks, jobID, err := b.resolveTargets(ctx, target)
-	if err != nil {
-		return 0, err
+// job id first, then as a task id.
+//
+// It is best-effort but NEVER lies: a task is marked "killed" only after its
+// cancel command actually succeeds. Three cases per non-terminal task:
+//
+//   - already terminal → skipped (nothing to cancel).
+//   - has external id → run kill_template; mark killed only on success.
+//   - no external id → REFUSED: the submit id was lost, so we have no handle to
+//     cancel and the cluster job may be running untracked. We will not record a
+//     kill we did not perform — the user must check the cluster manually.
+//
+// Kill does not abort on the first problem: it cancels every task it can and
+// returns how many were killed plus an error summarizing the ones it could not
+// (so a single stuck task doesn't block cancelling the rest of a job).
+func (b *Backend) Kill(ctx context.Context, target string) (killed int, err error) {
+	tasks, jobID, rerr := b.resolveTargets(ctx, target)
+	if rerr != nil {
+		return 0, rerr
 	}
 
-	killed := 0
+	// Refresh the job aggregate on EVERY exit (incl. the error path) so the job
+	// status reflects the tasks we did kill, without waiting for the next poll.
+	// Named returns let a refresh error surface on the success path without
+	// clobbering a real error from the loop.
+	if jobID != "" {
+		defer func() {
+			if e := b.refreshJobStatus(ctx, jobID); e != nil && err == nil {
+				err = fmt.Errorf("refresh job %s status: %w", jobID, e)
+			}
+		}()
+	}
+
+	var problems []string
 	for _, tk := range tasks {
 		if isTerminal(tk.Status) {
 			continue
 		}
-		if tk.ExternalID != "" {
-			if cmd, rerr := hpccore.Render(b.Cfg.KillTemplate, map[string]string{"ext_id": tk.ExternalID}); rerr == nil {
-				_, _ = b.Run(ctx, cmd) // best-effort; DB mark below is authoritative
-			}
+		if tk.ExternalID == "" {
+			problems = append(problems, fmt.Sprintf(
+				"%s: no external id (submit id was lost) — cannot cancel; check the cluster (e.g. squeue) manually", tk.ID))
+			continue
 		}
-		if err := b.Store.UpdateTaskStatus(ctx, tk.ID, "killed", map[string]any{"finished_at": nowUnix()}); err != nil {
-			return killed, fmt.Errorf("mark task %s killed: %w", tk.ID, err)
+
+		cmd, rErr := hpccore.Render(b.Cfg.KillTemplate, map[string]string{"ext_id": tk.ExternalID})
+		if rErr != nil {
+			problems = append(problems, fmt.Sprintf("%s: render kill_template: %v", tk.ID, rErr))
+			continue
+		}
+		if out, xerr := b.Run(ctx, cmd); xerr != nil {
+			problems = append(problems, fmt.Sprintf(
+				"%s (ext id %s): cancel failed (may have already finished): %v %s",
+				tk.ID, tk.ExternalID, xerr, strings.TrimSpace(out)))
+			continue
+		}
+
+		if uErr := b.Store.UpdateTaskStatus(ctx, tk.ID, "killed",
+			map[string]any{"finished_at": nowUnix(), "status_source": hpccore.SourceRunq}); uErr != nil {
+			return killed, fmt.Errorf("mark task %s killed: %w", tk.ID, uErr)
 		}
 		killed++
 	}
 
-	if jobID != "" {
-		if err := b.refreshJobStatus(ctx, jobID); err != nil {
-			return killed, err
-		}
+	if len(problems) > 0 {
+		return killed, fmt.Errorf("killed %d task(s); could not cancel %d:\n  %s",
+			killed, len(problems), strings.Join(problems, "\n  "))
 	}
 	return killed, nil
 }

@@ -96,4 +96,16 @@ func TestProbeScheduler(t *testing.T) {
 			t.Fatalf("got %q, want running", got)
 		}
 	})
+
+	t.Run("parser empty output (exit 0) is gone", func(t *testing.T) {
+		// Job vanished from the active query: the parser exits 0 with no token.
+		// This must map to gone (not unknown), else a dead task zombies as running.
+		b := &Backend{Cfg: &hpcconfig.Config{
+			StatusTemplate: "echo R",
+			StatusParser:   []string{"awk '/NOPE/{print}'"}, // matches nothing, exit 0, empty
+		}, Run: shellRunner}
+		if got := b.probeScheduler(ctx, "1"); got != hpccore.SchedGone {
+			t.Fatalf("got %q, want gone", got)
+		}
+	})
 }

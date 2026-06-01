@@ -86,7 +86,10 @@ func Render(tmpl string, vars map[string]string) (string, error) {
 //   - No match → error, so a failed/garbled submission surfaces instead of
 //     silently recording an empty id.
 func ExtractSubmitID(output, regex string) (string, error) {
-	reg := regexp.MustCompile(regex)
+	reg, err := regexp.Compile(regex)
+	if err != nil {
+		return "", fmt.Errorf("invalid submit_id_regex %q: %w", regex, err)
+	}
 	result := reg.FindAllStringSubmatch(output, 1)
 	if len(result) == 0 {
 		return "", fmt.Errorf("no match found")
@@ -147,6 +150,23 @@ func ParseSignal(token string) SchedulerSignal {
 	}
 }
 
+// Status-source values: the provenance of a canonical status, persisted in
+// tasks.status_source. They let the HPC backend treat an "inferred" terminal as
+// correctable while wrapper/scheduler/runq terminals are final. "" = unknown.
+const (
+	SourceWrapper   = "wrapper"   // from the wrapper's status.json
+	SourceScheduler = "scheduler" // from the scheduler probe (active state or accounting terminal)
+	SourceInferred  = "inferred"  // a guess: wrapper said running but the scheduler says it's gone
+	SourceRunq      = "runq"      // a runq-initiated kill that succeeded
+	SourceSubmit    = "submit"    // the submit command itself failed
+)
+
+// Decision is Reconcile's output: the canonical status plus where it came from.
+type Decision struct {
+	Status string
+	Source string
+}
+
 // Observed is the multi-source view of a single task that Reconcile collapses
 // into one canonical status. The glue fills this from status.json plus the
 // optional scheduler probe.
@@ -166,58 +186,66 @@ type Observed struct {
 }
 
 // Reconcile MERGES two independent fact sources into the canonical status to
-// persist: the wrapper's own exit code (process-inside truth) and the
-// scheduler's verdict (process-outside lifecycle). The DB is the source of
-// truth; Reconcile takes the current DB status and returns the status to write
-// — returning `current` unchanged when there is no new fact, so a transient
-// missing observation never downgrades a task (e.g. running → pending).
+// persist — the wrapper's own exit code (process-inside truth) and the
+// scheduler's verdict (process-outside lifecycle) — and reports the provenance
+// (Source) so the backend knows how much to trust it. The DB is the source of
+// truth; Reconcile takes the current status+source and returns what to write,
+// keeping current unchanged when there is no new fact, so a transient missing
+// observation never downgrades a task (e.g. running → pending).
 //
-// Precedence:
+// Precedence (status / source):
 //
-//	KillRequested                                  -> killed   (user-initiated, DB already marked)
-//	wrapper success/failed                         -> that     (own exit code, most trustworthy)
-//	scheduler terminal (success/failed/killed)     -> that     (covers deaths the wrapper couldn't record)
-//	wrapper started/running + scheduler Gone       -> failed   (zombie: running but confirmed gone)
-//	wrapper started/running otherwise              -> running
-//	wrapper "" + scheduler Running                 -> running
-//	wrapper "" + scheduler Active/Pending          -> pending
-//	wrapper "" + scheduler Gone                    -> failed   (left queue without ever starting)
-//	otherwise (scheduler Unknown, no wrapper)      -> current  (no new fact; leave DB untouched)
-func Reconcile(current string, o Observed) string {
+//	KillRequested                                  -> killed   / runq
+//	wrapper success|failed                         -> that     / wrapper   (own exit code, most trustworthy)
+//	scheduler Success|Failed|Killed                -> that     / scheduler (accounting; deaths the wrapper couldn't record)
+//	wrapper started|running + scheduler Gone       -> failed   / inferred  (zombie GUESS — correctable later)
+//	wrapper started|running                        -> running  / wrapper
+//	wrapper "" + scheduler Running                 -> running  / scheduler
+//	wrapper "" + scheduler Active|Pending          -> pending  / scheduler
+//	otherwise (incl. wrapper "" + Gone/Unknown)    -> keep current status+source
+//
+// Note: "wrapper "" + Gone" deliberately KEEPS current (does not infer failure).
+// We only infer death when we have positive evidence the task actually ran
+// (wrapper started/running); a task that never reported running must not be
+// killed off just because an active query doesn't list it (it may be in the
+// submit→start race window, or simply not written status.json yet).
+func Reconcile(currentStatus, currentSource string, o Observed) Decision {
+	keep := Decision{Status: currentStatus, Source: currentSource}
+
 	if o.KillRequested {
-		return "killed"
+		return Decision{"killed", SourceRunq}
 	}
-	// 1. Wrapper's own terminal exit code wins — it has the real result.
+	// Wrapper's own terminal exit code wins — it has the real result.
 	if o.WrapperStatus == "success" || o.WrapperStatus == "failed" {
-		return o.WrapperStatus
+		return Decision{o.WrapperStatus, SourceWrapper}
 	}
-	// 2. Scheduler-reported terminal states (only present when a parser hook
-	//    emits them, e.g. sacct). Covers SIGKILL/OOM/timeout/node-fail that the
-	//    wrapper could not record.
+	// Scheduler-reported terminal states (only when a parser hook emits them,
+	// e.g. sacct). Covers SIGKILL/OOM/timeout/node-fail the wrapper couldn't record.
 	switch o.Scheduler {
 	case SchedSuccess:
-		return "success"
+		return Decision{"success", SourceScheduler}
 	case SchedFailed:
-		return "failed"
+		return Decision{"failed", SourceScheduler}
 	case SchedKilled:
-		return "killed"
+		return Decision{"killed", SourceScheduler}
 	}
-	// 3. Wrapper reports it is executing.
+	// Wrapper reports it is executing.
 	if o.WrapperStatus == "started" || o.WrapperStatus == "running" {
 		if o.Scheduler == SchedGone {
-			return "failed" // running but confirmed gone, no terminal record → zombie
+			// Ran, but the scheduler confirms it's gone with no terminal record:
+			// a zombie GUESS. Mark failed/inferred so a later wrapper terminal can
+			// still correct it.
+			return Decision{"failed", SourceInferred}
 		}
-		return "running"
+		return Decision{"running", SourceWrapper}
 	}
-	// 4. No wrapper signal yet — lean on the scheduler's liveness.
+	// No wrapper signal yet — lean on the scheduler's liveness only.
 	switch o.Scheduler {
 	case SchedRunning:
-		return "running"
+		return Decision{"running", SourceScheduler}
 	case SchedActive, SchedPending:
-		return "pending"
-	case SchedGone:
-		return "failed" // left the active queue without ever recording a start
+		return Decision{"pending", SourceScheduler}
 	}
-	// 5. No new fact — leave the DB exactly as it is.
-	return current
+	// No new fact (scheduler Unknown/Gone, no wrapper) — leave the DB as is.
+	return keep
 }

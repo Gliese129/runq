@@ -3,6 +3,7 @@ package hpc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -34,52 +35,82 @@ func readStatus(taskDir string) statusFile {
 	return sf
 }
 
-// Refresh projects on-disk task state into the DB. For each task it:
-//   - ingests metrics.jsonl (idempotent — safe to re-run every refresh)
-//   - reads status.json and optionally probes the scheduler
-//   - asks hpccore.Reconcile for the canonical status and writes it
+// Refresh is the ONLY engine that advances task state — there is no resident
+// process on HPC, so state moves forward only when a command calls this. It is a
+// best-effort projection (see the package doc). For each task it ingests
+// metrics.jsonl (always, idempotent — catches late/appended files), then, unless
+// the task is already a HARD terminal, reads status.json + probes the scheduler
+// and recomputes the canonical status+source via hpccore.Reconcile.
 //
-// The DB is the source of truth; this is the only writer. There is no
-// user-visible sync — status/best/collect call Refresh internally.
+// Terminal handling keys off status_source:
+//   - wrapper / runq terminals are FINAL — skipped (no re-probe).
+//   - scheduler / submit / inferred terminals stay correctable: Refresh
+//     re-probes every cycle so a late wrapper signal can overturn them
+//     ("wrapper terminal wins").
+//
+// The DB is the (lazily-updated) source of truth and this is its only writer;
+// there is no user-visible sync — status/best/collect call Refresh internally.
 func (b *Backend) Refresh(ctx context.Context, jobID string) error {
 	tasks, err := b.Store.ListTasks(ctx, store.TaskFilter{JobID: jobID})
 	if err != nil {
 		return err
 	}
+	var ingestErrs []error
 	for _, tk := range tasks {
-		// Metrics/checkpoints: idempotent batch insert (INSERT OR IGNORE).
-		_, _ = ingest.ReapOutputs(ctx, b.Store, ingest.Target{
+		// Metrics/checkpoints: idempotent (INSERT OR IGNORE), run for every task
+		// so files that appear/grow after a status change still land.
+		if _, ierr := ingest.ReapOutputs(ctx, b.Store, ingest.Target{
 			TaskID: tk.ID, JobID: tk.JobID, Dir: tk.TaskDir,
-		})
+		}); ierr != nil {
+			ingestErrs = append(ingestErrs, fmt.Errorf("ingest task %s: %w", tk.ID, ierr))
+		}
+
+		// Only wrapper and runq terminals are hard-final (skip re-probe).
+		// Scheduler / submit / inferred terminals stay correctable so a late
+		// wrapper signal can overturn them.
+		if isTerminal(tk.Status) && (tk.StatusSource == hpccore.SourceWrapper || tk.StatusSource == hpccore.SourceRunq) {
+			continue
+		}
 
 		sf := readStatus(tk.TaskDir)
-
-		canonical := hpccore.Reconcile(tk.Status, hpccore.Observed{
+		d := hpccore.Reconcile(tk.Status, tk.StatusSource, hpccore.Observed{
 			WrapperStatus: sf.Status,
 			ExitCode:      sf.ExitCode,
 			Scheduler:     b.probeScheduler(ctx, tk.ExternalID),
-			KillRequested: tk.Status == "killed", // DB stays authoritative
+			KillRequested: tk.Status == "killed", // defensive; killed is skipped above
 		})
 
-		fields := map[string]any{}
-		// Stamp finished_at once, on the first terminal transition, preferring
-		// the wrapper's timestamp; never re-stamp (avoids drift across refreshes).
-		if isTerminal(canonical) && tk.FinishedAt == nil {
-			ft := sf.FinishedAt
-			if ft == 0 {
-				ft = nowUnix()
-			}
-			fields["finished_at"] = ft
-		}
-
-		if canonical == tk.Status && len(fields) == 0 {
+		if d.Status == tk.Status && d.Source == tk.StatusSource {
 			continue // nothing changed
 		}
-		if err := b.Store.UpdateTaskStatus(ctx, tk.ID, canonical, fields); err != nil {
+
+		fields := map[string]any{"status_source": d.Source}
+		switch {
+		case isTerminal(d.Status) && d.Status != tk.Status:
+			// Entering a terminal, or correcting one terminal to another
+			// (inferred→wrapper): (re)stamp finished_at, preferring the wrapper's.
+			if sf.FinishedAt > 0 {
+				fields["finished_at"] = sf.FinishedAt
+			} else {
+				fields["finished_at"] = nowUnix()
+			}
+		case !isTerminal(d.Status) && isTerminal(tk.Status):
+			// Leaving a terminal (an inferred failure the scheduler re-activated):
+			// clear the stamp.
+			fields["finished_at"] = nil
+		}
+
+		if err := b.Store.UpdateTaskStatus(ctx, tk.ID, d.Status, fields); err != nil {
 			return fmt.Errorf("update task %s: %w", tk.ID, err)
 		}
 	}
-	return b.refreshJobStatus(ctx, jobID)
+	if err := b.refreshJobStatus(ctx, jobID); err != nil {
+		return err
+	}
+	if len(ingestErrs) > 0 {
+		return fmt.Errorf("status refreshed but ingest had errors: %w", errors.Join(ingestErrs...))
+	}
+	return nil
 }
 
 // probeScheduler runs the configured status_template (and optional status_parser
@@ -97,14 +128,21 @@ func (b *Backend) probeScheduler(ctx context.Context, extID string) hpccore.Sche
 	if err != nil {
 		return hpccore.SchedUnknown
 	}
-	out, err := b.Run(ctx, cmd)
-	if err != nil {
-		return hpccore.SchedUnknown
-	}
+	// Note: status command exit code handling differs by mode (below). Capture
+	// the output regardless of error so a parser can still interpret it.
+	out, runErr := b.Run(ctx, cmd)
 
-	// Optional parser pipeline: feed the raw output to stage 1 on stdin and pipe
-	// each stage into the next. runq assembles the pipe so each stage stays a
-	// short filter; {{ext_id}} is available in any stage.
+	// Optional parser pipeline: feed the status output to stage 1 on stdin and
+	// pipe each stage into the next. runq assembles the pipe so each stage stays
+	// a short filter; {{ext_id}} is available in any stage.
+	//
+	// When a parser is configured we do NOT bail on a non-zero status command:
+	// many active queries (e.g. `qstat -f <finished_id>`) ERROR once the job
+	// leaves the queue, and that error IS the "gone" signal. We hand the (often
+	// empty) output to the parser and let it decide — the parser is contracted to
+	// emit `gone` for absence. (Trade-off: a genuinely broken status binary that
+	// returns empty will also look "gone"; for reliable terminal states use an
+	// accounting query like the slurm preset's sacct.)
 	if len(b.Cfg.StatusParser) > 0 {
 		stages := make([]string, 0, len(b.Cfg.StatusParser))
 		for _, s := range b.Cfg.StatusParser {
@@ -119,10 +157,17 @@ func (b *Backend) probeScheduler(ctx context.Context, extID string) hpccore.Sche
 		if perr != nil {
 			return hpccore.SchedUnknown
 		}
+		// Empty parser output = job absent from the active query = gone.
+		if strings.TrimSpace(pout) == "" {
+			return hpccore.SchedGone
+		}
 		return hpccore.ParseSignal(pout)
 	}
 
-	// No hook: interpret the raw output directly.
+	// No parser: a status command error is "no info" (don't guess).
+	if runErr != nil {
+		return hpccore.SchedUnknown
+	}
 	if strings.TrimSpace(out) == "" {
 		return hpccore.SchedGone
 	}

@@ -4,38 +4,48 @@ import "testing"
 
 func TestReconcile(t *testing.T) {
 	cases := []struct {
-		name    string
-		current string
-		obs     Observed
-		want    string
+		name       string
+		curStatus  string
+		curSource  string
+		obs        Observed
+		wantStatus string
+		wantSource string
 	}{
-		{"user kill wins", "running", Observed{WrapperStatus: "running", KillRequested: true}, "killed"},
-		{"wrapper success", "running", Observed{WrapperStatus: "success"}, "success"},
-		{"wrapper failed", "running", Observed{WrapperStatus: "failed"}, "failed"},
-		{"wrapper success beats scheduler failed", "running", Observed{WrapperStatus: "success", Scheduler: SchedFailed}, "success"},
+		{"user kill", "running", SourceWrapper, Observed{WrapperStatus: "running", KillRequested: true}, "killed", SourceRunq},
+		{"wrapper success", "running", SourceWrapper, Observed{WrapperStatus: "success"}, "success", SourceWrapper},
+		{"wrapper failed", "running", SourceWrapper, Observed{WrapperStatus: "failed"}, "failed", SourceWrapper},
+		{"wrapper success beats scheduler failed", "running", SourceWrapper, Observed{WrapperStatus: "success", Scheduler: SchedFailed}, "success", SourceWrapper},
 
-		{"scheduler terminal success", "running", Observed{WrapperStatus: "", Scheduler: SchedSuccess}, "success"},
-		{"scheduler terminal failed", "running", Observed{WrapperStatus: "", Scheduler: SchedFailed}, "failed"},
-		{"scheduler terminal killed", "running", Observed{WrapperStatus: "", Scheduler: SchedKilled}, "killed"},
+		{"scheduler terminal success", "running", "", Observed{Scheduler: SchedSuccess}, "success", SourceScheduler},
+		{"scheduler terminal failed", "running", "", Observed{Scheduler: SchedFailed}, "failed", SourceScheduler},
+		{"scheduler terminal killed", "running", "", Observed{Scheduler: SchedKilled}, "killed", SourceScheduler},
 
-		{"zombie: running but gone", "running", Observed{WrapperStatus: "running", Scheduler: SchedGone}, "failed"},
-		{"running + active", "pending", Observed{WrapperStatus: "running", Scheduler: SchedActive}, "running"},
-		{"running + scheduler running", "pending", Observed{WrapperStatus: "started", Scheduler: SchedRunning}, "running"},
-		{"running + scheduler unknown", "running", Observed{WrapperStatus: "running", Scheduler: SchedUnknown}, "running"},
+		{"zombie: running but gone -> inferred", "running", SourceWrapper, Observed{WrapperStatus: "running", Scheduler: SchedGone}, "failed", SourceInferred},
+		{"running + active", "pending", SourceScheduler, Observed{WrapperStatus: "running", Scheduler: SchedActive}, "running", SourceWrapper},
+		{"running + sched running", "pending", "", Observed{WrapperStatus: "started", Scheduler: SchedRunning}, "running", SourceWrapper},
+		{"running + unknown", "running", SourceWrapper, Observed{WrapperStatus: "running", Scheduler: SchedUnknown}, "running", SourceWrapper},
 
-		{"no wrapper + scheduler running", "pending", Observed{WrapperStatus: "", Scheduler: SchedRunning}, "running"},
-		{"no wrapper + active", "pending", Observed{WrapperStatus: "", Scheduler: SchedActive}, "pending"},
-		{"no wrapper + pending", "pending", Observed{WrapperStatus: "", Scheduler: SchedPending}, "pending"},
-		{"no wrapper + gone", "pending", Observed{WrapperStatus: "", Scheduler: SchedGone}, "failed"},
+		{"no wrapper + sched running", "pending", "", Observed{Scheduler: SchedRunning}, "running", SourceScheduler},
+		{"no wrapper + active", "pending", "", Observed{Scheduler: SchedActive}, "pending", SourceScheduler},
+		{"no wrapper + pending", "pending", "", Observed{Scheduler: SchedPending}, "pending", SourceScheduler},
 
-		// No new fact → keep current (no spurious downgrade).
-		{"keep current running", "running", Observed{WrapperStatus: "", Scheduler: SchedUnknown}, "running"},
-		{"keep current pending", "pending", Observed{WrapperStatus: "", Scheduler: SchedUnknown}, "pending"},
+		// The important change: "no wrapper + gone" must NOT infer failure — keep
+		// current (a never-started task isn't killed just because it's not listed).
+		{"no wrapper + gone -> keep", "pending", "", Observed{Scheduler: SchedGone}, "pending", ""},
+
+		// No new fact → keep current status AND source (no spurious downgrade).
+		{"keep running", "running", SourceWrapper, Observed{Scheduler: SchedUnknown}, "running", SourceWrapper},
+		{"keep pending", "pending", "", Observed{Scheduler: SchedUnknown}, "pending", ""},
+
+		// An inferred terminal is correctable by a later wrapper terminal.
+		{"inferred failed corrected by wrapper success", "failed", SourceInferred, Observed{WrapperStatus: "success"}, "success", SourceWrapper},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := Reconcile(c.current, c.obs); got != c.want {
-				t.Errorf("Reconcile(%q, %+v) = %q, want %q", c.current, c.obs, got, c.want)
+			got := Reconcile(c.curStatus, c.curSource, c.obs)
+			if got.Status != c.wantStatus || got.Source != c.wantSource {
+				t.Errorf("Reconcile(%q,%q,%+v) = {%q,%q}, want {%q,%q}",
+					c.curStatus, c.curSource, c.obs, got.Status, got.Source, c.wantStatus, c.wantSource)
 			}
 		})
 	}

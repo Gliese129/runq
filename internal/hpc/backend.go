@@ -10,6 +10,33 @@
 // template rendering, run.sh generation, and DB reconciliation — the genuinely
 // algorithmic bits (shell-safe interpolation, id extraction, status reconcile)
 // live in internal/hpccore.
+//
+// # Best-effort status (read this before reasoning about task state)
+//
+// Unlike the daemon, there is NO resident process driving state forward — no
+// scheduler loop, no timer. Every status the DB holds is a BEST-EFFORT
+// projection, recomputed only when a CLI command runs Refresh, of sources the
+// user owns:
+//
+//   - the wrapper's <task_dir>/status.json (written by run.sh / the SDK), and
+//   - an OPTIONAL scheduler probe (status_template, + status_parser).
+//
+// Consequences, by design:
+//
+//   - State only advances when a command (status / best / collect) runs Refresh
+//     on that job. Between commands the DB is frozen; a job can finish on the
+//     cluster and still read "running" until the next poll. That is expected.
+//   - The honest default for a submitted-but-not-yet-terminal task is "(maybe)
+//     running". runq does NOT own liveness truth — whether running/done is
+//     accurate depends on the user's shell integration (run.sh writing
+//     status.json, and/or a correct status_template/status_parser). runq only
+//     faithfully reflects those files + the optional probe.
+//   - Precise liveness (scheduler probe, gone/zombie detection) is an OPTIONAL
+//     accuracy enhancement the user opts into via status_template; the core path
+//     (status.json only) is deliberately coarse.
+//   - The DB never records a fact runq does not know: a task only becomes
+//     "killed" after a cancel actually succeeds (see Kill), never just because a
+//     kill was requested.
 package hpc
 
 import (

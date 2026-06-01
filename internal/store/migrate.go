@@ -39,6 +39,12 @@ func (s *Store) addMissingColumns(ctx context.Context) error {
 	if err := addColumnIfMissing(ctx, s.db, "tasks", "external_id", "TEXT"); err != nil {
 		return fmt.Errorf("add tasks.external_id: %w", err)
 	}
+	// L2-E: status_source records where a task's status came from (wrapper /
+	// scheduler / inferred / runq / submit). Lets refresh treat "inferred"
+	// terminals as correctable while hard terminals are final.
+	if err := addColumnIfMissing(ctx, s.db, "tasks", "status_source", "TEXT"); err != nil {
+		return fmt.Errorf("add tasks.status_source: %w", err)
+	}
 	return nil
 }
 
