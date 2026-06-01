@@ -13,14 +13,7 @@ package preflight
 // ./internal/preflight/...` discovers it. Codex: please flesh out the
 // bodies.
 
-import (
-	"context"
-	"os"
-	"path/filepath"
-	"strings"
-	"testing"
-	"time"
-)
+import "testing"
 
 // ----------------------------------------------------------------------
 // (1) checkWritable
@@ -160,94 +153,4 @@ func TestRunPreflight_Skip(t *testing.T) {
 
 func TestRunPreflight_AggregatesFindings(t *testing.T) {
 	t.Skip("TODO(codex)")
-}
-
-// ----------------------------------------------------------------------
-// helpers (codex can use these for the bodies above)
-// ----------------------------------------------------------------------
-
-// withWritableDir creates a tmp dir, returns its path, and registers
-// cleanup. Codex: use this in writability tests.
-func withWritableDir(t *testing.T) string {
-	t.Helper()
-	d := t.TempDir()
-	return d
-}
-
-// withPythonScript writes a tiny Python file under workingDir and
-// returns its path (used to drive extractImports tests).
-func withPythonScript(t *testing.T, workingDir, name, source string) string {
-	t.Helper()
-	p := filepath.Join(workingDir, name)
-	if err := os.WriteFile(p, []byte(source), 0o644); err != nil {
-		t.Fatalf("write %s: %v", p, err)
-	}
-	return p
-}
-
-// withFakePythonOnPath puts a tiny bash stub named “python“ (and
-// “python3“) at the front of $PATH for the test's lifetime. The stub
-// reads its argv and behaves according to “behavior“ — typically
-// "ok" (exit 0) or "missing" (exit 1 with a ModuleNotFoundError-style
-// message). Use this in checkImports / checkPipCheck tests to keep
-// the suite hermetic.
-//
-// behavior strings:
-//
-//	"ok"      — succeed on every import probe
-//	"missing" — fail with "ModuleNotFoundError: No module named 'X'"
-//	"pipbad"  — succeed on import probes, fail pip check with one
-//	            conflict line
-func withFakePythonOnPath(t *testing.T, behavior string) {
-	t.Helper()
-	bin := t.TempDir()
-	script := `#!/usr/bin/env bash
-case "$behavior" in
-  ok) exit 0 ;;
-  missing)
-    # the actual import target is the last arg; mimic CPython's
-    # error format so checkImports's lastLine() picks it up.
-    target=${@: -1}
-    target=${target#import }
-    >&2 echo "ModuleNotFoundError: No module named '${target}'"
-    exit 1 ;;
-  pipbad)
-    if [[ "$*" == *"pip check"* ]]; then
-      echo "tensorflow 2.5 has requirement numpy~=1.19, but you have numpy 1.24."
-      exit 1
-    fi
-    exit 0 ;;
-esac
-exit 0
-`
-	stub := filepath.Join(bin, "python")
-	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake python: %v", err)
-	}
-	if err := os.Link(stub, filepath.Join(bin, "python3")); err != nil {
-		_ = os.WriteFile(filepath.Join(bin, "python3"), []byte(script), 0o755)
-	}
-	t.Setenv("behavior", behavior)
-	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-}
-
-// withContext returns a context with the given timeout for subprocess-
-// driven tests. Used to keep import / pip check probes from hanging
-// the suite on slow CI.
-func withContext(t *testing.T, timeout time.Duration) (context.Context, context.CancelFunc) {
-	t.Helper()
-	return context.WithTimeout(context.Background(), timeout)
-}
-
-// requireFinding asserts that “findings“ contains at least one entry
-// whose Detail field substring-matches “want“. Codex: this is the
-// idiomatic assertion shape for the table-driven tests above.
-func requireFinding(t *testing.T, findings []PreflightFinding, want string) {
-	t.Helper()
-	for _, f := range findings {
-		if strings.Contains(f.Detail, want) {
-			return
-		}
-	}
-	t.Fatalf("no finding contained %q; got %#v", want, findings)
 }
