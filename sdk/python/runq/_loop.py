@@ -4,7 +4,7 @@ Three small surfaces packaged together because they all live near the
 training loop in user code:
 
 1. ``loop(iterable)`` — generator that yields items and short-circuits
-   when the most-recent ``report()`` returned ``should_stop=True``.
+   on preemption (SIGTERM) or early-stop from ``report()``.
 2. ``@epoch`` — timing-only decorator that emits one
    ``epoch_time_seconds`` event per call. Does NOT touch step (Codex
    review #7 — step ownership belongs to ``report`` / ``safe_save``).
@@ -13,7 +13,8 @@ training loop in user code:
 
 Coupling boundaries
 -------------------
-- ``loop`` reads ``ctx._last_decision`` (set by ``report``).
+- ``loop`` uses the shared iterator core in ``_range`` (``_check_break``
+  + ``_init_iterator``) — same preemption + early-stop as ``range()``.
 - ``epoch`` writes via ``_append_event`` and respects the active
   ``log_group`` prefix (uses :func:`runq._prefix.apply_prefix`).
 - ``log_group`` writes to ``runq._prefix._prefix_stack`` ContextVar.
@@ -40,44 +41,28 @@ def loop(
     name: str | None = None,
     total: int | None = None,
 ) -> Iterator[Any]:
-    """Generator wrapping ``iterable`` with auto early-stop break.
+    """Generator wrapping ``iterable`` with preemption + early-stop.
 
-    Yields each item from ``iterable``. After each user-body
-    completes, reads ``ctx._last_decision`` (set by the most recent
-    :func:`runq.report` call) and breaks out of the loop when
-    ``should_stop`` is True.
+    Shares the iterator core with :func:`runq.range`:
+
+    - SIGTERM preemption (cooperative flag)
+    - early-stop via ``ctx._last_decision`` (set by ``report()``)
+    - stale decision reset at start
+
+    ``loop()`` wraps arbitrary iterables (dataloaders, custom sequences);
+    ``range()`` is the numeric step owner. Use ``loop()`` when your
+    iterator is not a simple int range.
 
     Step ownership
     --------------
-    ``loop`` is the default ``step`` source (F5.5 ownership table):
-    before each yield it sets ``ctx.current_step = i``. Subsequent
-    ``runq.report`` / ``runq.safe_save`` calls without an explicit
-    ``step=`` use that value. An explicit ``step=epoch`` at the call
-    site overrides it (and writes back to ctx). Canonical pattern::
-
-        for epoch in runq.loop(range(N)):
-            ...
-            runq.report({"val_loss": loss}, step=epoch)        # explicit, equivalent
-            runq.safe_save("ckpt.pt", state, step=epoch)       # explicit, equivalent
-
-        # Equivalent (relies on loop having set ctx.current_step):
-        for _ in runq.loop(range(N)):
-            ...
-            runq.report({"val_loss": loss})
-            runq.safe_save("ckpt.pt", state)
-
-    Progress bar
-    ------------
-    Optionally wraps the iterator in ``tqdm`` if installed. Falls back
-    to plain iteration silently when tqdm is absent — we don't want
-    a missing dev dep to crash production training.
+    ``loop`` uses the enumerate index as ``ctx.current_step``.
+    Subsequent ``runq.report`` / ``runq.safe_save`` calls without an
+    explicit ``step=`` use that value.
 
     Parameters
     ----------
     iterable :
-        Any iterable. Note: passing a generator with no ``__len__``
-        and no ``total=`` means tqdm can't show ETA; that's fine,
-        it still works.
+        Any iterable (dataloader, list, generator, …).
     name :
         Description for the progress bar AND the ``loop_break`` event
         if early stop fires.
@@ -86,31 +71,27 @@ def loop(
 
     Yields
     ------
-    Items from ``iterable``, until exhausted OR a stop decision fires.
+    Items from ``iterable``, until exhausted, preempted, or early-stopped.
     """
-    ctx = get_ctx()
+    from ._range import _check_break, _init_iterator
+
+    try:
+        ctx = get_ctx()
+    except RuntimeError:
+        ctx = None
+
+    _init_iterator(ctx)
+
     iterator = _maybe_tqdm(iterable, name=name, total=total)
-    # Reset any stale decision from a previous training run sharing
-    # the same process — important for notebook workflows.
-    ctx._last_decision = None
 
     for i, item in enumerate(iterator):
-        # F5.5: loop is the default step source. Set BEFORE yielding so
-        # the user's body sees ctx.current_step == i for any non-
-        # explicit ``runq.report({...})`` / ``runq.safe_save(...)``.
-        ctx.current_step = i
+        if _check_break(ctx, name or "loop", i) is not None:
+            return
+
+        if ctx is not None:
+            ctx.current_step = i
+
         yield item
-        decision = ctx._last_decision
-        if decision is not None and getattr(decision, "should_stop", False):
-            _append_event(
-                {
-                    "type": "loop_break",
-                    "name": name or "loop",
-                    "reason": getattr(decision, "reason", None),
-                    "ts": int(time.time()),
-                }
-            )
-            break
 
 
 def _maybe_tqdm(iterable, *, name, total):

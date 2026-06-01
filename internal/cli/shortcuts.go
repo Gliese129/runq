@@ -79,6 +79,7 @@ job.yaml in the current directory.`,
 		dryRunAlias, _ := cmd.Flags().GetBool("dry-run")
 		watch, _ := cmd.Flags().GetBool("watch")
 		projectOverride, _ := cmd.Flags().GetString("project")
+		noteOverride, _ := cmd.Flags().GetString("note")
 		noPreflight, _ := cmd.Flags().GetBool("no-preflight")
 
 		if file == "." {
@@ -97,6 +98,9 @@ job.yaml in the current directory.`,
 		}
 		if projectOverride != "" {
 			job.Project = projectOverride
+		}
+		if noteOverride != "" {
+			job.Note = noteOverride
 		}
 		// dry-run
 		if dryRun || dryRunAlias {
@@ -493,6 +497,7 @@ func init() {
 	submitCmd.Flags().Bool("dry-run", false, "Expand sweep and print tasks without submitting")
 	submitCmd.Flags().Bool("watch", false, "Block and show live progress after submit")
 	submitCmd.Flags().String("project", "", "Override the project name in the YAML")
+	submitCmd.Flags().StringP("note", "n", "", "Experiment note (overrides YAML note: field)")
 	submitCmd.Flags().Bool(
 		"no-preflight",
 		false,

@@ -35,7 +35,7 @@ func TestWriteCreatesWorkspace(t *testing.T) {
 	params := job.TaskParams{"lr": 0.1, "seed": 7}
 	wandb := &project.WandbConfig{Project: "exp", Entity: "lab"}
 
-	if err := Write(dir, params, wandb); err != nil {
+	if err := Write(dir, params, wandb, ""); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
 	if info, err := os.Stat(CheckpointsDir(dir)); err != nil || !info.IsDir() {
@@ -69,7 +69,7 @@ func TestWriteCreatesWorkspace(t *testing.T) {
 
 func TestWriteOmitsWandbWhenNil(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "task1")
-	if err := Write(dir, job.TaskParams{"x": 1}, nil); err != nil {
+	if err := Write(dir, job.TaskParams{"x": 1}, nil, ""); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
 	if _, err := os.Stat(WandbConfigPath(dir)); !os.IsNotExist(err) {

@@ -33,10 +33,15 @@ func WandbConfigPath(dir string) string {
 	return filepath.Join(dir, "wandb_config.json")
 }
 
+func NotePath(dir string) string {
+	return filepath.Join(dir, "note.txt")
+}
+
 // Write creates <dir>/checkpoints/, writes params.json, and (when wandb is
-// configured at project level) writes wandb_config.json. All writes are atomic
-// via utils.AtomicWriteFile so the Python SDK never observes a half-written file.
-func Write(dir string, params job.TaskParams, wandb *project.WandbConfig) error {
+// configured at project level) writes wandb_config.json. When note is non-empty
+// it also writes note.txt. All writes are atomic via utils.AtomicWriteFile so
+// the Python SDK never observes a half-written file.
+func Write(dir string, params job.TaskParams, wandb *project.WandbConfig, note string) error {
 	if err := os.MkdirAll(CheckpointsDir(dir), 0o755); err != nil {
 		return fmt.Errorf("mkdir %s: %w", dir, err)
 	}
@@ -56,6 +61,12 @@ func Write(dir string, params job.TaskParams, wandb *project.WandbConfig) error 
 		}
 		if err := utils.AtomicWriteFile(WandbConfigPath(dir), wandbJSON, 0o644); err != nil {
 			return fmt.Errorf("write wandb_config.json: %w", err)
+		}
+	}
+
+	if note != "" {
+		if err := utils.AtomicWriteFile(NotePath(dir), []byte(note), 0o644); err != nil {
+			return fmt.Errorf("write note.txt: %w", err)
 		}
 	}
 	return nil

@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     id           TEXT PRIMARY KEY,    -- ULID or short UUID
     project_name TEXT NOT NULL REFERENCES projects(name),
     description  TEXT,
+    note         TEXT,                -- user-supplied experiment note (--note flag or job.yaml note: field)
     config_json  TEXT NOT NULL,       -- serialized job.JobConfig as JSON
     status       TEXT NOT NULL DEFAULT 'pending',  -- pending/running/paused/done
     total_tasks  INTEGER NOT NULL DEFAULT 0,

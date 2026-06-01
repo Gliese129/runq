@@ -279,13 +279,13 @@ def test_safe_save_decorator_uses_ctx_step_fallback(daemon_ctx, monkeypatch):
 
 
 def test_safe_save_inside_loop_picks_up_loop_step(daemon_ctx, monkeypatch):
-    """The integration test: loop sets step, safe_save uses it without explicit kwarg."""
+    """The integration test: range sets step, safe_save uses it without explicit kwarg."""
     monkeypatch.setattr(shutil, "disk_usage", _disk_usage_seq([1 << 50]))
 
     def save_fn(path, obj):
         Path(path).write_text(obj)
 
-    for _ in runq.loop(range(3)):
+    for _ in runq.range(3):
         runq.safe_save(f"ck-{daemon_ctx.current_step}.pt", "x",
                        save_fn=save_fn, size_hint=100)
 

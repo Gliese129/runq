@@ -1,59 +1,89 @@
 """runq — Lab GPU scheduler SDK (in-task client).
 
-Public API, lazy user path:
+Public API::
 
     import runq
 
     ctx = runq.context()
-    runq.log_metric("loss", 0.42, step=epoch)     # low-level helper
-    runq.safe_save("ckpt.pt", model.state_dict(), # disk-safe save
-                   step=epoch, is_best=True, size_hint=...)
 
-Stage 2 will add: runq.report, decorator-form safe_save with size
-auto-estimation, runq.loop, @runq.early_stop, @runq.epoch.
+    # Typed params with auto merge from sweep
+    @runq.dataclass(auto_overwrite=True)
+    class Params:
+        lr: float = 0.001
+        batch_size: int = 32
+    cfg = Params()
 
-See `demo/l2c/stage2_sdk_design.md` for the full API design and
-behavior contracts.
+    # Training loop with auto step + preemption
+    for step in runq.range(100):
+        loss = train(model)
+        runq.log_metric("loss", loss)             # step auto-populated
+        runq.report({"val_loss": evaluate(model)}) # early-stop check
+        runq.safe_save("ckpt.pt", model.state_dict())
+
+    # Resume from latest checkpoint
+    ckpt = runq.latest_checkpoint()
 """
 
-from ._context import Context, context, get_ctx
+from ._config import dataclass
+from ._context import Context, ParamDict, context, get_ctx
 from ._events import log_metric
 from ._exceptions import RunqDiskFullError, RunqEarlyStopSignal, RunqError
-from ._loop import epoch, log_group, loop
+from ._loop import log_group, loop
+from ._manifest import best_checkpoint, latest_checkpoint
 from ._policies import convergence, patience, threshold
+from ._range import is_preempted, range
 from ._report import Decision, early_stop, report
 from ._safe_save import safe_save
 from ._sync import sync_now
 from ._transport import TransportError
 
-# NB: __all__ is grouped by *topic* (init / metrics / policies / loop /
-# exceptions), not alphabetically. The grouping makes the API surface
-# discoverable to lazy users reading ``help(runq)``; ruff's RUF022 wants
-# alphabetical, which would scramble it. Hence the noqa.
 __all__ = [  # noqa: RUF022
+    # Init + context
     "Context",
+    "ParamDict",
     "context",
     "get_ctx",
+    # Typed parameter dataclass
+    "dataclass",
+    # Training loop
+    "loop",
+    "range",
+    "is_preempted",
+    # Metrics
     "log_metric",
+    "log_group",
+    # Early stop
     "report",
     "early_stop",
     "Decision",
-    # Built-in early-stop policy factories (step 7).
     "patience",
     "threshold",
     "convergence",
-    # Training-loop ergonomics (step 8).
-    "loop",
-    "epoch",
-    "log_group",
+    # Checkpoint
     "safe_save",
-    # Ephemeral reap (F10 β-mode).
+    "best_checkpoint",
+    "latest_checkpoint",
+    # Sync
     "sync_now",
-    # Exceptions.
+    # Exceptions
     "RunqError",
     "RunqDiskFullError",
     "RunqEarlyStopSignal",
     "TransportError",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
+
+
+def __getattr__(name: str):
+    """Module-level attribute access for convenience properties."""
+    if name == "preempted":
+        from ._range import is_preempted
+        return is_preempted()
+    if name == "seed":
+        from ._context import get_ctx
+        return get_ctx().seed
+    if name == "params":
+        from ._context import get_ctx
+        return get_ctx().params
+    raise AttributeError(f"module 'runq' has no attribute {name!r}")

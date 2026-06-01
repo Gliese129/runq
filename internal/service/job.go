@@ -110,7 +110,7 @@ func (s *JobService) SubmitJobWithOpts(ctx context.Context, jobCfg job.JobConfig
 		// L2-C: per-task workspace. Created BEFORE the DB insert so that if mkdir
 		// fails, no half-state is persisted. Residual dirs on later failures are
 		// tolerated — the next submission uses a fresh task_id.
-		if err := workspace.Write(planned.TaskDir, planned.Params, plan.Wandb); err != nil {
+		if err := workspace.Write(planned.TaskDir, planned.Params, plan.Wandb, plan.Note); err != nil {
 			return "", 0, fmt.Errorf("prepare task workspace for %s: %w", planned.TaskID, err)
 		}
 
@@ -142,7 +142,7 @@ func (s *JobService) SubmitJobWithOpts(ctx context.Context, jobCfg job.JobConfig
 
 	jobRow := store.JobRow{
 		ID: plan.JobID, ProjectName: plan.Project, Description: plan.Description,
-		ConfigJSON: string(cfgJSON), Status: "pending", TotalTasks: len(plan.Tasks), CreatedAt: now,
+		Note: plan.Note, ConfigJSON: string(cfgJSON), Status: "pending", TotalTasks: len(plan.Tasks), CreatedAt: now,
 	}
 	taskRows := make([]store.TaskRow, 0, len(tasks))
 	for _, t := range tasks {

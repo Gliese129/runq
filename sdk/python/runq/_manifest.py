@@ -107,6 +107,13 @@ def validate_policy(keep_last_n: int | None, keep_best: bool) -> None:
         raise ValueError(
             f"runq.safe_save: keep_last_n must be >= 0, got {keep_last_n}"
         )
+    if keep_last_n is not None and keep_last_n == 0 and not keep_best:
+        raise ValueError(
+            "runq.safe_save: keep_last_n=0 with keep_best=False would "
+            "delete all managed checkpoints. Use keep_last_n=0, "
+            "keep_best=True to keep only the best, or omit keep_last_n "
+            "to disable cleanup."
+        )
 
 
 # ---- mechanical: paths + atomic IO ----------------------------------
@@ -314,6 +321,7 @@ def cleanup(
             keep_indices.add(bests[-1])
     # clean useless ckpt
     deleted = []
+    failed_delete = set()
     for i, e in enumerate(entries):
         if i in keep_indices:
             continue
@@ -328,8 +336,91 @@ def cleanup(
             _LOG.warning(
                 "runq cleanup: failed to delete %s: %s", abs_path, err,
             )
-    # write back
-    m["entries"] = [entries[i] for i in sorted(keep_indices)]
+            # Keep entry in manifest — file still exists on disk.
+            failed_delete.add(i)
+    # write back: keep indices + entries whose deletion failed
+    survive = keep_indices | failed_delete
+    m["entries"] = [entries[i] for i in sorted(survive)]
     save_manifest(checkpoint_dir, m)
     return deleted
+
+
+def best_checkpoint(checkpoint_dir: str | Path | None = None) -> str | None:
+    """Return the absolute path of the best checkpoint (is_best=True), or None.
+
+    If no entry has is_best=True, returns None.
+    If ``checkpoint_dir`` is None, uses ``ctx.checkpoint_dir``.
+    """
+    if checkpoint_dir is None:
+        from ._context import get_ctx
+        try:
+            ctx = get_ctx()
+        except RuntimeError:
+            return None
+        checkpoint_dir = ctx.checkpoint_dir
+    if checkpoint_dir is None:
+        return None
+
+    m = load_manifest(checkpoint_dir)
+    entries = m.get("entries", [])
+
+    # Find the most recent is_best entry
+    best = None
+    for e in entries:
+        if e.get("is_best", False):
+            best = e
+
+    if best is None:
+        return None
+
+    path = best.get("path")
+    if not path:
+        return None
+
+    abs_path = os.path.join(str(checkpoint_dir), path)
+    if os.path.exists(abs_path):
+        return abs_path
+    return None
+
+
+def latest_checkpoint(checkpoint_dir: str | Path | None = None) -> str | None:
+    """Return the absolute path of the most recent checkpoint, or None.
+
+    Reads the manifest and returns the entry with the highest (step, ts).
+    Returns None if no manifest exists, the manifest is empty, or the
+    file has been deleted from disk.
+
+    If ``checkpoint_dir`` is None, uses ``ctx.checkpoint_dir``.
+    """
+    if checkpoint_dir is None:
+        from ._context import get_ctx
+        try:
+            ctx = get_ctx()
+        except RuntimeError:
+            return None
+        checkpoint_dir = ctx.checkpoint_dir
+    if checkpoint_dir is None:
+        return None
+
+    m = load_manifest(checkpoint_dir)
+    entries = m.get("entries", [])
+    if not entries:
+        return None
+
+    # Sort by (step, ts) descending — same ordering as cleanup
+    best = max(
+        entries,
+        key=lambda e: (
+            e.get("step") if e.get("step") is not None else -1,
+            e.get("ts", 0),
+        ),
+    )
+    path = best.get("path")
+    if not path:
+        return None
+
+    abs_path = os.path.join(str(checkpoint_dir), path)
+    if os.path.exists(abs_path):
+        return abs_path
+    return None
 

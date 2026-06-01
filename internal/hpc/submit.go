@@ -77,7 +77,7 @@ func (b *Backend) Submit(ctx context.Context, jobCfg job.JobConfig, proj *projec
 	}
 	jobRow := store.JobRow{
 		ID: plan.JobID, ProjectName: plan.Project, Description: plan.Description,
-		ConfigJSON: string(cfgJSON), Status: "pending", TotalTasks: len(plan.Tasks), CreatedAt: now,
+		Note: plan.Note, ConfigJSON: string(cfgJSON), Status: "pending", TotalTasks: len(plan.Tasks), CreatedAt: now,
 	}
 	if err := b.Store.InsertJob(ctx, &jobRow); err != nil {
 		return "", 0, fmt.Errorf("persist job: %w", err)
@@ -86,7 +86,7 @@ func (b *Backend) Submit(ctx context.Context, jobCfg job.JobConfig, proj *projec
 	for _, t := range plan.Tasks {
 		// Local prep + template render first: these have no external side effect,
 		// so a failure here aborts before any cluster job or DB row exists.
-		if err := workspace.Write(t.TaskDir, t.Params, plan.Wandb); err != nil {
+		if err := workspace.Write(t.TaskDir, t.Params, plan.Wandb, plan.Note); err != nil {
 			return plan.JobID, submitted, fmt.Errorf("prepare workspace for %s: %w", t.TaskID, err)
 		}
 		runsh := filepath.Join(t.TaskDir, runScriptName)

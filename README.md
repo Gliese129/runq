@@ -240,8 +240,8 @@ runq is designed for the "submit before going home" workflow:
 | Command | Description |
 |---|---|
 | `runq init [script.py]` | Scaffold project.yaml + job.yaml |
-| `runq submit [path]` | Submit a job from YAML |
-| `runq sweep` | Submit a sweep from CLI args |
+| `runq submit [path] [--note "..."]` | Submit a job from YAML |
+| `runq sweep [--note "..."]` | Submit a sweep from CLI args |
 | `runq run <project> -- <args>` | Quick single-task run |
 | `runq ps` | List tasks |
 | `runq gpu` | GPU allocation |
@@ -263,7 +263,7 @@ runq is designed for the "submit before going home" workflow:
 | Command | Description |
 |---|---|
 | `runq hpc init [--scheduler slurm\|pbs\|sge]` | Generate `~/.runq/config.yaml` template |
-| `runq hpc submit <job.yaml>` | Compile sweep + submit each task to the cluster |
+| `runq hpc submit <job.yaml> [--note "..."]` | Compile sweep + submit each task to the cluster |
 | `runq hpc status <job_id>` | Refresh from disk and show task status |
 | `runq hpc kill <job_id\|task_id>` | Cancel via kill_template |
 | `runq hpc ls` | List HPC jobs (DB state) |
@@ -293,6 +293,49 @@ runq is designed for the "submit before going home" workflow:
 By default `<root>` is `<working_dir>/.runq/`. If `data_path` is set in `config.yaml`, physical storage moves to `<data_path>/<project>/` and `.runq` becomes a convenience symlink.
 
 </details>
+
+## Python SDK
+
+runq ships an optional Python SDK (`pip install runq`) that integrates with your training script. The SDK handles parameter injection, checkpoint safety, metrics logging, and cooperative preemption — all without changing your training loop structure.
+
+```python
+import runq
+
+ctx = runq.context()
+
+# Typed params — auto-merged from sweep parameters
+@runq.dataclass(auto_overwrite=True)
+class Params:
+    lr: float = 0.001
+    batch_size: int = 32
+
+cfg = Params()  # cfg.lr may be overridden by the sweep
+
+# Training loop with preemption + early stop
+for step in runq.range(1000):
+    loss = train(model, cfg)
+    runq.log_metric("loss", loss)
+    runq.report({"val_loss": evaluate(model)})  # early-stop check
+    runq.safe_save("ckpt.pt", model.state_dict(), keep_last_n=3)
+
+# Resume
+ckpt = runq.latest_checkpoint()  # or runq.best_checkpoint()
+```
+
+Key features:
+
+- **`runq.range()` / `runq.loop()`** — drop-in iterators with SIGTERM preemption and early-stop. `range()` for numeric loops, `loop()` for arbitrary iterables (dataloaders).
+- **`@runq.dataclass`** — typed parameter class with `to_json`/`from_json`/`to_yaml`/`from_yaml`. `auto_overwrite=True` merges sweep params at instantiation.
+- **`runq.safe_save()`** — atomic checkpoint writes (tmp + fsync + rename). Catches ENOSPC mid-write, triggers freeze flow in daemon mode. Manifest-scoped cleanup via `keep_last_n` / `keep_best`.
+- **`runq.seed`** — deterministic per-task seed derived from task ID.
+- **`runq.report()`** — early-stop evaluation with pluggable policies (`patience`, `threshold`, `convergence`).
+- **Tri-mode** — works with daemon (Unix socket), without daemon (file-only), or in manual mode (no runq infrastructure at all).
+
+The SDK is in `sdk/python/`. Install from the repo:
+
+```bash
+cd sdk/python && pip install -e .
+```
 
 ## License
 

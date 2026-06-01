@@ -15,12 +15,34 @@ from __future__ import annotations
 import json
 import os
 import uuid
+import difflib
+import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 # Module-level singleton. None until context() is called.
 _ctx: Context | None = None
+
+
+class ParamDict(dict):
+    """Dict subclass with helpful KeyError messages for parameter access.
+
+    When a key is missing, shows all available keys and suggests close
+    matches via fuzzy matching — catches the common "sweep YAML says
+    ``learning_rate``, code says ``lr``" mismatch immediately.
+    """
+
+    def __getitem__(self, key):
+        try:
+            return super().__getitem__(key)
+        except KeyError:
+            available = sorted(self.keys())
+            close = difflib.get_close_matches(str(key), available, n=3, cutoff=0.5)
+            msg = f"'{key}' not found in runq.params.\nAvailable: {available}"
+            if close:
+                msg += f"\nDid you mean: {close}?"
+            raise KeyError(msg) from None
 
 
 @dataclass
@@ -69,6 +91,10 @@ class Context:
     # NO auto-increment counter (unlike the early step 1 implementation);
     # if you want incrementing steps without loop(), pass step explicitly.
     current_step: int | None = None
+
+    # Deterministic seed derived from task_id. Different per task in the
+    # same sweep, but reproducible across reruns of the same task.
+    seed: int = 0
 
     # ---- step-8 loop coordination ----
     #
@@ -264,7 +290,8 @@ def context() -> Context:
         socket_path=env.get("RUNQ_SOCKET_PATH"),
         safety_factor_percent=_int_env("RUNQ_SAFETY_FACTOR_PERCENT", 110),
         safety_extra_gb=_int_env("RUNQ_SAFETY_EXTRA_GB", 0),
-        params=params,
+        params=ParamDict(params),
+        seed=int(hashlib.sha256(task_id.encode()).hexdigest(), 16) % (2**32),
     )
 
     # Make sure dirs we will write to actually exist. Cheap, idempotent,

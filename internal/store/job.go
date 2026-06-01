@@ -12,6 +12,7 @@ type JobRow struct {
 	ID          string
 	ProjectName string
 	Description string
+	Note        string
 	ConfigJSON  string // serialized job.JobConfig (kept for UI to display original sweep config)
 	Status      string // pending / running / paused / done
 	TotalTasks  int
@@ -21,10 +22,10 @@ type JobRow struct {
 
 // InsertJob inserts a single job row.
 func (s *Store) InsertJob(ctx context.Context, j *JobRow) error {
-	query := `INSERT INTO jobs (id, project_name, description, config_json, status, total_tasks, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`
+	query := `INSERT INTO jobs (id, project_name, description, note, config_json, status, total_tasks, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
 	_, err := s.db.ExecContext(ctx, query,
-		j.ID, j.ProjectName, j.Description, j.ConfigJSON,
+		j.ID, j.ProjectName, j.Description, j.Note, j.ConfigJSON,
 		j.Status, j.TotalTasks, j.CreatedAt.Unix(),
 	)
 	return err
@@ -32,10 +33,10 @@ func (s *Store) InsertJob(ctx context.Context, j *JobRow) error {
 
 // InsertJobTx inserts a job row within an existing transaction.
 func (s *Store) InsertJobTx(ctx context.Context, tx *sql.Tx, j *JobRow) error {
-	query := `INSERT INTO jobs (id, project_name, description, config_json, status, total_tasks, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`
+	query := `INSERT INTO jobs (id, project_name, description, note, config_json, status, total_tasks, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
 	_, err := tx.ExecContext(ctx, query,
-		j.ID, j.ProjectName, j.Description, j.ConfigJSON,
+		j.ID, j.ProjectName, j.Description, j.Note, j.ConfigJSON,
 		j.Status, j.TotalTasks, j.CreatedAt.Unix(),
 	)
 	return err
@@ -93,7 +94,7 @@ func (s *Store) UpdateJobStatus(ctx context.Context, jobID string, status string
 
 // GetJob returns a single job by ID. Returns (nil, nil) if not found.
 func (s *Store) GetJob(ctx context.Context, jobID string) (*JobRow, error) {
-	query := `SELECT id, project_name, description, config_json, status, total_tasks, created_at, finished_at
+	query := `SELECT id, project_name, description, note, config_json, status, total_tasks, created_at, finished_at
 		FROM jobs WHERE id = ?`
 	row := s.db.QueryRowContext(ctx, query, jobID)
 
@@ -109,7 +110,7 @@ func (s *Store) GetJob(ctx context.Context, jobID string) (*JobRow, error) {
 
 // ListJobs lists jobs, optionally filtered by project name. Empty projectName = no filter.
 func (s *Store) ListJobs(ctx context.Context, projectName string) ([]JobRow, error) {
-	query := `SELECT id, project_name, description, config_json, status, total_tasks, created_at, finished_at
+	query := `SELECT id, project_name, description, note, config_json, status, total_tasks, created_at, finished_at
 		FROM jobs`
 	var args []any
 	if projectName != "" {
@@ -162,18 +163,20 @@ func (s *Store) DeleteJob(ctx context.Context, jobID string) error {
 func scanJob(scanner interface{ Scan(dest ...any) error }) (*JobRow, error) {
 	var j JobRow
 	var (
+		note       sql.NullString
 		createdAt  int64
 		finishedAt sql.NullInt64
 	)
 
 	err := scanner.Scan(
-		&j.ID, &j.ProjectName, &j.Description, &j.ConfigJSON,
+		&j.ID, &j.ProjectName, &j.Description, &note, &j.ConfigJSON,
 		&j.Status, &j.TotalTasks, &createdAt, &finishedAt,
 	)
 	if err != nil {
 		return nil, err
 	}
 
+	j.Note = note.String
 	j.CreatedAt = time.Unix(createdAt, 0)
 	j.FinishedAt = unixToNullTime(finishedAt)
 	return &j, nil

@@ -171,23 +171,6 @@ def test_log_group_report_history_keeps_unprefixed_keys(clean_env, tmp_path, mon
     assert "train/loss" not in history[0]["metrics"]
 
 
-# ---- composition with @epoch ----
-
-def test_log_group_composes_with_epoch(clean_env, tmp_path, monkeypatch):
-    """@log_group wrapping @epoch → epoch_time_seconds gets the prefix."""
-    monkeypatch.chdir(tmp_path)
-    runq.context()
-
-    @runq.log_group("train")
-    @runq.epoch
-    def step():
-        pass
-
-    step()
-    events = _read_events(tmp_path / "runq_metrics.jsonl")
-    assert events[0]["key"] == "train/epoch_time_seconds"
-
-
 # ---- thread isolation via contextvars ----
 
 def test_log_group_thread_isolation(clean_env, tmp_path, monkeypatch):

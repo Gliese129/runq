@@ -35,6 +35,7 @@ type Plan struct {
 	JobID       string
 	Project     string
 	Description string
+	Note        string
 	GPUsPerTask int
 	Wandb       *project.WandbConfig
 	Tasks       []PlannedTask
@@ -159,6 +160,7 @@ func Build(ctx context.Context, cfg job.JobConfig, proj *project.Config, d Deps)
 		JobID:       jobID,
 		Project:     cfg.Project,
 		Description: cfg.Description,
+		Note:        cfg.Note,
 		GPUsPerTask: gpusPerTask,
 		Wandb:       proj.Wandb,
 		Tasks:       tasks,

@@ -449,7 +449,7 @@ def safe_save(
     # mkdir before every nested save (e.g. "epoch-5/model.pt"). Safe
     # to call repeatedly thanks to exist_ok=True; cost is one stat.
     os.makedirs(dir_for_usage, exist_ok=True)
-    mount = _resolve_mountpoint(str(path))
+    mount = _resolve_mountpoint(final_path)
     effective_save_fn = save_fn or _default_save
     tmp_path = f"{final_path}.runq-tmp-{os.getpid()}-{time.time_ns()}"
     threshold = _compute_threshold(size_hint, ctx)

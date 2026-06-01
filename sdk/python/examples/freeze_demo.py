@@ -96,7 +96,7 @@ def train() -> float:
         return False
 
     best_loss = math.inf
-    for _ in runq.loop(range(epochs), name="train"):
+    for _ in runq.range(epochs):
         optim.zero_grad()
         loss = ((model(X) - y) ** 2).mean()
         loss.backward()

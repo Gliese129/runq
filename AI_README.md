@@ -64,9 +64,56 @@ Before touching any config, ask the user these questions:
 | See all CLI commands | `internal/cli/root.go`, `internal/cli/hpc.go` |
 | Understand task directory layout | `internal/workspace/workspace.go` |
 
+## Python SDK (`sdk/python/runq/`)
+
+runq includes a Python SDK that users `import runq` inside their training scripts. It handles parameter injection, metrics logging, checkpoint safety, preemption, and early stopping.
+
+### Architecture
+
+- **Tri-mode**: daemon (Unix socket to resident daemon), no_daemon (file-only, for HPC), manual (no runq infrastructure).
+- **Context** (`_context.py`): `runq.context()` initializes from env vars (`RUNQ_TASK_ID`, `RUNQ_SOCKET`, etc.) or params passed directly. Returns a `Context` dataclass.
+- **ParamDict** (`_context.py`): dict subclass with fuzzy-match suggestions on KeyError (difflib).
+- **Seed** (`_context.py`): `runq.seed` — deterministic per-task seed via SHA-256 of task_id, mod 2^32.
+
+### Key modules
+
+| File | Purpose |
+|---|---|
+| `_config.py` | `@runq.dataclass` — typed param class with auto-merge from sweep params |
+| `_range.py` | `runq.range()` + shared iterator core (`_check_break`, `_init_iterator`) |
+| `_loop.py` | `runq.loop()` for arbitrary iterables + `@epoch` + `log_group()` |
+| `_safe_save.py` | Atomic checkpoint writes + ENOSPC freeze flow + decorator form |
+| `_manifest.py` | Checkpoint manifest for `keep_last_n` / `keep_best` cleanup |
+| `_report.py` | `runq.report()` — early-stop evaluation with pluggable policies |
+| `_policies.py` | Built-in policies: `patience`, `threshold`, `convergence` |
+| `_events.py` | `log_metric()` + jsonl event appender |
+| `_transport.py` | httpx Unix socket client for daemon communication |
+| `_sync.py` | `sync_now()` — push metrics to daemon on demand |
+
+### SDK installation
+
+```bash
+cd sdk/python && pip install -e .
+```
+
+### Key files for SDK work
+
+| When you need to... | Read |
+|---|---|
+| Understand the public API | `sdk/python/runq/__init__.py` |
+| Understand param dataclass | `sdk/python/runq/_config.py` |
+| Understand iterator core (range/loop) | `sdk/python/runq/_range.py` |
+| Understand checkpoint safety | `sdk/python/runq/_safe_save.py`, `sdk/python/runq/_manifest.py` |
+| Understand early-stop | `sdk/python/runq/_report.py`, `sdk/python/runq/_policies.py` |
+| Understand daemon communication | `sdk/python/runq/_transport.py` |
+| See SDK tests | `sdk/python/tests/` |
+| See SDK examples | `sdk/python/examples/` |
+
 ## Pitfalls
 
 - Daemon mode needs `nvidia-smi` on PATH and the daemon running.
 - HPC `runq hpc init` writes a **template** — user must customize it.
 - On HPC, login node may differ from compute node — use `--no-preflight` if pip/import checks fail at submit.
 - `working_dir` in project.yaml must exist at submit time.
+- SDK `runq.safe_save()` uses `_resolve_mountpoint` on the resolved absolute path — relative paths are resolved via `ctx.checkpoint_dir` first.
+- SDK manifest cleanup is scoped to files the SDK created — user-placed files are never touched.

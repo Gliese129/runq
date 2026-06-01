@@ -55,7 +55,7 @@ def train() -> int:
     X = torch.randn(64, 4)
     y = torch.randn(64, 1)
 
-    for _ in runq.loop(range(5), name="train"):
+    for _ in runq.range(5):
         loss = ((model(X) - y) ** 2).mean().item()
 
         runq.report({"val_loss": loss})

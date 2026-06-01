@@ -113,6 +113,7 @@ Examples:
 func init() {
 	hpcInitCmd.Flags().String("scheduler", "", "preset to generate: slurm | pbs | sge (omit for generic)")
 	hpcSubmitCmd.Flags().String("project-file", "", "load project config from a YAML file instead of the HPC registry")
+	hpcSubmitCmd.Flags().StringP("note", "n", "", "Experiment note (overrides YAML note: field)")
 	hpcSubmitCmd.Flags().Bool("no-preflight", false, "skip fail-before-submit checks (pip/import/path)")
 	hpcStatusCmd.Flags().Bool("json", false, "output raw JSON")
 	hpcLsCmd.Flags().Bool("json", false, "output raw JSON")
@@ -178,6 +179,10 @@ func runHPCSubmit(cmd *cobra.Command, args []string) error {
 	}
 	if err := yaml.Unmarshal(buf, &jobCfg); err != nil {
 		return fmt.Errorf("parse %s: %w", args[0], err)
+	}
+
+	if noteOverride, _ := cmd.Flags().GetString("note"); noteOverride != "" {
+		jobCfg.Note = noteOverride
 	}
 
 	b, st, err := newHPCBackend()

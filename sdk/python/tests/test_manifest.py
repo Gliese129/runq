@@ -280,18 +280,15 @@ def test_cleanup_keep_last_n_zero_with_keep_best_keeps_only_best(tmp_path):
     assert survivors == ["b.pt"]
 
 
-def test_cleanup_keep_last_n_zero_without_keep_best_evicts_all(tmp_path):
-    """N=0 alone is allowed and means 'rotate the slot, no history'."""
+def test_cleanup_keep_last_n_zero_without_keep_best_rejected(tmp_path):
+    """N=0 + keep_best=False is ambiguous ('delete everything') and rejected."""
+    import pytest
     _populate(tmp_path, [
         _entry("a.pt", step=1, ts=10),
         _entry("b.pt", step=2, ts=20),
     ])
-    deleted = _manifest.cleanup(tmp_path, keep_last_n=0)
-    assert sorted(Path(p).name for p in deleted) == ["a.pt", "b.pt"]
-    survivors = [p.name for p in tmp_path.iterdir() if p.name.endswith(".pt")]
-    assert survivors == []
-    # Manifest also drained.
-    assert _manifest.load_manifest(tmp_path)["entries"] == []
+    with pytest.raises(ValueError, match="keep_last_n=0 with keep_best=False"):
+        _manifest.cleanup(tmp_path, keep_last_n=0)
 
 
 def test_cleanup_keep_best_rescues_from_keep_last_n(tmp_path):
