@@ -77,7 +77,7 @@ func (b *Backend) Refresh(ctx context.Context, jobID string) error {
 			WrapperStatus: sf.Status,
 			ExitCode:      sf.ExitCode,
 			Scheduler:     b.probeScheduler(ctx, tk.ExternalID),
-			KillRequested: tk.Status == "killed", // defensive; killed is skipped above
+			KillRequested: false, // hpc kill writes killed/runq directly; never infer intent from status
 		})
 
 		if d.Status == tk.Status && d.Source == tk.StatusSource {

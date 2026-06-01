@@ -1,0 +1,90 @@
+[project]
+name = "runq"
+version = "0.2.0"
+description = "Lab GPU scheduler — in-task Python SDK"
+readme = "README.md"
+# 3.10 floor: matches PyTorch's current support window and is widely
+# deployed in lab conda envs. 3.9 EOL is Oct 2025 — not worth carrying.
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [{name = "runq contributors"}]
+
+# httpx for HTTP-over-unix-socket. Pulls in httpcore + h11 + anyio +
+# idna + sniffio — about 1 MB total. Lab user envs almost always have
+# these already (transitively via wandb / transformers / fastapi).
+# Worth the dep for cleaner code than hand-rolled framing.
+#
+# torch is intentionally NOT pinned — safe_save's size estimator
+# imports it lazily, missing torch falls back to size_hint requirement.
+dependencies = [
+    "httpx>=0.24",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "ruff>=0.6",
+]
+# Convenience: pip install -e ".[wandb]" pulls wandb for users who want
+# the L3 mirror integration. Core SDK still works without it.
+wandb = [
+    "wandb>=0.15",
+]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["runq*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+# Match the package's Python floor. Older targets force a more
+# conservative subset (e.g. no `X | Y` types, no `int | None` PEP 604).
+target-version = "py310"
+line-length = 100
+
+# Source roots that ruff walks. ``examples/`` is included so demos
+# follow the same hygiene as the SDK itself.
+src = ["runq", "tests", "examples"]
+
+# Built-in pyc caches + editor backups never need to be linted.
+extend-exclude = ["__pycache__", "*.pyc", ".venv", "build", "dist"]
+
+[tool.ruff.lint]
+# Selected rule sets. Wider than pyflakes-only (E/F) but narrower than
+# "all" — keeping bloat out and signal high. Rationale per group:
+#   E,W     — pycodestyle (style errors / warnings; the baseline)
+#   F       — pyflakes (real bugs: undefined names, unused imports)
+#   I       — isort (consistent import order — small but constant value)
+#   B       — flake8-bugbear (mutable defaults, except-pass, etc.)
+#   UP      — pyupgrade (modernizations for the target Python)
+#   SIM     — flake8-simplify (collapse-able patterns)
+#   RUF     — ruff-native rules (RUF100 for unused noqa, etc.)
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF"]
+
+# Global ignores:
+# - RUF002/RUF003: em-dashes (—) and other Unicode look-alikes in
+#   docstrings + comments. We use em-dashes intentionally throughout
+#   the SDK; the ASCII fallback ("--") would regress readability.
+# - SIM105: rewrite ``try: ... except X: pass`` as
+#   ``with contextlib.suppress(X): ...``. The try/except/pass pattern
+#   is idiomatic and arguably clearer at the call site (exception
+#   class is right there, no extra import); collapse-to-suppress
+#   doesn't add signal.
+ignore = ["RUF002", "RUF003", "SIM105"]
+
+# Per-file relaxations:
+# - tests can have unused imports (pytest plugins, fixtures defined in
+#   conftest), `assert` patterns, and longer lines for readability.
+# - examples have prose-y comments that may push line length.
+[tool.ruff.lint.per-file-ignores]
+"tests/*"    = ["E501", "F401", "B011"]
+"examples/*" = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["runq"]

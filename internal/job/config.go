@@ -10,6 +10,7 @@ import (
 type JobConfig struct {
 	Project     string       `yaml:"project"`
 	Description string       `yaml:"description,omitempty"`
+	Note        string       `yaml:"note,omitempty"`
 	Sweep       []SweepBlock `yaml:"sweep"`
 	Overrides   *Overrides   `yaml:"overrides,omitempty"`
 }

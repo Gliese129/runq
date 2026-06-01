@@ -5,7 +5,7 @@ on:
       - 'v*'
 
 jobs:
-  build-and-release:
+  build-go:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -27,7 +27,7 @@ jobs:
           go-version: '1.25'
           cache: 'true'
 
-      - name: Build
+      - name: Build Go binary
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
@@ -40,5 +40,34 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: runq-${{ matrix.goos }}-${{ matrix.goarch }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-python-sdk:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: sdk/python/pyproject.toml
+
+      - name: Build Python SDK
+        run: |
+          python -m pip install --upgrade build
+          python -m build sdk/python
+
+      - name: Upload Python SDK
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            sdk/python/dist/*.whl
+            sdk/python/dist/*.tar.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

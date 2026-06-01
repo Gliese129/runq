@@ -38,6 +38,7 @@ Examples:
 func init() {
 	sweepCmd.Flags().String("project", "", "Project name (default: current directory name)")
 	sweepCmd.Flags().String("description", "", "Optional job description")
+	sweepCmd.Flags().StringP("note", "n", "", "Experiment note")
 	sweepCmd.Flags().Bool("list", false, "Use list (zip) mode instead of grid")
 	sweepCmd.Flags().Bool("dry", false, "Expand sweep and print tasks without submitting")
 }
@@ -95,6 +96,7 @@ func inferType(s string) any {
 func runSweep(cmd *cobra.Command, args []string) error {
 	projectName, _ := cmd.Flags().GetString("project")
 	description, _ := cmd.Flags().GetString("description")
+	note, _ := cmd.Flags().GetString("note")
 	listMode, _ := cmd.Flags().GetBool("list")
 	dryRun, _ := cmd.Flags().GetBool("dry")
 
@@ -120,6 +122,7 @@ func runSweep(cmd *cobra.Command, args []string) error {
 	jobCfg := job2.JobConfig{
 		Project:     projectName,
 		Description: description,
+		Note:        note,
 		Sweep:       []job2.SweepBlock{block},
 	}
 

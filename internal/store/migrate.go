@@ -45,6 +45,10 @@ func (s *Store) addMissingColumns(ctx context.Context) error {
 	if err := addColumnIfMissing(ctx, s.db, "tasks", "status_source", "TEXT"); err != nil {
 		return fmt.Errorf("add tasks.status_source: %w", err)
 	}
+	// note: user-supplied experiment note (--note flag or job.yaml note: field).
+	if err := addColumnIfMissing(ctx, s.db, "jobs", "note", "TEXT"); err != nil {
+		return fmt.Errorf("add jobs.note: %w", err)
+	}
 	return nil
 }
 
