@@ -98,13 +98,13 @@ func TestRestoreRuntimeStateRestoresPausedJobsBeforeScheduling(t *testing.T) {
 // (not reap-driven from metrics.jsonl).
 //
 // What this test covers:
-//  1. SubmitJob creates <working_dir>/.runq/<task_id>/ with params.json
+//  1. SubmitJob creates <root>/<job_id>/<task_id>/ with params.json
 //     and wandb_config.json artifacts.
 //  2. Scheduler dispatches the task with the L2-C env block injected, so
 //     the command can find RUNQ_METRICS_FILE / RUNQ_TASK_DIR.
 //  3. The task writes a metric and a checkpoint to metrics.jsonl using
 //     the flat SDK event format (no `data` wrapper).
-//  4. After the task exits, scheduler.runTask invokes ReapTaskOutputs
+//  4. After the task exits, scheduler.runTask invokes shared ingest
 //     which parses metrics.jsonl and batch-inserts metric + checkpoint
 //     rows into the store. TaskID and JobID are filled by the daemon
 //     from the task context (not by the SDK).
@@ -151,17 +151,21 @@ func TestL2CStage1EndToEnd(t *testing.T) {
 	}
 
 	// ── submit a 1-task job ──
-	jobID, n, err := jobSvc.SubmitJob(ctx, job.JobConfig{
-		Project: "p",
-		Sweep: []job.SweepBlock{
-			{
-				Method: "grid",
-				Parameters: map[string]job.ParameterSpec{
-					"lr": {Values: []any{1e-4}},
+	jobID, n, err := jobSvc.SubmitJobWithOpts(
+		ctx,
+		job.JobConfig{
+			Project: "p",
+			Sweep: []job.SweepBlock{
+				{
+					Method: "grid",
+					Parameters: map[string]job.ParameterSpec{
+						"lr": {Values: []any{1e-4}},
+					},
 				},
 			},
 		},
-	})
+		service.SubmitJobOpts{SkipPreflight: true},
+	)
 	if err != nil {
 		t.Fatalf("SubmitJob: %v", err)
 	}
@@ -175,7 +179,7 @@ func TestL2CStage1EndToEnd(t *testing.T) {
 		t.Fatalf("expected 1 task row, got %d", len(tasks))
 	}
 	taskID := tasks[0].ID
-	taskDir := filepath.Join(workDir, ".runq", taskID)
+	taskDir := filepath.Join(workDir, ".runq", jobID, taskID)
 	if got := tasks[0].TaskDir; got != taskDir {
 		t.Errorf("TaskRow.TaskDir = %q, want %q", got, taskDir)
 	}

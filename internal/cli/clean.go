@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/gliese129/runq/internal/store"
@@ -105,22 +107,33 @@ func runClean(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// cleanTaskArtifacts deletes a finished task's log file.
-// Returns the number of bytes freed.
-// TODO(L3): also remove checkpoint_dir when checkpoint management lands.
+// cleanTaskArtifacts removes the task's workspace directory (task_dir) and log
+// file (if it lives outside task_dir). Returns total bytes freed.
 func cleanTaskArtifacts(t store.TaskRow) int64 {
-	if t.LogPath == "" {
-		return 0
+	var freed int64
+	if t.TaskDir != "" {
+		freed += dirSize(t.TaskDir)
+		os.RemoveAll(t.TaskDir)
 	}
-	info, err := os.Stat(t.LogPath)
-	if err != nil {
-		return 0
+	if t.LogPath != "" && (t.TaskDir == "" || !strings.HasPrefix(t.LogPath, t.TaskDir)) {
+		if info, err := os.Stat(t.LogPath); err == nil {
+			freed += info.Size()
+			os.Remove(t.LogPath)
+		}
 	}
-	size := info.Size()
-	if err := os.Remove(t.LogPath); err != nil {
-		return 0
-	}
-	return size
+	return freed
+}
+
+// dirSize returns the total size of all regular files under dir.
+func dirSize(dir string) int64 {
+	var total int64
+	filepath.Walk(dir, func(_ string, info os.FileInfo, err error) error {
+		if err == nil && !info.IsDir() {
+			total += info.Size()
+		}
+		return nil
+	})
+	return total
 }
 
 // formatBytes formats byte count into human-readable form.

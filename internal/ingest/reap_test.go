@@ -1,4 +1,4 @@
-package scheduler
+package ingest
 
 import (
 	"context"
@@ -9,9 +9,8 @@ import (
 	"time"
 
 	"github.com/gliese129/runq/internal/store"
+	"github.com/gliese129/runq/internal/workspace"
 )
-
-// ── helpers ───────────────────────────────────────────────────────────────
 
 func openMemoryStoreAndSeed(t *testing.T, taskID, jobID, taskDir string) *store.Store {
 	t.Helper()
@@ -47,17 +46,12 @@ func writeMetricsFile(t *testing.T, taskDir string, lines []string) {
 	if err := os.MkdirAll(taskDir, 0o755); err != nil {
 		t.Fatalf("mkdir taskDir: %v", err)
 	}
-	path := filepath.Join(taskDir, "metrics.jsonl")
+	path := workspace.MetricsPath(taskDir)
 	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
 		t.Fatalf("write metrics.jsonl: %v", err)
 	}
 }
 
-// ── tests ─────────────────────────────────────────────────────────────────
-
-// TestReapNormal: well-formed metrics.jsonl with one metric and one
-// checkpoint event — both should land in their tables and the counts in
-// ReapResult should match.
 func TestReapNormal(t *testing.T) {
 	taskDir := t.TempDir()
 	writeMetricsFile(t, taskDir, []string{
@@ -66,9 +60,9 @@ func TestReapNormal(t *testing.T) {
 	})
 	st := openMemoryStoreAndSeed(t, "t1", "j1", taskDir)
 
-	res, err := ReapTaskOutputs(context.Background(), st, &Task{ID: "t1", JobID: "j1", TaskDir: taskDir})
+	res, err := ReapOutputs(context.Background(), st, Target{TaskID: "t1", JobID: "j1", Dir: taskDir})
 	if err != nil {
-		t.Fatalf("ReapTaskOutputs: %v", err)
+		t.Fatalf("ReapOutputs: %v", err)
 	}
 	if res.MetricCount != 1 {
 		t.Errorf("MetricCount = %d, want 1", res.MetricCount)
@@ -96,8 +90,6 @@ func TestReapNormal(t *testing.T) {
 	}
 }
 
-// TestReapBrokenLine: one malformed JSON line in the middle. Reap must not
-// abort — surrounding well-formed events still insert.
 func TestReapBrokenLine(t *testing.T) {
 	taskDir := t.TempDir()
 	writeMetricsFile(t, taskDir, []string{
@@ -107,17 +99,15 @@ func TestReapBrokenLine(t *testing.T) {
 	})
 	st := openMemoryStoreAndSeed(t, "t1", "j1", taskDir)
 
-	res, err := ReapTaskOutputs(context.Background(), st, &Task{ID: "t1", JobID: "j1", TaskDir: taskDir})
+	res, err := ReapOutputs(context.Background(), st, Target{TaskID: "t1", JobID: "j1", Dir: taskDir})
 	if err != nil {
-		t.Fatalf("ReapTaskOutputs: %v", err)
+		t.Fatalf("ReapOutputs: %v", err)
 	}
 	if res.MetricCount != 2 {
 		t.Errorf("MetricCount = %d, want 2 (broken line skipped)", res.MetricCount)
 	}
 }
 
-// TestReapUnknownType: forward-compat for future SDK event types — daemon
-// should silently skip unknown `type` values, not error out.
 func TestReapUnknownType(t *testing.T) {
 	taskDir := t.TempDir()
 	writeMetricsFile(t, taskDir, []string{
@@ -127,19 +117,15 @@ func TestReapUnknownType(t *testing.T) {
 	})
 	st := openMemoryStoreAndSeed(t, "t1", "j1", taskDir)
 
-	res, err := ReapTaskOutputs(context.Background(), st, &Task{ID: "t1", JobID: "j1", TaskDir: taskDir})
+	res, err := ReapOutputs(context.Background(), st, Target{TaskID: "t1", JobID: "j1", Dir: taskDir})
 	if err != nil {
-		t.Fatalf("ReapTaskOutputs: %v", err)
+		t.Fatalf("ReapOutputs: %v", err)
 	}
 	if res.MetricCount != 1 {
 		t.Errorf("MetricCount = %d, want 1 (other types ignored)", res.MetricCount)
 	}
 }
 
-// TestReapDiskLowIgnored: post-pivot, disk_low goes through the SDK's HTTP
-// channel, not metrics.jsonl. If an old jsonl from a pre-pivot task still
-// contains a disk_low line, reap must silently skip it (forward-compat
-// "unknown type" path) — never crash, never populate any flag.
 func TestReapDiskLowIgnored(t *testing.T) {
 	taskDir := t.TempDir()
 	writeMetricsFile(t, taskDir, []string{
@@ -148,22 +134,20 @@ func TestReapDiskLowIgnored(t *testing.T) {
 	})
 	st := openMemoryStoreAndSeed(t, "t1", "j1", taskDir)
 
-	res, err := ReapTaskOutputs(context.Background(), st, &Task{ID: "t1", JobID: "j1", TaskDir: taskDir})
+	res, err := ReapOutputs(context.Background(), st, Target{TaskID: "t1", JobID: "j1", Dir: taskDir})
 	if err != nil {
-		t.Fatalf("ReapTaskOutputs: %v", err)
+		t.Fatalf("ReapOutputs: %v", err)
 	}
 	if res.MetricCount != 1 {
 		t.Errorf("MetricCount = %d, want 1 (disk_low must be ignored, metric must still land)", res.MetricCount)
 	}
 }
 
-// TestReapMissingFile: tasks that don't log any metric still trigger reap;
-// the absence of metrics.jsonl must not be treated as an error.
 func TestReapMissingFile(t *testing.T) {
-	taskDir := t.TempDir() // no file inside
+	taskDir := t.TempDir()
 	st := openMemoryStoreAndSeed(t, "t1", "j1", taskDir)
 
-	res, err := ReapTaskOutputs(context.Background(), st, &Task{ID: "t1", JobID: "j1", TaskDir: taskDir})
+	res, err := ReapOutputs(context.Background(), st, Target{TaskID: "t1", JobID: "j1", Dir: taskDir})
 	if err != nil {
 		t.Errorf("missing file should be silent, got %v", err)
 	}
@@ -172,25 +156,30 @@ func TestReapMissingFile(t *testing.T) {
 	}
 }
 
-// TestReapIdempotent: re-running reap on the same metrics.jsonl (matches
-// the daemon-restart-then-reclaim path) must not duplicate rows.
 func TestReapIdempotent(t *testing.T) {
 	taskDir := t.TempDir()
 	writeMetricsFile(t, taskDir, []string{
 		`{"type":"metric","key":"loss","value":0.42,"step":1,"ts":1}`,
 	})
 	st := openMemoryStoreAndSeed(t, "t1", "j1", taskDir)
-	task := &Task{ID: "t1", JobID: "j1", TaskDir: taskDir}
+	target := Target{TaskID: "t1", JobID: "j1", Dir: taskDir}
 
-	if _, err := ReapTaskOutputs(context.Background(), st, task); err != nil {
+	if _, err := ReapOutputs(context.Background(), st, target); err != nil {
 		t.Fatalf("first reap: %v", err)
 	}
-	if _, err := ReapTaskOutputs(context.Background(), st, task); err != nil {
+	if _, err := ReapOutputs(context.Background(), st, target); err != nil {
 		t.Fatalf("second reap: %v", err)
 	}
 	var n int
 	st.DB().QueryRow(`SELECT COUNT(*) FROM metrics WHERE task_id='t1'`).Scan(&n)
 	if n != 1 {
 		t.Errorf("expected 1 row after double-reap (INSERT OR IGNORE), got %d", n)
+	}
+}
+
+func TestMetricsPathComesFromWorkspaceContract(t *testing.T) {
+	taskDir := filepath.Join(t.TempDir(), "task")
+	if got := workspace.MetricsPath(taskDir); got != filepath.Join(taskDir, "metrics.jsonl") {
+		t.Fatalf("workspace.MetricsPath = %q", got)
 	}
 }

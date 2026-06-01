@@ -3,37 +3,32 @@ package service
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"time"
 
+	"github.com/gliese129/runq/internal/config"
 	"github.com/gliese129/runq/internal/executor"
 	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/project"
 	"github.com/gliese129/runq/internal/resource"
 	"github.com/gliese129/runq/internal/scheduler"
 	"github.com/gliese129/runq/internal/store"
+	"github.com/gliese129/runq/internal/submitplan"
 	"github.com/gliese129/runq/internal/utils"
+	"github.com/gliese129/runq/internal/workspace"
 )
 
 // JobService handles job-level operations.
 // All mutations go through here so DB + Queue + Scheduler stay in sync.
 type JobService struct {
-	Store     *store.Store
-	Queue     *scheduler.Queue
-	Scheduler *scheduler.Scheduler
-	Exec      *executor.Executor
-	Registry  *project.Registry
-	Pool      resource.Allocator
-
-	// Preflight controls the F8 fail-before-queue checks. Zero value
-	// = defaults (skip=false, sane timeouts). The CLI's
-	// --no-preflight flag flips Preflight.Skip on a per-call basis
-	// via SubmitJobOpts (below) — this field is the daemon-wide
-	// fallback / default.
-	Preflight Preflight
+	Store      *store.Store
+	Queue      *scheduler.Queue
+	Scheduler  *scheduler.Scheduler
+	Exec       *executor.Executor
+	Registry   *project.Registry
+	Pool       resource.Allocator
+	StorageCfg *config.GlobalConfig // nil-safe: nil = project_path mode
 }
 
 // SubmitJobOpts carries per-call overrides for SubmitJob. Today the
@@ -80,134 +75,62 @@ func (s *JobService) SubmitJobWithOpts(ctx context.Context, jobCfg job.JobConfig
 		return "", 0, fmt.Errorf("project %q not found", jobCfg.Project)
 	}
 
-	// Expand sweep into parameter combinations.
-	taskParams, err := job.Expand(&jobCfg)
+	wsRoot, err := config.ResolveRoot(s.StorageCfg, proj.WorkingDir, proj.ProjectName)
 	if err != nil {
-		return "", 0, fmt.Errorf("sweep expansion failed: %w", err)
+		return "", 0, fmt.Errorf("resolve workspace root: %w", err)
 	}
 
-	// Determine effective settings (job overrides > project defaults).
-	gpusPerTask := proj.Defaults.GPUsPerTask
-	maxRetry := proj.Defaults.MaxRetry
-	if jobCfg.Overrides != nil {
-		if jobCfg.Overrides.GPUsPerTask != nil {
-			gpusPerTask = *jobCfg.Overrides.GPUsPerTask
-		}
-		if jobCfg.Overrides.MaxRetry != nil {
-			maxRetry = *jobCfg.Overrides.MaxRetry
-		}
-	}
-	if gpusPerTask <= 0 {
-		gpusPerTask = 1
-	}
+	jobID := utils.GenerateID()
+	jobRoot := filepath.Join(wsRoot, jobID)
 
-	// Parse timeout: job override > project default > 0 (no timeout).
-	var timeoutSec int
-	timeoutStr := proj.Defaults.Timeout
-	if jobCfg.Overrides != nil && jobCfg.Overrides.Timeout != nil {
-		timeoutStr = *jobCfg.Overrides.Timeout
+	plan, err := submitplan.Build(ctx, jobCfg, proj, submitplan.Deps{
+		JobID: jobID,
+		IDGen: utils.GenerateID,
+		Paths: submitplan.Paths{
+			WorkspaceRoot: jobRoot,
+			LogRoot:       jobRoot,
+		},
+		SkipPreflight: opts.SkipPreflight,
+	})
+	if err != nil {
+		return "", 0, err
 	}
-	if timeoutStr != "" {
-		d, err := utils.ParseHumanDuration(timeoutStr)
-		if err != nil {
-			return "", 0, fmt.Errorf("invalid timeout %q: %w", timeoutStr, err)
-		}
-		timeoutSec = int(d.Seconds())
-	}
-
-	// Caller UID — used for fair-scheduling and audit.
-	callerUID := os.Getuid()
 
 	// A6: reject if gpus_per_task exceeds total available GPUs.
 	if s.Pool != nil {
 		total := s.Pool.TotalCount()
-		if gpusPerTask > total {
-			return "", 0, fmt.Errorf("gpus_per_task (%d) exceeds total GPUs (%d)", gpusPerTask, total)
+		if plan.GPUsPerTask > total {
+			return "", 0, fmt.Errorf("gpus_per_task (%d) exceeds total GPUs (%d)", plan.GPUsPerTask, total)
 		}
 	}
 
-	// Merge env: project env + job override env.
-	env := make(map[string]string)
-	for k, v := range proj.Environment {
-		env[k] = v
-	}
-	if jobCfg.Overrides != nil {
-		for k, v := range jobCfg.Overrides.Env {
-			env[k] = v
-		}
-	}
-
-	// L2-C: fail fast if working_dir is misconfigured.
-	// Silent mkdir on a typo would push the error onto the running task itself,
-	// which is harder to debug than failing at submission time.
-	if _, err := os.Stat(proj.WorkingDir); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return "", 0, fmt.Errorf("working_dir %q does not exist", proj.WorkingDir)
-		}
-		return "", 0, fmt.Errorf("stat working_dir %q: %w", proj.WorkingDir, err)
-	}
-
-	// F8 preflight — runs after sweep expansion (so we have a sample
-	// rendered command to inspect) and before any DB write. The Skip
-	// flag is OR'd: either the daemon's default OR the per-call opt
-	// can disable.
-	pf := s.Preflight
-	if pf.PipCheckTimeout == 0 && pf.ImportTimeout == 0 {
-		pf = DefaultPreflight()
-	}
-	pf.Skip = pf.Skip || opts.SkipPreflight
-	sampleCmd, _ := renderSampleCommand(proj, taskParams)
-	if err := pf.RunPreflight(ctx, proj, sampleCmd); err != nil {
-		return "", 0, err
-	}
-
-	// Generate job ID and build task list.
-	jobID := GenerateID()
 	now := time.Now()
-	tasks := make([]*scheduler.Task, 0, len(taskParams))
-	for _, params := range taskParams {
-		cmd, err := job.Render(proj.CmdTemplate, params)
-		if err != nil {
-			return "", 0, fmt.Errorf("render command failed: %w", err)
-		}
-		// B4: wrap command with Python environment activation.
-		cmd = utils.WrapCommand(proj.PythonEnv.Type, proj.PythonEnv.Path, proj.PythonEnv.Name, cmd, proj.WorkingDir)
-		taskID := GenerateID()
-
-		// L2-C: per-task workspace at <working_dir>/.runq/<task_id>/.
-		// Holds params.json (always), wandb_config.json (when configured),
-		// metrics.jsonl (SDK writes), checkpoints/ (SDK writes).
-		// Created BEFORE the DB insert so that if mkdir fails, no half-state
-		// is persisted. Residual dirs on later failures are tolerated — the
-		// next submission uses a fresh task_id.
-		taskDir := filepath.Join(proj.WorkingDir, ".runq", taskID)
-		if err := writeTaskWorkspace(taskDir, params, proj.Wandb); err != nil {
-			return "", 0, fmt.Errorf("prepare task workspace for %s: %w", taskID, err)
+	tasks := make([]*scheduler.Task, 0, len(plan.Tasks))
+	for _, planned := range plan.Tasks {
+		// L2-C: per-task workspace. Created BEFORE the DB insert so that if mkdir
+		// fails, no half-state is persisted. Residual dirs on later failures are
+		// tolerated — the next submission uses a fresh task_id.
+		if err := workspace.Write(planned.TaskDir, planned.Params, plan.Wandb); err != nil {
+			return "", 0, fmt.Errorf("prepare task workspace for %s: %w", planned.TaskID, err)
 		}
 
 		tasks = append(tasks, &scheduler.Task{
-			ID:          taskID,
-			JobID:       jobID,
-			ProjectName: proj.ProjectName,
-			Command:     cmd,
-			Params:      params,
-			GPUsNeeded:  gpusPerTask,
-			MaxRetry:    maxRetry,
-			LogPath:     filepath.Join(proj.WorkingDir, "logs", taskID+".log"),
-			WorkingDir:  proj.WorkingDir,
-			Env:         env,
-			Resumable:   proj.Resume.Enabled,
-			ExtraArgs:   proj.Resume.ExtraArgs,
-			Timeout:     timeoutSec,
-			UID:         callerUID,
-			TaskDir:     taskDir,
-			// CheckpointDir is the SDK-visible default ckpt path. Same value
-			// the daemon injects as RUNQ_CHECKPOINT_DIR (see buildTaskEnv).
-			// Scheduler's freeze-mount filter and the thaw mount-mate listing
-			// both call utils.MountOf on this path, so it MUST be populated
-			// at submit time — otherwise pending tasks have CheckpointDir==""
-			// and the filters silently no-op.
-			CheckpointDir: filepath.Join(taskDir, "checkpoints"),
+			ID:            planned.TaskID,
+			JobID:         plan.JobID,
+			ProjectName:   plan.Project,
+			Command:       planned.Command,
+			Params:        planned.Params,
+			GPUsNeeded:    planned.GPUsNeeded,
+			MaxRetry:      planned.MaxRetry,
+			LogPath:       planned.LogPath,
+			WorkingDir:    planned.WorkingDir,
+			Env:           planned.Env,
+			Resumable:     planned.Resumable,
+			ExtraArgs:     planned.ExtraArgs,
+			Timeout:       planned.Timeout,
+			UID:           planned.UID,
+			TaskDir:       planned.TaskDir,
+			CheckpointDir: planned.CheckpointDir,
 		})
 	}
 
@@ -218,8 +141,8 @@ func (s *JobService) SubmitJobWithOpts(ctx context.Context, jobCfg job.JobConfig
 	}
 
 	jobRow := store.JobRow{
-		ID: jobID, ProjectName: jobCfg.Project, Description: jobCfg.Description,
-		ConfigJSON: string(cfgJSON), Status: "pending", TotalTasks: len(tasks), CreatedAt: now,
+		ID: plan.JobID, ProjectName: plan.Project, Description: plan.Description,
+		ConfigJSON: string(cfgJSON), Status: "pending", TotalTasks: len(plan.Tasks), CreatedAt: now,
 	}
 	taskRows := make([]store.TaskRow, 0, len(tasks))
 	for _, t := range tasks {
@@ -242,7 +165,7 @@ func (s *JobService) SubmitJobWithOpts(ctx context.Context, jobCfg job.JobConfig
 
 	// DB succeeded — push to in-memory Queue.
 	s.Queue.PushBatch(tasks)
-	return jobID, len(tasks), nil
+	return plan.JobID, len(tasks), nil
 }
 
 // ListJobs returns a summary of all jobs with task status breakdown.
@@ -391,40 +314,4 @@ func (s *JobService) RemoveJob(ctx context.Context, jobID string) error {
 		return fmt.Errorf("job %q is %s, only completed jobs can be removed", jobID, j.Status)
 	}
 	return s.Store.DeleteJob(ctx, jobID)
-}
-
-// writeTaskWorkspace creates <taskDir>/checkpoints/, writes params.json, and
-// (when wandb is configured at project level) writes wandb_config.json. All
-// writes are atomic via utils.AtomicWriteFile so the Python SDK never observes
-// a half-written file.
-//
-// Layout:
-//
-//	<taskDir>/
-//	├── params.json           sweep-expanded parameter map for this task
-//	├── wandb_config.json     optional, mirrors project.Config.Wandb
-//	└── checkpoints/          empty; SDK populates via @runq.safe_save
-func writeTaskWorkspace(taskDir string, params job.TaskParams, wandb *project.WandbConfig) error {
-	if err := os.MkdirAll(filepath.Join(taskDir, "checkpoints"), 0o755); err != nil {
-		return fmt.Errorf("mkdir %s: %w", taskDir, err)
-	}
-
-	paramsJSON, err := json.MarshalIndent(params, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal params: %w", err)
-	}
-	if err := utils.AtomicWriteFile(filepath.Join(taskDir, "params.json"), paramsJSON, 0o644); err != nil {
-		return fmt.Errorf("write params.json: %w", err)
-	}
-
-	if wandb != nil {
-		wandbJSON, err := json.MarshalIndent(wandb, "", "  ")
-		if err != nil {
-			return fmt.Errorf("marshal wandb config: %w", err)
-		}
-		if err := utils.AtomicWriteFile(filepath.Join(taskDir, "wandb_config.json"), wandbJSON, 0o644); err != nil {
-			return fmt.Errorf("write wandb_config.json: %w", err)
-		}
-	}
-	return nil
 }

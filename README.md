@@ -72,9 +72,10 @@ git clone https://github.com/gliese129/runq.git && cd runq
 go build -o runq ./cmd/runq
 ```
 
-Requires `nvidia-smi` on PATH. Run `runq doctor` to check your setup.
+Daemon mode requires `nvidia-smi` on PATH. Run `runq doctor` to check your setup.
+HPC mode requires only a working cluster CLI (`sbatch`/`qsub`).
 
-## Quickstart
+## Quickstart — Daemon (Local GPU Machine)
 
 ```bash
 # 1. Start the daemon (auto-detects your GPUs)
@@ -94,6 +95,29 @@ runq logs <task_id>         # tail output
 ```
 
 That's it. runq expands the parameter sweep, queues the tasks, assigns GPUs, and retries failures.
+
+## Quickstart — HPC (Slurm / PBS / SGE)
+
+On a shared cluster, runq compiles your sweep, writes per-task workspaces, and delegates scheduling to the cluster's native job manager. No resident daemon needed.
+
+```bash
+# 1. Generate config (edit it for your cluster)
+runq hpc init --scheduler slurm
+
+# 2. Write project.yaml + job.yaml (same format as daemon mode)
+#    See examples/ for templates
+
+# 3. Submit
+runq hpc submit job.yaml --project-file project.yaml
+
+# 4. Monitor
+runq hpc ls                          # list jobs
+runq hpc status <job_id>             # refresh from disk + show tasks
+runq hpc best <job_id> --key loss    # best task by metric
+runq hpc collect <job_id> --key loss # all tasks ranked by metric
+```
+
+After `runq hpc init`, edit `~/.runq/config.yaml` to match your cluster — the `submit_template`, `submit_id_regex`, and `kill_template` fields must be correct for your scheduler. Presets for Slurm, PBS, and SGE are provided as starting points.
 
 ## Usage
 
@@ -209,26 +233,9 @@ runq is designed for the "submit before going home" workflow:
 - **GPU leak detection** — checks for residual processes after each task exits.
 - **External GPU awareness** — detects non-runq processes on GPUs and avoids those slots.
 
-<details>
-<summary><strong>Architecture</strong></summary>
-
-```
-CLI (cobra)  ──unix socket──►  Daemon
-                                ├── API (gin)
-                                ├── Scheduler
-                                │   ├── Queue
-                                │   ├── Prioritizer (FIFO / Fair-share)
-                                │   └── GPU Pool
-                                ├── Executor (os/exec)
-                                └── Store (SQLite)
-```
-
-The daemon exposes a REST API over a unix domain socket. All state is persisted to SQLite; the in-memory queue is rebuilt from DB on restart.
-
-</details>
 
 <details>
-<summary><strong>CLI Reference</strong></summary>
+<summary><strong>CLI Reference — Daemon</strong></summary>
 
 | Command | Description |
 |---|---|
@@ -246,7 +253,24 @@ The daemon exposes a REST API over a unix domain socket. All state is persisted 
 | `runq project add/ls/show/edit/rm` | Project management |
 | `runq daemon start/stop/restart` | Daemon lifecycle |
 | `runq doctor` | Environment check |
-| `runq clean` | Remove finished tasks and orphan jobs |
+| `runq clean --older-than <dur>` | Remove finished tasks, workspaces, and orphan jobs |
+
+</details>
+
+<details>
+<summary><strong>CLI Reference — HPC</strong></summary>
+
+| Command | Description |
+|---|---|
+| `runq hpc init [--scheduler slurm\|pbs\|sge]` | Generate `~/.runq/config.yaml` template |
+| `runq hpc submit <job.yaml>` | Compile sweep + submit each task to the cluster |
+| `runq hpc status <job_id>` | Refresh from disk and show task status |
+| `runq hpc kill <job_id\|task_id>` | Cancel via kill_template |
+| `runq hpc ls` | List HPC jobs (DB state) |
+| `runq hpc best <job_id> --key <metric>` | Show the task with the best metric value |
+| `runq hpc collect <job_id> --key <metric>` | Per-task params + best metric, ranked |
+| `runq hpc rm <job_id>` | Remove a completed job from DB |
+| `runq hpc clean --older-than <dur>` | Delete old tasks, workspaces, and empty jobs |
 
 </details>
 
@@ -255,10 +279,18 @@ The daemon exposes a REST API over a unix domain socket. All state is persisted 
 
 | Path | Description |
 |---|---|
-| `~/.runq/runq.db` | SQLite database (all state) |
-| `~/.runq/runq.sock` | Unix domain socket |
-| `~/.runq/daemon.pid` | PID file |
-| `<working_dir>/logs/<task_id>.log` | Task output |
+| `~/.runq/config.yaml` | Global config (`data_path`) + HPC config (`hpc:` section) |
+| `~/.runq/runq.db` | SQLite database (daemon) |
+| `~/.runq/runq.sock` | Unix domain socket (daemon) |
+| `~/.runq/daemon.pid` | PID file (daemon) |
+| `<root>/<job_id>/<task_id>/` | Per-task workspace |
+| `<task_dir>/params.json` | Sweep-expanded parameters |
+| `<task_dir>/metrics.jsonl` | Training metrics |
+| `<task_dir>/checkpoints/` | Checkpoint directory |
+| `<task_dir>/run.sh` | Generated wrapper script (HPC only) |
+| `<task_dir>/status.json` | Self-reported task status (HPC only) |
+
+By default `<root>` is `<working_dir>/.runq/`. If `data_path` is set in `config.yaml`, physical storage moves to `<data_path>/<project>/` and `.runq` becomes a convenience symlink.
 
 </details>
 

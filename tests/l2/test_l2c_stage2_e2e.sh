@@ -484,7 +484,7 @@ t10_sdk_freeze_thaw_roundtrip() {
 
   task_dir=$(task_field "${task}" task_dir)
   [[ -d "${task_dir}" ]] || { echo "no task_dir for ${task}" >&2; return 1; }
-  [[ "${task_dir}" == "${RUNQ_PROJECT_DIR}/.runq/${task}" ]]
+  [[ "${task_dir}" == "${RUNQ_PROJECT_DIR}/.runq/${job}/${task}" ]]
 
   wait_for_file "${task_dir}/started" 20
   grep -Fq "task_id=${task}" "${task_dir}/started"

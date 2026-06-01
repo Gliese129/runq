@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gliese129/runq/internal/api"
+	"github.com/gliese129/runq/internal/config"
 	"github.com/gliese129/runq/internal/executor"
 	"github.com/gliese129/runq/internal/project"
 	"github.com/gliese129/runq/internal/resource"
@@ -77,9 +78,14 @@ func NewDaemon() (*Daemon, error) {
 	)
 
 	// Build service layer.
+	storageCfg, err := config.Load()
+	if err != nil {
+		return nil, fmt.Errorf("load global config: %w", err)
+	}
 	reg := project.NewRegistry(st.DB())
 	jobSvc := &service.JobService{
 		Store: st, Queue: queue, Scheduler: sched, Exec: exec, Registry: reg, Pool: pool,
+		StorageCfg: storageCfg,
 	}
 	taskSvc := &service.TaskService{
 		Store: st, Queue: queue, Exec: exec, Scheduler: sched,

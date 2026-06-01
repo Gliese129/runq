@@ -36,10 +36,20 @@ type TaskRow struct {
 	StartedAt   *time.Time
 	FinishedAt  *time.Time
 
-	// L2-C: per-task workspace at <project.WorkingDir>/.runq/<task_id>.
+	// L2-C: per-task workspace at <root>/<job_id>/<task_id>.
 	// Holds params.json, wandb_config.json (optional), metrics.jsonl, checkpoints/.
 	// Created by service.JobService.SubmitJob, read by SDK via RUNQ_TASK_DIR env.
 	TaskDir string
+
+	// L2-E: HPC scheduler job id (sbatch/qsub). Empty for daemon-managed tasks.
+	// Set by the HPC backend after submit; used by refresh to map a task back to
+	// its cluster job for status/kill.
+	ExternalID string
+
+	// L2-E: provenance of Status — "" | wrapper | scheduler | inferred | runq |
+	// submit. Lets HPC refresh treat "inferred" terminals as correctable while
+	// wrapper/scheduler/runq terminals are final. Empty for daemon tasks.
+	StatusSource string
 }
 
 // TaskFilter holds optional filter criteria for ListTasks.
@@ -55,27 +65,29 @@ const allTaskColumns = `id, job_id, project_name, command, params_json,
 	gpus_needed, gpus, status, retry_count, max_retry,
 	pid, start_time, log_path, working_dir, env_json,
 	resumable, extra_args, uid, timeout,
-	enqueued_at, started_at, finished_at, task_dir`
+	enqueued_at, started_at, finished_at, task_dir, external_id, status_source`
 
 // scanTask reads one result row into a TaskRow.
 // Column order must match allTaskColumns.
 func scanTask(scanner interface{ Scan(dest ...any) error }) (*TaskRow, error) {
 	var t TaskRow
 	var (
-		gpus       sql.NullString
-		pid        sql.NullInt64
-		startTime  sql.NullInt64
-		logPath    sql.NullString
-		workingDir sql.NullString
-		envJSON    sql.NullString
-		resumable  int
-		extraArgs  sql.NullString
-		uid        sql.NullInt64
-		timeout    sql.NullInt64
-		enqueuedAt int64
-		startedAt  sql.NullInt64
-		finishedAt sql.NullInt64
-		taskDir    sql.NullString
+		gpus         sql.NullString
+		pid          sql.NullInt64
+		startTime    sql.NullInt64
+		logPath      sql.NullString
+		workingDir   sql.NullString
+		envJSON      sql.NullString
+		resumable    int
+		extraArgs    sql.NullString
+		uid          sql.NullInt64
+		timeout      sql.NullInt64
+		enqueuedAt   int64
+		startedAt    sql.NullInt64
+		finishedAt   sql.NullInt64
+		taskDir      sql.NullString
+		externalID   sql.NullString
+		statusSource sql.NullString
 	)
 
 	err := scanner.Scan(
@@ -83,7 +95,7 @@ func scanTask(scanner interface{ Scan(dest ...any) error }) (*TaskRow, error) {
 		&t.GPUsNeeded, &gpus, &t.Status, &t.RetryCount, &t.MaxRetry,
 		&pid, &startTime, &logPath, &workingDir, &envJSON,
 		&resumable, &extraArgs, &uid, &timeout, &enqueuedAt, &startedAt, &finishedAt,
-		&taskDir,
+		&taskDir, &externalID, &statusSource,
 	)
 	if err != nil {
 		return nil, err
@@ -103,6 +115,8 @@ func scanTask(scanner interface{ Scan(dest ...any) error }) (*TaskRow, error) {
 	t.StartedAt = unixToNullTime(startedAt)
 	t.FinishedAt = unixToNullTime(finishedAt)
 	t.TaskDir = taskDir.String
+	t.ExternalID = externalID.String
+	t.StatusSource = statusSource.String
 
 	return &t, nil
 }
@@ -114,8 +128,8 @@ func (s *Store) InsertTask(ctx context.Context, t *TaskRow) error {
 		gpus_needed, gpus, status, retry_count, max_retry,
 		pid, start_time, log_path, working_dir, env_json,
 		resumable, extra_args, uid, timeout,
-		enqueued_at, started_at, finished_at, task_dir
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+		enqueued_at, started_at, finished_at, task_dir, external_id, status_source
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	resumable := 0
 	if t.Resumable {
@@ -130,7 +144,7 @@ func (s *Store) InsertTask(ctx context.Context, t *TaskRow) error {
 		resumable, t.ExtraArgs, nullInt(t.UID), nullInt(t.Timeout),
 		t.EnqueuedAt.Unix(),
 		nullTimeToUnix(t.StartedAt), nullTimeToUnix(t.FinishedAt),
-		nullString(t.TaskDir),
+		nullString(t.TaskDir), nullString(t.ExternalID), nullString(t.StatusSource),
 	)
 	return err
 }
@@ -142,8 +156,8 @@ func (s *Store) InsertTaskTx(ctx context.Context, tx *sql.Tx, t *TaskRow) error 
 		gpus_needed, gpus, status, retry_count, max_retry,
 		pid, start_time, log_path, working_dir, env_json,
 		resumable, extra_args, uid, timeout,
-		enqueued_at, started_at, finished_at, task_dir
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+		enqueued_at, started_at, finished_at, task_dir, external_id, status_source
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	resumable := 0
 	if t.Resumable {
@@ -158,14 +172,35 @@ func (s *Store) InsertTaskTx(ctx context.Context, tx *sql.Tx, t *TaskRow) error 
 		resumable, t.ExtraArgs, nullInt(t.UID), nullInt(t.Timeout),
 		t.EnqueuedAt.Unix(),
 		nullTimeToUnix(t.StartedAt), nullTimeToUnix(t.FinishedAt),
-		nullString(t.TaskDir),
+		nullString(t.TaskDir), nullString(t.ExternalID), nullString(t.StatusSource),
 	)
 	return err
+}
+
+// allowedStatusFields is the whitelist of column names that UpdateTaskStatus
+// accepts. Any key not in this set is rejected to prevent accidental SQL
+// injection from future callers.
+var allowedStatusFields = map[string]bool{
+	"pid":           true,
+	"gpus":          true,
+	"start_time":    true,
+	"started_at":    true,
+	"finished_at":   true,
+	"retry_count":   true,
+	"log_path":      true,
+	"working_dir":   true,
+	"env_json":      true,
+	"external_id":   true,
+	"status_source": true,
+	"extra_args":    true,
 }
 
 // UpdateTaskStatus updates a task's status and any extra fields.
 //
 // fields is a map of column name → new value for additional columns to update.
+// Only columns listed in allowedStatusFields are accepted; unknown keys return
+// an error.
+//
 // Example:
 //
 //	store.UpdateTaskStatus(ctx, id, "running", map[string]any{
@@ -176,6 +211,9 @@ func (s *Store) UpdateTaskStatus(ctx context.Context, taskID string, status stri
 	args := []any{status}
 
 	for col, val := range fields {
+		if !allowedStatusFields[col] {
+			return fmt.Errorf("UpdateTaskStatus: column %q not in whitelist", col)
+		}
 		setClauses = append(setClauses, col+" = ?")
 		args = append(args, val)
 	}

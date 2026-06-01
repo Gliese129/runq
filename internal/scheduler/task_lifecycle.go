@@ -3,53 +3,45 @@ package scheduler
 import (
 	"context"
 	"errors"
-	"os"
-	"path/filepath"
-	"strconv"
 	"time"
 
 	"github.com/gliese129/runq/internal/executor"
+	"github.com/gliese129/runq/internal/ingest"
+	"github.com/gliese129/runq/internal/runqenv"
 )
 
 // buildTaskEnv merges task.Env with the RUNQ_* environment variables the SDK
-// expects to find. RUNQ_* are written last so they win against any user-set
-// keys with the same name (RUNQ_* are an internal contract; user overrides
-// of e.g. RUNQ_TASK_ID would silently break the SDK).
+// expects to find. The shared RUNQ_* contract comes from runqenv.Base (the
+// single source of truth, also used by the HPC wrapper); the daemon then layers
+// on RUNQ_SOCKET_PATH. RUNQ_* are written last so they win against any user-set
+// keys with the same name (RUNQ_* are an internal contract; user overrides of
+// e.g. RUNQ_TASK_ID would silently break the SDK).
 //
 // Non-RUNQ user env (e.g. WANDB_API_KEY) is preserved as-is.
-//
-// RUNQ_WANDB_CONFIG_FILE is only injected when the file exists, so that the
-// SDK can use the env's presence/absence as a binary signal for "wandb is
-// configured for this task" without needing to stat the path itself.
 func (s *Scheduler) buildTaskEnv(task *Task) map[string]string {
 	env := make(map[string]string, len(task.Env)+10)
 	for k, v := range task.Env {
 		env[k] = v
 	}
-	env["RUNQ_TASK_ID"] = task.ID
-	env["RUNQ_JOB_ID"] = task.JobID
-	env["RUNQ_PROJECT_NAME"] = task.ProjectName
-	if task.TaskDir != "" {
-		env["RUNQ_TASK_DIR"] = task.TaskDir
-		env["RUNQ_PARAMS_FILE"] = filepath.Join(task.TaskDir, "params.json")
-		env["RUNQ_METRICS_FILE"] = filepath.Join(task.TaskDir, "metrics.jsonl")
-		env["RUNQ_CHECKPOINT_DIR"] = filepath.Join(task.TaskDir, "checkpoints")
-
-		wandbCfg := filepath.Join(task.TaskDir, "wandb_config.json")
-		if _, err := os.Stat(wandbCfg); err == nil {
-			env["RUNQ_WANDB_CONFIG_FILE"] = wandbCfg
-		}
+	for k, v := range runqenv.Base(
+		runqenv.Identity{
+			TaskID:  task.ID,
+			JobID:   task.JobID,
+			Project: task.ProjectName,
+			TaskDir: task.TaskDir,
+		},
+		runqenv.Safety{
+			FactorPercent: s.cfg.Disk.SafetyFactorPercent,
+			ExtraGB:       s.cfg.Disk.SafetyExtraGB,
+		},
+	) {
+		env[k] = v
 	}
+	// RUNQ_SOCKET_PATH is daemon-only (the SDK uses it to reach the daemon for
+	// self-freeze). The HPC wrapper omits it and sets RUNQ_NO_DAEMON instead.
 	if s.socketPath != "" {
 		env["RUNQ_SOCKET_PATH"] = s.socketPath
 	}
-
-	// SDK contract for self-freeze: SDK reads these and computes
-	//   needed = upcoming_ckpt_size × percent / 100 + extra_gb × 1GiB
-	// Always injected (never optional) so the SDK doesn't need fallback
-	// defaults — if the field is missing it's a daemon-side bug.
-	env["RUNQ_SAFETY_FACTOR_PERCENT"] = strconv.Itoa(s.cfg.Disk.SafetyFactorPercent)
-	env["RUNQ_SAFETY_EXTRA_GB"] = strconv.Itoa(s.cfg.Disk.SafetyExtraGB)
 
 	return env
 }
@@ -156,7 +148,11 @@ func (s *Scheduler) completeTask(task *Task, status TaskStatus) {
 // defer and from MonitorReattached's defer, so any panic here would
 // orphan a task. Keep this function dumb.
 func (s *Scheduler) reapMetrics(task *Task) {
-	result, err := ReapTaskOutputs(s.ctx, s.store, task)
+	result, err := ingest.ReapOutputs(s.ctx, s.store, ingest.Target{
+		TaskID: task.ID,
+		JobID:  task.JobID,
+		Dir:    task.TaskDir,
+	})
 	if err != nil {
 		s.logger.Warn("reap failed", "task", task.ID, "error", err)
 		return

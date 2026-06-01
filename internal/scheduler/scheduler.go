@@ -11,7 +11,7 @@
 //	gpu.go              checkGPUResidual + gpuRefreshLoop + gpuString
 //	freeze.go           FreezeState (disk-freeze state machine; SDK-driven)
 //	queue.go            Task + Queue + TaskStatus
-//	reap.go             ReapTaskOutputs (metrics.jsonl ingestion)
+//	task_lifecycle.go   lifecycle + shared ingest adapter
 //	prioritizer.go      Prioritizer interface + FIFO / FairShare strategies
 package scheduler
 

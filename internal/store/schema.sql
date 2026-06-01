@@ -41,7 +41,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     enqueued_at  INTEGER,            -- Unix timestamp
     started_at   INTEGER,            -- Unix timestamp, nullable
     finished_at  INTEGER,            -- Unix timestamp, nullable
-    task_dir     TEXT                 -- L2-C: <working_dir>/.runq/<task_id>, holds params.json / metrics.jsonl / checkpoints/
+    task_dir     TEXT,                -- L2-C: <root>/<job_id>/<task_id>, holds params.json / metrics.jsonl / checkpoints/
+    external_id  TEXT,                -- L2-E: HPC scheduler job id (sbatch/qsub). Empty for daemon-managed tasks.
+    status_source TEXT                -- L2-E: provenance of status: "" | wrapper | scheduler | inferred | runq | submit
 );
 
 CREATE INDEX IF NOT EXISTS idx_tasks_job_id      ON tasks(job_id);
