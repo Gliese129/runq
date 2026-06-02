@@ -1,0 +1,18 @@
+{
+  "name": "runq-dashboard",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build"
+  },
+  "dependencies": {
+    "@vitejs/plugin-vue": "^6.0.0",
+    "vite": "^7.0.0",
+    "vue": "^3.5.0",
+    "vue-i18n": "^11.0.0",
+    "vuetify": "^3.9.0"
+  },
+  "devDependencies": {}
+}

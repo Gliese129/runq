@@ -43,7 +43,15 @@ type GlobalConfig struct {
 	// project's <working_dir>/.runq is a symlink pointing there. When empty,
 	// <working_dir>/.runq/ is the real storage location.
 	DataPath string `yaml:"data_path,omitempty"`
+	// Mode selects the default backend for unified CLI/dashboard commands.
+	// Empty is accepted on disk and normalized to daemon when loaded.
+	Mode string `yaml:"mode,omitempty"`
 }
+
+const (
+	ModeDaemon = "daemon"
+	ModeHPC    = "hpc"
+)
 
 // configFile is the on-disk shape: global keys at the top, plus an opaque hpc
 // section that this package does NOT parse (hpcconfig owns that).
@@ -73,7 +81,7 @@ func DBPath() string { return filepath.Join(ConfigDir(), "runq.db") }
 func Load() (*GlobalConfig, error) {
 	buf, err := os.ReadFile(ConfigPath())
 	if os.IsNotExist(err) {
-		return &GlobalConfig{}, nil
+		return &GlobalConfig{Mode: ModeDaemon}, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", ConfigPath(), err)
@@ -82,7 +90,161 @@ func Load() (*GlobalConfig, error) {
 	if err := yaml.Unmarshal(buf, &f); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", ConfigPath(), err)
 	}
+	mode, err := NormalizeMode(f.GlobalConfig.Mode)
+	if err != nil {
+		return nil, fmt.Errorf("parse %s: %w", ConfigPath(), err)
+	}
+	f.GlobalConfig.Mode = mode
 	return &f.GlobalConfig, nil
+}
+
+// NormalizeMode returns the canonical mode value accepted by the unified CLI.
+func NormalizeMode(mode string) (string, error) {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	if mode == "" {
+		return ModeDaemon, nil
+	}
+	switch mode {
+	case ModeDaemon, ModeHPC:
+		return mode, nil
+	default:
+		return "", fmt.Errorf("mode must be %q or %q, got %q", ModeDaemon, ModeHPC, mode)
+	}
+}
+
+// ConfigMode returns cfg.Mode with nil/empty values treated as daemon.
+func ConfigMode(cfg *GlobalConfig) string {
+	if cfg == nil {
+		return ModeDaemon
+	}
+	mode, err := NormalizeMode(cfg.Mode)
+	if err != nil {
+		return ModeDaemon
+	}
+	return mode
+}
+
+// Keys returns the supported top-level global config keys.
+func Keys() []string {
+	return []string{"mode", "data_path"}
+}
+
+// GetKey reads one supported global config key.
+func GetKey(key string) (string, error) {
+	cfg, err := Load()
+	if err != nil {
+		return "", err
+	}
+	switch key {
+	case "mode":
+		return ConfigMode(cfg), nil
+	case "data_path":
+		return cfg.DataPath, nil
+	default:
+		return "", fmt.Errorf("unsupported config key %q", key)
+	}
+}
+
+// ListKeys returns all supported global config keys with normalized values.
+func ListKeys() (map[string]string, error) {
+	cfg, err := Load()
+	if err != nil {
+		return nil, err
+	}
+	return map[string]string{
+		"mode":      ConfigMode(cfg),
+		"data_path": cfg.DataPath,
+	}, nil
+}
+
+// SetKey updates one top-level global config key while preserving unrelated
+// YAML sections such as hpc:. Empty data_path removes that key.
+func SetKey(key, value string) error {
+	key = strings.TrimSpace(key)
+	value = strings.TrimSpace(value)
+	switch key {
+	case "mode":
+		mode, err := NormalizeMode(value)
+		if err != nil {
+			return err
+		}
+		value = mode
+	case "data_path":
+		// No extra validation: users may point at paths not mounted on this host.
+	default:
+		return fmt.Errorf("unsupported config key %q", key)
+	}
+
+	doc, err := readConfigNode()
+	if err != nil {
+		return err
+	}
+	root := doc.Content[0]
+	if key == "data_path" && value == "" {
+		removeMappingValue(root, key)
+	} else {
+		setMappingScalar(root, key, value)
+	}
+	if err := os.MkdirAll(ConfigDir(), 0o755); err != nil {
+		return fmt.Errorf("create config dir: %w", err)
+	}
+	out, err := yaml.Marshal(doc)
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+	return os.WriteFile(ConfigPath(), out, 0o644)
+}
+
+func readConfigNode() (*yaml.Node, error) {
+	buf, err := os.ReadFile(ConfigPath())
+	if os.IsNotExist(err) {
+		return newConfigNode(), nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", ConfigPath(), err)
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal(buf, &doc); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", ConfigPath(), err)
+	}
+	if len(doc.Content) == 0 {
+		return newConfigNode(), nil
+	}
+	if doc.Content[0].Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("parse %s: config root must be a YAML mapping", ConfigPath())
+	}
+	return &doc, nil
+}
+
+func newConfigNode() *yaml.Node {
+	return &yaml.Node{
+		Kind: yaml.DocumentNode,
+		Content: []*yaml.Node{{
+			Kind: yaml.MappingNode,
+		}},
+	}
+}
+
+func setMappingScalar(root *yaml.Node, key, value string) {
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		if root.Content[i].Value == key {
+			root.Content[i+1] = &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: value}
+			return
+		}
+	}
+	root.Content = append(root.Content,
+		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key},
+		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: value},
+	)
+}
+
+func removeMappingValue(root *yaml.Node, key string) {
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		if root.Content[i].Value == key {
+			root.Content = append(root.Content[:i], root.Content[i+2:]...)
+			return
+		}
+	}
 }
 
 // ResolveRoot returns the PHYSICAL workspace root for a project. Both daemon

@@ -9,10 +9,12 @@ import (
 
 // GPUState tracks the status of a single GPU.
 type GPUState struct {
-	Index   int    `json:"index"`
-	TaskID  string `json:"task_id,omitempty"` // empty if free
-	MemFree int    `json:"mem_free"`          // MB
-	UtilPct int    `json:"util_pct"`          // %
+	Index    int    `json:"index"`
+	Name     string `json:"name"`
+	MemTotal int    `json:"mem_total"`         // MB
+	MemFree  int    `json:"mem_free"`          // MB
+	UtilPct  int    `json:"util_pct"`          // %
+	TaskID   string `json:"task_id,omitempty"` // empty if free
 }
 
 // GPUPool manages GPU allocation on the local machine.
@@ -27,9 +29,11 @@ func NewGPUPool(infos []Info) *GPUPool {
 	gpus := make(map[int]*GPUState, len(infos))
 	for _, info := range infos {
 		gpus[info.Index] = &GPUState{
-			Index:   info.Index,
-			MemFree: info.MemFree,
-			UtilPct: info.UtilPct,
+			Index:    info.Index,
+			Name:     info.Name,
+			MemTotal: info.MemFree + info.MemUsed,
+			MemFree:  info.MemFree,
+			UtilPct:  info.UtilPct,
 		}
 	}
 	return &GPUPool{gpus: gpus}
@@ -79,7 +83,8 @@ func (p *GPUPool) Status() []GPUState {
 	copied := make([]GPUState, 0, len(p.gpus))
 	for _, g := range p.gpus {
 		copied = append(copied, GPUState{
-			Index: g.Index, TaskID: g.TaskID, MemFree: g.MemFree, UtilPct: g.UtilPct,
+			Index: g.Index, Name: g.Name, MemTotal: g.MemTotal,
+			MemFree: g.MemFree, UtilPct: g.UtilPct, TaskID: g.TaskID,
 		})
 	}
 	slices.SortFunc(copied, func(a, b GPUState) int { return a.Index - b.Index })

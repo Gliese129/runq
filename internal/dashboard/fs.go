@@ -1,0 +1,125 @@
+package dashboard
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+
+	"github.com/gliese129/runq/internal/job"
+	"github.com/gliese129/runq/internal/utils"
+)
+
+// FSEntry, ParseScriptRequest, ParseResult, ScriptArg are in types.go.
+
+func (s *Server) handleFSList(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Query().Get("path")
+	if path == "" {
+		home, _ := os.UserHomeDir()
+		path = home
+	}
+	safePath, err := homeSafePath(path)
+	if err != nil {
+		writeErrorStatus(w, http.StatusForbidden, err)
+		return
+	}
+	entries, err := os.ReadDir(safePath)
+	if err != nil {
+		writeErrorStatus(w, http.StatusBadRequest, err)
+		return
+	}
+	out := make([]FSEntry, 0, len(entries))
+	for _, entry := range entries {
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		out = append(out, FSEntry{
+			Name:  entry.Name(),
+			Path:  filepath.Join(safePath, entry.Name()),
+			IsDir: entry.IsDir(),
+			Size:  info.Size(),
+		})
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].IsDir != out[j].IsDir {
+			return out[i].IsDir
+		}
+		return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
+	})
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleParseScript(w http.ResponseWriter, r *http.Request) {
+	var req ParseScriptRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErrorStatus(w, http.StatusBadRequest, err)
+		return
+	}
+	safePath, err := homeSafePath(req.Path)
+	if err != nil {
+		writeErrorStatus(w, http.StatusForbidden, err)
+		return
+	}
+	args, err := job.ScanArgparse(safePath)
+	if err != nil {
+		writeErrorStatus(w, http.StatusBadRequest, err)
+		return
+	}
+	out := ParseResult{
+		Args: make([]ScriptArg, 0, len(args)),
+		Env:  detectedEnv(filepath.Dir(safePath)),
+		Cmd:  fmt.Sprintf("python %s {{args}}", filepath.Base(safePath)),
+	}
+	for _, arg := range args {
+		var def *string
+		if arg.Default != "" {
+			value := arg.Default
+			def = &value
+		}
+		out.Args = append(out.Args, ScriptArg{
+			Name:    arg.Name,
+			Type:    arg.Type,
+			Default: def,
+		})
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func homeSafePath(path string) (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	if path == "" {
+		path = home
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	home, _ = filepath.Abs(home)
+	abs = filepath.Clean(abs)
+	home = filepath.Clean(home)
+	if abs != home && !strings.HasPrefix(abs, home+string(os.PathSeparator)) {
+		return "", fmt.Errorf("path outside home is not allowed")
+	}
+	return abs, nil
+}
+
+func detectedEnv(dir string) string {
+	envType, envPath, envName := utils.DetectPythonEnv(dir)
+	if envType == "" {
+		return ""
+	}
+	if envName != "" {
+		return envType + ":" + envName
+	}
+	if envPath != "" {
+		return envType + ":" + envPath
+	}
+	return envType
+}

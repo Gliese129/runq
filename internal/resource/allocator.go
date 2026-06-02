@@ -116,7 +116,7 @@ func (m *MockAllocator) Status() []GPUState {
 	}
 	states := make([]GPUState, m.Total)
 	for i := 0; i < m.Total; i++ {
-		states[i] = GPUState{Index: i, TaskID: taskMap[i], MemFree: 80000}
+		states[i] = GPUState{Index: i, Name: "MockGPU", MemTotal: 80000, MemFree: 80000, TaskID: taskMap[i]}
 	}
 	return states
 }

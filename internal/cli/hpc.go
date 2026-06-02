@@ -185,24 +185,27 @@ func runHPCSubmit(cmd *cobra.Command, args []string) error {
 		jobCfg.Note = noteOverride
 	}
 
-	b, st, err := newHPCBackend()
-	if err != nil {
-		return err
-	}
-	defer st.Close()
-
-	proj, err := resolveHPCProject(cmd, st, jobCfg.Project)
-	if err != nil {
-		return err
-	}
-
 	skip, _ := cmd.Flags().GetBool("no-preflight")
-	jobID, n, err := b.Submit(context.Background(), jobCfg, proj, hpc.SubmitOpts{SkipPreflight: skip})
+	jobID, n, err := submitHPCJobConfig(cmd, jobCfg, skip)
 	if err != nil {
 		return err
 	}
 	fmt.Printf("submitted job %s (%d tasks)\n", utils.IDColor(jobID), n)
 	return nil
+}
+
+func submitHPCJobConfig(cmd *cobra.Command, jobCfg job.JobConfig, skipPreflight bool) (string, int, error) {
+	b, st, err := newHPCBackend()
+	if err != nil {
+		return "", 0, err
+	}
+	defer st.Close()
+
+	proj, err := resolveHPCProject(cmd, st, jobCfg.Project)
+	if err != nil {
+		return "", 0, err
+	}
+	return b.Submit(context.Background(), jobCfg, proj, hpc.SubmitOpts{SkipPreflight: skipPreflight})
 }
 
 // resolveHPCProject loads the project config from --project-file when given,
