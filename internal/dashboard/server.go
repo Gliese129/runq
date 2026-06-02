@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/gliese129/runq/internal/config"
+	"github.com/gliese129/runq/internal/job"
 )
 
 type Server struct {
@@ -62,6 +63,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/dashboard/jobs/{id}/compare", s.handleCompare)
 	s.mux.HandleFunc("GET /api/dashboard/jobs/{id}/matrix", s.handleMatrix)
 	s.mux.HandleFunc("GET /api/dashboard/gpu", s.handleGPU)
+	s.mux.HandleFunc("POST /api/dashboard/jobs", s.handleSubmitJob)
+	s.mux.HandleFunc("POST /api/dashboard/jobs/dry-run", s.handleDryRun)
 	s.mux.HandleFunc("POST /api/dashboard/tasks/{id}/kill", s.handleKillTask)
 	s.mux.HandleFunc("POST /api/dashboard/tasks/{id}/retry", s.handleRetryTask)
 	s.mux.HandleFunc("POST /api/dashboard/jobs/{id}/kill", s.handleKillJob)
@@ -148,6 +151,37 @@ func (s *Server) handleGPU(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, gpus)
+}
+
+func (s *Server) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
+	var cfg job.JobConfig
+	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+		writeErrorStatus(w, http.StatusBadRequest, err)
+		return
+	}
+	jobID, total, err := s.backend.SubmitJob(r.Context(), cfg)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"job_id":      jobID,
+		"total_tasks": total,
+	})
+}
+
+func (s *Server) handleDryRun(w http.ResponseWriter, r *http.Request) {
+	var cfg job.JobConfig
+	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+		writeErrorStatus(w, http.StatusBadRequest, err)
+		return
+	}
+	tasks, err := s.backend.DryRun(r.Context(), cfg)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, tasks)
 }
 
 func (s *Server) handleKillTask(w http.ResponseWriter, r *http.Request) {

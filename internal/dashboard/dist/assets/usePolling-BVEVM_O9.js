@@ -1,0 +1,1 @@
+import{o,b2 as s,R as c,G as d}from"./index-cAIt60BM.js";function h(f,i,n){let t=null;const e=d(!1);async function a(u){if(!e.value){e.value=!0;try{await f(u)}finally{e.value=!1}}}function r(){l(),a(!1),t=setInterval(()=>{document.hidden||n&&!n.value||a(!0)},i)}function l(){t&&(clearInterval(t),t=null)}o(r),s(l),n&&c(n,u=>{u?r():l()})}export{h as u};

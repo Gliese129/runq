@@ -7,6 +7,7 @@ import (
 	"io"
 
 	"github.com/gliese129/runq/internal/api"
+	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/resource"
 	"github.com/gliese129/runq/internal/service"
 	"github.com/gliese129/runq/internal/store"
@@ -101,6 +102,21 @@ func (b *DaemonBackend) PauseJob(ctx context.Context, jobID string) error {
 
 func (b *DaemonBackend) ResumeJob(ctx context.Context, jobID string) error {
 	return b.do(ctx, "POST", "/api/jobs/"+jobID+"/resume", nil, nil)
+}
+
+func (b *DaemonBackend) SubmitJob(ctx context.Context, cfg job.JobConfig) (string, int, error) {
+	var resp struct {
+		JobID      string `json:"job_id"`
+		TotalTasks int    `json:"total_tasks"`
+	}
+	if err := b.do(ctx, "POST", "/api/jobs", cfg, &resp); err != nil {
+		return "", 0, err
+	}
+	return resp.JobID, resp.TotalTasks, nil
+}
+
+func (b *DaemonBackend) DryRun(_ context.Context, cfg job.JobConfig) ([]job.TaskParams, error) {
+	return job.Expand(&cfg)
 }
 
 func (b *DaemonBackend) taskRows(ctx context.Context, jobID string) ([]store.TaskRow, error) {

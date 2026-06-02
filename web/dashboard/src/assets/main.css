@@ -1,0 +1,125 @@
+@import "tailwindcss";
+
+/* ===== Route transitions ===== */
+.fade-slide-enter-active,
+.fade-slide-leave-active {
+  transition: opacity 0.25s cubic-bezier(0.4, 0, 0.2, 1),
+              transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.fade-slide-enter-from {
+  opacity: 0;
+  transform: translateY(12px);
+}
+.fade-slide-leave-to {
+  opacity: 0;
+  transform: translateY(-6px);
+}
+
+/* ===== Scale pop (for modals, toasts, chips appearing) ===== */
+.scale-enter-active {
+  transition: opacity 0.2s ease, transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+.scale-leave-active {
+  transition: opacity 0.15s ease, transform 0.15s ease;
+}
+.scale-enter-from {
+  opacity: 0;
+  transform: scale(0.92);
+}
+.scale-leave-to {
+  opacity: 0;
+  transform: scale(0.95);
+}
+
+/* ===== Slide up (for panels, filter bars) ===== */
+.slide-up-enter-active {
+  transition: opacity 0.3s ease, transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.slide-up-leave-active {
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+.slide-up-enter-from {
+  opacity: 0;
+  transform: translateY(16px);
+}
+.slide-up-leave-to {
+  opacity: 0;
+  transform: translateY(8px);
+}
+
+/* ===== Stagger animation for card grids ===== */
+@keyframes card-in {
+  from {
+    opacity: 0;
+    transform: translateY(16px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.card-stagger > * {
+  animation: card-in 0.4s cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+.card-stagger > *:nth-child(1) { animation-delay: 0ms; }
+.card-stagger > *:nth-child(2) { animation-delay: 60ms; }
+.card-stagger > *:nth-child(3) { animation-delay: 120ms; }
+.card-stagger > *:nth-child(4) { animation-delay: 180ms; }
+.card-stagger > *:nth-child(5) { animation-delay: 240ms; }
+.card-stagger > *:nth-child(6) { animation-delay: 300ms; }
+.card-stagger > *:nth-child(n+7) { animation-delay: 360ms; }
+
+/* ===== Pulse dot for running status ===== */
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(0.85); }
+}
+
+.pulse-dot {
+  animation: pulse-dot 1.5s ease-in-out infinite;
+}
+
+/* ===== Shimmer skeleton loading ===== */
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    rgb(var(--v-theme-surface-variant)) 25%,
+    rgb(var(--v-theme-surface)) 50%,
+    rgb(var(--v-theme-surface-variant)) 75%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.5s ease-in-out infinite;
+  border-radius: 8px;
+}
+
+/* ===== Card hover lift (refined) ===== */
+.v-card[hover]:hover,
+.v-card--hover:hover {
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.06) !important;
+  transform: translateY(-2px);
+}
+
+/* ===== Smooth defaults ===== */
+.v-btn, .v-chip, .v-card, .v-progress-linear {
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1) !important;
+}
+
+/* Nav rail active indicator */
+.v-navigation-drawer .v-btn--active {
+  background: rgba(var(--v-theme-primary), 0.12);
+}
+
+/* ===== Monospace ===== */
+code {
+  font-family: 'JetBrains Mono', 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  font-size: 0.85em;
+}
+
+/* ===== Cursor pointer for clickable cards ===== */
+.cursor-pointer { cursor: pointer; }

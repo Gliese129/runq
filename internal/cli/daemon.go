@@ -29,9 +29,13 @@ var daemonStartCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		bg, _ := cmd.Flags().GetBool("detach")
 		if bg {
+			selfPath, err := os.Executable()
+			if err != nil {
+				return fmt.Errorf("resolve executable path: %w", err)
+			}
 			_, dataDir := utils.ResolveDataDir()
 			logFile, _ := os.OpenFile(filepath.Join(dataDir, "daemon.log"), os.O_CREATE|os.O_APPEND|os.O_RDWR, 0644)
-			subp := exec.Command(os.Args[0], "daemon", "start")
+			subp := exec.Command(selfPath, "daemon", "start")
 			subp.Stdin = nil
 			subp.Stdout = logFile
 			subp.Stderr = logFile

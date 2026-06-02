@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/store"
 	"github.com/gliese129/runq/internal/workspace"
 )
@@ -33,6 +34,9 @@ type Backend interface {
 	KillJob(ctx context.Context, jobID string) error
 	PauseJob(ctx context.Context, jobID string) error
 	ResumeJob(ctx context.Context, jobID string) error
+
+	SubmitJob(ctx context.Context, cfg job.JobConfig) (jobID string, totalTasks int, err error)
+	DryRun(ctx context.Context, cfg job.JobConfig) ([]job.TaskParams, error)
 }
 
 // ---- builders: store rows → view types ----
@@ -88,8 +92,9 @@ func BuildJobDetail(job store.JobRow, tasks []store.TaskRow) JobDetail {
 		views = append(views, BuildTaskView(task))
 	}
 	return JobDetail{
-		Job:   BuildJobSummary(job, tasks),
-		Tasks: views,
+		Job:        BuildJobSummary(job, tasks),
+		Tasks:      views,
+		MetricKeys: collectMetricKeys(tasks),
 	}
 }
 
@@ -271,6 +276,42 @@ func readStatusArtifacts(path string, out *taskArtifacts) {
 	if err := json.Unmarshal(buf, &status); err == nil {
 		out.ExitCode = status.ExitCode
 	}
+}
+
+// collectMetricKeys scans the first few tasks with metrics for unique
+// metric key names. Internal keys (prefixed with "_") are excluded.
+func collectMetricKeys(tasks []store.TaskRow) []string {
+	seen := map[string]bool{}
+	scanned := 0
+	for _, task := range tasks {
+		if task.TaskDir == "" || scanned >= 5 {
+			continue
+		}
+		f, err := os.Open(workspace.MetricsPath(task.TaskDir))
+		if err != nil {
+			continue
+		}
+		scanner := bufio.NewScanner(f)
+		scanner.Buffer(make([]byte, 64*1024), 10*1024*1024)
+		for scanner.Scan() {
+			var event struct {
+				Key string `json:"key"`
+			}
+			if json.Unmarshal(scanner.Bytes(), &event) == nil && event.Key != "" {
+				if !strings.HasPrefix(event.Key, "_") {
+					seen[event.Key] = true
+				}
+			}
+		}
+		f.Close()
+		scanned++
+	}
+	keys := make([]string, 0, len(seen))
+	for k := range seen {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func bestMetric(taskDir, key string, desc bool) (float64, bool) {

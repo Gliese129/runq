@@ -54,7 +54,10 @@ func NewDaemon() (*Daemon, error) {
 
 	gpus, err := resource.Detect()
 	if err != nil {
-		return nil, fmt.Errorf("detect GPUs: %w", err)
+		// Non-fatal: daemon can run without GPUs (e.g. Mac, CPU-only nodes).
+		// Tasks requesting gpu_num > 0 will stay pending until GPUs appear.
+		logger.Warn("GPU detection failed, running without GPU support", "error", err)
+		gpus = nil
 	}
 
 	pool := resource.NewGPUPool(gpus)

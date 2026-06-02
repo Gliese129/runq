@@ -22,8 +22,9 @@ type TaskCountGroup struct {
 }
 
 type JobDetail struct {
-	Job   JobSummary `json:"job"`
-	Tasks []TaskView `json:"tasks"`
+	Job        JobSummary `json:"job"`
+	Tasks      []TaskView `json:"tasks"`
+	MetricKeys []string   `json:"metric_keys"`
 }
 
 type TaskView struct {

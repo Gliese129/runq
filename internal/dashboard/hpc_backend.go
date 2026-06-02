@@ -5,6 +5,8 @@ import (
 	"fmt"
 
 	"github.com/gliese129/runq/internal/hpc"
+	"github.com/gliese129/runq/internal/job"
+	"github.com/gliese129/runq/internal/project"
 	"github.com/gliese129/runq/internal/store"
 )
 
@@ -122,4 +124,17 @@ func (b *HPCBackend) PauseJob(ctx context.Context, jobID string) error {
 
 func (b *HPCBackend) ResumeJob(ctx context.Context, jobID string) error {
 	return fmt.Errorf("resume job in hpc mode: %w", ErrNotSupported)
+}
+
+func (b *HPCBackend) SubmitJob(ctx context.Context, cfg job.JobConfig) (string, int, error) {
+	reg := project.NewRegistry(b.store.DB())
+	proj, err := reg.Get(cfg.Project)
+	if err != nil {
+		return "", 0, fmt.Errorf("project %q not found: %w", cfg.Project, err)
+	}
+	return b.backend.Submit(ctx, cfg, proj, hpc.SubmitOpts{})
+}
+
+func (b *HPCBackend) DryRun(_ context.Context, cfg job.JobConfig) ([]job.TaskParams, error) {
+	return job.Expand(&cfg)
 }

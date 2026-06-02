@@ -3,6 +3,8 @@ package dashboard
 import (
 	"context"
 	"fmt"
+
+	"github.com/gliese129/runq/internal/job"
 )
 
 type UnavailableBackend struct {
@@ -51,6 +53,14 @@ func (b *UnavailableBackend) PauseJob(ctx context.Context, jobID string) error {
 
 func (b *UnavailableBackend) ResumeJob(ctx context.Context, jobID string) error {
 	return b.wrap()
+}
+
+func (b *UnavailableBackend) SubmitJob(ctx context.Context, cfg job.JobConfig) (string, int, error) {
+	return "", 0, b.wrap()
+}
+
+func (b *UnavailableBackend) DryRun(ctx context.Context, cfg job.JobConfig) ([]job.TaskParams, error) {
+	return nil, b.wrap()
 }
 
 func (b *UnavailableBackend) wrap() error {
