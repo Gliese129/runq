@@ -65,15 +65,15 @@
 import { ref, computed, onMounted, provide, reactive } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
-import { api } from '@/api/client'
+import { api } from '@/apis/client'
 import { useSnackbar } from '@/composables/useSnackbar'
 import { usePreferences } from '@/composables/usePreferences'
-import type { FSEntry, ParseResult, JobDetail } from '@/api/types'
+import type { FSEntry, ParseResult, JobDetail } from '@/types/api'
 
 import StepSelect from './StepSelect.vue'
 import StepConfigure from './StepConfigure.vue'
 import StepReview from './StepReview.vue'
-import { SUBMIT_STATE_KEY, type ArgState, type SweepGroup } from './types'
+import { SUBMIT_STATE_KEY, type ArgState, type SweepGroup } from '@/types/submit'
 
 const { t } = useI18n()
 const router = useRouter()

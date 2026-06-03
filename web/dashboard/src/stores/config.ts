@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import { api } from '../api/client'
-import type { ConfigResponse, FeatureFlags } from '../api/types'
+import { api } from '@/apis/client'
+import type { ConfigResponse, FeatureFlags } from '@/types/api'
 
 export const useConfigStore = defineStore('config', () => {
   const mode = ref('')

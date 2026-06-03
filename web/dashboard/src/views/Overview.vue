@@ -1,177 +1,123 @@
 <template>
   <div>
-    <!-- Connection error banner -->
+    <!-- Connection error -->
     <v-slide-y-transition>
-      <v-card v-if="!conn.connected.value" color="error" variant="tonal" class="mb-4 pa-4">
-        <div class="d-flex align-center ga-3">
-          <v-icon>mdi-connection</v-icon>
+      <v-card v-if="!conn.connected.value" color="error" variant="tonal" class="mb-4 pa-3">
+        <div class="d-flex align-center ga-2">
+          <v-icon size="18">mdi-connection</v-icon>
           <div class="flex-grow-1">
-            <div class="font-weight-medium">{{ t('status.disconnected') }}</div>
+            <div class="text-body-2 font-weight-medium">{{ t('status.disconnected') }}</div>
             <div class="text-caption">{{ conn.lastError.value }}</div>
           </div>
-          <v-btn variant="tonal" size="small" @click="retryConnection">
-            {{ t('common.retry') }}
-          </v-btn>
+          <v-btn variant="tonal" size="x-small" @click="retryConnection">{{ t('common.retry') }}</v-btn>
         </div>
       </v-card>
     </v-slide-y-transition>
 
-    <!-- Metric cards -->
-    <div class="d-flex flex-wrap ga-3 mb-6 card-stagger">
-      <div style="flex: 1; min-width: 140px">
-        <MetricCard
-          :label="t('overview.running')"
-          :value="jobs.totalRunning"
-          icon="mdi-play-circle"
-          color="warning"
-          :active="activeFilter === 'running'"
-          @click="toggleFilter('running')"
-        />
-      </div>
-      <div style="flex: 1; min-width: 140px">
-        <MetricCard
-          :label="t('overview.pending')"
-          :value="jobs.totalPending"
-          icon="mdi-clock-outline"
-          color="info"
-          :active="activeFilter === 'pending'"
-          @click="toggleFilter('pending')"
-        />
-      </div>
-      <div v-if="config.features.gpu_map" style="flex: 1; min-width: 140px">
-        <MetricCard
-          :label="t('overview.gpu_free')"
-          :value="gpuDisplay"
-          icon="mdi-memory"
-          color="success"
-          :subtitle="gpuSubtitle"
-        />
-      </div>
-      <div style="flex: 1; min-width: 140px">
-        <MetricCard
-          :label="t('overview.failed')"
-          :value="jobs.totalFailed"
-          icon="mdi-alert-circle"
-          color="error"
-          :active="activeFilter === 'failed'"
-          @click="toggleFilter('failed')"
-        />
-      </div>
-    </div>
-
-    <!-- Active filter bar -->
-    <v-slide-y-transition>
-      <v-card v-if="activeFilter" class="mb-4 pa-3">
-        <div class="d-flex align-center justify-space-between">
-          <div class="d-flex align-center ga-2">
-            <StatusBadge :status="activeFilter" />
-            <span class="text-body-2">{{ filteredJobs.length }} {{ t('project.jobs').toLowerCase() }}</span>
-          </div>
-          <v-btn size="small" variant="text" @click="activeFilter = ''">
-            <v-icon start size="16">mdi-close</v-icon>
-            {{ t('common.clear') }}
-          </v-btn>
-        </div>
-        <div class="d-flex flex-column ga-1 mt-2">
-          <div
-            v-for="j in filteredJobs.slice(0, 10)"
-            :key="j.id"
-            class="d-flex align-center pa-2 rounded-lg cursor-pointer hover-bg"
-            @click="router.push({ name: 'job-detail', params: { project: j.project, jobId: j.id } })"
-          >
-            <code class="text-caption mr-3">{{ j.id.slice(0, 8) }}</code>
-            <span class="text-body-2 flex-grow-1">{{ j.project }}</span>
-            <span class="text-caption text-on-surface-variant">{{ j.note }}</span>
-          </div>
-        </div>
-      </v-card>
-    </v-slide-y-transition>
-
-    <!-- GPU bars -->
-    <v-slide-y-transition>
-      <v-card v-if="config.features.gpu_map && gpu.gpus.length > 0 && !activeFilter" class="mb-6 pa-4">
-        <div class="text-subtitle-2 mb-3">{{ t('nav.gpu') }}</div>
-        <div class="d-flex flex-column ga-2">
-          <GPUBar v-for="g in gpu.gpus" :key="g.index" :slot="g" />
-        </div>
-      </v-card>
-    </v-slide-y-transition>
-
-    <!-- Recent jobs -->
-    <div v-if="recentJobs.length > 0 && !activeFilter" class="mb-6">
-      <div class="text-subtitle-2 mb-3">{{ t('overview.recent') }}</div>
-      <div class="d-flex flex-column ga-2 card-stagger">
+    <!-- Metric row -->
+    <v-row dense class="mb-4">
+      <v-col v-for="m in metrics" :key="m.key" cols="6" sm="3">
         <v-card
-          v-for="j in recentJobs"
-          :key="j.id"
-          class="pa-4 cursor-pointer"
-          hover
-          @click="router.push({ name: 'job-detail', params: { project: j.project, jobId: j.id } })"
+          class="pa-3 cursor-pointer"
+          :class="{ 'border-primary': activeFilter === m.key }"
+          @click="toggleFilter(m.key)"
         >
-          <div class="d-flex align-center ga-3">
-            <StatusBadge :status="j.status" />
-            <div class="flex-grow-1">
-              <div class="d-flex align-center ga-2">
-                <span class="font-weight-medium">{{ j.project }}</span>
-                <code class="text-caption text-on-surface-variant">{{ j.id.slice(0, 8) }}</code>
-              </div>
-              <div v-if="j.note" class="text-caption text-on-surface-variant">{{ j.note }}</div>
+          <div class="d-flex align-center justify-space-between">
+            <div>
+              <div class="text-caption text-on-surface-variant">{{ m.label }}</div>
+              <div class="text-h5 font-weight-medium">{{ m.value }}</div>
             </div>
-            <div class="text-right">
-              <div class="d-flex align-center ga-1">
-                <v-progress-linear
-                  :model-value="j.tasks.total > 0 ? (j.tasks.completed / j.tasks.total) * 100 : 0"
-                  color="success"
-                  height="4"
-                  rounded
-                  style="width: 60px"
-                />
-                <span class="text-caption text-on-surface-variant">{{ j.tasks.completed }}/{{ j.tasks.total }}</span>
-              </div>
-              <div class="text-caption text-on-surface-variant">{{ relativeTime(j.created_at) }}</div>
-            </div>
+            <div class="status-dot" :class="`status-dot--${m.dotClass}`" style="width: 10px; height: 10px" />
           </div>
         </v-card>
-      </div>
-    </div>
+      </v-col>
+    </v-row>
 
-    <!-- Project cards -->
-    <div v-if="jobs.projects.length > 0 && !activeFilter">
-      <div class="text-subtitle-2 mb-3">{{ t('overview.projects') }}</div>
-      <v-row class="card-stagger">
-        <v-col v-for="proj in jobs.projects" :key="proj" cols="12" sm="6" md="4">
-          <v-card
-            class="pa-4 cursor-pointer"
-            hover
-            @click="router.push({ name: 'project', params: { project: proj } })"
-          >
-            <div class="d-flex align-center justify-space-between mb-2">
-              <span class="text-subtitle-1 font-weight-medium">{{ proj }}</span>
-              <StatusBadge v-if="latestJobStatus(proj)" :status="latestJobStatus(proj)!" />
-            </div>
-            <div class="text-caption text-on-surface-variant">
-              {{ projectJobCount(proj) }} {{ t('project.jobs').toLowerCase() }}
-            </div>
-          </v-card>
-        </v-col>
-      </v-row>
+    <!-- GPU bars (always visible in daemon mode) -->
+    <v-card v-if="config.features.gpu_map && gpu.gpus.length > 0" class="mb-4 pa-3">
+      <div class="text-caption text-on-surface-variant mb-2">GPU</div>
+      <div class="d-flex flex-column ga-1">
+        <GPUBar v-for="g in gpu.gpus" :key="g.index" :slot="g" />
+      </div>
+    </v-card>
+
+    <!-- Active filter: show matching jobs -->
+    <v-card v-if="activeFilter" class="mb-4 pa-3">
+      <div class="d-flex align-center justify-space-between mb-2">
+        <div class="d-flex align-center ga-2">
+          <div class="status-dot" :class="`status-dot--${activeFilter}`" />
+          <span class="text-body-2 font-weight-medium">{{ filteredJobs.length }} jobs</span>
+        </div>
+        <v-btn size="x-small" variant="text" @click="activeFilter = ''">
+          <v-icon size="14">mdi-close</v-icon> Clear
+        </v-btn>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="data-mono" style="width: 100%">
+          <thead><tr><th>ID</th><th>Project</th><th>Note</th><th>Tasks</th><th>Created</th></tr></thead>
+          <tbody>
+            <tr
+              v-for="j in filteredJobs.slice(0, 20)"
+              :key="j.id"
+              class="cursor-pointer"
+              @click="router.push({ name: 'job-detail', params: { project: j.project, jobId: j.id } })"
+            >
+              <td><code>{{ j.id.slice(0, 8) }}</code></td>
+              <td>{{ j.project }}</td>
+              <td class="text-on-surface-variant">{{ j.note || '—' }}</td>
+              <td>{{ j.tasks.completed }}/{{ j.tasks.total }}</td>
+              <td class="text-on-surface-variant">{{ relativeTime(j.created_at) }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </v-card>
+
+    <!-- Recent jobs table -->
+    <div v-if="!activeFilter && recentJobs.length > 0" class="mb-4">
+      <div class="text-subtitle-2 mb-2">{{ t('overview.recent') }}</div>
+      <v-card class="pa-0">
+        <div class="overflow-x-auto">
+          <table class="data-mono" style="width: 100%">
+            <thead><tr><th></th><th>ID</th><th>Project</th><th>Note</th><th>Progress</th><th>Created</th></tr></thead>
+            <tbody>
+              <tr
+                v-for="j in recentJobs"
+                :key="j.id"
+                class="cursor-pointer"
+                @click="router.push({ name: 'job-detail', params: { project: j.project, jobId: j.id } })"
+              >
+                <td style="width: 24px"><div class="status-dot" :class="`status-dot--${j.status}`" /></td>
+                <td><code>{{ j.id.slice(0, 8) }}</code></td>
+                <td class="font-weight-medium">{{ j.project }}</td>
+                <td class="text-on-surface-variant">{{ j.note || '—' }}</td>
+                <td>
+                  <div class="d-flex align-center ga-2">
+                    <v-progress-linear
+                      :model-value="j.tasks.total > 0 ? (j.tasks.completed / j.tasks.total) * 100 : 0"
+                      color="success" height="3" rounded style="width: 50px"
+                    />
+                    <span class="text-on-surface-variant">{{ j.tasks.completed }}/{{ j.tasks.total }}</span>
+                  </div>
+                </td>
+                <td class="text-on-surface-variant">{{ relativeTime(j.created_at) }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </v-card>
     </div>
 
     <!-- Empty state -->
     <v-card v-if="jobs.projects.length === 0 && !jobs.loading && !activeFilter" class="pa-8 text-center">
-      <ChibiMascot :size="96" mood="thinking" variant="sparkle" class="mb-2" />
-      <v-icon v-if="!settings.animeMode" size="48" color="primary" class="mb-3" style="opacity: 0.5">mdi-rocket-launch-outline</v-icon>
+      <v-icon size="40" color="primary" class="mb-3" style="opacity: 0.4">mdi-rocket-launch-outline</v-icon>
       <div class="text-h6 mb-1">{{ t('overview.no_projects') }}</div>
       <div class="text-body-2 text-on-surface-variant mb-4">{{ t('overview.no_projects_hint') }}</div>
-      <div class="d-flex justify-center ga-2">
-        <v-btn color="primary" variant="tonal" :to="{ name: 'submit' }">
-          <v-icon start>mdi-plus</v-icon>
-          {{ t('nav.submit') }}
-        </v-btn>
-      </div>
+      <v-btn color="primary" variant="tonal" :to="{ name: 'submit' }">
+        <v-icon start size="16">mdi-plus</v-icon> {{ t('nav.submit') }}
+      </v-btn>
       <div class="mt-4 text-caption text-on-surface-variant">
-        {{ t('overview.hint_cli') }}
-        <code>runq submit train.py --lr 0.001</code>
+        {{ t('overview.hint_cli') }} <code>runq submit train.py --lr 0.001</code>
       </div>
     </v-card>
   </div>
@@ -186,22 +132,26 @@ import { useGPUStore } from '@/stores/gpu'
 import { useConfigStore } from '@/stores/config'
 import { usePolling } from '@/composables/usePolling'
 import { useConnection } from '@/composables/useConnection'
-import MetricCard from '@/components/MetricCard.vue'
-import StatusBadge from '@/components/StatusBadge.vue'
 import GPUBar from '@/components/GPUBar.vue'
-import ChibiMascot from '@/components/ChibiMascot.vue'
-import { useSettingsStore } from '@/stores/settings'
-
-const settings = useSettingsStore()
 
 const { t } = useI18n()
 const router = useRouter()
 const jobs = useJobsStore()
 const gpu = useGPUStore()
 const config = useConfigStore()
-
 const conn = useConnection()
 const activeFilter = ref('')
+
+const metrics = computed(() => [
+  { key: 'running', label: t('overview.running'), value: jobs.totalRunning, dotClass: 'running' },
+  { key: 'pending', label: t('overview.pending'), value: jobs.totalPending, dotClass: 'pending' },
+  { key: 'failed', label: t('overview.failed'), value: jobs.totalFailed, dotClass: 'failed' },
+  { key: 'done', label: t('overview.completed') || 'Completed', value: totalCompleted.value, dotClass: 'completed' },
+])
+
+const totalCompleted = computed(() =>
+  jobs.jobs.reduce((sum, job) => sum + job.tasks.completed, 0)
+)
 
 function retryConnection() {
   jobs.fetchJobs()
@@ -214,38 +164,17 @@ const filteredJobs = computed(() => {
     if (activeFilter.value === 'running') return j.tasks.running > 0
     if (activeFilter.value === 'pending') return j.tasks.pending > 0
     if (activeFilter.value === 'failed') return j.tasks.failed > 0
+    if (activeFilter.value === 'done') return j.status === 'done'
     return false
   })
 })
 
-const recentJobs = computed(() => {
-  return [...jobs.jobs]
-    .sort((a, b) => b.created_at - a.created_at)
-    .slice(0, 5)
-})
-
-const gpuDisplay = computed(() => {
-  if (gpu.totalCount === 0) return '—'
-  return `${gpu.freeCount}/${gpu.totalCount}`
-})
-
-const gpuSubtitle = computed(() => {
-  if (gpu.totalCount === 0) return t('status.gpu_off')
-  return undefined
-})
+const recentJobs = computed(() =>
+  [...jobs.jobs].sort((a, b) => b.created_at - a.created_at).slice(0, 10)
+)
 
 function toggleFilter(status: string) {
   activeFilter.value = activeFilter.value === status ? '' : status
-}
-
-function projectJobCount(proj: string) {
-  return jobs.jobsByProject.get(proj)?.length ?? 0
-}
-
-function latestJobStatus(proj: string): string | undefined {
-  const arr = jobs.jobsByProject.get(proj)
-  if (!arr || arr.length === 0) return undefined
-  return arr[0].status
 }
 
 function relativeTime(ts: number): string {
@@ -256,7 +185,6 @@ function relativeTime(ts: number): string {
   return `${Math.floor(diff / 86400)}d ago`
 }
 
-// Polling — pass silent flag to suppress toasts on interval ticks
 usePolling((silent: boolean) => {
   jobs.fetchJobs(silent)
   if (config.features.gpu_map) gpu.fetchGPU(silent)
@@ -264,8 +192,7 @@ usePolling((silent: boolean) => {
 </script>
 
 <style scoped>
-.hover-bg:hover {
-  background: rgb(var(--v-theme-surface-variant));
-  transition: background 0.15s ease;
+.border-primary {
+  border: 1.5px solid rgb(var(--v-theme-primary)) !important;
 }
 </style>

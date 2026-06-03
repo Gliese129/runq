@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import { api } from '../api/client'
-import type { GPUSlot } from '../api/types'
+import { api } from '@/apis/client'
+import type { GPUSlot } from '@/types/api'
 
 export const useGPUStore = defineStore('gpu', () => {
   const gpus = ref<GPUSlot[]>([])

@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import { api } from '../api/client'
-import type { WebhookConfig } from '../api/types'
+import { api } from '@/apis/client'
+import type { WebhookConfig } from '@/types/api'
 
 export const useSettingsStore = defineStore('settings', () => {
   const webhook = ref<WebhookConfig>({ url: '', events: [] })

@@ -233,7 +233,7 @@ import { ref, computed, inject, watch, nextTick, onMounted, onUnmounted } from '
 import { useI18n } from 'vue-i18n'
 import ChipInput from '@/components/ChipInput.vue'
 import draggable from 'vuedraggable'
-import { SUBMIT_STATE_KEY, type ArgState, type GroupParam, type SweepGroup } from './types'
+import { SUBMIT_STATE_KEY, type ArgState, type GroupParam, type SweepGroup } from '@/types/submit'
 
 const { t } = useI18n()
 const state = inject(SUBMIT_STATE_KEY)!

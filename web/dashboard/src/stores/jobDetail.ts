@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import { api } from '../api/client'
-import type { JobDetail, CompareRow } from '../api/types'
+import { api } from '@/apis/client'
+import type { JobDetail, CompareRow } from '@/types/api'
 
 export const useJobDetailStore = defineStore('jobDetail', () => {
   const detail = ref<JobDetail | null>(null)

@@ -42,7 +42,7 @@
           <v-icon size="14" color="primary">mdi-file-code-outline</v-icon>
           <div class="flex-grow-1" style="min-width: 0">
             <div class="text-body-2 font-weight-medium text-truncate">{{ s.name }}</div>
-            <div class="text-caption text-on-surface-variant">{{ s.project }} ¡¤ {{ timeAgo(s.ts) }}</div>
+            <div class="text-caption text-on-surface-variant">{{ s.project }} Â· {{ timeAgo(s.ts) }}</div>
           </div>
         </div>
       </div>
@@ -170,10 +170,10 @@
 <script setup lang="ts">
 import { ref, computed, inject, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { api } from '@/api/client'
+import { api } from '@/apis/client'
 import { usePreferences } from '@/composables/usePreferences'
-import type { FSEntry } from '@/api/types'
-import { SUBMIT_STATE_KEY } from './types'
+import type { FSEntry } from '@/types/api'
+import { SUBMIT_STATE_KEY } from '@/types/submit'
 
 const emit = defineEmits<{
   select: [entry: FSEntry]
@@ -327,3 +327,4 @@ onMounted(() => {
   color: rgb(var(--v-theme-primary));
 }
 </style>
+/style>

@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import { api } from '@/api/client'
+import { api } from '@/apis/client'
 
 export interface ProjectSummary {
   name: string

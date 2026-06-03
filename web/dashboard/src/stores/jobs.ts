@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import { api } from '../api/client'
-import type { JobSummary } from '../api/types'
+import { api } from '@/apis/client'
+import type { JobSummary } from '@/types/api'
 
 export const useJobsStore = defineStore('jobs', () => {
   const jobs = ref<JobSummary[]>([])

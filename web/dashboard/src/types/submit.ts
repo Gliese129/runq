@@ -1,5 +1,5 @@
 import type { InjectionKey } from 'vue'
-import type { FSEntry, ParseResult } from '@/api/types'
+import type { FSEntry, ParseResult } from '@/types/api'
 
 export interface ArgState {
   name: string
@@ -25,11 +25,6 @@ export interface SweepGroup {
   params: GroupParam[]
 }
 
-/**
- * Shared state provided by the index shell and injected by child steps.
- * Wrapped in reactive() so all Ref/ComputedRef properties are auto-unwrapped;
- * consumers access plain values (no .value needed).
- */
 export interface SubmitState {
   step: number
   selectedScript: FSEntry | null

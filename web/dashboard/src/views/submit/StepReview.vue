@@ -66,7 +66,7 @@
 <script setup lang="ts">
 import { computed, inject } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { SUBMIT_STATE_KEY, type SweepGroup, type GroupParam } from './types'
+import { SUBMIT_STATE_KEY, type SweepGroup, type GroupParam } from '@/types/submit'
 
 const { t } = useI18n()
 const state = inject(SUBMIT_STATE_KEY)!
