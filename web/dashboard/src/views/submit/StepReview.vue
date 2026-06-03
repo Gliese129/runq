@@ -1,0 +1,87 @@
+<template>
+  <div style="max-width: 960px; margin: 0 auto">
+    <v-row class="mb-4" dense>
+      <v-col cols="4">
+        <v-card class="pa-3 text-center">
+          <div class="text-caption text-on-surface-variant mb-1">{{ t('submit.total_tasks') }}</div>
+          <div class="text-h5 font-weight-medium">{{ state.dryRunResult.length }}</div>
+        </v-card>
+      </v-col>
+      <v-col cols="4">
+        <v-card class="pa-3 text-center">
+          <div class="text-caption text-on-surface-variant mb-1">{{ t('submit.sweep_label') }}</div>
+          <div class="text-body-2 font-weight-medium" style="word-break: break-word">{{ state.sweepSummary || '-' }}</div>
+        </v-card>
+      </v-col>
+      <v-col cols="4">
+        <v-card class="pa-3 text-center">
+          <div class="text-caption text-on-surface-variant mb-1">{{ t('submit.project') }}</div>
+          <div class="text-body-2 font-weight-medium text-truncate">{{ state.projectName }}</div>
+          <code class="text-caption text-on-surface-variant">{{ state.selectedScript?.name }}</code>
+        </v-card>
+      </v-col>
+    </v-row>
+
+    <v-card class="pa-4">
+      <div class="d-flex align-center justify-space-between mb-3">
+        <div class="text-subtitle-2">{{ t('submit.preview') }}</div>
+        <v-btn v-if="state.dryRunResult.length > 0" size="x-small" variant="text" color="primary" @click="state.step = 1">
+          <v-icon start size="14">mdi-pencil-outline</v-icon> Edit
+        </v-btn>
+      </div>
+
+      <div v-if="state.dryRunLoading" class="d-flex justify-center pa-8">
+        <v-progress-circular indeterminate color="primary" />
+      </div>
+
+      <div v-else-if="state.dryRunResult.length > 0" class="overflow-x-auto">
+        <table class="data-mono" style="width: 100%">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th v-for="h in state.dryRunHeaders" :key="h.key" :class="{ 'swept-col': sweptParamNames.has(h.key) }">{{ h.title }}</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="(row, i) in state.dryRunResult" :key="i">
+              <td class="text-on-surface-variant">{{ i + 1 }}</td>
+              <td v-for="h in state.dryRunHeaders" :key="h.key" :class="{ 'swept-col': sweptParamNames.has(h.key) }">{{ row[h.key] }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div v-else class="text-center text-on-surface-variant pa-8">
+        <v-icon size="28" class="mb-2">mdi-alert-circle-outline</v-icon>
+        <div class="text-body-2">{{ state.dryRunError || t('submit.no_tasks') }}</div>
+        <div v-if="!state.dryRunError" class="text-caption mt-1">{{ t('submit.no_tasks_hint') }}</div>
+        <v-btn size="small" variant="tonal" color="primary" class="mt-3" @click="state.step = 1">
+          <v-icon start size="14">mdi-arrow-left</v-icon> Back to configure
+        </v-btn>
+      </div>
+    </v-card>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { computed, inject } from 'vue'
+import { useI18n } from 'vue-i18n'
+import { SUBMIT_STATE_KEY, type SweepGroup, type GroupParam } from './types'
+
+const { t } = useI18n()
+const state = inject(SUBMIT_STATE_KEY)!
+
+const sweptParamNames = computed(() => {
+  const names = new Set<string>()
+  for (const g of state.groups as SweepGroup[]) {
+    for (const p of g.params as GroupParam[]) {
+      if (p.values.length > 1) names.add(p.name)
+    }
+  }
+  return names
+})
+</script>
+
+<style scoped>
+.swept-col { color: rgb(var(--v-theme-primary)); font-weight: 500; }
+</style>

@@ -1,140 +1,145 @@
 <template>
   <v-app>
-    <!-- Sidebar rail navigation -->
     <v-navigation-drawer
-      rail
-      permanent
+      v-model="drawerOpen"
+      :rail="collapsed"
+      :permanent="!mobile"
+      :temporary="mobile"
       color="surface"
-      style="border-right: 1px solid rgba(0,0,0,0.06)"
+      width="240"
+      style="border-right: 0.5px solid rgb(var(--v-theme-outline-variant))"
     >
-      <div class="d-flex flex-column align-center py-3">
-        <!-- Logo -->
-        <router-link :to="{ name: 'overview' }" class="text-decoration-none mb-4">
-          <RunqLogo :size="36" />
+      <div class="d-flex align-center ga-2 pa-3" style="height: 56px">
+        <router-link :to="{ name: 'overview' }" class="text-decoration-none d-flex align-center ga-2">
+          <RunqLogo :size="28" />
+          <span v-if="!collapsed" class="text-body-1 font-weight-bold text-on-surface">runq</span>
         </router-link>
+        <v-spacer />
+        <v-chip v-if="!collapsed && config.loaded" size="x-small" variant="tonal" color="primary" label>
+          {{ config.mode }}
+        </v-chip>
       </div>
 
-      <!-- Nav items -->
-      <div class="d-flex flex-column align-center ga-1 px-1">
-        <v-tooltip v-for="item in navItems" :key="item.name" :text="item.label" location="end">
+      <v-divider />
+
+      <div class="pa-2">
+        <v-list-item
+          v-for="item in navItems"
+          :key="item.name"
+          :to="item.to"
+          :active="isActive(item.name)"
+          :title="collapsed ? '' : item.label"
+          :prepend-icon="item.icon"
+          density="compact"
+          rounded="lg"
+          class="mb-1"
+          color="primary"
+        />
+      </div>
+
+      <v-divider />
+
+      <div class="pa-2 flex-grow-1 overflow-y-auto">
+        <div v-if="!collapsed" class="text-caption text-on-surface-variant px-2 mb-1 d-flex align-center justify-space-between">
+          Projects
+          <v-btn icon size="x-small" variant="text" @click="projects.fetch()">
+            <v-icon size="12">mdi-refresh</v-icon>
+          </v-btn>
+        </div>
+        <v-tooltip v-else text="Projects" location="end">
           <template #activator="{ props: tp }">
-            <v-btn
-              v-bind="tp"
-              icon
-              size="small"
-              :variant="isActive(item.name) ? 'tonal' : 'text'"
-              :color="isActive(item.name) ? 'primary' : undefined"
-              :to="item.to"
-              class="mb-1"
-            >
-              <v-icon size="20">{{ item.icon }}</v-icon>
-            </v-btn>
+            <div v-bind="tp" class="text-center mb-1">
+              <v-icon size="16" color="on-surface-variant">mdi-folder-multiple-outline</v-icon>
+            </div>
           </template>
         </v-tooltip>
+
+        <v-list-item
+          v-for="proj in projects.list"
+          :key="proj.name"
+          :to="{ name: 'project', params: { project: proj.name } }"
+          :active="projects.selected === proj.name"
+          density="compact"
+          rounded="lg"
+          class="mb-1"
+          color="primary"
+          @click="projects.select(proj.name)"
+        >
+          <template #prepend>
+            <div class="status-dot mr-2" :style="{ background: projectColor(proj.name) }" />
+          </template>
+          <v-list-item-title v-if="!collapsed" class="text-body-2">{{ proj.name }}</v-list-item-title>
+          <template v-if="!collapsed" #append>
+            <span class="text-caption text-on-surface-variant">{{ proj.job_count }}</span>
+          </template>
+        </v-list-item>
+
+        <div v-if="projects.list.length === 0 && !projects.loading && !collapsed" class="text-caption text-on-surface-variant text-center pa-3">
+          No projects yet
+        </div>
       </div>
 
-      <v-spacer />
-
-      <!-- Bottom: connection + settings -->
       <template #append>
-        <div class="d-flex flex-column align-center ga-1 pb-3 px-1">
-          <!-- Connection indicator -->
-          <v-tooltip :text="conn.connected.value ? 'Connected' : conn.lastError.value" location="end">
-            <template #activator="{ props: tp }">
-              <div v-bind="tp" class="d-flex justify-center" style="width: 100%">
-                <div
-                  class="rounded-circle"
-                  :style="{
-                    width: '8px',
-                    height: '8px',
-                    background: conn.connected.value
-                      ? 'rgb(var(--v-theme-success))'
-                      : 'rgb(var(--v-theme-error))',
-                    transition: 'background 0.3s ease',
-                  }"
-                  :class="{ 'pulse-dot': !conn.connected.value }"
-                />
-              </div>
-            </template>
-          </v-tooltip>
-
-          <v-tooltip :text="t('nav.settings')" location="end">
-            <template #activator="{ props: tp }">
-              <v-btn
-                v-bind="tp"
-                icon
-                size="small"
-                :variant="isActive('settings') ? 'tonal' : 'text'"
-                :color="isActive('settings') ? 'primary' : undefined"
-                :to="{ name: 'settings' }"
-              >
-                <v-icon size="20">mdi-cog-outline</v-icon>
-              </v-btn>
-            </template>
-          </v-tooltip>
+        <v-divider />
+        <div class="pa-2">
+          <v-list-item
+            :to="{ name: 'settings' }"
+            :active="isActive('settings')"
+            :title="collapsed ? '' : t('nav.settings')"
+            prepend-icon="mdi-cog-outline"
+            density="compact"
+            rounded="lg"
+            color="primary"
+          />
+          <v-list-item
+            :title="collapsed ? '' : (settings.theme === 'dark' ? 'Light mode' : 'Dark mode')"
+            :prepend-icon="settings.theme === 'dark' ? 'mdi-white-balance-sunny' : 'mdi-moon-waning-crescent'"
+            density="compact"
+            rounded="lg"
+            @click="toggleTheme"
+          />
+          <v-list-item
+            v-if="!mobile"
+            :title="collapsed ? '' : 'Collapse'"
+            :prepend-icon="collapsed ? 'mdi-chevron-right' : 'mdi-chevron-left'"
+            density="compact"
+            rounded="lg"
+            @click="toggleCollapse"
+          />
+          <div class="d-flex align-center ga-2 px-3 py-1">
+            <div class="status-dot" :class="conn.connected.value ? 'status-dot--completed' : 'status-dot--failed'" />
+            <span v-if="!collapsed" class="text-caption text-on-surface-variant">
+              {{ conn.connected.value ? 'Connected' : 'Disconnected' }}
+            </span>
+          </div>
         </div>
       </template>
     </v-navigation-drawer>
 
-    <!-- Top bar (minimal — just context info) -->
-    <v-app-bar elevation="0" color="transparent" style="border-bottom: 1px solid rgba(0,0,0,0.04)">
-      <v-app-bar-title class="text-body-2 text-on-surface-variant d-flex align-center ga-2">
-        <span class="font-weight-bold text-on-surface">{{ pageTitle }}</span>
-        <v-chip v-if="config.loaded" size="x-small" variant="tonal" color="primary" label>
-          {{ config.mode }}
-        </v-chip>
-      </v-app-bar-title>
-
-      <template #append>
-        <!-- GPU chip -->
-        <v-chip
-          v-if="config.features.gpu_map && gpu.totalCount > 0"
-          size="small"
-          variant="tonal"
-          :color="gpu.freeCount > 0 ? 'success' : 'warning'"
-          class="mr-2"
-        >
-          <v-icon start size="14">mdi-memory</v-icon>
-          {{ gpu.freeCount }}/{{ gpu.totalCount }}
-        </v-chip>
-
-        <!-- Language selector -->
-        <v-menu>
-          <template #activator="{ props: mp }">
-            <v-btn v-bind="mp" variant="text" size="small" class="mr-1 text-caption">
-              {{ currentLangLabel }}
-              <v-icon end size="14">mdi-chevron-down</v-icon>
-            </v-btn>
-          </template>
-          <v-list density="compact" min-width="120">
-            <v-list-item
-              v-for="lang in locales"
-              :key="lang.value"
-              :active="settings.locale === lang.value"
-              @click="switchLocale(lang.value)"
-            >
-              <v-list-item-title class="text-body-2">{{ lang.label }}</v-list-item-title>
-            </v-list-item>
-          </v-list>
-        </v-menu>
-
-        <!-- Theme toggle -->
-        <v-btn
-          icon
-          size="small"
-          variant="text"
-          @click="toggleTheme"
-        >
-          <v-icon size="18">{{ settings.theme === 'dark' ? 'mdi-white-balance-sunny' : 'mdi-moon-waning-crescent' }}</v-icon>
-        </v-btn>
-      </template>
+    <v-app-bar elevation="0" color="transparent" density="compact" style="border-bottom: 0.5px solid rgb(var(--v-theme-outline-variant))">
+      <v-btn v-if="mobile" icon size="small" variant="text" @click="drawerOpen = !drawerOpen">
+        <v-icon>mdi-menu</v-icon>
+      </v-btn>
+      <v-breadcrumbs v-if="breadcrumbs.length > 0" :items="breadcrumbs" density="compact" class="text-body-2 pa-0 ml-2">
+        <template #divider><v-icon size="12">mdi-chevron-right</v-icon></template>
+      </v-breadcrumbs>
+      <v-spacer />
+      <v-chip
+        v-if="config.features.gpu_map && gpu.totalCount > 0"
+        size="small" variant="tonal"
+        :color="gpu.freeCount > 0 ? 'success' : 'warning'"
+        class="mr-2"
+      >
+        <v-icon start size="14">mdi-memory</v-icon>
+        {{ gpu.freeCount }}/{{ gpu.totalCount }}
+      </v-chip>
     </v-app-bar>
 
     <v-main>
-      <v-container fluid class="pa-5 pa-md-8" style="max-width: 1200px">
-        <router-view v-slot="{ Component, route }">
+      <v-container fluid class="pa-4 pa-md-6" style="max-width: 1200px">
+        <router-view v-slot="{ Component, route: r }">
           <transition name="fade-slide" mode="out-in">
-            <component :is="Component" :key="route.path" />
+            <component :is="Component" :key="r.path" />
           </transition>
         </router-view>
       </v-container>
@@ -143,37 +148,33 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute } from 'vue-router'
-import { useTheme } from 'vuetify'
+import { useTheme, useDisplay } from 'vuetify'
 import { useConfigStore } from '@/stores/config'
 import { useGPUStore } from '@/stores/gpu'
 import { useSettingsStore } from '@/stores/settings'
+import { useProjectStore } from '@/stores/projects'
 import { useConnection } from '@/composables/useConnection'
 import RunqLogo from '@/components/RunqLogo.vue'
 
-const { t, locale } = useI18n()
+const { t } = useI18n()
 const route = useRoute()
 const theme = useTheme()
+const { mobile } = useDisplay()
 const config = useConfigStore()
 const gpu = useGPUStore()
 const settings = useSettingsStore()
+const projects = useProjectStore()
 const conn = useConnection()
 
-const locales = [
-  { value: 'en', label: 'EN' },
-  { value: 'ja', label: 'JA' },
-  { value: 'zh-CN', label: 'ZH' },
-]
+const drawerOpen = ref(true)
+const collapsed = ref(localStorage.getItem('runq-sidebar-collapsed') === 'true')
 
-const currentLangLabel = computed(() =>
-  locales.find(l => l.value === settings.locale)?.label || 'EN'
-)
-
-function switchLocale(val: string) {
-  settings.setLocale(val)
-  locale.value = val
+function toggleCollapse() {
+  collapsed.value = !collapsed.value
+  localStorage.setItem('runq-sidebar-collapsed', String(collapsed.value))
 }
 
 function toggleTheme() {
@@ -185,30 +186,35 @@ function toggleTheme() {
 const navItems = computed(() => [
   { name: 'overview', label: t('nav.overview'), icon: 'mdi-view-dashboard-outline', to: { name: 'overview' } },
   { name: 'submit', label: t('nav.submit'), icon: 'mdi-plus-circle-outline', to: { name: 'submit' } },
-  { name: 'about', label: t('nav.about'), icon: 'mdi-information-outline', to: { name: 'about' } },
 ])
-
-const pageTitle = computed(() => {
-  switch (route.name) {
-    case 'overview': return t('nav.overview')
-    case 'submit': return t('submit.title')
-    case 'settings': return t('settings.title')
-    case 'about': return t('about.title')
-    case 'project': return String(route.params.project || '')
-    default: return 'runq'
-  }
-})
 
 function isActive(name: string): boolean {
   return route.name === name
+}
+
+const breadcrumbs = computed(() => {
+  const items: { title: string; to?: object; disabled?: boolean }[] = []
+  if (route.params.project) {
+    items.push({ title: String(route.params.project), to: { name: 'project', params: { project: route.params.project } } })
+  }
+  if (route.params.jobId) {
+    items.push({ title: String(route.params.jobId).slice(0, 8), disabled: true })
+  }
+  return items
+})
+
+const PROJECT_COLORS = ['#1E40AF', '#16A34A', '#D97706', '#DC2626', '#7C3AED', '#0891B2', '#DB2777', '#65A30D']
+function projectColor(name: string): string {
+  let hash = 0
+  for (let i = 0; i < name.length; i++) hash = ((hash << 5) - hash + name.charCodeAt(i)) | 0
+  return PROJECT_COLORS[Math.abs(hash) % PROJECT_COLORS.length]
 }
 
 onMounted(async () => {
   try {
     if (!config.loaded) await config.fetchConfig()
     if (config.features.gpu_map) gpu.fetchGPU()
-  } catch {
-    // connection error tracked globally
-  }
+    projects.fetch()
+  } catch {}
 })
 </script>

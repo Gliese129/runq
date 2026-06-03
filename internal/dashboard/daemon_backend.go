@@ -8,17 +8,19 @@ import (
 
 	"github.com/gliese129/runq/internal/api"
 	"github.com/gliese129/runq/internal/job"
+	"github.com/gliese129/runq/internal/project"
 	"github.com/gliese129/runq/internal/resource"
 	"github.com/gliese129/runq/internal/service"
 	"github.com/gliese129/runq/internal/store"
 )
 
 type DaemonBackend struct {
-	client *api.Client
+	client   *api.Client
+	registry *project.Registry
 }
 
-func NewDaemonBackend(socketPath string) *DaemonBackend {
-	return &DaemonBackend{client: api.NewClient(socketPath)}
+func NewDaemonBackend(socketPath string, registry *project.Registry) *DaemonBackend {
+	return &DaemonBackend{client: api.NewClient(socketPath), registry: registry}
 }
 
 func (b *DaemonBackend) ListJobs(ctx context.Context) ([]JobSummary, error) {
@@ -45,6 +47,15 @@ func (b *DaemonBackend) GetJob(ctx context.Context, jobID string) (*JobDetail, e
 		return nil, fmt.Errorf("job %q not found", jobID)
 	}
 	view := BuildJobDetail(*detail.Job, detail.Tasks)
+	if b.registry != nil {
+		if cfg, err := b.registry.Get(detail.Job.ProjectName); err == nil && cfg.Wandb != nil {
+			view.Wandb = &WandbInfo{
+				Entity:  cfg.Wandb.Entity,
+				Project: cfg.Wandb.Project,
+				BaseURL: wandbBaseURL(cfg.Wandb.Entity, cfg.Wandb.Project),
+			}
+		}
+	}
 	return &view, nil
 }
 
@@ -54,14 +65,6 @@ func (b *DaemonBackend) CompareMetrics(ctx context.Context, jobID, key string, d
 		return nil, err
 	}
 	return BuildCompareRows(rows, key, desc), nil
-}
-
-func (b *DaemonBackend) EvalMatrix(ctx context.Context, jobID, rowKey, colKey, valueKey string) (*MatrixView, error) {
-	rows, err := b.taskRows(ctx, jobID)
-	if err != nil {
-		return nil, err
-	}
-	return BuildMatrixView(rows, rowKey, colKey, valueKey), nil
 }
 
 func (b *DaemonBackend) GPUStatus(ctx context.Context) ([]GPUSlot, error) {
@@ -117,6 +120,30 @@ func (b *DaemonBackend) SubmitJob(ctx context.Context, cfg job.JobConfig) (strin
 
 func (b *DaemonBackend) DryRun(_ context.Context, cfg job.JobConfig) ([]job.TaskParams, error) {
 	return job.Expand(&cfg)
+}
+
+func (b *DaemonBackend) ListProjects(ctx context.Context) ([]ProjectSummary, error) {
+	// Fetch projects from daemon API (registry lives in daemon process)
+	var configs []project.Config
+	if err := b.do(ctx, "GET", "/api/projects", nil, &configs); err != nil {
+		return nil, err
+	}
+	// Get job counts
+	var jobs []service.JobSummary
+	_ = b.do(ctx, "GET", "/api/jobs", nil, &jobs)
+	jobCounts := make(map[string]int)
+	for _, j := range jobs {
+		jobCounts[j.Project]++
+	}
+	out := make([]ProjectSummary, 0, len(configs))
+	for _, c := range configs {
+		out = append(out, ProjectSummary{
+			Name:     c.ProjectName,
+			WorkDir:  c.WorkingDir,
+			JobCount: jobCounts[c.ProjectName],
+		})
+	}
+	return out, nil
 }
 
 func (b *DaemonBackend) taskRows(ctx context.Context, jobID string) ([]store.TaskRow, error) {

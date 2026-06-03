@@ -61,7 +61,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/dashboard/jobs", s.handleListJobs)
 	s.mux.HandleFunc("GET /api/dashboard/jobs/{id}", s.handleGetJob)
 	s.mux.HandleFunc("GET /api/dashboard/jobs/{id}/compare", s.handleCompare)
-	s.mux.HandleFunc("GET /api/dashboard/jobs/{id}/matrix", s.handleMatrix)
+	s.mux.HandleFunc("GET /api/dashboard/projects", s.handleListProjects)
 	s.mux.HandleFunc("GET /api/dashboard/gpu", s.handleGPU)
 	s.mux.HandleFunc("POST /api/dashboard/jobs", s.handleSubmitJob)
 	s.mux.HandleFunc("POST /api/dashboard/jobs/dry-run", s.handleDryRun)
@@ -90,6 +90,15 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			PauseResume: isDaemon,
 		},
 	})
+}
+
+func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
+	projects, err := s.backend.ListProjects(r.Context())
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, projects)
 }
 
 func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
@@ -125,25 +134,6 @@ func (s *Server) handleCompare(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, rows)
 }
 
-func (s *Server) handleMatrix(w http.ResponseWriter, r *http.Request) {
-	rowKey := r.URL.Query().Get("row")
-	colKey := r.URL.Query().Get("col")
-	valueKey := r.URL.Query().Get("val")
-	if valueKey == "" {
-		valueKey = r.URL.Query().Get("value")
-	}
-	if rowKey == "" || colKey == "" || valueKey == "" {
-		writeErrorStatus(w, http.StatusBadRequest, fmt.Errorf("row, col, and val are required"))
-		return
-	}
-	matrix, err := s.backend.EvalMatrix(r.Context(), r.PathValue("id"), rowKey, colKey, valueKey)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, matrix)
-}
-
 func (s *Server) handleGPU(w http.ResponseWriter, r *http.Request) {
 	gpus, err := s.backend.GPUStatus(r.Context())
 	if err != nil {
@@ -157,6 +147,11 @@ func (s *Server) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
 	var cfg job.JobConfig
 	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
 		writeErrorStatus(w, http.StatusBadRequest, err)
+		return
+	}
+	cfg.Project = strings.TrimSpace(cfg.Project)
+	if cfg.Project == "" {
+		writeErrorStatus(w, http.StatusBadRequest, fmt.Errorf("project is required"))
 		return
 	}
 	jobID, total, err := s.backend.SubmitJob(r.Context(), cfg)

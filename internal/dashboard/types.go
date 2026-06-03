@@ -21,10 +21,17 @@ type TaskCountGroup struct {
 	Failed    int `json:"failed"`
 }
 
+type WandbInfo struct {
+	Entity  string `json:"entity,omitempty"`
+	Project string `json:"project,omitempty"`
+	BaseURL string `json:"base_url"`
+}
+
 type JobDetail struct {
 	Job        JobSummary `json:"job"`
 	Tasks      []TaskView `json:"tasks"`
 	MetricKeys []string   `json:"metric_keys"`
+	Wandb      *WandbInfo `json:"wandb,omitempty"`
 }
 
 type TaskView struct {
@@ -45,16 +52,6 @@ type CompareRow struct {
 	Params map[string]any `json:"params"`
 	Best   float64        `json:"best"`
 	Rank   int            `json:"rank"`
-}
-
-type MatrixView struct {
-	RowKey   string     `json:"row_key"`
-	ColKey   string     `json:"col_key"`
-	ValueKey string     `json:"value_key"`
-	Rows     []string   `json:"rows"`
-	Cols     []string   `json:"cols"`
-	Cells    [][]any    `json:"cells"`
-	TaskIDs  [][]string `json:"task_ids"`
 }
 
 type GPUSlot struct {
@@ -86,6 +83,14 @@ type FeatureFlags struct {
 type ErrorResponse struct {
 	Error string `json:"error"`
 	Code  int    `json:"code"`
+}
+
+// Project summary for sidebar.
+
+type ProjectSummary struct {
+	Name     string `json:"name"`
+	WorkDir  string `json:"work_dir,omitempty"`
+	JobCount int    `json:"job_count"`
 }
 
 // Filesystem types for init GUI.

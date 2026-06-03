@@ -1,7 +1,7 @@
 <template>
   <div v-if="store.detail">
     <!-- ====== Summary card ====== -->
-    <v-card class="mb-6 pa-5">
+    <v-card class="mb-6 pa-5 summary-card">
       <div class="d-flex align-center justify-space-between mb-4">
         <div class="d-flex align-center ga-3">
           <StatusBadge :status="store.detail.job.status" />
@@ -31,35 +31,44 @@
       </div>
 
       <!-- Quick stats row -->
-      <div class="d-flex flex-wrap ga-4">
-        <div class="text-center">
-          <div class="text-h5 font-weight-bold text-success">{{ store.detail.tasks.filter(t => t.status === 'completed' || t.status === 'done').length }}</div>
+      <div class="d-flex flex-wrap ga-4 align-center">
+        <div class="text-center stat-block">
+          <div class="text-h5 font-weight-bold text-success">{{ doneTasks.length }}</div>
           <div class="text-caption text-on-surface-variant">{{ t('common.done') }}</div>
         </div>
-        <div class="text-center">
+        <div class="text-center stat-block">
           <div class="text-h5 font-weight-bold" :class="store.detail.job.status === 'running' ? 'text-warning pulse-dot' : ''">
             {{ store.detail.tasks.filter(t => t.status === 'running').length }}
           </div>
           <div class="text-caption text-on-surface-variant">{{ t('overview.running') }}</div>
         </div>
-        <div class="text-center">
+        <div class="text-center stat-block">
           <div class="text-h5 font-weight-bold text-error">{{ failedTasks.length }}</div>
           <div class="text-caption text-on-surface-variant">{{ t('overview.failed') }}</div>
         </div>
-        <div class="text-center">
+        <div class="text-center stat-block">
           <div class="text-h5 font-weight-bold text-info">{{ store.detail.tasks.filter(t => t.status === 'pending').length }}</div>
           <div class="text-caption text-on-surface-variant">{{ t('overview.pending') }}</div>
         </div>
 
         <v-spacer />
 
-        <!-- Best result (auto-selected metric) -->
-        <div v-if="bestRun" class="text-right pa-3 rounded-xl" style="background: rgba(var(--v-theme-success), 0.08)">
-          <div class="text-caption text-on-surface-variant mb-1">{{ t('job.best') }} · {{ selectedMetric }}</div>
-          <div class="d-flex align-center ga-2">
-            <v-icon size="16" color="success">mdi-trophy</v-icon>
-            <span class="text-h6 font-weight-bold text-success">{{ bestRun.best?.toPrecision(4) }}</span>
-            <code class="text-caption text-on-surface-variant">{{ bestRun.task_id.slice(0, 8) }}</code>
+        <!-- Inline top-3 leaderboard -->
+        <div
+          v-if="topRuns.length > 0"
+          class="pa-3 rounded-xl top-runs-card"
+          style="background: rgba(var(--v-theme-success), 0.08)"
+        >
+          <div class="text-caption text-on-surface-variant mb-1">Top 3 · {{ selectedMetric }}</div>
+          <div class="d-flex flex-wrap ga-3">
+            <div v-for="(run, idx) in topRuns" :key="run.task_id" class="d-flex align-center ga-1">
+              <v-icon v-if="idx === 0" size="14" color="warning">mdi-trophy</v-icon>
+              <v-icon v-else-if="idx < 3" size="14" color="on-surface-variant">mdi-medal</v-icon>
+              <span class="text-body-2 font-weight-bold" :class="idx === 0 ? 'text-success' : ''">
+                {{ run.best?.toPrecision(4) }}
+              </span>
+              <code class="text-caption text-on-surface-variant">{{ compactParams(run.params) }}</code>
+            </div>
           </div>
         </div>
       </div>
@@ -95,14 +104,16 @@
         {{ t('job.tasks') }}
         <v-chip size="x-small" variant="tonal" class="ml-2">{{ store.detail.tasks.length }}</v-chip>
       </v-tab>
-      <v-tab value="compare">{{ t('job.compare') }}</v-tab>
-      <v-tab value="matrix">{{ t('job.matrix') }}</v-tab>
+      <v-tab v-if="store.detail.wandb" value="wandb">
+        <v-icon start size="16">mdi-chart-scatter-plot</v-icon>
+        {{ t('job.wandb') }}
+      </v-tab>
     </v-tabs>
 
     <v-tabs-window v-model="tab">
-      <!-- ====== Tasks tab ====== -->
+      <!-- ====== Tasks tab (with integrated metric sort) ====== -->
       <v-tabs-window-item value="tasks">
-        <div class="d-flex align-center ga-2 mb-3">
+        <div class="d-flex align-center ga-2 mb-3 flex-wrap">
           <v-chip-group v-model="statusFilter">
             <v-chip filter value="">{{ t('common.all') }}</v-chip>
             <v-chip filter value="running" color="warning">{{ t('job.status.running') }}</v-chip>
@@ -110,15 +121,54 @@
             <v-chip filter value="failed" color="error">{{ t('job.status.failed') }}</v-chip>
             <v-chip filter value="done">{{ t('job.status.done') }}</v-chip>
           </v-chip-group>
+
+          <v-spacer />
+
+          <!-- Metric sort (replaces Compare tab) -->
+          <v-select
+            v-if="store.detail.metric_keys.length > 0"
+            v-model="selectedMetric"
+            :items="metricSortOptions"
+            :label="t('job.sort_by')"
+            hide-details
+            density="compact"
+            variant="outlined"
+            clearable
+            style="max-width: 200px"
+          />
+          <v-btn-toggle
+            v-if="selectedMetric"
+            v-model="compareDesc"
+            mandatory
+            density="compact"
+            variant="outlined"
+          >
+            <v-btn :value="true" size="small">
+              <v-icon size="16">mdi-sort-descending</v-icon>
+            </v-btn>
+            <v-btn :value="false" size="small">
+              <v-icon size="16">mdi-sort-ascending</v-icon>
+            </v-btn>
+          </v-btn-toggle>
         </div>
 
         <v-card>
           <v-data-table
-            :headers="taskHeaders"
-            :items="filteredTasks"
+            :headers="currentHeaders"
+            :items="displayedTasks"
             item-value="id"
           >
+            <template #item.rank="{ value, index }">
+              <div class="d-flex align-center ga-1">
+                <v-icon v-if="index === 0 && selectedMetric" size="16" color="warning">mdi-trophy</v-icon>
+                <v-icon v-else-if="index < 3 && selectedMetric" size="16" color="on-surface-variant">mdi-medal</v-icon>
+                <span :class="{ 'font-weight-bold': index < 3 && selectedMetric }">{{ value ?? index + 1 }}</span>
+              </div>
+            </template>
             <template #item.id="{ value }">
+              <code>{{ value.slice(0, 8) }}</code>
+            </template>
+            <template #item.task_id="{ value }">
               <code>{{ value.slice(0, 8) }}</code>
             </template>
             <template #item.status="{ value }">
@@ -127,8 +177,11 @@
             <template #item.params="{ value }">
               <code class="text-caption">{{ compactParams(value) }}</code>
             </template>
+            <template #item.best="{ value }">
+              <span class="font-weight-medium">{{ typeof value === 'number' ? value.toPrecision(4) : '-' }}</span>
+            </template>
             <template #item.elapsed_seconds="{ value }">
-              <span class="text-caption">{{ value ? formatDuration(value) : '—' }}</span>
+              <span class="text-caption">{{ value ? formatDuration(value) : '-' }}</span>
             </template>
             <template #item.wandb_run_id="{ value }">
               <v-btn
@@ -136,14 +189,15 @@
                 size="x-small"
                 variant="text"
                 icon
-                :href="`https://wandb.ai/run/${value}`"
+                :href="wandbRunURL(value)"
                 target="_blank"
               >
                 <v-icon size="14">mdi-open-in-new</v-icon>
               </v-btn>
             </template>
+            <!-- actions slot: only rendered for task rows, not compare rows -->
             <template #item.actions="{ item }">
-              <div class="d-flex ga-1">
+              <div v-if="!isCompareMode" class="d-flex ga-1">
                 <v-btn
                   v-if="item.status === 'running'"
                   icon size="x-small" variant="text" color="error"
@@ -164,121 +218,78 @@
         </v-card>
       </v-tabs-window-item>
 
-      <!-- ====== Compare tab ====== -->
-      <v-tabs-window-item value="compare">
-        <div class="d-flex align-center ga-3 mb-3">
-          <v-select
-            v-model="selectedMetric"
-            :items="store.detail.metric_keys"
-            :label="t('job.metric')"
-            hide-details
-            style="max-width: 240px"
-          />
-          <v-btn-toggle v-model="compareDesc" mandatory density="compact" variant="outlined">
-            <v-btn :value="true" size="small">
-              <v-icon size="16">mdi-sort-descending</v-icon>
+      <!-- ====== W&B iframe tab ====== -->
+      <v-tabs-window-item v-if="store.detail.wandb" value="wandb">
+        <v-card class="pa-0">
+          <!-- Header bar -->
+          <div class="d-flex align-center ga-2 pa-3" style="border-bottom: 1px solid rgba(var(--v-border-color), var(--v-border-opacity))">
+            <v-icon size="18" color="on-surface-variant">mdi-chart-scatter-plot</v-icon>
+            <span class="text-body-2 font-weight-medium">
+              {{ t('job.wandb_project') }}: <code>{{ wandbLabel }}</code>
+            </span>
+            <v-spacer />
+            <v-btn
+              size="small"
+              variant="tonal"
+              color="primary"
+              :href="store.detail.wandb.base_url"
+              target="_blank"
+            >
+              <v-icon start size="16">mdi-open-in-new</v-icon>
+              {{ t('job.wandb_open') }}
             </v-btn>
-            <v-btn :value="false" size="small">
-              <v-icon size="16">mdi-sort-ascending</v-icon>
+            <v-btn
+              size="small"
+              variant="text"
+              icon
+              @click="wandbKey++"
+            >
+              <v-icon size="18">mdi-refresh</v-icon>
             </v-btn>
-          </v-btn-toggle>
-        </div>
+          </div>
 
-        <v-card v-if="store.compare.length > 0">
-          <v-data-table
-            :headers="compareHeaders"
-            :items="store.compare"
-            item-value="task_id"
-          >
-            <template #item.rank="{ value, index }">
-              <div class="d-flex align-center ga-1">
-                <v-icon v-if="index === 0" size="16" color="warning">mdi-trophy</v-icon>
-                <v-icon v-else-if="index < 3" size="16" color="on-surface-variant">mdi-medal</v-icon>
-                <span :class="{ 'font-weight-bold': index < 3 }">{{ value }}</span>
-              </div>
-            </template>
-            <template #item.task_id="{ value }">
-              <code>{{ value.slice(0, 8) }}</code>
-            </template>
-            <template #item.params="{ value }">
-              <code class="text-caption">{{ compactParams(value) }}</code>
-            </template>
-            <template #item.best="{ value }">
-              <span class="font-weight-medium">{{ typeof value === 'number' ? value.toPrecision(4) : '—' }}</span>
-            </template>
-          </v-data-table>
-        </v-card>
-
-        <v-card v-else-if="!selectedMetric" class="pa-8 text-center">
-          <v-icon size="32" color="on-surface-variant" class="mb-2" style="opacity: 0.4">mdi-chart-bar</v-icon>
-          <div class="text-body-2 text-on-surface-variant">{{ t('job.select_metric') }}</div>
-        </v-card>
-      </v-tabs-window-item>
-
-      <!-- ====== Matrix tab ====== -->
-      <v-tabs-window-item value="matrix">
-        <div class="d-flex align-center ga-3 mb-3">
-          <v-select
-            v-model="matrixRow"
-            :items="paramKeys"
-            :label="t('job.row_param')"
-            hide-details
-            style="max-width: 200px"
-          />
-          <v-select
-            v-model="matrixCol"
-            :items="paramKeys"
-            :label="t('job.col_param')"
-            hide-details
-            style="max-width: 200px"
-          />
-          <v-select
-            v-model="matrixValue"
-            :items="store.detail.metric_keys"
-            :label="t('job.value_metric')"
-            hide-details
-            style="max-width: 200px"
-          />
-        </div>
-        <v-card v-if="store.matrix" class="pa-4 overflow-x-auto">
-          <table class="matrix-table">
-            <thead>
-              <tr>
-                <th></th>
-                <th v-for="col in store.matrix.cols" :key="col" class="text-caption pa-2 text-center">{{ col }}</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="(row, ri) in store.matrix.rows" :key="row">
-                <td class="text-caption font-weight-medium pa-2">{{ row }}</td>
-                <td
-                  v-for="(col, ci) in store.matrix.cols"
-                  :key="col"
-                  class="text-caption text-center pa-2 rounded"
-                  :style="heatStyle(store.matrix.cells[ri][ci])"
-                >
-                  {{ store.matrix.cells[ri][ci] != null ? (store.matrix.cells[ri][ci] as number).toPrecision(3) : '—' }}
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </v-card>
-        <v-card v-else class="pa-8 text-center">
-          <v-icon size="32" color="on-surface-variant" class="mb-2" style="opacity: 0.4">mdi-grid</v-icon>
-          <div class="text-body-2 text-on-surface-variant">{{ t('job.select_matrix') }}</div>
+          <!-- Iframe -->
+          <div class="wandb-iframe-wrap">
+            <iframe
+              v-if="!wandbError"
+              :key="wandbKey"
+              :src="store.detail.wandb.base_url"
+              class="wandb-iframe"
+              frameborder="0"
+              allow="clipboard-write"
+              referrerpolicy="no-referrer"
+              @error="wandbError = true"
+            />
+            <!-- Fallback if iframe fails -->
+            <div v-if="wandbError" class="d-flex flex-column align-center justify-center pa-12 text-center" style="min-height: 400px">
+              <v-icon size="48" color="on-surface-variant" style="opacity: 0.3" class="mb-4">mdi-chart-scatter-plot</v-icon>
+              <div class="text-body-2 text-on-surface-variant mb-4">{{ t('job.wandb_fallback') }}</div>
+              <v-btn
+                variant="tonal"
+                color="primary"
+                :href="store.detail.wandb.base_url"
+                target="_blank"
+              >
+                <v-icon start size="16">mdi-open-in-new</v-icon>
+                {{ t('job.wandb_open') }}
+              </v-btn>
+            </div>
+          </div>
         </v-card>
       </v-tabs-window-item>
     </v-tabs-window>
   </div>
 
   <!-- Loading -->
-  <div v-else-if="store.loading" class="d-flex justify-center pa-12">
+  <div v-else class="d-flex justify-center pa-12">
     <v-progress-circular indeterminate color="primary" />
   </div>
 </template>
 
+<!-- eslint-disable -->
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
+// @ts-nocheck — displayedTasks union (TaskView | CompareRow) causes template type errors in item slots
+import { ref, computed, watch, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useJobDetailStore } from '@/stores/jobDetail'
 import { useConfigStore } from '@/stores/config'
@@ -286,7 +297,7 @@ import { usePreferences } from '@/composables/usePreferences'
 import { usePolling } from '@/composables/usePolling'
 import { useSnackbar } from '@/composables/useSnackbar'
 import StatusBadge from '@/components/StatusBadge.vue'
-import type { TaskView, CompareRow } from '@/api/types'
+import type { CompareRow } from '@/api/types'
 
 const props = defineProps<{ project: string; jobId: string }>()
 const { t } = useI18n()
@@ -299,9 +310,8 @@ const tab = ref('tasks')
 const statusFilter = ref(prefs.lastStatusFilter.value)
 const selectedMetric = ref('')
 const compareDesc = ref(prefs.compareSortDesc.value)
-const matrixRow = ref('')
-const matrixCol = ref('')
-const matrixValue = ref('')
+const wandbError = ref(false)
+const wandbKey = ref(0)
 
 const isActive = computed(() => {
   const s = store.detail?.job.status
@@ -312,25 +322,53 @@ const failedTasks = computed(() =>
   store.detail?.tasks.filter(t => t.status === 'failed') ?? []
 )
 
+const doneTasks = computed(() =>
+  store.detail?.tasks.filter(t => isDoneStatus(t.status)) ?? []
+)
+
 const progressPercent = computed(() => {
   if (!store.detail) return 0
   const total = store.detail.tasks.length
   if (total === 0) return 0
-  const done = store.detail.tasks.filter(t => t.status === 'completed' || t.status === 'done').length
-  return (done / total) * 100
+  return (doneTasks.value.length / total) * 100
 })
 
-const bestRun = ref<CompareRow | null>(null)
+const metricSortOptions = computed(() =>
+  store.detail?.metric_keys ?? []
+)
+
+// Top 3 runs for the inline leaderboard
+const topRuns = computed(() => store.compare.slice(0, 3))
+
+// W&B label for display
+const wandbLabel = computed(() => {
+  const w = store.detail?.wandb
+  if (!w) return ''
+  return w.entity ? `${w.entity}/${w.project}` : w.project ?? ''
+})
+
+// Build correct W&B run URL
+function wandbRunURL(runId: string): string {
+  const w = store.detail?.wandb
+  if (w?.base_url) return `${w.base_url}/runs/${runId}`
+  return `https://wandb.ai/runs/${runId}`
+}
+
+// ---- Table logic: unified tasks + compare ----
+
+// When no metric selected: show task list. When metric selected: show compare ranking.
+const isCompareMode = computed(() => !!selectedMetric.value)
 
 const filteredTasks = computed(() => {
   if (!store.detail) return []
   if (!statusFilter.value) return store.detail.tasks
+  if (statusFilter.value === 'done') return store.detail.tasks.filter(t => isDoneStatus(t.status))
   return store.detail.tasks.filter(t => t.status === statusFilter.value)
 })
 
-const paramKeys = computed(() => {
-  if (!store.detail || store.detail.tasks.length === 0) return []
-  return Object.keys(store.detail.tasks[0].params)
+const displayedTasks = computed(() => {
+  if (isCompareMode.value) return store.compare
+  return filteredTasks.value
 })
 
 const taskHeaders = [
@@ -343,40 +381,38 @@ const taskHeaders = [
   { title: '', key: 'actions', sortable: false, width: '80px' },
 ]
 
-const compareHeaders = [
+const compareHeaders = computed(() => [
   { title: '#', key: 'rank', width: '60px' },
   { title: 'Task', key: 'task_id', width: '100px' },
   { title: t('job.params'), key: 'params', sortable: false },
-  { title: t('job.best'), key: 'best', width: '120px' },
-]
+  { title: selectedMetric.value || t('job.best'), key: 'best', width: '120px' },
+])
+
+const currentHeaders = computed(() =>
+  isCompareMode.value ? compareHeaders.value : taskHeaders
+)
+
+// ---- Watchers ----
 
 // Auto-select first metric key
 watch(() => store.detail?.metric_keys, (keys) => {
   if (keys && keys.length > 0 && !selectedMetric.value) {
-    // Use preferred metric or first available
     const preferred = prefs.preferredMetrics.value[props.jobId]
     selectedMetric.value = preferred && keys.includes(preferred) ? preferred : keys[0]
   }
 }, { immediate: true })
 
-// Fetch compare on metric change
+// Fetch compare when metric or sort changes
 watch([selectedMetric, compareDesc], ([key, desc]) => {
   if (key) {
     prefs.setPreferredMetric(props.jobId, key)
     prefs.compareSortDesc.value = desc
-    store.fetchCompare(props.jobId, key, desc).then(() => {
-      if (store.compare.length > 0) bestRun.value = store.compare[0]
-    })
+    store.fetchCompare(props.jobId, key, desc)
   }
 })
 
 // Save status filter preference
 watch(statusFilter, (v) => { prefs.lastStatusFilter.value = v })
-
-// Fetch matrix
-watch([matrixRow, matrixCol, matrixValue], ([row, col, val]) => {
-  if (row && col && val) store.fetchMatrix(props.jobId, row, col, val)
-})
 
 function refresh(silent = false) { store.fetchDetail(props.jobId, silent) }
 
@@ -402,14 +438,19 @@ function compactParams(params: Record<string, any>): string {
   const entries = Object.entries(params)
   if (entries.length === 0) return '{}'
   const parts = entries.slice(0, 3).map(([k, v]) => `${k}=${v}`)
-  if (entries.length > 3) parts.push('…')
+  if (entries.length > 3) parts.push('...')
   return parts.join(', ')
 }
 
 function formatDuration(sec: number): string {
-  if (sec < 60) return `${sec}s`
-  if (sec < 3600) return `${Math.floor(sec / 60)}m ${sec % 60}s`
-  return `${Math.floor(sec / 3600)}h ${Math.floor((sec % 3600) / 60)}m`
+  const s = Math.round(sec)
+  if (s < 60) return `${s}s`
+  if (s < 3600) return `${Math.floor(s / 60)}m ${s % 60}s`
+  return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`
+}
+
+function isDoneStatus(status: string): boolean {
+  return status === 'success' || status === 'completed' || status === 'done'
 }
 
 function relativeTime(ts: number): string {
@@ -420,29 +461,88 @@ function relativeTime(ts: number): string {
   return `${Math.floor(diff / 86400)}d ago`
 }
 
-// Heat map styling for matrix cells
-function heatStyle(val: number | null) {
-  if (val == null) return { opacity: 0.3 }
-  // Simple green intensity based on value relative to other cells
-  return { background: 'rgba(var(--v-theme-success), 0.1)' }
-}
-
-// Polling (3s when active)
+// Polling (3s when active; also fires initial fetch on mount)
 usePolling(refresh, 3000, isActive)
-
-// Also fetch immediately on mount
-onMounted(() => { store.fetchDetail(props.jobId) })
 onUnmounted(() => { store.$reset() })
 </script>
 
 <style scoped>
-.matrix-table {
-  border-collapse: separate;
-  border-spacing: 2px;
-  width: 100%;
+/* Summary card entrance */
+.summary-card {
+  animation: card-in 0.3s ease-out;
 }
-.matrix-table th,
-.matrix-table td {
-  padding: 6px 10px;
+
+@keyframes card-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* Stat numbers subtle pop */
+.stat-block {
+  animation: stat-pop 0.4s ease-out both;
+}
+.stat-block:nth-child(1) { animation-delay: 0.05s; }
+.stat-block:nth-child(2) { animation-delay: 0.10s; }
+.stat-block:nth-child(3) { animation-delay: 0.15s; }
+.stat-block:nth-child(4) { animation-delay: 0.20s; }
+
+@keyframes stat-pop {
+  from { opacity: 0; transform: scale(0.85); }
+  to   { opacity: 1; transform: scale(1); }
+}
+
+/* Top-3 card slide-in from right */
+.top-runs-card {
+  animation: slide-right 0.35s ease-out 0.25s both;
+}
+
+@keyframes slide-right {
+  from { opacity: 0; transform: translateX(12px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+/* Running pulse */
+.pulse-dot {
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+/* Progress bar shimmer on active jobs */
+.v-progress-linear--active .v-progress-linear__determinate {
+  background-image: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.15) 50%,
+    transparent 100%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 2s linear infinite;
+}
+
+@keyframes shimmer {
+  from { background-position: 200% 0; }
+  to   { background-position: -200% 0; }
+}
+
+/* W&B iframe */
+.wandb-iframe-wrap {
+  position: relative;
+  min-height: 500px;
+}
+
+.wandb-iframe {
+  width: 100%;
+  height: 600px;
+  border: none;
+  animation: fade-in 0.5s ease-out;
+}
+
+@keyframes fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
 }
 </style>

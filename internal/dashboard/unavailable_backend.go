@@ -27,10 +27,6 @@ func (b *UnavailableBackend) CompareMetrics(ctx context.Context, jobID, key stri
 	return nil, b.wrap()
 }
 
-func (b *UnavailableBackend) EvalMatrix(ctx context.Context, jobID, rowKey, colKey, valueKey string) (*MatrixView, error) {
-	return nil, b.wrap()
-}
-
 func (b *UnavailableBackend) GPUStatus(ctx context.Context) ([]GPUSlot, error) {
 	return nil, b.wrap()
 }
@@ -60,6 +56,10 @@ func (b *UnavailableBackend) SubmitJob(ctx context.Context, cfg job.JobConfig) (
 }
 
 func (b *UnavailableBackend) DryRun(ctx context.Context, cfg job.JobConfig) ([]job.TaskParams, error) {
+	return nil, b.wrap()
+}
+
+func (b *UnavailableBackend) ListProjects(ctx context.Context) ([]ProjectSummary, error) {
 	return nil, b.wrap()
 }
 

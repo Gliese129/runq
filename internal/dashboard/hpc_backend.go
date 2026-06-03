@@ -46,6 +46,14 @@ func (b *HPCBackend) GetJob(ctx context.Context, jobID string) (*JobDetail, erro
 		return nil, err
 	}
 	detail := BuildJobDetail(*view.Job, view.Tasks)
+	reg := project.NewRegistry(b.store.DB())
+	if cfg, err := reg.Get(view.Job.ProjectName); err == nil && cfg.Wandb != nil {
+		detail.Wandb = &WandbInfo{
+			Entity:  cfg.Wandb.Entity,
+			Project: cfg.Wandb.Project,
+			BaseURL: wandbBaseURL(cfg.Wandb.Entity, cfg.Wandb.Project),
+		}
+	}
 	return &detail, nil
 }
 
@@ -58,17 +66,6 @@ func (b *HPCBackend) CompareMetrics(ctx context.Context, jobID, key string, desc
 		return nil, err
 	}
 	return BuildCompareRows(tasks, key, desc), nil
-}
-
-func (b *HPCBackend) EvalMatrix(ctx context.Context, jobID, rowKey, colKey, valueKey string) (*MatrixView, error) {
-	if err := b.backend.Refresh(ctx, jobID); err != nil {
-		return nil, err
-	}
-	tasks, err := b.store.ListTasks(ctx, store.TaskFilter{JobID: jobID})
-	if err != nil {
-		return nil, err
-	}
-	return BuildMatrixView(tasks, rowKey, colKey, valueKey), nil
 }
 
 func (b *HPCBackend) GPUStatus(ctx context.Context) ([]GPUSlot, error) {
@@ -137,4 +134,27 @@ func (b *HPCBackend) SubmitJob(ctx context.Context, cfg job.JobConfig) (string, 
 
 func (b *HPCBackend) DryRun(_ context.Context, cfg job.JobConfig) ([]job.TaskParams, error) {
 	return job.Expand(&cfg)
+}
+
+func (b *HPCBackend) ListProjects(ctx context.Context) ([]ProjectSummary, error) {
+	reg := project.NewRegistry(b.store.DB())
+	configs, err := reg.List()
+	if err != nil {
+		return nil, err
+	}
+	// Count jobs per project
+	jobs, _ := b.store.ListJobs(ctx, "")
+	jobCounts := make(map[string]int)
+	for _, j := range jobs {
+		jobCounts[j.ProjectName]++
+	}
+	out := make([]ProjectSummary, 0, len(configs))
+	for _, c := range configs {
+		out = append(out, ProjectSummary{
+			Name:     c.ProjectName,
+			WorkDir:  c.WorkingDir,
+			JobCount: jobCounts[c.ProjectName],
+		})
+	}
+	return out, nil
 }

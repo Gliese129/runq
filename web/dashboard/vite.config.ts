@@ -18,7 +18,12 @@ export default defineConfig({
   server: {
     proxy: {
       "/api": "http://localhost:8077",
+      "/ws": {
+        target: "ws://localhost:8077",
+        ws: true,
+      },
     },
+    hmr: true,
   },
   build: {
     outDir: "../../internal/dashboard/dist",

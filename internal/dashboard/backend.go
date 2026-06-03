@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"net/url"
 	"strings"
 	"time"
 
@@ -26,7 +27,6 @@ type Backend interface {
 	ListJobs(ctx context.Context) ([]JobSummary, error)
 	GetJob(ctx context.Context, jobID string) (*JobDetail, error)
 	CompareMetrics(ctx context.Context, jobID, key string, desc bool) ([]CompareRow, error)
-	EvalMatrix(ctx context.Context, jobID, rowKey, colKey, valueKey string) (*MatrixView, error)
 	GPUStatus(ctx context.Context) ([]GPUSlot, error)
 
 	KillTask(ctx context.Context, taskID string) error
@@ -37,6 +37,7 @@ type Backend interface {
 
 	SubmitJob(ctx context.Context, cfg job.JobConfig) (jobID string, totalTasks int, err error)
 	DryRun(ctx context.Context, cfg job.JobConfig) ([]job.TaskParams, error)
+	ListProjects(ctx context.Context) ([]ProjectSummary, error)
 }
 
 // ---- builders: store rows → view types ----
@@ -156,63 +157,14 @@ func BuildCompareRows(tasks []store.TaskRow, key string, desc bool) []CompareRow
 	return rows
 }
 
-func BuildMatrixView(tasks []store.TaskRow, rowKey, colKey, valueKey string) *MatrixView {
-	rowSet := map[string]bool{}
-	colSet := map[string]bool{}
-	type point struct {
-		row, col string
-		taskID   string
-		value    any
-	}
-	points := make([]point, 0, len(tasks))
-	for _, task := range tasks {
-		params := decodeParams(task.ParamsJSON)
-		row, rowOK := params[rowKey]
-		col, colOK := params[colKey]
-		if !rowOK || !colOK {
-			continue
-		}
-		rowStr := fmt.Sprint(row)
-		colStr := fmt.Sprint(col)
-		rowSet[rowStr] = true
-		colSet[colStr] = true
-		var value any
-		if task.Status != "running" && task.Status != "pending" {
-			if best, ok := bestMetric(task.TaskDir, valueKey, false); ok {
-				value = best
-			}
-		}
-		points = append(points, point{row: rowStr, col: colStr, taskID: task.ID, value: value})
-	}
-
-	rows := sortedSet(rowSet)
-	cols := sortedSet(colSet)
-	rowIndex := indexByValue(rows)
-	colIndex := indexByValue(cols)
-	cells := make([][]any, len(rows))
-	taskIDs := make([][]string, len(rows))
-	for i := range rows {
-		cells[i] = make([]any, len(cols))
-		taskIDs[i] = make([]string, len(cols))
-	}
-	for _, p := range points {
-		r := rowIndex[p.row]
-		c := colIndex[p.col]
-		cells[r][c] = p.value
-		taskIDs[r][c] = p.taskID
-	}
-	return &MatrixView{
-		RowKey:   rowKey,
-		ColKey:   colKey,
-		ValueKey: valueKey,
-		Rows:     rows,
-		Cols:     cols,
-		Cells:    cells,
-		TaskIDs:  taskIDs,
-	}
-}
-
 // ---- helpers ----
+
+func wandbBaseURL(entity, project string) string {
+	if entity != "" {
+		return "https://wandb.ai/" + url.PathEscape(entity) + "/" + url.PathEscape(project)
+	}
+	return "https://wandb.ai/" + url.PathEscape(project)
+}
 
 func decodeParams(raw string) map[string]any {
 	params := map[string]any{}
@@ -356,23 +308,6 @@ func numericInt(value any) (int, bool) {
 	default:
 		return 0, false
 	}
-}
-
-func sortedSet(set map[string]bool) []string {
-	values := make([]string, 0, len(set))
-	for value := range set {
-		values = append(values, value)
-	}
-	sort.Strings(values)
-	return values
-}
-
-func indexByValue(values []string) map[string]int {
-	out := make(map[string]int, len(values))
-	for i, value := range values {
-		out[value] = i
-	}
-	return out
 }
 
 func refreshStoreJobStatus(ctx context.Context, st *store.Store, jobID string) error {

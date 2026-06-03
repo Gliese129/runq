@@ -58,7 +58,7 @@ watch(lastStatusFilter, (v) => save('status-filter', v))
 
 // --- Compare sort preference ---
 
-const compareSortDesc = ref(load('compare-desc', true))
+const compareSortDesc = ref(load('compare-desc', false))
 
 watch(compareSortDesc, (v) => save('compare-desc', v))
 

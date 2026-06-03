@@ -31,10 +31,17 @@ export interface TaskView {
   wandb_run_id?: string
 }
 
+export interface WandbInfo {
+  entity?: string
+  project?: string
+  base_url: string
+}
+
 export interface JobDetail {
   job: JobSummary
   tasks: TaskView[]
   metric_keys: string[]
+  wandb?: WandbInfo
 }
 
 export interface CompareRow {
@@ -42,16 +49,6 @@ export interface CompareRow {
   params: Record<string, any>
   best: number
   rank: number
-}
-
-export interface MatrixView {
-  row_key: string
-  col_key: string
-  value_key: string
-  rows: string[]
-  cols: string[]
-  cells: (number | null)[][]
-  task_ids: string[][]
 }
 
 export interface GPUSlot {

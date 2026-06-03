@@ -2,41 +2,49 @@ import 'vuetify/styles'
 import '@mdi/font/css/materialdesignicons.css'
 import { createVuetify } from 'vuetify'
 
+// ──────────────────────────────────────────────
+// Theme A (Flat Professional) + B (Terminal Data)
+// Light: A-base shell, B-accented data areas
+// Dark:  full B-style
+// ──────────────────────────────────────────────
+
 const light = {
   dark: false,
   colors: {
-    primary: '#6C63FF',
-    'primary-darken-1': '#534AB7',
-    secondary: '#2DB88A',
-    error: '#E5574F',
-    warning: '#F5A623',
-    success: '#5CB85C',
-    info: '#4A9EF5',
+    primary: '#1E40AF',         // Blue 800 — nav, links, active
+    'primary-darken-1': '#1E3A8A',
+    secondary: '#3B82F6',       // Blue 500 — lighter accent
+    error: '#DC2626',           // Red 600
+    warning: '#D97706',         // Amber 600
+    success: '#16A34A',         // Green 600
+    info: '#2563EB',            // Blue 600
     surface: '#FFFFFF',
-    'surface-variant': '#F5F4F0',
-    background: '#FAFAF8',
-    'on-background': '#2C2C2C',
-    'on-surface': '#2C2C2C',
-    'on-surface-variant': '#6E6E6E',
+    'surface-variant': '#F1F5F9', // Slate 100
+    background: '#F8FAFC',       // Slate 50
+    'on-background': '#0F172A',  // Slate 900
+    'on-surface': '#0F172A',
+    'on-surface-variant': '#64748B', // Slate 500
+    'outline-variant': '#E2E8F0',    // Slate 200
   },
 }
 
 const dark = {
   dark: true,
   colors: {
-    primary: '#B4ADFF',
-    'primary-darken-1': '#8B83E0',
-    secondary: '#6DDBB2',
-    error: '#F09595',
-    warning: '#FAC775',
-    success: '#8DD879',
-    info: '#85B7EB',
-    surface: '#242424',
-    'surface-variant': '#2E2E2C',
-    background: '#1A1A18',
-    'on-background': '#E8E8E4',
-    'on-surface': '#E8E8E4',
-    'on-surface-variant': '#A0A098',
+    primary: '#60A5FA',         // Blue 400
+    'primary-darken-1': '#3B82F6',
+    secondary: '#93C5FD',       // Blue 300
+    error: '#F87171',           // Red 400
+    warning: '#FBBF24',         // Amber 400
+    success: '#4ADE80',         // Green 400
+    info: '#60A5FA',            // Blue 400
+    surface: '#0F172A',         // Slate 900
+    'surface-variant': '#1E293B', // Slate 800
+    background: '#020617',       // Slate 950
+    'on-background': '#F1F5F9',  // Slate 100
+    'on-surface': '#F1F5F9',
+    'on-surface-variant': '#94A3B8', // Slate 400
+    'outline-variant': '#334155',    // Slate 700
   },
 }
 
@@ -46,19 +54,30 @@ export default createVuetify({
     themes: { light, dark },
   },
   defaults: {
+    // ── Global: flat, compact, no Material effects ──
+    global: {
+      ripple: false,
+    },
     VCard: {
-      elevation: 1,
-      rounded: 'xl',
+      elevation: 0,
+      rounded: 'lg',       // 8px — 6px via CSS override below
+      border: true,         // use border instead of shadow
     },
     VBtn: {
-      rounded: 'pill',
+      rounded: 'lg',
       variant: 'text',
     },
     VChip: {
       size: 'small',
-      rounded: 'pill',
+      rounded: 'lg',
     },
     VTextField: {
+      variant: 'outlined',
+      density: 'compact',
+      rounded: 'lg',
+      hideDetails: 'auto',
+    },
+    VTextarea: {
       variant: 'outlined',
       density: 'compact',
       rounded: 'lg',
@@ -74,15 +93,27 @@ export default createVuetify({
       inset: true,
     },
     VDataTable: {
-      density: 'comfortable',
+      density: 'compact',
       hover: true,
     },
+    VList: {
+      density: 'compact',
+    },
+    VExpansionPanel: {
+      elevation: 0,
+    },
     VTab: {
-      rounded: 'pill',
+      rounded: 'lg',
     },
     VSnackbar: {
-      rounded: 'xl',
-      timeout: 4000,
+      rounded: 'lg',
+      timeout: 3000,
+    },
+    VSheet: {
+      rounded: 'lg',
+    },
+    VNavigationDrawer: {
+      elevation: 0,
     },
   },
 })

@@ -1,12 +1,11 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { api } from '../api/client'
-import type { JobDetail, CompareRow, MatrixView } from '../api/types'
+import type { JobDetail, CompareRow } from '../api/types'
 
 export const useJobDetailStore = defineStore('jobDetail', () => {
   const detail = ref<JobDetail | null>(null)
   const compare = ref<CompareRow[]>([])
-  const matrix = ref<MatrixView | null>(null)
   const loading = ref(false)
 
   async function fetchDetail(jobId: string, silent = false) {
@@ -23,11 +22,6 @@ export const useJobDetailStore = defineStore('jobDetail', () => {
   async function fetchCompare(jobId: string, key: string, desc: boolean) {
     const order = desc ? 'desc' : 'asc'
     compare.value = await api.get<CompareRow[]>(`/jobs/${jobId}/compare?key=${encodeURIComponent(key)}&order=${order}`)
-  }
-
-  async function fetchMatrix(jobId: string, rowKey: string, colKey: string, valueKey: string) {
-    const params = new URLSearchParams({ row: rowKey, col: colKey, value: valueKey })
-    matrix.value = await api.get<MatrixView>(`/jobs/${jobId}/matrix?${params}`)
   }
 
   async function killTask(taskId: string) {
@@ -53,13 +47,12 @@ export const useJobDetailStore = defineStore('jobDetail', () => {
   function $reset() {
     detail.value = null
     compare.value = []
-    matrix.value = null
     loading.value = false
   }
 
   return {
-    detail, compare, matrix, loading,
-    fetchDetail, fetchCompare, fetchMatrix,
+    detail, compare, loading,
+    fetchDetail, fetchCompare,
     killTask, retryTask, killJob, pauseJob, resumeJob,
     $reset,
   }
