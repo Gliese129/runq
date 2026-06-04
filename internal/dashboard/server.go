@@ -15,22 +15,31 @@ import (
 )
 
 type Server struct {
-	backend Backend
-	mode    string
-	cfg     *config.GlobalConfig
-	mux     *http.ServeMux
-	static  fs.FS
+	backend      Backend
+	mode         string
+	cfg          *config.GlobalConfig
+	mux          *http.ServeMux
+	static       fs.FS
+	staticSource string
+	staticErr    error
 }
 
 // ConfigResponse and ErrorResponse are in types.go.
 
 func NewServer(backend Backend, mode string, cfg *config.GlobalConfig) *Server {
+	return NewServerWithAssets(backend, mode, cfg, "")
+}
+
+func NewServerWithAssets(backend Backend, mode string, cfg *config.GlobalConfig, assetsDir string) *Server {
+	static := ResolveStaticAssets(assetsDir)
 	s := &Server{
-		backend: backend,
-		mode:    mode,
-		cfg:     cfg,
-		mux:     http.NewServeMux(),
-		static:  StaticFS(),
+		backend:      backend,
+		mode:         mode,
+		cfg:          cfg,
+		mux:          http.NewServeMux(),
+		static:       static.FS,
+		staticSource: static.Source,
+		staticErr:    static.Err,
 	}
 	s.registerRoutes()
 	return s
@@ -38,6 +47,10 @@ func NewServer(backend Backend, mode string, cfg *config.GlobalConfig) *Server {
 
 func (s *Server) Handler() http.Handler {
 	return corsMiddleware(s.mux)
+}
+
+func (s *Server) StaticAssetsUnavailable() bool {
+	return s.static == nil
 }
 
 // corsMiddleware allows localhost origins for vite dev server.
@@ -278,6 +291,10 @@ func (s *Server) handleAPINotFound(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSPA(w http.ResponseWriter, r *http.Request) {
+	if s.static == nil {
+		writeMissingDashboard(w, s.staticErr)
+		return
+	}
 	path := strings.TrimPrefix(r.URL.Path, "/")
 	if path == "" {
 		path = "index.html"

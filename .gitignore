@@ -12,6 +12,7 @@ docs/
 *.test
 *.out
 vendor/
+internal/dashboard/dist/
 
 # IDE
 .idea/

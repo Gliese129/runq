@@ -65,11 +65,27 @@ It also works on HPC clusters (SLURM, PBS, SGE) — runq doesn't replace the clu
 go install github.com/gliese129/runq/cmd/runq@latest
 ```
 
-Or build from source:
+This installs the CLI core. The dashboard UI and Python SDK are optional.
+
+For the dashboard, download a `runq-dashboard-*` binary from GitHub Releases, or build it from source:
 
 ```bash
 git clone https://github.com/gliese129/runq.git && cd runq
-go build -o runq ./cmd/runq
+cd web/dashboard && yarn install --frozen-lockfile && yarn build
+cd ../..
+go build -tags dashboard -o runq ./cmd/runq
+```
+
+During dashboard UI development, run the backend with local assets:
+
+```bash
+runq dashboard --assets-dir internal/dashboard/dist
+```
+
+For the Python SDK:
+
+```bash
+pip install runq
 ```
 
 Daemon mode requires `nvidia-smi` on PATH. Run `runq doctor` to check your setup.

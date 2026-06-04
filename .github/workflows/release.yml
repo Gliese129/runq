@@ -27,6 +27,15 @@ jobs:
           go-version: '1.25'
           cache: 'true'
 
+      - name: Build CLI-only binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          BINARY_NAME="runq-${{ matrix.goos }}-${{ matrix.goarch }}"
+          go build -o "$BINARY_NAME" ./cmd/runq
+
       - name: Set up node
         uses: actions/setup-node@v4
         with:
@@ -45,19 +54,21 @@ jobs:
           yarn install --frozen-lockfile
           yarn build
 
-      - name: Build Go binary
+      - name: Build Go binary with embedded dashboard
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: 0
         run: |
-          BINARY_NAME="runq-${{ matrix.goos }}-${{ matrix.goarch }}"
-          go build -o "$BINARY_NAME" ./cmd/runq
+          BINARY_NAME="runq-dashboard-${{ matrix.goos }}-${{ matrix.goarch }}"
+          go build -tags dashboard -o "$BINARY_NAME" ./cmd/runq
 
       - name: Upload Release
         uses: softprops/action-gh-release@v2
         with:
-          files: runq-${{ matrix.goos }}-${{ matrix.goarch }}
+          files: |
+            runq-${{ matrix.goos }}-${{ matrix.goarch }}
+            runq-dashboard-${{ matrix.goos }}-${{ matrix.goarch }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

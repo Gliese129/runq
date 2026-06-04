@@ -1,3 +1,5 @@
+//go:build dashboard
+
 package dashboard
 
 import (
@@ -5,13 +7,13 @@ import (
 	"io/fs"
 )
 
-//go:embed dist/* dist/assets/_*
+//go:embed all:dist
 var embeddedStaticFS embed.FS
 
-func StaticFS() fs.FS {
+func embeddedDashboardFS() (fs.FS, bool) {
 	sub, err := fs.Sub(embeddedStaticFS, "dist")
 	if err != nil {
-		panic(err)
+		return nil, false
 	}
-	return sub
+	return sub, true
 }

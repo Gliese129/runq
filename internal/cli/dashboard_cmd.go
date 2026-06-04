@@ -26,6 +26,7 @@ var dashboardCmd = &cobra.Command{
 func init() {
 	dashboardCmd.Flags().String("host", "127.0.0.1", "host to bind")
 	dashboardCmd.Flags().Int("port", 8077, "port to bind")
+	dashboardCmd.Flags().String("assets-dir", "", "dashboard static assets directory")
 	dashboardCmd.GroupID = groupCore
 	rootCmd.AddCommand(dashboardCmd)
 }
@@ -44,11 +45,12 @@ func runDashboard(cmd *cobra.Command, args []string) error {
 
 	host, _ := cmd.Flags().GetString("host")
 	port, _ := cmd.Flags().GetInt("port")
+	assetsDir, _ := cmd.Flags().GetString("assets-dir")
 	if _, err := dashboard.ParsePort(strconv.Itoa(port)); err != nil {
 		return err
 	}
 
-	server := dashboard.NewServer(backend, mode, cfg)
+	server := dashboard.NewServerWithAssets(backend, mode, cfg, assetsDir)
 	addr := net.JoinHostPort(host, strconv.Itoa(port))
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -67,6 +69,9 @@ func runDashboard(cmd *cobra.Command, args []string) error {
 	}()
 
 	fmt.Fprintf(cmd.OutOrStdout(), "Dashboard running at http://%s\n", addr)
+	if server.StaticAssetsUnavailable() {
+		fmt.Fprintf(cmd.OutOrStdout(), "Dashboard UI is not installed; API routes are still available. Build with -tags dashboard or pass --assets-dir.\n")
+	}
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	select {
