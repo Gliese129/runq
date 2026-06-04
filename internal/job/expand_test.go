@@ -1,6 +1,7 @@
 package job
 
 import (
+	"encoding/json"
 	"reflect"
 	"testing"
 
@@ -38,6 +39,47 @@ func TestExpandGrid(t *testing.T) {
 		if !reflect.DeepEqual(tasks[i], want) {
 			t.Errorf("task[%d] = %v, want %v", i, tasks[i], want)
 		}
+	}
+}
+
+func TestJobConfigJSONDecodesSweepValues(t *testing.T) {
+	input := []byte(`{
+		"project": "test",
+		"note": "dashboard",
+		"sweep": [{
+			"method": "grid",
+			"parameters": {
+				"lr": { "values": [0.001, 0.01] },
+				"batch_size": { "values": [32] }
+			}
+		}]
+	}`)
+	var cfg JobConfig
+	if err := json.Unmarshal(input, &cfg); err != nil {
+		t.Fatalf("unmarshal json: %v", err)
+	}
+	tasks, err := Expand(&cfg)
+	if err != nil {
+		t.Fatalf("expand: %v", err)
+	}
+	if len(tasks) != 2 {
+		t.Fatalf("expected 2 tasks, got %d: %#v", len(tasks), tasks)
+	}
+	if tasks[0]["batch_size"] != float64(32) || tasks[0]["lr"] != 0.001 {
+		t.Fatalf("unexpected first task: %#v", tasks[0])
+	}
+}
+
+func TestExpandEmptySweepRunsOnce(t *testing.T) {
+	tasks, err := Expand(&JobConfig{Project: "test"})
+	if err != nil {
+		t.Fatalf("expand: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("expected one no-param task, got %d: %#v", len(tasks), tasks)
+	}
+	if len(tasks[0]) != 0 {
+		t.Fatalf("expected empty params, got %#v", tasks[0])
 	}
 }
 

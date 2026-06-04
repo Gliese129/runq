@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gliese129/runq/internal/job"
@@ -25,6 +26,7 @@ func (s *Server) registerRoutes() {
 	{
 		projects.POST("", s.handleProjectAdd)
 		projects.GET("", s.handleProjectList)
+		projects.GET("/match", s.handleProjectMatch) // before /:name
 		projects.GET("/:name", s.handleProjectGet)
 		projects.PUT("/:name", s.handleProjectUpdate)
 		projects.DELETE("/:name", s.handleProjectDelete)
@@ -79,10 +81,31 @@ func (s *Server) handleProjectAdd(c *gin.Context) {
 		return
 	}
 	if err := s.deps.Registry.Add(cfg); err != nil {
-		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		status := http.StatusBadRequest
+		if strings.Contains(err.Error(), "already exists") {
+			status = http.StatusConflict
+		}
+		c.JSON(status, gin.H{"error": err.Error()})
 		return
 	}
 	c.JSON(http.StatusCreated, gin.H{"message": fmt.Sprintf("project %q registered", cfg.ProjectName)})
+}
+
+func (s *Server) handleProjectMatch(c *gin.Context) {
+	dir := c.Query("dir")
+	if dir == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "dir query parameter is required"})
+		return
+	}
+	configs, err := s.deps.Registry.Match(dir)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if configs == nil {
+		configs = []project.Config{}
+	}
+	c.JSON(http.StatusOK, configs)
 }
 
 func (s *Server) handleProjectList(c *gin.Context) {

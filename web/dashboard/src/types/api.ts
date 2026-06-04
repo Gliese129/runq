@@ -92,6 +92,39 @@ export interface ScriptArg {
   default?: string
 }
 
+export interface ProjectSummary {
+  name: string
+  work_dir?: string
+  job_count: number
+}
+
+export interface ProjectConfig {
+  project_name: string
+  working_dir: string
+  command_template: string
+  environment?: Record<string, string>
+  defaults?: {
+    gpus_per_task?: number
+    max_retry?: number
+    timeout?: string
+  }
+  resume?: {
+    enabled: boolean
+    extra_args?: string
+  }
+  python_env?: {
+    type?: string
+    path?: string
+    name?: string
+  }
+  wandb?: {
+    project: string
+    entity?: string
+    tags?: string[]
+    mode?: string
+  }
+}
+
 export interface WebhookConfig {
   url: string
   events: string[]

@@ -1,6 +1,8 @@
 package project
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -18,10 +20,13 @@ func setup(t *testing.T) (*Registry, func()) {
 	return reg, func() { s.Close() }
 }
 
-func sampleConfig(name string) Config {
+// sampleConfig returns a Config with WorkingDir set to a real temp directory.
+func sampleConfig(t *testing.T, name string) Config {
+	t.Helper()
+	dir := t.TempDir()
 	return Config{
 		ProjectName: name,
-		WorkingDir:  "/home/user/projects/" + name,
+		WorkingDir:  dir,
 		CmdTemplate: "python train.py {{args}}",
 		Defaults:    Defaults{GPUsPerTask: 1, MaxRetry: 3},
 		Resume:      ResumeConfig{Enabled: true, ExtraArgs: "--resume"},
@@ -32,9 +37,15 @@ func TestAddAndGet(t *testing.T) {
 	reg, cleanup := setup(t)
 	defer cleanup()
 
-	cfg := sampleConfig("resnet50")
+	cfg := sampleConfig(t, "resnet50")
 	if err := reg.Add(cfg); err != nil {
 		t.Fatalf("Add failed: %v", err)
+	}
+
+	// project.yaml must exist on disk
+	yamlPath := filepath.Join(cfg.WorkingDir, "project.yaml")
+	if _, err := os.Stat(yamlPath); err != nil {
+		t.Fatalf("project.yaml not written: %v", err)
 	}
 
 	got, err := reg.Get("resnet50")
@@ -55,11 +66,32 @@ func TestAddAndGet(t *testing.T) {
 	}
 }
 
+func TestAddFailsOnBadDir(t *testing.T) {
+	reg, cleanup := setup(t)
+	defer cleanup()
+
+	cfg := Config{
+		ProjectName: "bad",
+		WorkingDir:  "/this/path/does/not/exist",
+		CmdTemplate: "echo {{args}}",
+	}
+	err := reg.Add(cfg)
+	if err == nil {
+		t.Fatal("expected error for non-existent working_dir, got nil")
+	}
+
+	// DB should NOT have the project
+	_, getErr := reg.Get("bad")
+	if getErr == nil {
+		t.Fatal("project should not be in DB after failed Add")
+	}
+}
+
 func TestAddDuplicate(t *testing.T) {
 	reg, cleanup := setup(t)
 	defer cleanup()
 
-	cfg := sampleConfig("resnet50")
+	cfg := sampleConfig(t, "resnet50")
 	if err := reg.Add(cfg); err != nil {
 		t.Fatalf("first Add failed: %v", err)
 	}
@@ -69,6 +101,29 @@ func TestAddDuplicate(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "already exists") {
 		t.Errorf("error should mention 'already exists', got: %v", err)
+	}
+}
+
+func TestAddSkipsWriteIfYamlExists(t *testing.T) {
+	reg, cleanup := setup(t)
+	defer cleanup()
+
+	cfg := sampleConfig(t, "existing")
+	// Pre-create a project.yaml with custom content
+	yamlPath := filepath.Join(cfg.WorkingDir, "project.yaml")
+	original := []byte("# my custom yaml\nproject_name: existing\n")
+	if err := os.WriteFile(yamlPath, original, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := reg.Add(cfg); err != nil {
+		t.Fatalf("Add failed: %v", err)
+	}
+
+	// File should be untouched (not overwritten)
+	got, _ := os.ReadFile(yamlPath)
+	if string(got) != string(original) {
+		t.Error("project.yaml was overwritten; WriteYAML should skip existing files")
 	}
 }
 
@@ -90,7 +145,7 @@ func TestList(t *testing.T) {
 	defer cleanup()
 
 	for _, name := range []string{"bert", "gpt2", "resnet50"} {
-		if err := reg.Add(sampleConfig(name)); err != nil {
+		if err := reg.Add(sampleConfig(t, name)); err != nil {
 			t.Fatalf("Add %q failed: %v", name, err)
 		}
 	}
@@ -102,7 +157,6 @@ func TestList(t *testing.T) {
 	if len(configs) != 3 {
 		t.Fatalf("expected 3 projects, got %d", len(configs))
 	}
-	// Should be ordered by name
 	if configs[0].ProjectName != "bert" || configs[2].ProjectName != "resnet50" {
 		t.Errorf("unexpected order: %v, %v, %v",
 			configs[0].ProjectName, configs[1].ProjectName, configs[2].ProjectName)
@@ -126,7 +180,7 @@ func TestUpdate(t *testing.T) {
 	reg, cleanup := setup(t)
 	defer cleanup()
 
-	cfg := sampleConfig("resnet50")
+	cfg := sampleConfig(t, "resnet50")
 	if err := reg.Add(cfg); err != nil {
 		t.Fatalf("Add failed: %v", err)
 	}
@@ -147,13 +201,20 @@ func TestUpdate(t *testing.T) {
 	if got.Defaults.MaxRetry != 5 {
 		t.Errorf("max_retry = %d, want 5", got.Defaults.MaxRetry)
 	}
+
+	// project.yaml should be overwritten by Update
+	data, _ := os.ReadFile(filepath.Join(cfg.WorkingDir, "project.yaml"))
+	if !strings.Contains(string(data), "train_v2.py") {
+		t.Error("project.yaml not updated after Update")
+	}
 }
 
 func TestUpdateNotFound(t *testing.T) {
 	reg, cleanup := setup(t)
 	defer cleanup()
 
-	err := reg.Update(sampleConfig("nonexistent"))
+	cfg := sampleConfig(t, "nonexistent")
+	err := reg.Update(cfg)
 	if err == nil {
 		t.Fatal("expected error for updating missing project, got nil")
 	}
@@ -166,7 +227,7 @@ func TestRemove(t *testing.T) {
 	reg, cleanup := setup(t)
 	defer cleanup()
 
-	cfg := sampleConfig("resnet50")
+	cfg := sampleConfig(t, "resnet50")
 	if err := reg.Add(cfg); err != nil {
 		t.Fatalf("Add failed: %v", err)
 	}

@@ -1,40 +1,97 @@
 package project
 
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+
+	"gopkg.in/yaml.v3"
+)
+
+const yamlHeader = `# runq project configuration
+# Edit as needed, then re-register: runq project add .
+#
+`
+
+// WriteYAML writes the Config as a project.yaml file into the WorkingDir.
+// If the file already exists, it is left untouched (user may have comments
+// or custom formatting). Use OverwriteYAML to force-write.
+// Returns an error if WorkingDir does not exist or is not a directory.
+func (c *Config) WriteYAML() error {
+	if err := c.checkWorkingDir(); err != nil {
+		return err
+	}
+	path := filepath.Join(c.WorkingDir, "project.yaml")
+	if _, err := os.Stat(path); err == nil {
+		return nil // already exists, don't clobber
+	}
+	return c.OverwriteYAML()
+}
+
+// OverwriteYAML writes the Config as project.yaml, replacing any existing file.
+// Returns an error if WorkingDir does not exist or is not a directory.
+func (c *Config) OverwriteYAML() error {
+	if err := c.checkWorkingDir(); err != nil {
+		return err
+	}
+	path := filepath.Join(c.WorkingDir, "project.yaml")
+	data, err := yaml.Marshal(c)
+	if err != nil {
+		return fmt.Errorf("marshal project config: %w", err)
+	}
+	content := yamlHeader + string(data)
+	return os.WriteFile(path, []byte(content), 0o644)
+}
+
+func (c *Config) checkWorkingDir() error {
+	if c.WorkingDir == "" {
+		return fmt.Errorf("working_dir is required")
+	}
+	info, err := os.Stat(c.WorkingDir)
+	if err != nil {
+		return fmt.Errorf("working_dir %q: %w", c.WorkingDir, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("working_dir %q is not a directory", c.WorkingDir)
+	}
+	return nil
+}
+
 // Config represents a parsed project.yaml file.
 type Config struct {
-	ProjectName string            `yaml:"project_name"`
-	WorkingDir  string            `yaml:"working_dir"`
-	CmdTemplate string            `yaml:"command_template"`
-	Environment map[string]string `yaml:"environment,omitempty"`
-	Defaults    Defaults          `yaml:"defaults,omitempty"`
-	Resume      ResumeConfig      `yaml:"resume,omitempty"`
-	PythonEnv   PythonEnvConfig   `yaml:"python_env,omitempty"`
-	Wandb       *WandbConfig      `yaml:"wandb,omitempty"`
+	ProjectName string            `yaml:"project_name" json:"project_name"`
+	WorkingDir  string            `yaml:"working_dir" json:"working_dir"`
+	CmdTemplate string            `yaml:"command_template" json:"command_template"`
+	Environment map[string]string `yaml:"environment,omitempty" json:"environment,omitempty"`
+	Defaults    Defaults          `yaml:"defaults,omitempty" json:"defaults,omitempty"`
+	Resume      ResumeConfig      `yaml:"resume,omitempty" json:"resume,omitempty"`
+	PythonEnv   PythonEnvConfig   `yaml:"python_env,omitempty" json:"python_env,omitempty"`
+	Wandb       *WandbConfig      `yaml:"wandb,omitempty" json:"wandb,omitempty"`
 }
 
 type WandbConfig struct {
-	Project string   `yaml:"project"`
-	Entity  string   `yaml:"entity,omitempty"`
-	Tags    []string `yaml:"tags,omitempty"`
-	Mode    string   `yaml:"mode,omitempty"` // "online" / "offline" / "disabled"
+	Project string   `yaml:"project" json:"project"`
+	Entity  string   `yaml:"entity,omitempty" json:"entity,omitempty"`
+	Tags    []string `yaml:"tags,omitempty" json:"tags,omitempty"`
+	Mode    string   `yaml:"mode,omitempty" json:"mode,omitempty"` // "online" / "offline" / "disabled"
 }
 
 // Defaults are project-level defaults that can be overridden per-job.
 type Defaults struct {
-	GPUsPerTask int    `yaml:"gpus_per_task,omitempty"`
-	MaxRetry    int    `yaml:"max_retry,omitempty"` // 0 means unlimited
-	Timeout     string `yaml:"timeout,omitempty"`   // human duration, e.g. "3h", "1d"
+	GPUsPerTask int    `yaml:"gpus_per_task,omitempty" json:"gpus_per_task,omitempty"`
+	MaxRetry    int    `yaml:"max_retry,omitempty" json:"max_retry,omitempty"` // 0 means unlimited
+	Timeout     string `yaml:"timeout,omitempty" json:"timeout,omitempty"`     // human duration, e.g. "3h", "1d"
 }
 
 // PythonEnvConfig specifies which Python environment to activate before running tasks.
 type PythonEnvConfig struct {
-	Type string `yaml:"type,omitempty"` // "venv", "conda", "uv", "system", "" (auto)
-	Path string `yaml:"path,omitempty"` // venv: relative path to venv dir (e.g. ".venv")
-	Name string `yaml:"name,omitempty"` // conda: environment name
+	Type string `yaml:"type,omitempty" json:"type,omitempty"` // "venv", "conda", "uv", "system", "" (auto)
+	Path string `yaml:"path,omitempty" json:"path,omitempty"` // venv: relative path to venv dir (e.g. ".venv")
+	Name string `yaml:"name,omitempty" json:"name,omitempty"` // conda: environment name
 }
 
 // ResumeConfig controls whether a crashed task can resume from checkpoint.
 type ResumeConfig struct {
-	Enabled   bool   `yaml:"enabled"`
-	ExtraArgs string `yaml:"extra_args,omitempty"` // appended to cmd when resuming
+	Enabled   bool   `yaml:"enabled" json:"enabled"`
+	ExtraArgs string `yaml:"extra_args,omitempty" json:"extra_args,omitempty"` // appended to cmd when resuming
 }

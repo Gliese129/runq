@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -108,6 +109,47 @@ func homeSafePath(path string) (string, error) {
 		return "", fmt.Errorf("path outside home is not allowed")
 	}
 	return abs, nil
+}
+
+func (s *Server) handleCondaEnvs(w http.ResponseWriter, r *http.Request) {
+	// Try conda info --envs --json
+	cmd := exec.Command("conda", "info", "--envs", "--json")
+	out, err := cmd.Output()
+	if err != nil {
+		// conda not installed or not in PATH
+		writeJSON(w, http.StatusOK, []string{})
+		return
+	}
+	var info struct {
+		Envs []string `json:"envs"`
+	}
+	if err := json.Unmarshal(out, &info); err != nil {
+		writeJSON(w, http.StatusOK, []string{})
+		return
+	}
+	// Extract env names from paths: /path/to/envs/myenv → myenv, base is special
+	names := make([]string, 0, len(info.Envs))
+	seen := map[string]bool{}
+	for _, p := range info.Envs {
+		name := filepath.Base(p)
+		// conda base env's path ends with the conda install dir, not "base"
+		// Check if this is the base env by looking for conda-meta
+		if _, err := os.Stat(filepath.Join(p, "conda-meta")); err != nil {
+			continue
+		}
+		// The first env in the list is base
+		if len(names) == 0 && name != "base" {
+			// Check if it's the root conda dir
+			if _, err := os.Stat(filepath.Join(p, "condabin")); err == nil {
+				name = "base"
+			}
+		}
+		if !seen[name] {
+			names = append(names, name)
+			seen[name] = true
+		}
+	}
+	writeJSON(w, http.StatusOK, names)
 }
 
 func detectedEnv(dir string) string {

@@ -7,13 +7,13 @@
           <div class="text-h5 font-weight-bold">{{ t('submit.title') }}</div>
           <div class="text-body-2 text-on-surface-variant mt-1">{{ t('submit.subtitle') }}</div>
         </div>
-        <v-chip v-if="step >= 1 && displayTaskCount > 0" variant="tonal" color="primary">
+        <v-chip v-if="step >= 2 && displayTaskCount > 0" variant="tonal" color="primary">
           {{ displayTaskCount }} {{ displayTaskCount === 1 ? 'task' : 'tasks' }}
         </v-chip>
       </div>
 
       <div class="d-flex ga-2 mb-5">
-        <div v-for="(s, i) in steps" :key="i"
+        <div v-for="(_, i) in steps" :key="i"
           class="flex-grow-1 rounded-pill"
           :style="{
             height: '4px',
@@ -24,7 +24,7 @@
       </div>
     </div>
 
-    <StepSelect v-if="step === 0" @select="onScriptSelected" @load-from-job="loadFromJob" />
+    <StepProject v-if="step === 0" @create="onCreateProject" />
     <StepConfigure v-else-if="step === 1" />
     <StepReview v-else-if="step === 2" />
 
@@ -36,17 +36,26 @@
       </v-btn>
       <v-spacer />
       <v-btn
-        v-if="step < 2"
+        v-if="step === 0"
         color="primary"
         variant="tonal"
-        :disabled="step === 0 && !selectedScript"
+        :disabled="!projectName"
         @click="goNext"
       >
         {{ t('common.next') }}
         <v-icon end>mdi-arrow-right</v-icon>
       </v-btn>
       <v-btn
-        v-else
+        v-else-if="step === 1"
+        color="primary"
+        variant="tonal"
+        @click="goNext"
+      >
+        {{ t('common.next') }}
+        <v-icon end>mdi-arrow-right</v-icon>
+      </v-btn>
+      <v-btn
+        v-else-if="step === 2"
         color="primary"
         variant="flat"
         size="large"
@@ -62,35 +71,43 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, provide, reactive } from 'vue'
-import { useRouter, useRoute } from 'vue-router'
+import { ref, computed, provide, reactive } from 'vue'
+import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { api } from '@/apis/client'
 import { useSnackbar } from '@/composables/useSnackbar'
 import { usePreferences } from '@/composables/usePreferences'
-import type { FSEntry, ParseResult, JobDetail } from '@/types/api'
+import type { ProjectSummary } from '@/types/api'
 
-import StepSelect from './StepSelect.vue'
+import StepProject from './StepProject.vue'
 import StepConfigure from './StepConfigure.vue'
 import StepReview from './StepReview.vue'
-import { SUBMIT_STATE_KEY, type ArgState, type SweepGroup } from '@/types/submit'
+import { SUBMIT_STATE_KEY, type SweepGroup } from '@/types/submit'
 
 const { t } = useI18n()
 const router = useRouter()
-const route = useRoute()
 const snack = useSnackbar()
 const prefs = usePreferences()
 
-const steps = ['select', 'configure', 'review']
+const steps = ['project', 'configure', 'review']
 const step = ref(0)
 
-const selectedScript = ref<FSEntry | null>(null)
-const fromJobId = ref(route.query.from as string || '')
-
-const parseResult = ref<ParseResult | null>(null)
 const projectName = ref(prefs.lastProject.value || '')
+const matchedProjects = ref<ProjectSummary[]>([])
+const newProject = reactive({
+  name: '',
+  workDir: '',
+  cmd: '',
+  gpus: 1,
+  maxRetry: 0,
+  envType: '',
+  envPath: '',
+  envName: '',
+  creating: false,
+  error: '',
+  params: [] as Array<{ name: string; type: string; default: string; include: boolean }>,
+})
 const note = ref('')
-const args = ref<ArgState[]>([])
 
 const groups = ref<SweepGroup[]>([])
 let groupIdCounter = 0
@@ -99,6 +116,8 @@ const dryRunResult = ref<Record<string, any>[]>([])
 const dryRunLoading = ref(false)
 const dryRunError = ref('')
 const submitting = ref(false)
+
+// ── Computed ──
 
 const usedParamNames = computed(() => {
   const names = new Set<string>()
@@ -116,10 +135,10 @@ function groupTaskCount(group: SweepGroup): number {
   return Math.max(...group.params.map(p => p.values.length), 0)
 }
 
-// Backend does cartesian product across sweep blocks
 const totalTaskCount = computed(() => {
+  if (groups.value.length === 0) return 1 // no sweep = 1 task
   const activeGroups = groups.value.filter(g => g.params.length > 0)
-  if (activeGroups.length === 0) return 1
+  if (activeGroups.length === 0) return 0 // explicit empty groups = 0 tasks
   return activeGroups.reduce((product, g) => product * (groupTaskCount(g) || 1), 1)
 })
 
@@ -145,13 +164,14 @@ const dryRunHeaders = computed(() => {
   return Object.keys(dryRunResult.value[0]).map(k => ({ title: k, key: k }))
 })
 
+// ── Provide ──
+
 provide(SUBMIT_STATE_KEY, reactive({
   step,
-  selectedScript,
-  parseResult,
   projectName,
+  matchedProjects,
+  newProject,
   note,
-  args,
   groups,
   groupIdCounter,
   usedParamNames,
@@ -163,57 +183,70 @@ provide(SUBMIT_STATE_KEY, reactive({
   dryRunError,
   dryRunHeaders,
   submitting,
-  fromJobId,
   prefs,
   groupTaskCount,
   getNextGroupId: () => ++groupIdCounter,
 }))
 
-async function onScriptSelected(entry: FSEntry) {
-  selectedScript.value = entry
-  await goNext()
+// ── Actions ──
+
+async function onCreateProject() {
+  newProject.error = ''
+  newProject.creating = true
+  try {
+    const payload: Record<string, any> = {
+      project_name: newProject.name.trim(),
+      working_dir: newProject.workDir,
+      command_template: newProject.cmd,
+      defaults: { gpus_per_task: newProject.gpus, max_retry: newProject.maxRetry },
+    }
+    if (newProject.envType) {
+      payload.python_env = {
+        type: newProject.envType,
+        path: newProject.envPath || undefined,
+        name: newProject.envName || undefined,
+      }
+    }
+    await api.post('/projects', payload)
+    matchedProjects.value.push({
+      name: newProject.name.trim(),
+      work_dir: newProject.workDir,
+      job_count: 0,
+    })
+    projectName.value = newProject.name.trim()
+    snack.success(`Project "${projectName.value}" registered`)
+    seedGroupsFromParams()
+    step.value++ // advance to configure
+  } catch (e: any) {
+    newProject.error = e?.message || 'Failed to create project'
+  } finally {
+    newProject.creating = false
+  }
 }
 
-async function parseAndConfigure() {
-  if (!selectedScript.value) return
-  parseResult.value = await api.post<ParseResult>('/fs/parse-script', { path: selectedScript.value.path })
-  const saved = prefs.getScriptArgs(selectedScript.value.path)
-
-  groups.value = []
-  groupIdCounter = 0
-
-  args.value = (parseResult.value.args || []).map(a => ({
-    ...a,
-    value: saved[a.name] || a.default || '',
-    sweep: false,
-    sweepValues: [],
-    boolValue: (saved[a.name] || a.default || '').toLowerCase() === 'true',
+function seedGroupsFromParams() {
+  const included = newProject.params.filter(p => p.include)
+  if (included.length === 0 || groups.value.length > 0) return
+  const id = ++groupIdCounter
+  const params = included.map(p => ({
+    name: p.name,
+    type: p.type,
+    default: p.default,
+    values: p.default ? [p.default] : [],
   }))
-
-  if (!projectName.value) {
-    const parts = selectedScript.value.path.split(/[\\/]+/)
-    projectName.value = parts.length > 1 ? parts[parts.length - 2] : 'default'
-  }
-
-  prefs.addRecentScript(
-    selectedScript.value.path,
-    selectedScript.value.name,
-    projectName.value,
-  )
+  groups.value.push({ id: `g${id}`, type: 'grid', expanded: true, params })
 }
 
 async function goNext() {
   if (step.value === 0) {
-    await parseAndConfigure()
+    prefs.lastProject.value = projectName.value
+    // Seed configure from discovered params (for existing projects, groups stay as-is)
+    if (groups.value.length === 0 && newProject.params.length > 0) {
+      seedGroupsFromParams()
+    }
   }
   if (step.value === 1) {
-    if (selectedScript.value) {
-      const argMap: Record<string, string> = {}
-      for (const a of args.value) {
-        argMap[a.name] = a.type === 'bool' ? String(a.boolValue) : a.value
-      }
-      prefs.saveScriptArgs(selectedScript.value.path, argMap)
-    }
+    // Run dry-run before entering review
     prefs.lastProject.value = projectName.value
     dryRunLoading.value = true
     dryRunError.value = ''
@@ -234,43 +267,29 @@ async function goNext() {
 function buildJobConfig() {
   const sweep: { method: string; parameters: Record<string, { values: any[] }> }[] = []
 
-  const baseParams: Record<string, { values: any[] }> = {}
-  for (const a of args.value) {
-    if (usedParamNames.value.has(a.name)) continue
-    const val = a.type === 'bool' ? a.boolValue : a.value
-    if (val !== '' && val !== undefined) {
-      baseParams[a.name] = { values: [val] }
-    }
-  }
-  if (Object.keys(baseParams).length > 0) {
-    sweep.push({ method: 'list', parameters: baseParams })
-  }
-
   for (const g of groups.value) {
     const active = g.params.filter(p => p.values.length > 0)
     if (active.length === 0) continue
     const parameters: Record<string, { values: any[] }> = {}
     for (const p of active) {
-      const arg = args.value.find(a => a.name === p.name)
-      const tp = arg?.type?.toLowerCase() || ''
-      parameters[p.name] = {
-        values: p.values.map(v => {
-          if (tp === 'int') return parseInt(v, 10) || v
-          if (tp === 'float') return parseFloat(v) || v
-          if (tp === 'bool') return v === 'true'
-          return v
-        }),
-      }
+      parameters[p.name] = { values: p.values.map(inferType) }
     }
     sweep.push({ method: g.type, parameters })
   }
 
   return {
     project: projectName.value,
-    description: selectedScript.value?.path || '',
     note: note.value,
     sweep,
   }
+}
+
+function inferType(v: string): any {
+  if (v === 'true') return true
+  if (v === 'false') return false
+  const n = Number(v)
+  if (!isNaN(n) && v.trim() !== '') return n
+  return v
 }
 
 async function submit() {
@@ -285,22 +304,4 @@ async function submit() {
     submitting.value = false
   }
 }
-
-async function loadFromJob() {
-  if (!fromJobId.value) return
-  try {
-    const detail = await api.get<JobDetail>(`/jobs/${fromJobId.value}`)
-    if (detail.tasks.length > 0) {
-      projectName.value = detail.job.project
-      note.value = `from ${detail.job.id.slice(0, 8)}`
-      snack.info(t('submit.loaded_from_job'))
-    }
-  } catch {
-    snack.error(t('submit.load_job_failed'))
-  }
-}
-
-onMounted(() => {
-  if (fromJobId.value) loadFromJob()
-})
 </script>

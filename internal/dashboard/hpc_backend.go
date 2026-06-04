@@ -136,12 +136,35 @@ func (b *HPCBackend) DryRun(_ context.Context, cfg job.JobConfig) ([]job.TaskPar
 	return job.Expand(&cfg)
 }
 
+func (b *HPCBackend) CreateProject(_ context.Context, cfg project.Config) error {
+	reg := project.NewRegistry(b.store.DB())
+	return reg.Add(cfg)
+}
+
+func (b *HPCBackend) GetProject(_ context.Context, name string) (*project.Config, error) {
+	reg := project.NewRegistry(b.store.DB())
+	return reg.Get(name)
+}
+
 func (b *HPCBackend) ListProjects(ctx context.Context) ([]ProjectSummary, error) {
 	reg := project.NewRegistry(b.store.DB())
 	configs, err := reg.List()
 	if err != nil {
 		return nil, err
 	}
+	return b.configsToSummaries(ctx, configs)
+}
+
+func (b *HPCBackend) MatchProjects(ctx context.Context, dir string) ([]ProjectSummary, error) {
+	reg := project.NewRegistry(b.store.DB())
+	configs, err := reg.Match(dir)
+	if err != nil {
+		return nil, err
+	}
+	return b.configsToSummaries(ctx, configs)
+}
+
+func (b *HPCBackend) configsToSummaries(ctx context.Context, configs []project.Config) ([]ProjectSummary, error) {
 	// Count jobs per project
 	jobs, _ := b.store.ListJobs(ctx, "")
 	jobCounts := make(map[string]int)

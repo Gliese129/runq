@@ -1,15 +1,5 @@
 import type { InjectionKey } from 'vue'
-import type { FSEntry, ParseResult } from '@/types/api'
-
-export interface ArgState {
-  name: string
-  type: string
-  default?: string
-  value: string
-  sweep: boolean
-  sweepValues: string[]
-  boolValue: boolean
-}
+import type { ProjectSummary } from '@/types/api'
 
 export interface GroupParam {
   name: string
@@ -27,11 +17,22 @@ export interface SweepGroup {
 
 export interface SubmitState {
   step: number
-  selectedScript: FSEntry | null
-  parseResult: ParseResult | null
   projectName: string
+  matchedProjects: ProjectSummary[]
+  newProject: {
+    name: string
+    workDir: string
+    cmd: string
+    gpus: number
+    maxRetry: number
+    envType: string        // 'venv' | 'conda' | 'uv' | 'system' | ''
+    envPath: string        // venv/uv: relative dir
+    envName: string        // conda: env name
+    creating: boolean
+    error: string
+    params: Array<{ name: string; type: string; default: string; include: boolean }>
+  }
   note: string
-  args: ArgState[]
   groups: SweepGroup[]
   groupIdCounter: number
   usedParamNames: Set<string>
@@ -43,7 +44,6 @@ export interface SubmitState {
   dryRunError: string
   dryRunHeaders: { title: string; key: string }[]
   submitting: boolean
-  fromJobId: string
   prefs: any
   groupTaskCount: (group: SweepGroup) => number
   getNextGroupId: () => number

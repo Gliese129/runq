@@ -16,6 +16,9 @@ type TaskParams map[string]any
 // Each block expands independently (grid → cartesian, list → zip),
 // then blocks are combined via cross-product.
 func Expand(cfg *JobConfig) ([]TaskParams, error) {
+	if len(cfg.Sweep) == 0 {
+		return []TaskParams{{}}, nil
+	}
 	blocks := make([][]TaskParams, 0, len(cfg.Sweep))
 	for _, sweep := range cfg.Sweep {
 		tasks, err := expandBlock(sweep)
@@ -109,6 +112,9 @@ func cartesianProduct(xs [][]TaskParams) ([]TaskParams, error) {
 	}
 	xs = filtered
 	if len(xs) == 0 {
+		// All blocks had empty parameters → 0 tasks.
+		// (This is distinct from "no sweep at all" which yields 1 task —
+		// that case is handled in Expand before we reach cartesianProduct.)
 		return []TaskParams{}, nil
 	}
 

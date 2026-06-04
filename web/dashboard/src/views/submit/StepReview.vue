@@ -17,7 +17,6 @@
         <v-card class="pa-3 text-center">
           <div class="text-caption text-on-surface-variant mb-1">{{ t('submit.project') }}</div>
           <div class="text-body-2 font-weight-medium text-truncate">{{ state.projectName }}</div>
-          <code class="text-caption text-on-surface-variant">{{ state.selectedScript?.name }}</code>
         </v-card>
       </v-col>
     </v-row>
@@ -25,7 +24,7 @@
     <v-card class="pa-4">
       <div class="d-flex align-center justify-space-between mb-3">
         <div class="text-subtitle-2">{{ t('submit.preview') }}</div>
-        <v-btn v-if="state.dryRunResult.length > 0" size="x-small" variant="text" color="primary" @click="state.step = 1">
+        <v-btn v-if="state.dryRunResult.length > 0" size="x-small" variant="text" color="primary" @click="state.step--">
           <v-icon start size="14">mdi-pencil-outline</v-icon> Edit
         </v-btn>
       </div>
@@ -55,7 +54,7 @@
         <v-icon size="28" class="mb-2">mdi-alert-circle-outline</v-icon>
         <div class="text-body-2">{{ state.dryRunError || t('submit.no_tasks') }}</div>
         <div v-if="!state.dryRunError" class="text-caption mt-1">{{ t('submit.no_tasks_hint') }}</div>
-        <v-btn size="small" variant="tonal" color="primary" class="mt-3" @click="state.step = 1">
+        <v-btn size="small" variant="tonal" color="primary" class="mt-3" @click="state.step--">
           <v-icon start size="14">mdi-arrow-left</v-icon> Back to configure
         </v-btn>
       </div>

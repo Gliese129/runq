@@ -11,6 +11,7 @@ import (
 
 	"github.com/gliese129/runq/internal/config"
 	"github.com/gliese129/runq/internal/job"
+	"github.com/gliese129/runq/internal/project"
 )
 
 type Server struct {
@@ -62,6 +63,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/dashboard/jobs/{id}", s.handleGetJob)
 	s.mux.HandleFunc("GET /api/dashboard/jobs/{id}/compare", s.handleCompare)
 	s.mux.HandleFunc("GET /api/dashboard/projects", s.handleListProjects)
+	s.mux.HandleFunc("GET /api/dashboard/projects/match", s.handleMatchProjects)
+	s.mux.HandleFunc("GET /api/dashboard/projects/{name}", s.handleGetProject)
+	s.mux.HandleFunc("POST /api/dashboard/projects", s.handleCreateProject)
 	s.mux.HandleFunc("GET /api/dashboard/gpu", s.handleGPU)
 	s.mux.HandleFunc("POST /api/dashboard/jobs", s.handleSubmitJob)
 	s.mux.HandleFunc("POST /api/dashboard/jobs/dry-run", s.handleDryRun)
@@ -72,6 +76,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/dashboard/jobs/{id}/resume", s.handleResumeJob)
 	s.mux.HandleFunc("GET /api/dashboard/fs/list", s.handleFSList)
 	s.mux.HandleFunc("POST /api/dashboard/fs/parse-script", s.handleParseScript)
+	s.mux.HandleFunc("GET /api/dashboard/conda/envs", s.handleCondaEnvs)
 	s.mux.HandleFunc("GET /api/{path...}", s.handleAPINotFound)
 	s.mux.HandleFunc("POST /api/{path...}", s.handleAPINotFound)
 	s.mux.HandleFunc("PUT /api/{path...}", s.handleAPINotFound)
@@ -99,6 +104,57 @@ func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, projects)
+}
+
+func (s *Server) handleMatchProjects(w http.ResponseWriter, r *http.Request) {
+	dir := r.URL.Query().Get("dir")
+	if dir == "" {
+		writeErrorStatus(w, http.StatusBadRequest, fmt.Errorf("dir query parameter is required"))
+		return
+	}
+	projects, err := s.backend.MatchProjects(r.Context(), dir)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if projects == nil {
+		projects = []ProjectSummary{}
+	}
+	writeJSON(w, http.StatusOK, projects)
+}
+
+func (s *Server) handleGetProject(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimSpace(r.PathValue("name"))
+	if name == "" {
+		writeErrorStatus(w, http.StatusBadRequest, fmt.Errorf("project name is required"))
+		return
+	}
+	cfg, err := s.backend.GetProject(r.Context(), name)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, cfg)
+}
+
+func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
+	var cfg project.Config
+	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+		writeErrorStatus(w, http.StatusBadRequest, err)
+		return
+	}
+	cfg.ProjectName = strings.TrimSpace(cfg.ProjectName)
+	if cfg.ProjectName == "" {
+		writeErrorStatus(w, http.StatusBadRequest, fmt.Errorf("project_name is required"))
+		return
+	}
+	if err := s.backend.CreateProject(r.Context(), cfg); err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]string{
+		"message": fmt.Sprintf("project %q created", cfg.ProjectName),
+	})
 }
 
 func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
@@ -268,10 +324,15 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeError(w http.ResponseWriter, err error) {
 	status := http.StatusInternalServerError
+	msg := strings.ToLower(err.Error())
 	if errors.Is(err, ErrNotSupported) {
 		status = http.StatusBadRequest
 	} else if isNotFound(err) {
 		status = http.StatusNotFound
+	} else if strings.Contains(msg, "already exists") {
+		status = http.StatusConflict
+	} else if strings.Contains(msg, "required") || strings.Contains(msg, "invalid") {
+		status = http.StatusBadRequest
 	}
 	writeErrorStatus(w, status, err)
 }

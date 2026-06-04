@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
+	"strings"
 )
 
 // Registry manages the set of registered projects, backed by SQLite.
@@ -16,9 +18,25 @@ func NewRegistry(db *sql.DB) *Registry {
 	return &Registry{db: db}
 }
 
-// Add registers a new project. Returns an error if a project with the
-// same name already exists.
+// Add registers a new project. Writes project.yaml to working_dir then
+// inserts into the database. The directory must exist and be writable —
+// project.yaml is the source of truth, so a failed write blocks registration.
+// Returns an error if a project with the same name already exists.
 func (r *Registry) Add(cfg Config) error {
+	var existing int
+	err := r.db.QueryRow(`SELECT 1 FROM projects WHERE name = ?`, cfg.ProjectName).Scan(&existing)
+	if err == nil {
+		return fmt.Errorf("project %q already exists", cfg.ProjectName)
+	}
+	if err != sql.ErrNoRows {
+		return fmt.Errorf("query project %q: %w", cfg.ProjectName, err)
+	}
+
+	// Write project.yaml — hard failure (file is source of truth)
+	if err := cfg.WriteYAML(); err != nil {
+		return fmt.Errorf("write project.yaml: %w", err)
+	}
+
 	data, err := json.Marshal(cfg)
 	if err != nil {
 		return fmt.Errorf("marshal project config: %w", err)
@@ -81,8 +99,23 @@ func (r *Registry) List() ([]Config, error) {
 }
 
 // Update modifies an existing project's config.
+// Rewrites project.yaml and updates the database.
 // Returns an error if the project does not exist.
 func (r *Registry) Update(cfg Config) error {
+	var existing int
+	err := r.db.QueryRow(`SELECT 1 FROM projects WHERE name = ?`, cfg.ProjectName).Scan(&existing)
+	if err == sql.ErrNoRows {
+		return fmt.Errorf("project %q not found", cfg.ProjectName)
+	}
+	if err != nil {
+		return fmt.Errorf("query project %q: %w", cfg.ProjectName, err)
+	}
+
+	// Rewrite project.yaml (explicit update)
+	if err := cfg.OverwriteYAML(); err != nil {
+		return fmt.Errorf("write project.yaml: %w", err)
+	}
+
 	data, err := json.Marshal(cfg)
 	if err != nil {
 		return fmt.Errorf("marshal project config: %w", err)
@@ -99,6 +132,27 @@ func (r *Registry) Update(cfg Config) error {
 		return fmt.Errorf("project %q not found", cfg.ProjectName)
 	}
 	return nil
+}
+
+// Match returns all projects whose WorkingDir is equal to or a parent of dir.
+// This is used to auto-detect which project(s) a script belongs to.
+func (r *Registry) Match(dir string) ([]Config, error) {
+	all, err := r.List()
+	if err != nil {
+		return nil, err
+	}
+	dir = filepath.Clean(dir)
+	var matched []Config
+	for _, cfg := range all {
+		wd := filepath.Clean(cfg.WorkingDir)
+		if wd == "" {
+			continue
+		}
+		if dir == wd || strings.HasPrefix(dir, wd+string(filepath.Separator)) {
+			matched = append(matched, cfg)
+		}
+	}
+	return matched, nil
 }
 
 // Remove deletes a project by name.

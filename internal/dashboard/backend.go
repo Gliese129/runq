@@ -6,15 +6,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
-	"net/url"
 	"strings"
 	"time"
 
 	"github.com/gliese129/runq/internal/job"
+	"github.com/gliese129/runq/internal/project"
 	"github.com/gliese129/runq/internal/store"
 	"github.com/gliese129/runq/internal/workspace"
 )
@@ -37,7 +38,10 @@ type Backend interface {
 
 	SubmitJob(ctx context.Context, cfg job.JobConfig) (jobID string, totalTasks int, err error)
 	DryRun(ctx context.Context, cfg job.JobConfig) ([]job.TaskParams, error)
+	GetProject(ctx context.Context, name string) (*project.Config, error)
 	ListProjects(ctx context.Context) ([]ProjectSummary, error)
+	MatchProjects(ctx context.Context, dir string) ([]ProjectSummary, error)
+	CreateProject(ctx context.Context, cfg project.Config) error
 }
 
 // ---- builders: store rows → view types ----

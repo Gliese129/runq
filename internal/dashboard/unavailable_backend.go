@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/gliese129/runq/internal/job"
+	"github.com/gliese129/runq/internal/project"
 )
 
 type UnavailableBackend struct {
@@ -59,8 +60,20 @@ func (b *UnavailableBackend) DryRun(ctx context.Context, cfg job.JobConfig) ([]j
 	return nil, b.wrap()
 }
 
+func (b *UnavailableBackend) GetProject(ctx context.Context, name string) (*project.Config, error) {
+	return nil, b.wrap()
+}
+
 func (b *UnavailableBackend) ListProjects(ctx context.Context) ([]ProjectSummary, error) {
 	return nil, b.wrap()
+}
+
+func (b *UnavailableBackend) MatchProjects(ctx context.Context, dir string) ([]ProjectSummary, error) {
+	return nil, b.wrap()
+}
+
+func (b *UnavailableBackend) CreateProject(ctx context.Context, cfg project.Config) error {
+	return b.wrap()
 }
 
 func (b *UnavailableBackend) wrap() error {

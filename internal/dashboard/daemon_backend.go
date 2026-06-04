@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
 
 	"github.com/gliese129/runq/internal/api"
 	"github.com/gliese129/runq/internal/job"
@@ -122,10 +123,45 @@ func (b *DaemonBackend) DryRun(_ context.Context, cfg job.JobConfig) ([]job.Task
 	return job.Expand(&cfg)
 }
 
+func (b *DaemonBackend) CreateProject(ctx context.Context, cfg project.Config) error {
+	return b.do(ctx, "POST", "/api/projects", cfg, nil)
+}
+
+func (b *DaemonBackend) GetProject(ctx context.Context, name string) (*project.Config, error) {
+	var cfg project.Config
+	if err := b.do(ctx, "GET", "/api/projects/"+url.PathEscape(name), nil, &cfg); err != nil {
+		return nil, err
+	}
+	return &cfg, nil
+}
+
 func (b *DaemonBackend) ListProjects(ctx context.Context) ([]ProjectSummary, error) {
 	// Fetch projects from daemon API (registry lives in daemon process)
 	var configs []project.Config
 	if err := b.do(ctx, "GET", "/api/projects", nil, &configs); err != nil {
+		return nil, err
+	}
+	// Get job counts
+	var jobs []service.JobSummary
+	_ = b.do(ctx, "GET", "/api/jobs", nil, &jobs)
+	jobCounts := make(map[string]int)
+	for _, j := range jobs {
+		jobCounts[j.Project]++
+	}
+	out := make([]ProjectSummary, 0, len(configs))
+	for _, c := range configs {
+		out = append(out, ProjectSummary{
+			Name:     c.ProjectName,
+			WorkDir:  c.WorkingDir,
+			JobCount: jobCounts[c.ProjectName],
+		})
+	}
+	return out, nil
+}
+
+func (b *DaemonBackend) MatchProjects(ctx context.Context, dir string) ([]ProjectSummary, error) {
+	var configs []project.Config
+	if err := b.do(ctx, "GET", "/api/projects/match?dir="+url.QueryEscape(dir), nil, &configs); err != nil {
 		return nil, err
 	}
 	// Get job counts
