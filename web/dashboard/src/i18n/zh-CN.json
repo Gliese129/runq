@@ -85,6 +85,7 @@
   "submit.no_tasks_hint": "脚本解析成功，但参数展开未产生任务",
   "submit.dryrun_failed": "预演失败",
   "submit.show_hidden": "显示隐藏文件",
+  "submit.preflight": "预检",
   "submit.success": "任务已提交！",
 
   "settings.title": "设置",
@@ -131,5 +132,7 @@
   "common.error": "错误",
   "common.done": "完成",
   "common.idle": "空闲",
+  "common.on": "开启",
+  "common.off": "关闭",
   "common.retry": "重试"
 }

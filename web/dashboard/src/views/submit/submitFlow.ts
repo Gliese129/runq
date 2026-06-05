@@ -168,6 +168,11 @@ export function buildJobConfig(
   }
 }
 
+export function submitEndpoint(preflightEnabled: boolean, forceSkipPreflight: unknown = false): string {
+  const skipPreflight = forceSkipPreflight === true || !preflightEnabled
+  return skipPreflight ? '/jobs?no_preflight=1' : '/jobs'
+}
+
 export function validateConfigure(
   groups: SweepGroup[],
   options: ConfigureValidationOptions = {},

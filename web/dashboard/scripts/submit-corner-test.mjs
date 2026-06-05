@@ -6,6 +6,13 @@ import ts from 'typescript'
 
 const flow = await loadSubmitFlow()
 
+test('submit endpoint honors preflight switch and ignores click events', () => {
+  assert.equal(flow.submitEndpoint(true), '/jobs')
+  assert.equal(flow.submitEndpoint(false), '/jobs?no_preflight=1')
+  assert.equal(flow.submitEndpoint(true, true), '/jobs?no_preflight=1')
+  assert.equal(flow.submitEndpoint(true, { type: 'click' }), '/jobs')
+})
+
 test('submit flow survives clumsy back-and-forth edits', () => {
   const project = {
     name: 'vision-train',

@@ -13,7 +13,12 @@ package preflight
 // ./internal/preflight/...` discovers it. Codex: please flesh out the
 // bodies.
 
-import "testing"
+import (
+	"os"
+	"reflect"
+	"strings"
+	"testing"
+)
 
 // ----------------------------------------------------------------------
 // (1) checkWritable
@@ -103,7 +108,36 @@ func TestCheckPathArgs_DuplicatesDeduped(t *testing.T) {
 //	- topLevelModule("a.b.c") → "a"; topLevelModule("a") → "a".
 
 func TestExtractImports_TopLevelOnly(t *testing.T) {
-	t.Skip("TODO(codex)")
+	dir := t.TempDir()
+	script := `import argparse
+import json
+import math
+import os
+from pathlib import Path
+from typing import Any
+
+Row = dict[str, Any]
+`
+	if err := os.WriteFile(dir+"/train.py", []byte(script), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	path, modules, err := extractImports("python train.py", dir)
+	if err != nil {
+		t.Fatalf("extractImports: %v", err)
+	}
+	if !strings.HasSuffix(path, "/train.py") {
+		t.Fatalf("path = %q, want train.py", path)
+	}
+	want := []string{"argparse", "json", "math", "os", "pathlib", "typing"}
+	if !reflect.DeepEqual(modules, want) {
+		t.Fatalf("modules = %#v, want %#v", modules, want)
+	}
+	for _, mod := range modules {
+		if strings.Contains(mod, "\n") {
+			t.Fatalf("module name crossed line boundary: %q", mod)
+		}
+	}
 }
 
 func TestExtractImports_DottedToHead(t *testing.T) {

@@ -1,22 +1,45 @@
 <template>
   <div style="max-width: 960px; margin: 0 auto">
     <v-row class="mb-4" dense>
-      <v-col cols="12" sm="4">
+      <v-col cols="12" sm="3">
         <v-card class="pa-3 text-center">
           <div class="text-caption text-on-surface-variant mb-1">{{ t('submit.total_tasks') }}</div>
           <div class="text-h5 font-weight-medium">{{ state.dryRunResult.length }}</div>
         </v-card>
       </v-col>
-      <v-col cols="12" sm="4">
+      <v-col cols="12" sm="3">
         <v-card class="pa-3 text-center">
           <div class="text-caption text-on-surface-variant mb-1">{{ t('submit.sweep_label') }}</div>
           <div class="text-body-2 font-weight-medium" style="word-break: break-word">{{ state.sweepSummary || '-' }}</div>
         </v-card>
       </v-col>
-      <v-col cols="12" sm="4">
+      <v-col cols="12" sm="3">
         <v-card class="pa-3 text-center">
           <div class="text-caption text-on-surface-variant mb-1">{{ t('submit.project') }}</div>
           <div class="text-body-2 font-weight-medium text-truncate">{{ state.projectName }}</div>
+        </v-card>
+      </v-col>
+      <v-col cols="12" sm="3">
+        <v-card class="pa-3">
+          <div class="d-flex align-center justify-space-between ga-3">
+            <div class="flex-grow-1">
+              <div class="text-caption text-on-surface-variant mb-1">{{ t('submit.preflight') }}</div>
+              <div
+                class="text-body-2 font-weight-medium"
+                :class="state.preflightEnabled ? 'text-success' : 'text-warning'"
+              >
+                {{ state.preflightEnabled ? t('common.on') : t('common.off') }}
+              </div>
+            </div>
+            <v-switch
+              v-model="state.preflightEnabled"
+              :color="state.preflightEnabled ? 'success' : 'warning'"
+              density="compact"
+              hide-details
+              inset
+              :aria-label="t('submit.preflight')"
+            />
+          </div>
         </v-card>
       </v-col>
     </v-row>

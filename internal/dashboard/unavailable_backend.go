@@ -52,7 +52,7 @@ func (b *UnavailableBackend) ResumeJob(ctx context.Context, jobID string) error 
 	return b.wrap()
 }
 
-func (b *UnavailableBackend) SubmitJob(ctx context.Context, cfg job.JobConfig) (string, int, error) {
+func (b *UnavailableBackend) SubmitJob(ctx context.Context, cfg job.JobConfig, opts SubmitOptions) (string, int, error) {
 	return "", 0, b.wrap()
 }
 

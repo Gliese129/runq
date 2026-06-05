@@ -85,6 +85,7 @@
   "submit.no_tasks_hint": "Script parsed OK, but parameter expansion produced 0 tasks",
   "submit.dryrun_failed": "Dry-run failed",
   "submit.show_hidden": "Show hidden files",
+  "submit.preflight": "Preflight",
   "submit.success": "Job submitted!",
 
   "settings.title": "Settings",
@@ -131,5 +132,7 @@
   "common.error": "Error",
   "common.done": "Done",
   "common.idle": "Idle",
+  "common.on": "On",
+  "common.off": "Off",
   "common.retry": "Retry"
 }

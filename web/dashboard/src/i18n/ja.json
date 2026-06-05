@@ -85,6 +85,7 @@
   "submit.no_tasks_hint": "スクリプトは正常に解析されましたが、パラメータ展開でタスクが生成されませんでした",
   "submit.dryrun_failed": "ドライランに失敗しました",
   "submit.show_hidden": "隠しファイルを表示",
+  "submit.preflight": "事前チェック",
   "submit.success": "ジョブを投入しました！",
 
   "settings.title": "設定",
@@ -131,5 +132,7 @@
   "common.error": "エラー",
   "common.done": "完了",
   "common.idle": "アイドル",
+  "common.on": "オン",
+  "common.off": "オフ",
   "common.retry": "再試行"
 }

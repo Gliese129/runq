@@ -108,15 +108,22 @@ func (b *DaemonBackend) ResumeJob(ctx context.Context, jobID string) error {
 	return b.do(ctx, "POST", "/api/jobs/"+jobID+"/resume", nil, nil)
 }
 
-func (b *DaemonBackend) SubmitJob(ctx context.Context, cfg job.JobConfig) (string, int, error) {
+func (b *DaemonBackend) SubmitJob(ctx context.Context, cfg job.JobConfig, opts SubmitOptions) (string, int, error) {
 	var resp struct {
 		JobID      string `json:"job_id"`
 		TotalTasks int    `json:"total_tasks"`
 	}
-	if err := b.do(ctx, "POST", "/api/jobs", cfg, &resp); err != nil {
+	if err := b.do(ctx, "POST", daemonSubmitPath(opts), cfg, &resp); err != nil {
 		return "", 0, err
 	}
 	return resp.JobID, resp.TotalTasks, nil
+}
+
+func daemonSubmitPath(opts SubmitOptions) string {
+	if opts.SkipPreflight {
+		return "/api/jobs?no_preflight=1"
+	}
+	return "/api/jobs"
 }
 
 func (b *DaemonBackend) DryRun(_ context.Context, cfg job.JobConfig) ([]job.TaskParams, error) {

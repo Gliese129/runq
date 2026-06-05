@@ -282,7 +282,7 @@ var scriptRegex = regexp.MustCompile(`(?:python\d*\s+(?:-\w+\s+)*)([^\s]+\.py)\b
 // supported — only the module name on the first line is captured,
 // which is what we care about for the resolution check.
 var topLevelImportRegex = regexp.MustCompile(
-	`(?m)^[ \t]*(?:from\s+([\w.]+)\s+import\b|import\s+([\w.,\s]+))`,
+	`(?m)^[ \t]*(?:from[ \t]+([\w.]+)[ \t]+import\b|import[ \t]+([^\n#]+))`,
 )
 
 // extractImports reads the python script referenced by `sampleCmd`

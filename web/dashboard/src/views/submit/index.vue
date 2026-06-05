@@ -56,23 +56,30 @@
         size="large"
         :loading="submitting"
         :disabled="dryRunResult.length === 0"
-        @click="submit"
+        @click="submit()"
       >
         <v-icon start>mdi-rocket-launch-outline</v-icon>
         {{ t('submit.submit') }} ({{ dryRunResult.length }} tasks)
       </v-btn>
     </div>
 
-    <!-- Persistent submit error -->
-    <v-alert
-      v-if="submitError && step === 2"
-      type="error" variant="tonal" density="compact" closable
-      class="mt-3"
-      style="max-width: 960px; margin: 0 auto"
-      @click:close="submitError = ''"
-    >
-      {{ submitError }}
-    </v-alert>
+    <!-- Submit error -->
+    <div v-if="submitError && step === 2" class="mt-3" style="max-width: 960px; margin: 0 auto">
+      <PreflightError
+        v-if="isPreflightError"
+        :message="submitError"
+        closable
+        @skip-preflight="submit(true)"
+        @close="submitError = ''"
+      />
+      <v-alert
+        v-else
+        type="error" variant="tonal" density="compact" closable
+        @click:close="submitError = ''"
+      >
+        {{ submitError }}
+      </v-alert>
+    </div>
   </div>
 </template>
 
@@ -85,6 +92,7 @@ import { useSnackbar } from '@/composables/useSnackbar'
 import { usePreferences } from '@/composables/usePreferences'
 import type { ProjectSummary } from '@/types/api'
 
+import PreflightError from '@/components/PreflightError.vue'
 import StepProject from './StepProject.vue'
 import StepConfigure from './StepConfigure.vue'
 import StepReview from './StepReview.vue'
@@ -94,6 +102,7 @@ import {
   buildProjectPayload as createProjectPayload,
   dryRunHeaders as createDryRunHeaders,
   groupTaskCount as countGroupTasks,
+  submitEndpoint as createSubmitEndpoint,
   sweepSummary as summarizeSweep,
   totalTaskCount as countTotalTasks,
   validateConfigure,
@@ -133,6 +142,7 @@ const dryRunResult = ref<Record<string, any>[]>([])
 const dryRunLoading = ref(false)
 const dryRunError = ref('')
 const submitting = ref(false)
+const preflightEnabled = ref(true)
 
 // ── Computed ──
 
@@ -180,6 +190,7 @@ provide(SUBMIT_STATE_KEY, reactive({
   dryRunError,
   dryRunHeaders,
   submitting,
+  preflightEnabled,
   prefs,
   groupTaskCount,
   getNextGroupId: () => ++groupIdCounter,
@@ -264,12 +275,14 @@ function buildJobConfig() {
 }
 
 const submitError = ref('')
+const isPreflightError = computed(() => submitError.value.includes('preflight') || submitError.value.includes('- import:') || submitError.value.includes('- pip_check:'))
 
-async function submit() {
+async function submit(forceSkipPreflight = false) {
   submitting.value = true
   submitError.value = ''
   try {
-    const res = await api.post<{ job_id: string }>('/jobs', buildJobConfig())
+    const url = createSubmitEndpoint(preflightEnabled.value, forceSkipPreflight)
+    const res = await api.post<{ job_id: string }>(url, buildJobConfig())
     snack.success(t('submit.success'))
     router.push({ name: 'job-detail', params: { project: projectName.value, jobId: res.job_id } })
   } catch (e: any) {

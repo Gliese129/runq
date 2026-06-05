@@ -65,6 +65,7 @@ export interface SubmitState {
   dryRunError: string
   dryRunHeaders: { title: string; key: string }[]
   submitting: boolean
+  preflightEnabled: boolean
   prefs: any
   groupTaskCount: (group: SweepGroup) => number
   getNextGroupId: () => number

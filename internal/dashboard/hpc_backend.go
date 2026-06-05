@@ -123,13 +123,13 @@ func (b *HPCBackend) ResumeJob(ctx context.Context, jobID string) error {
 	return fmt.Errorf("resume job in hpc mode: %w", ErrNotSupported)
 }
 
-func (b *HPCBackend) SubmitJob(ctx context.Context, cfg job.JobConfig) (string, int, error) {
+func (b *HPCBackend) SubmitJob(ctx context.Context, cfg job.JobConfig, opts SubmitOptions) (string, int, error) {
 	reg := project.NewRegistry(b.store.DB())
 	proj, err := reg.Get(cfg.Project)
 	if err != nil {
 		return "", 0, fmt.Errorf("project %q not found: %w", cfg.Project, err)
 	}
-	return b.backend.Submit(ctx, cfg, proj, hpc.SubmitOpts{})
+	return b.backend.Submit(ctx, cfg, proj, hpc.SubmitOpts{SkipPreflight: opts.SkipPreflight})
 }
 
 func (b *HPCBackend) DryRun(_ context.Context, cfg job.JobConfig) ([]job.TaskParams, error) {

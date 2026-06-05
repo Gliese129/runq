@@ -245,7 +245,10 @@ func (s *Server) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
 		writeErrorStatus(w, http.StatusBadRequest, fmt.Errorf("project is required"))
 		return
 	}
-	jobID, total, err := s.backend.SubmitJob(r.Context(), cfg)
+	opts := SubmitOptions{
+		SkipPreflight: r.URL.Query().Get("no_preflight") == "1",
+	}
+	jobID, total, err := s.backend.SubmitJob(r.Context(), cfg, opts)
 	if err != nil {
 		writeError(w, err)
 		return

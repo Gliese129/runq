@@ -36,13 +36,17 @@ type Backend interface {
 	PauseJob(ctx context.Context, jobID string) error
 	ResumeJob(ctx context.Context, jobID string) error
 
-	SubmitJob(ctx context.Context, cfg job.JobConfig) (jobID string, totalTasks int, err error)
+	SubmitJob(ctx context.Context, cfg job.JobConfig, opts SubmitOptions) (jobID string, totalTasks int, err error)
 	DryRun(ctx context.Context, cfg job.JobConfig) ([]job.TaskParams, error)
 	GetProject(ctx context.Context, name string) (*project.Config, error)
 	ListProjects(ctx context.Context) ([]ProjectSummary, error)
 	MatchProjects(ctx context.Context, dir string) ([]ProjectSummary, error)
 	CreateProject(ctx context.Context, cfg project.Config) error
 	UpdateProject(ctx context.Context, cfg project.Config) error
+}
+
+type SubmitOptions struct {
+	SkipPreflight bool
 }
 
 // ---- builders: store rows → view types ----
