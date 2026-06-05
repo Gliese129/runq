@@ -85,8 +85,8 @@ func Build(ctx context.Context, cfg job.JobConfig, proj *project.Config, d Deps)
 			maxRetry = *cfg.Overrides.MaxRetry
 		}
 	}
-	if gpusPerTask <= 0 {
-		gpusPerTask = 1
+	if gpusPerTask < 0 {
+		gpusPerTask = 0
 	}
 
 	var timeoutSec int

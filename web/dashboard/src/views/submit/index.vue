@@ -282,7 +282,7 @@ async function submit(forceSkipPreflight = false) {
   submitError.value = ''
   try {
     const url = createSubmitEndpoint(preflightEnabled.value, forceSkipPreflight)
-    const res = await api.post<{ job_id: string }>(url, buildJobConfig())
+    const res = await api.post<{ job_id: string }>(url, buildJobConfig(), { timeoutMs: 50000 })
     snack.success(t('submit.success'))
     router.push({ name: 'job-detail', params: { project: projectName.value, jobId: res.job_id } })
   } catch (e: any) {

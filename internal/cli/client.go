@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"text/tabwriter"
+	"time"
 
 	"github.com/gliese129/runq/internal/api"
 )
@@ -28,8 +30,18 @@ func newClient() *api.Client {
 // doAndDecode sends a request to the daemon and decodes the JSON response.
 // If v is nil, the response body is drained and discarded.
 func doAndDecode(method, path string, body any, v any) error {
+	return doAndDecodeWithTimeout(method, path, body, v, 0)
+}
+
+func doAndDecodeWithTimeout(method, path string, body any, v any, timeout time.Duration) error {
 	client := newClient()
-	resp, err := client.Do(method, path, body)
+	var resp *http.Response
+	var err error
+	if timeout > 0 {
+		resp, err = client.DoWithTimeout(method, path, body, timeout)
+	} else {
+		resp, err = client.Do(method, path, body)
+	}
 	if err != nil {
 		msg := api.DiagnoseDaemon(getSocketPath(), api.DefaultPIDPath())
 		return fmt.Errorf("%s", msg)

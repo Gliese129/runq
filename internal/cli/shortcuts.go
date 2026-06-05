@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/gliese129/runq/internal/api"
 	"github.com/gliese129/runq/internal/config"
 	job2 "github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/utils"
@@ -169,7 +170,7 @@ job.yaml in the current directory.`,
 			// it and forwards into SubmitJobOpts.SkipPreflight.
 			submitPath = "/api/jobs?no_preflight=1"
 		}
-		if err := doAndDecode("POST", submitPath, job, &resp); err != nil {
+		if err := doAndDecodeWithTimeout("POST", submitPath, job, &resp, api.SubmitClientTimeout); err != nil {
 			return err
 		}
 		if jsonOut {
@@ -292,7 +293,7 @@ var runCmd = &cobra.Command{
 			TotalTasks int    `json:"total_tasks"`
 		}
 		var resp JobResp
-		if err := doAndDecode("POST", "/api/jobs", jobCfg, &resp); err != nil {
+		if err := doAndDecodeWithTimeout("POST", "/api/jobs", jobCfg, &resp, api.SubmitClientTimeout); err != nil {
 			return err
 		}
 		fmt.Printf("Job submitted: id=%s tasks=%d\n", resp.JobId, resp.TotalTasks)

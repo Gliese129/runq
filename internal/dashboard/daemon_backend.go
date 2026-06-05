@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
+	"time"
 
 	"github.com/gliese129/runq/internal/api"
 	"github.com/gliese129/runq/internal/job"
@@ -113,7 +115,7 @@ func (b *DaemonBackend) SubmitJob(ctx context.Context, cfg job.JobConfig, opts S
 		JobID      string `json:"job_id"`
 		TotalTasks int    `json:"total_tasks"`
 	}
-	if err := b.do(ctx, "POST", daemonSubmitPath(opts), cfg, &resp); err != nil {
+	if err := b.doWithTimeout(ctx, "POST", daemonSubmitPath(opts), cfg, &resp, api.SubmitClientTimeout); err != nil {
 		return "", 0, err
 	}
 	return resp.JobID, resp.TotalTasks, nil
@@ -208,8 +210,18 @@ func (b *DaemonBackend) taskRows(ctx context.Context, jobID string) ([]store.Tas
 }
 
 func (b *DaemonBackend) do(ctx context.Context, method, path string, body any, out any) error {
+	return b.doWithTimeout(ctx, method, path, body, out, 0)
+}
+
+func (b *DaemonBackend) doWithTimeout(ctx context.Context, method, path string, body any, out any, timeout time.Duration) error {
 	_ = ctx
-	resp, err := b.client.Do(method, path, body)
+	var resp *http.Response
+	var err error
+	if timeout > 0 {
+		resp, err = b.client.DoWithTimeout(method, path, body, timeout)
+	} else {
+		resp, err = b.client.Do(method, path, body)
+	}
 	if err != nil {
 		return err
 	}

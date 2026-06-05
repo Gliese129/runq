@@ -23,6 +23,7 @@ export class ApiError extends Error {
 
 interface RequestOptions {
   silent?: boolean
+  timeoutMs?: number
 }
 
 async function request<T>(method: string, path: string, body?: unknown, opts?: RequestOptions): Promise<T> {
@@ -31,6 +32,7 @@ async function request<T>(method: string, path: string, body?: unknown, opts?: R
       method,
       url: path,
       data: body,
+      timeout: opts?.timeoutMs,
     })
     onApiSuccess()
     return res.data

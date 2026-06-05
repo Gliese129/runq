@@ -8,8 +8,9 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/gliese129/runq/internal/project"
+	"github.com/gliese129/runq/internal/api"
 	job2 "github.com/gliese129/runq/internal/job"
+	"github.com/gliese129/runq/internal/project"
 	"github.com/olekukonko/tablewriter"
 	"github.com/spf13/cobra"
 )
@@ -167,7 +168,7 @@ func runSweep(cmd *cobra.Command, args []string) error {
 		TotalGPUs  int    `json:"total_gpus"`
 	}
 	var resp JobResp
-	if err := doAndDecode("POST", "/api/jobs", jobCfg, &resp); err != nil {
+	if err := doAndDecodeWithTimeout("POST", "/api/jobs", jobCfg, &resp, api.SubmitClientTimeout); err != nil {
 		return err
 	}
 	fmt.Printf("Job submitted: id=%s tasks=%d (method=%s)\n", resp.JobId, resp.TotalTasks, method)
