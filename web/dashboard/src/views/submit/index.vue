@@ -89,6 +89,15 @@ import StepProject from './StepProject.vue'
 import StepConfigure from './StepConfigure.vue'
 import StepReview from './StepReview.vue'
 import { SUBMIT_STATE_KEY, type SweepGroup } from '@/types/submit'
+import {
+  buildJobConfig as createJobConfig,
+  buildProjectPayload as createProjectPayload,
+  dryRunHeaders as createDryRunHeaders,
+  groupTaskCount as countGroupTasks,
+  sweepSummary as summarizeSweep,
+  totalTaskCount as countTotalTasks,
+  validateConfigure,
+} from './submitFlow'
 
 const stepComponents = [markRaw(StepProject), markRaw(StepConfigure), markRaw(StepReview)]
 
@@ -136,55 +145,20 @@ const usedParamNames = computed(() => {
 })
 
 function groupTaskCount(group: SweepGroup): number {
-  if (group.params.length === 0) return 0
-  const counts = group.params.map(p => activeValues(p).length)
-  if (counts.every(c => c === 0)) return 0
-  if (group.type === 'grid') {
-    // Grid: cartesian product — only params with values contribute
-    return counts.filter(c => c > 0).reduce((acc, c) => acc * c, 1)
-  }
-  // List: all params must have same count (backend enforces), show min for safety
-  const nonZero = counts.filter(c => c > 0)
-  return nonZero.length > 0 ? Math.min(...nonZero) : 0
+  return countGroupTasks(group)
 }
 
-const totalTaskCount = computed(() => {
-  const activeGroups = groups.value.filter(g => g.params.length > 0)
-  if (activeGroups.length === 0) return 1
-  const counts = activeGroups.map(g => groupTaskCount(g))
-  if (counts.some(c => c === 0)) return 0 // has params but no values = invalid, not 1
-  return counts.reduce((product, c) => product * c, 1)
-})
+const totalTaskCount = computed(() => countTotalTasks(groups.value))
 
 const displayTaskCount = computed(() => {
   if (step.value === 2 && !dryRunLoading.value) return dryRunResult.value.length
   return totalTaskCount.value
 })
 
-const sweepSummary = computed(() => {
-  if (groups.value.length === 0) return ''
-  return groups.value
-    .filter(g => g.params.length > 0)
-    .map(g => {
-      const label = g.type === 'grid' ? 'Grid' : 'List'
-      const parts = g.params.map(p => `${p.name}(${activeValues(p).length})`)
-      return `[${label}] ${parts.join(g.type === 'grid' ? ' x ' : ', ')}`
-    })
-    .join(' + ')
-})
+const sweepSummary = computed(() => summarizeSweep(groups.value))
 
 const dryRunHeaders = computed(() => {
-  if (dryRunResult.value.length === 0) return []
-  const keys = new Set<string>()
-  for (const row of dryRunResult.value) {
-    for (const key of Object.keys(row)) keys.add(key)
-  }
-  const ordered: string[] = []
-  for (const p of newProject.params) {
-    if (keys.delete(p.name)) ordered.push(p.name)
-  }
-  ordered.push(...Array.from(keys).sort())
-  return ordered.map(k => ({ title: k, key: k }))
+  return createDryRunHeaders(dryRunResult.value, newProject.params)
 })
 
 // ── Provide ──
@@ -214,35 +188,7 @@ provide(SUBMIT_STATE_KEY, reactive({
 // ── Actions ──
 
 function buildProjectPayload() {
-  const payload: Record<string, any> = {
-    project_name: newProject.name.trim(),
-    working_dir: newProject.workDir,
-    command_template: newProject.cmd,
-    defaults: { gpus_per_task: newProject.gpus, max_retry: newProject.maxRetry },
-  }
-  if (newProject.envType) {
-    payload.python_env = {
-      type: newProject.envType,
-      path: newProject.envPath || undefined,
-      name: newProject.envName || undefined,
-    }
-  }
-  // Persist all param metadata. `include` is submit-flow state, not project YAML state.
-  const params = newProject.params.filter(p => p.name.trim())
-  if (params.length > 0) {
-    payload.params = params.map(p => {
-      const choices = p.values?.filter(v => !isBlankValue(v))
-      return {
-        name: p.name.trim(),
-        type: p.type,
-        default: !isBlankValue(p.default) ? p.default : undefined,
-        choices: choices?.length ? choices : undefined,
-        min: p.min ?? undefined,
-        max: p.max ?? undefined,
-      }
-    })
-  }
-  return payload
+  return createProjectPayload(newProject)
 }
 
 async function saveProject(): Promise<boolean> {
@@ -288,31 +234,12 @@ async function goNext() {
     if (!ok) return
   }
   if (step.value === 1) {
-    // ── Validation ──
-    const activeGroups = groups.value.filter(g => g.params.length > 0)
-    // Check for params with no values
-    for (const g of activeGroups) {
-      const emptyParams = g.params.filter(p => activeValues(p).length === 0)
-      if (emptyParams.length > 0) {
-        snack.error(`"${emptyParams[0].name}" has no values — add values or remove it`)
-        return
-      }
-      for (const p of g.params) {
-        const invalid = activeValues(p).find(v => validateTypedValue(v, p.type))
-        if (invalid != null) {
-          snack.error(`"${p.name}" has invalid ${p.type} value: ${invalid}`)
-          return
-        }
-      }
-    }
-    // List groups: equal non-empty value counts
-    for (const g of groups.value) {
-      if (g.type !== 'list' || g.params.length === 0) continue
-      const lengths = g.params.map(p => activeValues(p).length).filter(l => l > 0)
-      if (lengths.length > 0 && new Set(lengths).size > 1) {
-        snack.error(t('submit.list_length_mismatch', 'List group 中各参数的值数量必须相等'))
-        return
-      }
+    const validation = validateConfigure(groups.value, {
+      listLengthMismatchMessage: t('submit.list_length_mismatch', 'List group 中各参数的值数量必须相等'),
+    })
+    if (!validation.ok) {
+      snack.error(validation.message)
+      return
     }
     // Run dry-run before entering review
     prefs.lastProject.value = projectName.value
@@ -333,67 +260,7 @@ async function goNext() {
 }
 
 function buildJobConfig() {
-  const sweep: { method: string; parameters: Record<string, { values: any[] }> }[] = []
-  const sweptNames = new Set<string>()
-
-  for (const g of groups.value) {
-    const active = g.params.filter(p => activeValues(p).length > 0)
-    if (active.length === 0) continue
-    const parameters: Record<string, { values: any[] }> = {}
-    for (const p of active) {
-      const cleaned = activeValues(p)
-      parameters[p.name] = { values: cleaned.map(v => coerceValue(v, p.type)) }
-      sweptNames.add(p.name)
-    }
-    sweep.push({ method: g.type, parameters })
-  }
-
-  // Collect fixed_params: included params with default that aren't in sweep
-  const fixedParams: Record<string, any> = {}
-  for (const p of newProject.params) {
-    if (!p.include || isBlankValue(p.default) || sweptNames.has(p.name)) continue
-    fixedParams[p.name] = coerceValue(p.default, p.type)
-  }
-
-  return {
-    project: projectName.value,
-    note: note.value,
-    fixed_params: Object.keys(fixedParams).length > 0 ? fixedParams : undefined,
-    sweep,
-  }
-}
-
-function coerceValue(v: string, type: string): any {
-  const trimmed = v.trim()
-  switch (type) {
-    case 'int': { const n = parseInt(trimmed, 10); return isNaN(n) ? v : n }
-    case 'float': { const n = parseFloat(trimmed); return isNaN(n) ? v : n }
-    case 'bool': return trimmed.toLowerCase() === 'true' || trimmed === '1'
-    case 'str': case 'file': case 'folder': case 'list': return v
-    default: return v
-  }
-}
-
-function isBlankValue(v: string): boolean {
-  return String(v ?? '').trim() === ''
-}
-
-function activeValues(p: { values: string[] }): string[] {
-  return p.values.filter(v => !isBlankValue(v))
-}
-
-function validateTypedValue(value: string, type: string): string {
-  const trimmed = value.trim()
-  switch (type) {
-    case 'int':
-      return /^-?\d+$/.test(trimmed) ? '' : value
-    case 'float':
-      return trimmed !== '' && Number.isFinite(Number(trimmed)) ? '' : value
-    case 'bool':
-      return ['true', 'false', '1', '0'].includes(trimmed.toLowerCase()) ? '' : value
-    default:
-      return ''
-  }
+  return createJobConfig(projectName.value, note.value, newProject, groups.value)
 }
 
 const submitError = ref('')
