@@ -4,10 +4,14 @@
     <v-slide-y-transition>
       <v-card v-if="!conn.connected.value" color="error" variant="tonal" class="mb-4 pa-3">
         <div class="d-flex align-center ga-2">
-          <v-icon size="18">mdi-connection</v-icon>
+          <v-icon size="18">{{ conn.daemonDown.value ? 'mdi-server-off' : 'mdi-connection' }}</v-icon>
           <div class="flex-grow-1">
-            <div class="text-body-2 font-weight-medium">{{ t('status.disconnected') }}</div>
-            <div class="text-caption">{{ conn.lastError.value }}</div>
+            <div class="text-body-2 font-weight-medium">{{ t(conn.statusKey.value) }}</div>
+            <div v-if="conn.daemonDown.value" class="text-caption d-flex align-center ga-1">
+              <span>{{ t('status.daemon_down_hint') }}</span>
+              <code class="px-1">runq daemon start --detach</code>
+            </div>
+            <div v-else class="text-caption">{{ conn.lastError.value }}</div>
           </div>
           <v-btn variant="tonal" size="x-small" @click="retryConnection">{{ t('common.retry') }}</v-btn>
         </div>
@@ -117,7 +121,7 @@
         <v-icon start size="16">mdi-plus</v-icon> {{ t('nav.submit') }}
       </v-btn>
       <div class="mt-4 text-caption text-on-surface-variant">
-        {{ t('overview.hint_cli') }} <code>runq submit train.py --lr 0.001</code>
+        {{ t('overview.hint_cli') }} <code>runq init train.py</code> → <code>runq submit .</code>
       </div>
     </v-card>
   </div>
@@ -146,7 +150,7 @@ const metrics = computed(() => [
   { key: 'running', label: t('overview.running'), value: jobs.totalRunning, dotClass: 'running' },
   { key: 'pending', label: t('overview.pending'), value: jobs.totalPending, dotClass: 'pending' },
   { key: 'failed', label: t('overview.failed'), value: jobs.totalFailed, dotClass: 'failed' },
-  { key: 'done', label: t('overview.completed') || 'Completed', value: totalCompleted.value, dotClass: 'completed' },
+  { key: 'done', label: t('overview.completed'), value: totalCompleted.value, dotClass: 'completed' },
 ])
 
 const totalCompleted = computed(() =>

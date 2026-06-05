@@ -115,7 +115,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
-import { api } from '@/apis/client'
+import { filesApi } from '@/apis/files'
 import { usePreferences } from '@/composables/usePreferences'
 import type { FSEntry } from '@/types/api'
 
@@ -179,7 +179,7 @@ async function loadDir(path: string) {
   currentDir.value = path
   pathInput.value = path ? path + '/' : ''
   try {
-    entries.value = await api.get<FSEntry[]>(`/fs/list?path=${encodeURIComponent(path)}`)
+    entries.value = await filesApi.list(path)
   } catch { entries.value = [] }
 }
 

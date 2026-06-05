@@ -5,24 +5,24 @@
   "nav.submit": "投入",
   "nav.settings": "設定",
   "nav.about": "情報",
-
   "status.disconnected": "未接続",
+  "status.connected": "接続済み",
+  "status.daemon_down": "デーモンが起動していません",
+  "status.daemon_down_hint": "次のコマンドで起動: runq daemon start --detach",
   "status.gpu_off": "GPUモニター無効",
-
   "overview.running": "実行中",
   "overview.pending": "待機中",
   "overview.gpu_free": "GPU空き",
   "overview.failed": "失敗",
+  "overview.completed": "完了",
   "overview.no_projects": "プロジェクトがありません",
   "overview.no_projects_hint": "ジョブを投入して始めましょう",
   "overview.hint_cli": "コマンドラインからも可能です：",
   "overview.recent": "最近のジョブ",
   "overview.projects": "プロジェクト",
-
   "project.jobs": "ジョブ",
   "project.no_jobs": "このプロジェクトにはジョブがありません",
   "project.no_jobs_hint": "投入しますか？",
-
   "job.tasks": "タスク",
   "job.leaderboard": "ランキング",
   "job.wandb": "W&B",
@@ -48,7 +48,6 @@
   "job.status.pending": "待機中",
   "job.status.failed": "失敗",
   "job.status.killed": "停止済",
-
   "submit.title": "ジョブ投入",
   "submit.subtitle": "スクリプトを選び、パラメータを設定して実行",
   "submit.select_script": "スクリプト選択",
@@ -87,13 +86,13 @@
   "submit.show_hidden": "隠しファイルを表示",
   "submit.preflight": "事前チェック",
   "submit.success": "ジョブを投入しました！",
-
   "settings.title": "設定",
   "settings.system": "システム",
   "settings.mode": "モード",
   "settings.mode_local": "ローカル（デーモン）",
   "settings.mode_hpc": "HPCクラスター",
   "settings.data_path": "データパス",
+  "settings.data_path_default": "デフォルト: プロジェクトの .runq",
   "settings.config_path": "設定ファイルパス",
   "settings.webhook": "通知",
   "settings.webhook_hint": "ジョブ完了やタスク失敗の通知を受け取る",
@@ -115,10 +114,9 @@
   "settings.config": "構成情報",
   "settings.anime_mode": "アニメモード",
   "settings.anime_hint": "ページの各所にちびキャラを表示",
-
+  "settings.experimental": "実験的機能",
   "about.title": "runqについて",
   "about.description": "研究室向けGPUジョブスケジューラ",
-
   "common.save": "保存",
   "common.cancel": "キャンセル",
   "common.confirm": "確認",

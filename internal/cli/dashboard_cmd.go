@@ -102,7 +102,7 @@ func newDashboardBackend(mode string) (dashboard.Backend, func(), error) {
 		}
 		return dashboard.NewHPCBackend(b, st), func() { _ = st.Close() }, nil
 	case config.ModeDaemon:
-		return dashboard.NewDaemonBackend(getSocketPath(), nil), func() {}, nil
+		return dashboard.NewDaemonBackend(getSocketPath()), func() {}, nil
 	default:
 		return nil, nil, fmt.Errorf("unsupported mode %q", mode)
 	}

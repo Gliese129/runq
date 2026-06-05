@@ -3,14 +3,14 @@
     <JobHeader
       :detail="store.detail"
       :top-runs="topRuns"
-      :metric-key="selectedMetric"
+      :metric-key="topMetricKey"
       :can-pause="config.features.pause_resume"
       @pause="togglePause"
       @resume="togglePause"
       @kill="killJob"
     />
 
-    <!-- Filter + sort bar -->
+    <!-- Filter bar -->
     <div class="d-flex align-center ga-2 mb-3 flex-wrap">
       <v-chip
         v-for="s in statusOptions"
@@ -23,33 +23,18 @@
         <div v-if="s.dot" class="status-dot mr-1" :class="`status-dot--${s.dot}`" style="width:6px;height:6px" />
         {{ s.label }}
       </v-chip>
-      <v-spacer />
-      <v-select
-        v-if="store.detail.metric_keys.length > 0"
-        v-model="selectedMetric"
-        :items="store.detail.metric_keys"
-        label="Sort by metric"
-        hide-details density="compact" variant="outlined"
-        clearable style="max-width: 180px"
-      />
-      <v-btn-toggle
-        v-if="selectedMetric"
-        v-model="compareDesc"
-        mandatory density="compact" variant="outlined"
-      >
-        <v-btn :value="true" size="x-small"><v-icon size="14">mdi-sort-descending</v-icon></v-btn>
-        <v-btn :value="false" size="x-small"><v-icon size="14">mdi-sort-ascending</v-icon></v-btn>
-      </v-btn-toggle>
     </div>
 
-    <!-- Table: tasks or compare -->
-    <CompareTable v-if="isCompareMode" :rows="store.compare" :metric-key="selectedMetric" />
+    <!-- Unified task table with param columns + sorting -->
     <TaskTable
-      v-else
       :tasks="filteredTasks"
+      :job-id="props.jobId"
       :wandb="store.detail.wandb"
+      :metric-keys="store.detail.metric_keys"
+      :swept-params="sweptParams"
       @kill-task="onKillTask"
       @retry-task="onRetryTask"
+      @click-task="onClickTask"
     />
 
     <!-- W&B tab -->
@@ -78,6 +63,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, onUnmounted } from 'vue'
+import { useRouter } from 'vue-router'
 import { useJobDetailStore } from '@/stores/jobDetail'
 import { useConfigStore } from '@/stores/config'
 import { usePreferences } from '@/composables/usePreferences'
@@ -85,17 +71,15 @@ import { usePolling } from '@/composables/usePolling'
 import { useSnackbar } from '@/composables/useSnackbar'
 import JobHeader from './JobHeader.vue'
 import TaskTable from './TaskTable.vue'
-import CompareTable from './CompareTable.vue'
 
 const props = defineProps<{ project: string; jobId: string }>()
+const router = useRouter()
 const store = useJobDetailStore()
 const config = useConfigStore()
 const prefs = usePreferences()
 const snack = useSnackbar()
 
 const statusFilter = ref(prefs.lastStatusFilter.value)
-const selectedMetric = ref('')
-const compareDesc = ref(prefs.compareSortDesc.value)
 
 const statusOptions = [
   { value: '', label: 'All', dot: '' },
@@ -110,8 +94,35 @@ const isActive = computed(() => {
   return s === 'running' || s === 'pending' || s === 'paused'
 })
 
-const isCompareMode = computed(() => !!selectedMetric.value)
+// Detect swept params: params that differ across tasks
+const sweptParams = computed(() => {
+  if (!store.detail || store.detail.tasks.length < 2) return []
+  const tasks = store.detail.tasks
+  const first = tasks[0].params || {}
+  const varying = new Set<string>()
+  for (const t of tasks.slice(1)) {
+    for (const [k, v] of Object.entries(t.params || {})) {
+      if (first[k] !== v) varying.add(k)
+    }
+    for (const k of Object.keys(first)) {
+      if (!(k in (t.params || {}))) varying.add(k)
+    }
+  }
+  return [...varying]
+})
+
+// For JobHeader top runs — use first metric key
+const topMetricKey = computed(() => store.detail?.metric_keys?.[0] || '')
 const topRuns = computed(() => store.compare.slice(0, 3))
+
+// Auto-fetch compare for top runs display
+watch(() => store.detail?.metric_keys, (keys) => {
+  if (keys && keys.length > 0) {
+    const preferred = prefs.preferredMetrics.value[props.jobId]
+    const key = preferred && keys.includes(preferred) ? preferred : keys[0]
+    store.fetchCompare(props.jobId, key, true)
+  }
+}, { immediate: true })
 
 const filteredTasks = computed(() => {
   if (!store.detail) return []
@@ -120,23 +131,6 @@ const filteredTasks = computed(() => {
     return store.detail.tasks.filter(t => ['success', 'completed', 'done'].includes(t.status))
   }
   return store.detail.tasks.filter(t => t.status === statusFilter.value)
-})
-
-// Auto-select first metric
-watch(() => store.detail?.metric_keys, (keys) => {
-  if (keys && keys.length > 0 && !selectedMetric.value) {
-    const preferred = prefs.preferredMetrics.value[props.jobId]
-    selectedMetric.value = preferred && keys.includes(preferred) ? preferred : keys[0]
-  }
-}, { immediate: true })
-
-// Fetch compare on metric/sort change
-watch([selectedMetric, compareDesc], ([key, desc]) => {
-  if (key) {
-    prefs.setPreferredMetric(props.jobId, key)
-    prefs.compareSortDesc.value = desc
-    store.fetchCompare(props.jobId, key, desc)
-  }
 })
 
 watch(statusFilter, (v) => { prefs.lastStatusFilter.value = v })
@@ -161,6 +155,10 @@ function onKillTask(id: string) {
 
 function onRetryTask(id: string) {
   store.retryTask(id).then(() => refresh())
+}
+
+function onClickTask(id: string) {
+  router.push({ name: 'task-detail', params: { project: props.project, jobId: props.jobId, taskId: id } })
 }
 
 usePolling(refresh, 3000, isActive)

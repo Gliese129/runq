@@ -32,6 +32,14 @@ func (b *UnavailableBackend) GPUStatus(ctx context.Context) ([]GPUSlot, error) {
 	return nil, b.wrap()
 }
 
+func (b *UnavailableBackend) GetTask(ctx context.Context, taskID string) (*TaskView, string, error) {
+	return nil, "", b.wrap()
+}
+
+func (b *UnavailableBackend) TaskMetrics(ctx context.Context, taskID string) ([]MetricPoint, error) {
+	return nil, b.wrap()
+}
+
 func (b *UnavailableBackend) KillTask(ctx context.Context, taskID string) error {
 	return b.wrap()
 }
@@ -77,6 +85,10 @@ func (b *UnavailableBackend) CreateProject(ctx context.Context, cfg project.Conf
 }
 
 func (b *UnavailableBackend) UpdateProject(ctx context.Context, cfg project.Config) error {
+	return b.wrap()
+}
+
+func (b *UnavailableBackend) RenameProject(ctx context.Context, oldName, newName string) error {
 	return b.wrap()
 }
 

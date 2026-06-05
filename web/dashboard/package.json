@@ -3,6 +3,9 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "engines": {
+    "node": ">=20.19 || >=22.12"
+  },
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
@@ -12,6 +15,7 @@
     "@mdi/font": "^7.4.0",
     "@tailwindcss/vite": "^4.3.0",
     "axios": "^1.17.0",
+    "chart.js": "^4.5.1",
     "js-yaml": "^4.2.0",
     "pinia": "^3.0.0",
     "tailwindcss": "^4.3.0",

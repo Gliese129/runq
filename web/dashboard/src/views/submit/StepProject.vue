@@ -267,9 +267,11 @@
 <script setup lang="ts">
 import { ref, computed, inject, watch, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { api } from '@/apis/client'
+import { envApi } from '@/apis/env'
+import { filesApi } from '@/apis/files'
+import { projectsApi } from '@/apis/projects'
 import { usePreferences } from '@/composables/usePreferences'
-import type { FSEntry, ParseResult, ProjectConfig, ProjectSummary } from '@/types/api'
+import type { FSEntry, ParseResult, ProjectConfig } from '@/types/api'
 import { SUBMIT_STATE_KEY } from '@/types/submit'
 import ParamEditorDialog from './ParamEditorDialog.vue'
 import FileBrowserDialog from '@/components/FileBrowserDialog.vue'
@@ -287,7 +289,7 @@ async function doRename() {
   if (!newName || newName === state.projectName) return
   renaming.value = true
   try {
-    await api.post(`/projects/${encodeURIComponent(state.projectName)}/rename`, { new_name: newName })
+    await projectsApi.rename(state.projectName, newName)
     const proj = state.matchedProjects.find(p => p.name === state.projectName)
     if (proj) proj.name = newName
     state.projectName = newName
@@ -313,7 +315,7 @@ async function selectProject(name: string) {
 	mode.value = 'select'
 	state.projectName = name
 	try {
-		const cfg = await api.get<ProjectConfig>(`/projects/${encodeURIComponent(name)}`)
+		const cfg = await projectsApi.get(name)
 		selectedConfig.value = cfg
 		applyProjectConfig(cfg, state.groups.length === 0)
 		await refreshParamsFromProject(cfg)
@@ -343,7 +345,7 @@ async function refreshParamsFromProject(cfg: ProjectConfig) {
 	if (!path) return
 	scriptPath.value = path
 	try {
-		const result = await api.post<ParseResult>('/fs/parse-script', { path }, { silent: true })
+		const result = await filesApi.parseScript(path, { silent: true })
 		mergeParsedParams(result.args || [])
 		autoIncludeCommonParams()
 	} catch {
@@ -454,7 +456,7 @@ watch(() => form.envType, async (type) => {
   if (type === 'conda' && !condaEnvsLoaded) {
     condaEnvsLoading.value = true
     try {
-      condaEnvs.value = await api.get<string[]>('/conda/envs')
+      condaEnvs.value = await envApi.listCondaEnvs()
       condaEnvsLoaded = true
     } catch { condaEnvs.value = [] }
     finally { condaEnvsLoading.value = false }
@@ -574,11 +576,7 @@ async function onScriptPicked(entry: FSEntry) {
 
   // Parse script → env + params
   try {
-    const result = await api.post<{
-      detected_env?: string
-      suggested_command: string
-      args?: Array<{ name: string; type: string; default?: string }>
-    }>('/fs/parse-script', { path: entry.path })
+    const result = await filesApi.parseScript(entry.path)
 
     if (result.suggested_command) form.cmd = result.suggested_command
 
@@ -611,7 +609,7 @@ async function onScriptPicked(entry: FSEntry) {
 onMounted(async () => {
   // Refresh project list from backend
   try {
-    state.matchedProjects = await api.get<ProjectSummary[]>('/projects')
+    state.matchedProjects = await projectsApi.list()
   } catch { state.matchedProjects = [] }
 
   // If form already has data (user came back), preserve state
@@ -626,7 +624,7 @@ onMounted(async () => {
       // Came back — keep form, just restore mode + selectedConfig
       mode.value = 'select'
       try {
-        selectedConfig.value = await api.get<any>(`/projects/${encodeURIComponent(state.projectName)}`)
+        selectedConfig.value = await projectsApi.get(state.projectName)
       } catch { selectedConfig.value = null }
     }
   }

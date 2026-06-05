@@ -98,6 +98,24 @@ function removePreferredWorkspace(path: string) {
   preferredWorkspaces.value = preferredWorkspaces.value.filter(p => p !== path)
 }
 
+// --- Job task table: visible columns per job ---
+
+const jobVisibleCols = ref<Record<string, string[]>>(load('job-cols', {}))
+
+watch(jobVisibleCols, (v) => save('job-cols', v), { deep: true })
+
+function setJobVisibleCols(jobId: string, cols: string[]) {
+  jobVisibleCols.value[jobId] = cols
+  const entries = Object.entries(jobVisibleCols.value)
+  if (entries.length > 50) {
+    jobVisibleCols.value = Object.fromEntries(entries.slice(-50))
+  }
+}
+
+function getJobVisibleCols(jobId: string): string[] | null {
+  return jobVisibleCols.value[jobId] || null
+}
+
 export function usePreferences() {
   return {
     recentScripts,
@@ -112,5 +130,7 @@ export function usePreferences() {
     preferredWorkspaces,
     addPreferredWorkspace,
     removePreferredWorkspace,
+    setJobVisibleCols,
+    getJobVisibleCols,
   }
 }

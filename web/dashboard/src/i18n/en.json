@@ -5,24 +5,24 @@
   "nav.submit": "Submit",
   "nav.settings": "Settings",
   "nav.about": "About",
-
   "status.disconnected": "Disconnected",
+  "status.connected": "Connected",
+  "status.daemon_down": "Daemon not running",
+  "status.daemon_down_hint": "Start it with: runq daemon start --detach",
   "status.gpu_off": "GPU monitor off",
-
   "overview.running": "Running",
   "overview.pending": "Pending",
   "overview.gpu_free": "GPU free",
   "overview.failed": "Failed",
+  "overview.completed": "Completed",
   "overview.no_projects": "No projects yet",
   "overview.no_projects_hint": "Submit a job to get started",
   "overview.hint_cli": "Or from the command line:",
   "overview.recent": "Recent jobs",
   "overview.projects": "Projects",
-
   "project.jobs": "Jobs",
   "project.no_jobs": "No jobs in this project",
   "project.no_jobs_hint": "Submit one?",
-
   "job.tasks": "Tasks",
   "job.leaderboard": "Leaderboard",
   "job.wandb": "W&B",
@@ -48,7 +48,6 @@
   "job.status.pending": "Pending",
   "job.status.failed": "Failed",
   "job.status.killed": "Killed",
-
   "submit.title": "Submit job",
   "submit.subtitle": "Select a script, configure params, and run",
   "submit.select_script": "Select script",
@@ -87,13 +86,13 @@
   "submit.show_hidden": "Show hidden files",
   "submit.preflight": "Preflight",
   "submit.success": "Job submitted!",
-
   "settings.title": "Settings",
   "settings.system": "System",
   "settings.mode": "Mode",
   "settings.mode_local": "Local (daemon)",
   "settings.mode_hpc": "HPC cluster",
   "settings.data_path": "Data path",
+  "settings.data_path_default": "default: project .runq",
   "settings.config_path": "Config path",
   "settings.webhook": "Notifications",
   "settings.webhook_hint": "Get notified when jobs complete or tasks fail",
@@ -115,10 +114,9 @@
   "settings.config": "Configuration",
   "settings.anime_mode": "Anime mode",
   "settings.anime_hint": "Show chibi mascot at various spots",
-
+  "settings.experimental": "Experimental",
   "about.title": "About runq",
   "about.description": "GPU job scheduler for research labs",
-
   "common.save": "Save",
   "common.cancel": "Cancel",
   "common.confirm": "Confirm",

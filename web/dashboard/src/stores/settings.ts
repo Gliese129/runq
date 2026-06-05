@@ -1,29 +1,40 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import { api } from '@/apis/client'
 import type { WebhookConfig } from '@/types/api'
 
+const WEBHOOK_STORAGE_KEY = 'runq-webhook'
+
+function readStoredWebhook(): WebhookConfig {
+  try {
+    const raw = localStorage.getItem(WEBHOOK_STORAGE_KEY)
+    if (!raw) return { url: '', events: [] }
+    const parsed = JSON.parse(raw)
+    return {
+      url: typeof parsed.url === 'string' ? parsed.url : '',
+      events: Array.isArray(parsed.events) ? parsed.events.filter((e: unknown) => typeof e === 'string') : [],
+    }
+  } catch {
+    return { url: '', events: [] }
+  }
+}
+
 export const useSettingsStore = defineStore('settings', () => {
-  const webhook = ref<WebhookConfig>({ url: '', events: [] })
+  const webhook = ref<WebhookConfig>(readStoredWebhook())
   const theme = ref(localStorage.getItem('runq-theme') || 'light')
   const locale = ref(localStorage.getItem('runq-locale') || 'en')
   const animeMode = ref(localStorage.getItem('runq-anime') === 'true')
 
   async function loadWebhook() {
-    try {
-      webhook.value = await api.get<WebhookConfig>('/config/webhook')
-    } catch {
-      // endpoint may not exist yet — keep defaults
-    }
+    webhook.value = readStoredWebhook()
   }
 
   async function saveWebhook(url: string, events: string[]) {
-    await api.post('/config/webhook', { url, events })
     webhook.value = { url, events }
+    localStorage.setItem(WEBHOOK_STORAGE_KEY, JSON.stringify(webhook.value))
   }
 
   async function testWebhook() {
-    await api.post('/config/webhook/test')
+    throw new Error('Webhook test is not supported by the dashboard backend yet')
   }
 
   function setTheme(t: string) {

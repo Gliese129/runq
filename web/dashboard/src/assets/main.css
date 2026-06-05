@@ -83,6 +83,11 @@
 .status-dot--running {
   animation: status-pulse 2s ease-in-out infinite;
 }
+@media (prefers-reduced-motion: reduce) {
+  .status-dot--running {
+    animation: none;
+  }
+}
 
 /* Terminal block — dark bg even in light mode */
 .terminal-block {

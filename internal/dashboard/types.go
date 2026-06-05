@@ -35,16 +35,26 @@ type JobDetail struct {
 }
 
 type TaskView struct {
-	ID          string         `json:"id"`
-	Status      string         `json:"status"`
-	Params      map[string]any `json:"params"`
-	CurrentStep *int           `json:"current_step,omitempty"`
-	StartedAt   *int64         `json:"started_at,omitempty"`
-	FinishedAt  *int64         `json:"finished_at,omitempty"`
-	ElapsedSec  *float64       `json:"elapsed_seconds,omitempty"`
-	ExitCode    *int           `json:"exit_code,omitempty"`
-	RetryCount  int            `json:"retry_count"`
-	WandbRunID  string         `json:"wandb_run_id,omitempty"`
+	ID          string             `json:"id"`
+	Status      string             `json:"status"`
+	Params      map[string]any     `json:"params"`
+	Metrics     map[string]float64 `json:"metrics,omitempty"`
+	CurrentStep *int               `json:"current_step,omitempty"`
+	StartedAt   *int64             `json:"started_at,omitempty"`
+	FinishedAt  *int64             `json:"finished_at,omitempty"`
+	ElapsedSec  *float64           `json:"elapsed_seconds,omitempty"`
+	ExitCode    *int               `json:"exit_code,omitempty"`
+	RetryCount  int                `json:"retry_count"`
+	MaxRetry    int                `json:"max_retry"`
+	GPUs        string             `json:"gpus,omitempty"`
+	WandbRunID  string             `json:"wandb_run_id,omitempty"`
+}
+
+type MetricPoint struct {
+	Key   string  `json:"key"`
+	Value float64 `json:"value"`
+	Step  *int    `json:"step,omitempty"`
+	TS    int64   `json:"ts"`
 }
 
 type CompareRow struct {

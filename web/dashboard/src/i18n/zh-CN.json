@@ -5,24 +5,24 @@
   "nav.submit": "提交",
   "nav.settings": "设置",
   "nav.about": "关于",
-
   "status.disconnected": "未连接",
+  "status.connected": "已连接",
+  "status.daemon_down": "守护进程未运行",
+  "status.daemon_down_hint": "请运行启动：runq daemon start --detach",
   "status.gpu_off": "GPU 监控已关闭",
-
   "overview.running": "运行中",
   "overview.pending": "等待中",
   "overview.gpu_free": "GPU 空闲",
   "overview.failed": "失败",
+  "overview.completed": "已完成",
   "overview.no_projects": "暂无项目",
   "overview.no_projects_hint": "提交一个任务开始使用",
   "overview.hint_cli": "也可以通过命令行提交：",
   "overview.recent": "最近的任务",
   "overview.projects": "项目",
-
   "project.jobs": "任务",
   "project.no_jobs": "该项目暂无任务",
   "project.no_jobs_hint": "提交一个？",
-
   "job.tasks": "子任务",
   "job.leaderboard": "排行榜",
   "job.wandb": "W&B",
@@ -48,7 +48,6 @@
   "job.status.pending": "等待中",
   "job.status.failed": "失败",
   "job.status.killed": "已终止",
-
   "submit.title": "提交任务",
   "submit.subtitle": "选择脚本、配置参数并运行",
   "submit.select_script": "选择脚本",
@@ -87,13 +86,13 @@
   "submit.show_hidden": "显示隐藏文件",
   "submit.preflight": "预检",
   "submit.success": "任务已提交！",
-
   "settings.title": "设置",
   "settings.system": "系统",
   "settings.mode": "模式",
   "settings.mode_local": "本地（守护进程）",
   "settings.mode_hpc": "HPC 集群",
   "settings.data_path": "数据路径",
+  "settings.data_path_default": "默认：项目目录下的 .runq",
   "settings.config_path": "配置文件路径",
   "settings.webhook": "通知",
   "settings.webhook_hint": "在任务完成或失败时接收通知",
@@ -115,10 +114,9 @@
   "settings.config": "配置信息",
   "settings.anime_mode": "二次元模式",
   "settings.anime_hint": "在页面各处显示Q版小人",
-
+  "settings.experimental": "实验性功能",
   "about.title": "关于 runq",
   "about.description": "面向研究实验室的 GPU 任务调度器",
-
   "common.save": "保存",
   "common.cancel": "取消",
   "common.confirm": "确认",

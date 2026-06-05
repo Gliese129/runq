@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -30,6 +29,8 @@ type Backend interface {
 	CompareMetrics(ctx context.Context, jobID, key string, desc bool) ([]CompareRow, error)
 	GPUStatus(ctx context.Context) ([]GPUSlot, error)
 
+	GetTask(ctx context.Context, taskID string) (*TaskView, string, error)    // returns task view + log_path
+	TaskMetrics(ctx context.Context, taskID string) ([]MetricPoint, error) // returns all metric points
 	KillTask(ctx context.Context, taskID string) error
 	RetryTask(ctx context.Context, taskID string) error
 	KillJob(ctx context.Context, jobID string) error
@@ -43,6 +44,7 @@ type Backend interface {
 	MatchProjects(ctx context.Context, dir string) ([]ProjectSummary, error)
 	CreateProject(ctx context.Context, cfg project.Config) error
 	UpdateProject(ctx context.Context, cfg project.Config) error
+	RenameProject(ctx context.Context, oldName, newName string) error
 }
 
 type SubmitOptions struct {
@@ -115,9 +117,12 @@ func BuildTaskView(task store.TaskRow) TaskView {
 		ID:          task.ID,
 		Status:      task.Status,
 		Params:      params,
+		Metrics:     artifacts.Metrics,
 		CurrentStep: artifacts.CurrentStep,
 		ExitCode:    artifacts.ExitCode,
 		RetryCount:  task.RetryCount,
+		MaxRetry:    task.MaxRetry,
+		GPUs:        task.GPUs,
 		WandbRunID:  artifacts.WandbRunID,
 	}
 	if task.StartedAt != nil {
@@ -187,6 +192,7 @@ type taskArtifacts struct {
 	CurrentStep *int
 	ExitCode    *int
 	WandbRunID  string
+	Metrics     map[string]float64
 }
 
 func readTaskArtifacts(taskDir string) taskArtifacts {
@@ -213,14 +219,24 @@ func readMetricsArtifacts(path string, out *taskArtifacts) {
 		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
 			continue
 		}
+		key, _ := event["key"].(string)
 		if step, ok := numericInt(event["step"]); ok {
 			out.CurrentStep = &step
 		}
-		if fmt.Sprint(event["key"]) == "_wandb_run_id" {
+		if key == "_wandb_run_id" {
 			if value, ok := event["value"].(string); ok {
 				out.WandbRunID = value
 			} else if value, ok := event["run_id"].(string); ok {
 				out.WandbRunID = value
+			}
+			continue
+		}
+		if key != "" && !strings.HasPrefix(key, "_") {
+			if value, ok := numericFloat(event["value"]); ok {
+				if out.Metrics == nil {
+					out.Metrics = map[string]float64{}
+				}
+				out.Metrics[key] = value
 			}
 		}
 	}
@@ -319,6 +335,24 @@ func numericInt(value any) (int, bool) {
 	}
 }
 
+func numericFloat(value any) (float64, bool) {
+	switch v := value.(type) {
+	case float64:
+		return v, true
+	case float32:
+		return float64(v), true
+	case int:
+		return float64(v), true
+	case int64:
+		return float64(v), true
+	case json.Number:
+		f, err := strconv.ParseFloat(v.String(), 64)
+		return f, err == nil
+	default:
+		return 0, false
+	}
+}
+
 func refreshStoreJobStatus(ctx context.Context, st *store.Store, jobID string) error {
 	tasks, err := st.ListTasks(ctx, store.TaskFilter{JobID: jobID})
 	if err != nil {
@@ -344,6 +378,43 @@ func refreshStoreJobStatus(ctx context.Context, st *store.Store, jobID string) e
 		status = "running"
 	}
 	return st.UpdateJobStatus(ctx, jobID, status)
+}
+
+// readMetricPoints reads metrics.jsonl and returns all metric points (excluding internal keys).
+func readMetricPoints(taskDir string) []MetricPoint {
+	if taskDir == "" {
+		return nil
+	}
+	f, err := os.Open(workspace.MetricsPath(taskDir))
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+
+	var points []MetricPoint
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 64*1024), 10*1024*1024)
+	for scanner.Scan() {
+		var event struct {
+			Key   string  `json:"key"`
+			Value float64 `json:"value"`
+			Step  *int    `json:"step"`
+			TS    int64   `json:"ts"`
+		}
+		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil || event.Key == "" {
+			continue
+		}
+		if strings.HasPrefix(event.Key, "_") {
+			continue
+		}
+		points = append(points, MetricPoint{
+			Key:   event.Key,
+			Value: event.Value,
+			Step:  event.Step,
+			TS:    event.TS,
+		})
+	}
+	return points
 }
 
 func isNotFound(err error) bool {

@@ -87,7 +87,8 @@
 import { ref, computed, provide, reactive, markRaw } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
-import { api } from '@/apis/client'
+import { jobsApi } from '@/apis/jobs'
+import { projectsApi } from '@/apis/projects'
 import { useSnackbar } from '@/composables/useSnackbar'
 import { usePreferences } from '@/composables/usePreferences'
 import type { ProjectSummary } from '@/types/api'
@@ -102,7 +103,6 @@ import {
   buildProjectPayload as createProjectPayload,
   dryRunHeaders as createDryRunHeaders,
   groupTaskCount as countGroupTasks,
-  submitEndpoint as createSubmitEndpoint,
   sweepSummary as summarizeSweep,
   totalTaskCount as countTotalTasks,
   validateConfigure,
@@ -216,7 +216,7 @@ async function saveProject(): Promise<boolean> {
     }
     const isNew = !matchedProjects.value.some(p => p.name === targetName)
     if (isNew) {
-      await api.post('/projects', payload)
+      await projectsApi.create(payload)
       matchedProjects.value.push({
         name: targetName,
         work_dir: newProject.workDir,
@@ -224,7 +224,7 @@ async function saveProject(): Promise<boolean> {
       })
       snack.success(`Project "${targetName}" registered`)
     } else {
-      await api.put(`/projects/${encodeURIComponent(targetName)}`, payload)
+      await projectsApi.update(targetName, payload)
     }
     projectName.value = targetName
     prefs.lastProject.value = projectName.value
@@ -258,7 +258,7 @@ async function goNext() {
     dryRunError.value = ''
     step.value = 2
     try {
-      dryRunResult.value = await api.post<Record<string, any>[]>('/jobs/dry-run', buildJobConfig())
+      dryRunResult.value = await jobsApi.dryRun(buildJobConfig())
     } catch (e: any) {
       dryRunResult.value = []
       dryRunError.value = e?.message || t('submit.dryrun_failed')
@@ -281,8 +281,11 @@ async function submit(forceSkipPreflight = false) {
   submitting.value = true
   submitError.value = ''
   try {
-    const url = createSubmitEndpoint(preflightEnabled.value, forceSkipPreflight)
-    const res = await api.post<{ job_id: string }>(url, buildJobConfig(), { timeoutMs: 50000 })
+    const res = await jobsApi.submit(buildJobConfig(), {
+      preflightEnabled: preflightEnabled.value,
+      forceSkipPreflight,
+      timeoutMs: 50000,
+    })
     snack.success(t('submit.success'))
     router.push({ name: 'job-detail', params: { project: projectName.value, jobId: res.job_id } })
   } catch (e: any) {

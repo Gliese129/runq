@@ -1,6 +1,6 @@
 import axios from 'axios'
 import { useSnackbar } from '@/composables/useSnackbar'
-import { onApiSuccess, onApiError } from '@/composables/useConnection'
+import { onApiSuccess, onApiError, isDaemonDownError } from '@/composables/useConnection'
 
 const http = axios.create({
   baseURL: '/api/dashboard',
@@ -21,7 +21,7 @@ export class ApiError extends Error {
   }
 }
 
-interface RequestOptions {
+export interface RequestOptions {
   silent?: boolean
   timeoutMs?: number
 }
@@ -41,14 +41,16 @@ async function request<T>(method: string, path: string, body?: unknown, opts?: R
       const status = e.response?.status || 0
       const msg = e.response?.data?.error || e.message || 'Network error'
       onApiError(msg)
-      if (!opts?.silent && status !== 404) {
+      // Daemon-down has its own persistent banner + sidebar state; a raw
+      // socket snackbar on top of that just makes the three surfaces fight.
+      if (!opts?.silent && status !== 404 && !isDaemonDownError(msg)) {
         snack.error(msg)
       }
       throw new ApiError(msg, status, path)
     }
     const msg = e instanceof Error ? e.message : 'Unknown error'
     onApiError(msg)
-    if (!opts?.silent) snack.error(`Connection failed: ${msg}`)
+    if (!opts?.silent && !isDaemonDownError(msg)) snack.error(`Connection failed: ${msg}`)
     throw new ApiError(msg, 0, path)
   }
 }

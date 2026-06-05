@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import { api } from '@/apis/client'
+import { jobsApi } from '@/apis/jobs'
 import type { JobSummary } from '@/types/api'
 
 export const useJobsStore = defineStore('jobs', () => {
@@ -30,7 +30,7 @@ export const useJobsStore = defineStore('jobs', () => {
   async function fetchJobs(silent = false) {
     loading.value = true
     try {
-      jobs.value = await api.get<JobSummary[]>('/jobs', { silent })
+      jobs.value = await jobsApi.list({ silent })
     } catch {
       // swallow — connection state tracked globally
     } finally {

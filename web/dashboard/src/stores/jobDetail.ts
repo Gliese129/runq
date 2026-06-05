@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import { api } from '@/apis/client'
+import { jobsApi } from '@/apis/jobs'
+import { tasksApi } from '@/apis/tasks'
 import type { JobDetail, CompareRow } from '@/types/api'
 
 export const useJobDetailStore = defineStore('jobDetail', () => {
@@ -11,7 +12,7 @@ export const useJobDetailStore = defineStore('jobDetail', () => {
   async function fetchDetail(jobId: string, silent = false) {
     loading.value = true
     try {
-      detail.value = await api.get<JobDetail>(`/jobs/${jobId}`, { silent })
+      detail.value = await jobsApi.get(jobId, { silent })
     } catch {
       // swallow
     } finally {
@@ -20,28 +21,27 @@ export const useJobDetailStore = defineStore('jobDetail', () => {
   }
 
   async function fetchCompare(jobId: string, key: string, desc: boolean) {
-    const order = desc ? 'desc' : 'asc'
-    compare.value = await api.get<CompareRow[]>(`/jobs/${jobId}/compare?key=${encodeURIComponent(key)}&order=${order}`)
+    compare.value = await jobsApi.compare(jobId, key, desc)
   }
 
   async function killTask(taskId: string) {
-    await api.post(`/tasks/${taskId}/kill`)
+    await tasksApi.kill(taskId)
   }
 
   async function retryTask(taskId: string) {
-    await api.post(`/tasks/${taskId}/retry`)
+    await tasksApi.retry(taskId)
   }
 
   async function killJob(jobId: string) {
-    await api.post(`/jobs/${jobId}/kill`)
+    await jobsApi.kill(jobId)
   }
 
   async function pauseJob(jobId: string) {
-    await api.post(`/jobs/${jobId}/pause`)
+    await jobsApi.pause(jobId)
   }
 
   async function resumeJob(jobId: string) {
-    await api.post(`/jobs/${jobId}/resume`)
+    await jobsApi.resume(jobId)
   }
 
   function $reset() {

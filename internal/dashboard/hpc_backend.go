@@ -72,6 +72,26 @@ func (b *HPCBackend) GPUStatus(ctx context.Context) ([]GPUSlot, error) {
 	return []GPUSlot{}, nil
 }
 
+func (b *HPCBackend) GetTask(ctx context.Context, taskID string) (*TaskView, string, error) {
+	task, err := b.store.GetTask(ctx, taskID)
+	if err != nil {
+		return nil, "", err
+	}
+	if task == nil {
+		return nil, "", fmt.Errorf("task %q not found", taskID)
+	}
+	view := BuildTaskView(*task)
+	return &view, task.LogPath, nil
+}
+
+func (b *HPCBackend) TaskMetrics(ctx context.Context, taskID string) ([]MetricPoint, error) {
+	task, err := b.store.GetTask(ctx, taskID)
+	if err != nil || task == nil {
+		return nil, fmt.Errorf("task %q not found", taskID)
+	}
+	return readMetricPoints(task.TaskDir), nil
+}
+
 func (b *HPCBackend) KillTask(ctx context.Context, taskID string) error {
 	task, err := b.store.GetTask(ctx, taskID)
 	if err != nil {
@@ -144,6 +164,11 @@ func (b *HPCBackend) CreateProject(_ context.Context, cfg project.Config) error 
 func (b *HPCBackend) UpdateProject(_ context.Context, cfg project.Config) error {
 	reg := project.NewRegistry(b.store.DB())
 	return reg.Update(cfg)
+}
+
+func (b *HPCBackend) RenameProject(_ context.Context, oldName, newName string) error {
+	reg := project.NewRegistry(b.store.DB())
+	return reg.Rename(oldName, newName)
 }
 
 func (b *HPCBackend) GetProject(_ context.Context, name string) (*project.Config, error) {

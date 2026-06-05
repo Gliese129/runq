@@ -34,7 +34,7 @@ const (
 var rootCmd = &cobra.Command{
 	Use:   "runq",
 	Short: "A lightweight GPU job scheduler for research labs",
-	Long: `runq — single-machine GPU job scheduler for research labs
+	Long: `runq — a GPU job scheduler for research labs
 
   Get started in 3 steps:
 

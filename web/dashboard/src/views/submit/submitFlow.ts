@@ -1,4 +1,5 @@
 import type { ProjectParam, SweepGroup } from '@/types/submit'
+import type { JobConfigPayload, ProjectPayload } from '@/types/api'
 
 export interface SubmitProjectDraft {
   name: string
@@ -10,39 +11,6 @@ export interface SubmitProjectDraft {
   envPath: string
   envName: string
   params: ProjectParam[]
-}
-
-export interface JobConfigPayload {
-  project: string
-  note: string
-  fixed_params?: Record<string, any>
-  sweep: Array<{
-    method: string
-    parameters: Record<string, { values: any[] }>
-  }>
-}
-
-export interface ProjectPayload {
-  project_name: string
-  working_dir: string
-  command_template: string
-  defaults: {
-    gpus_per_task: number
-    max_retry: number
-  }
-  python_env?: {
-    type: string
-    path?: string
-    name?: string
-  }
-  params?: Array<{
-    name: string
-    type: string
-    default?: string
-    choices?: string[]
-    min?: number
-    max?: number
-  }>
 }
 
 export interface ConfigureValidationOptions {
@@ -166,11 +134,6 @@ export function buildJobConfig(
     fixed_params: Object.keys(fixedParams).length > 0 ? fixedParams : undefined,
     sweep,
   }
-}
-
-export function submitEndpoint(preflightEnabled: boolean, forceSkipPreflight: unknown = false): string {
-  const skipPreflight = forceSkipPreflight === true || !preflightEnabled
-  return skipPreflight ? '/jobs?no_preflight=1' : '/jobs'
 }
 
 export function validateConfigure(

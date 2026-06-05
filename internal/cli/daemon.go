@@ -44,7 +44,7 @@ var daemonStartCmd = &cobra.Command{
 			if err := subp.Start(); err != nil {
 				return err
 			}
-			fmt.Printf("daemon started at backend with pid %d!", subp.Process.Pid)
+			fmt.Printf("daemon started in background (pid %d)\n", subp.Process.Pid)
 			return nil
 		}
 

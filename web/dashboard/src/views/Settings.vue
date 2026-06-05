@@ -14,10 +14,11 @@
         </div>
         <div class="d-flex align-center justify-space-between">
           <span class="text-on-surface-variant">{{ t('settings.data_path') }}</span>
-          <code class="text-body-2 cursor-pointer" @click="copyToClipboard(config.dataPath)">
+          <code v-if="config.dataPath" class="text-body-2 cursor-pointer" @click="copyToClipboard(config.dataPath)">
             {{ config.dataPath }}
             <v-icon size="12" class="ml-1" color="on-surface-variant">mdi-content-copy</v-icon>
           </code>
+          <span v-else class="text-body-2 text-on-surface-variant font-italic">{{ t('settings.data_path_default') }}</span>
         </div>
         <div class="d-flex align-center justify-space-between">
           <span class="text-on-surface-variant">{{ t('settings.config_path') }}</span>
@@ -102,20 +103,30 @@
         </v-card>
       </div>
 
-      <!-- Anime mode -->
-      <div class="d-flex align-center justify-space-between rounded-lg pa-3" style="background: rgb(var(--v-theme-surface-variant), 0.3)">
-        <div>
-          <div class="text-body-2 font-weight-medium">{{ t('settings.anime_mode') }}</div>
-          <div class="text-caption text-on-surface-variant">{{ t('settings.anime_hint') }}</div>
-        </div>
-        <v-switch
-          :model-value="settings.animeMode"
-          @update:model-value="settings.setAnimeMode(Boolean($event))"
-          hide-details
-          color="primary"
-          density="compact"
-        />
-      </div>
+      <!-- Experimental (anime mode tucked away from the default view) -->
+      <v-expansion-panels variant="accordion" class="mt-2">
+        <v-expansion-panel>
+          <v-expansion-panel-title class="text-caption text-on-surface-variant">
+            <v-icon size="14" start>mdi-flask-outline</v-icon>
+            {{ t('settings.experimental') }}
+          </v-expansion-panel-title>
+          <v-expansion-panel-text>
+            <div class="d-flex align-center justify-space-between rounded-lg pa-3" style="background: rgb(var(--v-theme-surface-variant), 0.3)">
+              <div>
+                <div class="text-body-2 font-weight-medium">{{ t('settings.anime_mode') }}</div>
+                <div class="text-caption text-on-surface-variant">{{ t('settings.anime_hint') }}</div>
+              </div>
+              <v-switch
+                :model-value="settings.animeMode"
+                @update:model-value="settings.setAnimeMode(Boolean($event))"
+                hide-details
+                color="primary"
+                density="compact"
+              />
+            </div>
+          </v-expansion-panel-text>
+        </v-expansion-panel>
+      </v-expansion-panels>
     </v-card>
   </div>
 </template>
@@ -190,6 +201,8 @@ async function testWebhook() {
   try {
     await settings.testWebhook()
     snack.success(t('settings.webhook_test_ok'))
+  } catch (e: any) {
+    snack.error(e?.message || 'Webhook test failed')
   } finally {
     testing.value = false
   }

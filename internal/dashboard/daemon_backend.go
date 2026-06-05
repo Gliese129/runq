@@ -18,12 +18,11 @@ import (
 )
 
 type DaemonBackend struct {
-	client   *api.Client
-	registry *project.Registry
+	client *api.Client
 }
 
-func NewDaemonBackend(socketPath string, registry *project.Registry) *DaemonBackend {
-	return &DaemonBackend{client: api.NewClient(socketPath), registry: registry}
+func NewDaemonBackend(socketPath string) *DaemonBackend {
+	return &DaemonBackend{client: api.NewClient(socketPath)}
 }
 
 func (b *DaemonBackend) ListJobs(ctx context.Context) ([]JobSummary, error) {
@@ -50,13 +49,13 @@ func (b *DaemonBackend) GetJob(ctx context.Context, jobID string) (*JobDetail, e
 		return nil, fmt.Errorf("job %q not found", jobID)
 	}
 	view := BuildJobDetail(*detail.Job, detail.Tasks)
-	if b.registry != nil {
-		if cfg, err := b.registry.Get(detail.Job.ProjectName); err == nil && cfg.Wandb != nil {
-			view.Wandb = &WandbInfo{
-				Entity:  cfg.Wandb.Entity,
-				Project: cfg.Wandb.Project,
-				BaseURL: wandbBaseURL(cfg.Wandb.Entity, cfg.Wandb.Project),
-			}
+	// Project config (incl. W&B) lives in the daemon process. Fetch it over the
+	// API rather than holding a local registry, so there's a single source of truth.
+	if cfg, err := b.GetProject(ctx, detail.Job.ProjectName); err == nil && cfg.Wandb != nil {
+		view.Wandb = &WandbInfo{
+			Entity:  cfg.Wandb.Entity,
+			Project: cfg.Wandb.Project,
+			BaseURL: wandbBaseURL(cfg.Wandb.Entity, cfg.Wandb.Project),
 		}
 	}
 	return &view, nil
@@ -88,6 +87,27 @@ func (b *DaemonBackend) GPUStatus(ctx context.Context) ([]GPUSlot, error) {
 		})
 	}
 	return out, nil
+}
+
+func (b *DaemonBackend) GetTask(ctx context.Context, taskID string) (*TaskView, string, error) {
+	var task store.TaskRow
+	if err := b.do(ctx, "GET", "/api/tasks/"+taskID, nil, &task); err != nil {
+		return nil, "", err
+	}
+	view := BuildTaskView(task)
+	return &view, task.LogPath, nil
+}
+
+func (b *DaemonBackend) TaskMetrics(ctx context.Context, taskID string) ([]MetricPoint, error) {
+	// The daemon API has no /metrics endpoint; mirror the log path instead —
+	// fetch the task row, then read metrics.jsonl from its TaskDir directly.
+	// Assumes the dashboard process shares the filesystem with the daemon
+	// (single-node daemon mode). Cross-node HPC uses the template backend.
+	var task store.TaskRow
+	if err := b.do(ctx, "GET", "/api/tasks/"+taskID, nil, &task); err != nil {
+		return nil, err
+	}
+	return readMetricPoints(task.TaskDir), nil
 }
 
 func (b *DaemonBackend) KillTask(ctx context.Context, taskID string) error {
@@ -137,7 +157,13 @@ func (b *DaemonBackend) CreateProject(ctx context.Context, cfg project.Config) e
 }
 
 func (b *DaemonBackend) UpdateProject(ctx context.Context, cfg project.Config) error {
-	return b.do(ctx, "PUT", "/api/projects/"+cfg.ProjectName, cfg, nil)
+	return b.do(ctx, "PUT", "/api/projects/"+url.PathEscape(cfg.ProjectName), cfg, nil)
+}
+
+func (b *DaemonBackend) RenameProject(ctx context.Context, oldName, newName string) error {
+	return b.do(ctx, "POST", "/api/projects/"+url.PathEscape(oldName)+"/rename", map[string]string{
+		"new_name": newName,
+	}, nil)
 }
 
 func (b *DaemonBackend) GetProject(ctx context.Context, name string) (*project.Config, error) {

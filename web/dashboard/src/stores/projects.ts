@@ -1,12 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import { api } from '@/apis/client'
-
-export interface ProjectSummary {
-  name: string
-  work_dir?: string
-  job_count: number
-}
+import { projectsApi } from '@/apis/projects'
+import type { ProjectSummary } from '@/types/api'
 
 export const useProjectStore = defineStore('projects', () => {
   const list = ref<ProjectSummary[]>([])
@@ -16,7 +11,7 @@ export const useProjectStore = defineStore('projects', () => {
   async function fetch() {
     loading.value = true
     try {
-      list.value = await api.get<ProjectSummary[]>('/projects')
+      list.value = await projectsApi.list()
     } catch {
       list.value = []
     } finally {

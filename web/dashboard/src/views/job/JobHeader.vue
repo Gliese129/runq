@@ -42,7 +42,7 @@
 
     <!-- Failed hints -->
     <div v-if="failedCount > 0" class="mt-2 pa-2 rounded" style="background: rgb(var(--v-theme-error), 0.06)">
-      <div class="text-caption text-error">{{ failedCount }} failed</div>
+      <div class="text-caption text-error">{{ failedCount }} failed or killed</div>
       <div v-for="ft in failedTasks.slice(0, 3)" :key="ft.id" class="text-caption d-flex align-center ga-1">
         <code>{{ ft.id.slice(0, 8) }}</code>
         <span class="text-on-surface-variant">exit {{ ft.exit_code ?? '?' }}</span>
@@ -72,19 +72,27 @@ const emit = defineEmits<{
 }>()
 
 const isActive = computed(() => ['running', 'pending', 'paused'].includes(props.detail.job.status))
-const failedTasks = computed(() => props.detail.tasks.filter(t => t.status === 'failed'))
-const failedCount = computed(() => failedTasks.value.length)
-const doneCount = computed(() => props.detail.tasks.filter(t => ['success', 'completed', 'done'].includes(t.status)).length)
+
+// Counts come from the backend summary (detail.job.tasks) — the single source
+// of truth. Note the backend folds "killed" into "failed", so we don't recount
+// from the task array here (that's what caused the headline / hint mismatch).
+const counts = computed(() => props.detail.job.tasks)
+const failedCount = computed(() => counts.value.failed)
+// Per-task detail for the hint list still needs the task array; include killed
+// so the listed tasks match the (failed-incl-killed) count above.
+const failedTasks = computed(() =>
+  props.detail.tasks.filter(t => t.status === 'failed' || t.status === 'killed'),
+)
 const progress = computed(() => {
-  const total = props.detail.tasks.length
-  return total > 0 ? (doneCount.value / total) * 100 : 0
+  const total = counts.value.total
+  return total > 0 ? (counts.value.completed / total) * 100 : 0
 })
 
 const stats = computed(() => [
-  { label: 'Done', value: doneCount.value, color: 'text-success' },
-  { label: 'Running', value: props.detail.tasks.filter(t => t.status === 'running').length, color: 'text-warning' },
-  { label: 'Failed', value: failedCount.value, color: 'text-error' },
-  { label: 'Pending', value: props.detail.tasks.filter(t => t.status === 'pending').length, color: 'text-info' },
+  { label: 'Done', value: counts.value.completed, color: 'text-success' },
+  { label: 'Running', value: counts.value.running, color: 'text-warning' },
+  { label: 'Failed (incl. killed)', value: failedCount.value, color: 'text-error' },
+  { label: 'Pending', value: counts.value.pending, color: 'text-info' },
 ])
 
 function relativeTime(ts: number): string {

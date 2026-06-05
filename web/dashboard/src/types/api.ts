@@ -22,13 +22,24 @@ export interface TaskView {
   id: string
   status: string
   params: Record<string, any>
+  metrics?: Record<string, number>
   current_step?: number
   started_at?: number
   finished_at?: number
   elapsed_seconds?: number
   exit_code?: number
   retry_count: number
+  max_retry: number
+  gpus?: string
   wandb_run_id?: string
+}
+
+export interface TaskLogResponse {
+  lines: string[]
+  total_lines: number
+  start: number
+  end: number
+  error?: string
 }
 
 export interface WandbInfo {
@@ -71,6 +82,29 @@ export interface ConfigResponse {
   data_path: string
   config_path: string
   features: FeatureFlags
+}
+
+export interface ActionResponse {
+  ok: boolean
+}
+
+export interface MessageResponse {
+  message: string
+}
+
+export interface JobSubmitResponse {
+  job_id: string
+  total_tasks?: number
+}
+
+export interface JobConfigPayload {
+  project: string
+  note: string
+  fixed_params?: Record<string, any>
+  sweep: Array<{
+    method: string
+    parameters: Record<string, { values: any[] }>
+  }>
 }
 
 export interface FSEntry {
@@ -125,6 +159,29 @@ export interface ProjectConfig {
     entity?: string
     tags?: string[]
     mode?: string
+  }
+  params?: Array<{
+    name: string
+    type: string
+    default?: string
+    choices?: string[]
+    min?: number
+    max?: number
+  }>
+}
+
+export interface ProjectPayload {
+  project_name: string
+  working_dir: string
+  command_template: string
+  defaults: {
+    gpus_per_task: number
+    max_retry: number
+  }
+  python_env?: {
+    type: string
+    path?: string
+    name?: string
   }
   params?: Array<{
     name: string

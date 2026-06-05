@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import { api } from '@/apis/client'
+import { gpuApi } from '@/apis/gpu'
 import type { GPUSlot } from '@/types/api'
 
 export const useGPUStore = defineStore('gpu', () => {
@@ -13,7 +13,7 @@ export const useGPUStore = defineStore('gpu', () => {
   async function fetchGPU(silent = false) {
     loading.value = true
     try {
-      gpus.value = await api.get<GPUSlot[]>('/gpu', { silent })
+      gpus.value = await gpuApi.list({ silent })
     } catch {
       // swallow
     } finally {

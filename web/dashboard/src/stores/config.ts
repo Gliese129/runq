@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import { api } from '@/apis/client'
-import type { ConfigResponse, FeatureFlags } from '@/types/api'
+import { configApi } from '@/apis/config'
+import type { FeatureFlags } from '@/types/api'
 
 export const useConfigStore = defineStore('config', () => {
   const mode = ref('')
@@ -11,7 +11,7 @@ export const useConfigStore = defineStore('config', () => {
   const loaded = ref(false)
 
   async function fetchConfig() {
-    const res = await api.get<ConfigResponse>('/config')
+    const res = await configApi.get()
     mode.value = res.mode
     dataPath.value = res.data_path
     configPath.value = res.config_path

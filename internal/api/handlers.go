@@ -1,11 +1,14 @@
 package api
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -50,6 +53,7 @@ func (s *Server) registerRoutes() {
 	{
 		tasks.GET("", s.handleTaskList)
 		tasks.GET("/:id", s.handleTaskGet)
+		tasks.GET("/:id/log", s.handleTaskLog)
 		tasks.POST("/:id/kill", s.handleTaskKill)
 		tasks.POST("/:id/retry", s.handleTaskRetry)
 	}
@@ -323,6 +327,68 @@ func (s *Server) handleTaskGet(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, task)
+}
+
+// handleTaskLog reads the task's log file and returns the last N lines.
+// Query params: tail (default 500), offset (default 0, skip first N lines).
+func (s *Server) handleTaskLog(c *gin.Context) {
+	task, err := s.deps.Store.GetTask(context.Background(), c.Param("id"))
+	if err != nil || task == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
+		return
+	}
+	logPath := task.LogPath
+	if logPath == "" {
+		c.JSON(http.StatusOK, gin.H{"lines": []string{}, "total_lines": 0})
+		return
+	}
+
+	tail := 500
+	if v := c.Query("tail"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 5000 {
+			tail = n
+		}
+	}
+	offset := 0
+	if v := c.Query("offset"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			offset = n
+		}
+	}
+
+	f, err := os.Open(logPath)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"lines": []string{}, "total_lines": 0, "error": "log file not accessible"})
+		return
+	}
+	defer f.Close()
+
+	// Read all lines (simple approach; for huge files, optimize later)
+	var allLines []string
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // 1MB max line
+	for scanner.Scan() {
+		allLines = append(allLines, scanner.Text())
+	}
+	total := len(allLines)
+
+	// Apply offset + tail: return lines from [total-tail-offset, total-offset)
+	end := total - offset
+	if end < 0 {
+		end = 0
+	}
+	start := end - tail
+	if start < 0 {
+		start = 0
+	}
+	lines := allLines[start:end]
+
+	c.JSON(http.StatusOK, gin.H{
+		"lines":       lines,
+		"total_lines": total,
+		"start":       start,
+		"end":         end,
+	})
 }
 
 func (s *Server) handleTaskKill(c *gin.Context) {

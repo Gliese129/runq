@@ -1,11 +1,13 @@
 package dashboard
 
 import (
+	"bufio"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 
@@ -80,9 +82,13 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/dashboard/projects/{name}", s.handleGetProject)
 	s.mux.HandleFunc("POST /api/dashboard/projects", s.handleCreateProject)
 	s.mux.HandleFunc("PUT /api/dashboard/projects/{name}", s.handleUpdateProject)
+	s.mux.HandleFunc("POST /api/dashboard/projects/{name}/rename", s.handleRenameProject)
 	s.mux.HandleFunc("GET /api/dashboard/gpu", s.handleGPU)
 	s.mux.HandleFunc("POST /api/dashboard/jobs", s.handleSubmitJob)
 	s.mux.HandleFunc("POST /api/dashboard/jobs/dry-run", s.handleDryRun)
+	s.mux.HandleFunc("GET /api/dashboard/tasks/{id}", s.handleGetTask)
+	s.mux.HandleFunc("GET /api/dashboard/tasks/{id}/log", s.handleTaskLog)
+	s.mux.HandleFunc("GET /api/dashboard/tasks/{id}/metrics", s.handleTaskMetrics)
 	s.mux.HandleFunc("POST /api/dashboard/tasks/{id}/kill", s.handleKillTask)
 	s.mux.HandleFunc("POST /api/dashboard/tasks/{id}/retry", s.handleRetryTask)
 	s.mux.HandleFunc("POST /api/dashboard/jobs/{id}/kill", s.handleKillJob)
@@ -192,6 +198,33 @@ func (s *Server) handleUpdateProject(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleRenameProject(w http.ResponseWriter, r *http.Request) {
+	oldName := strings.TrimSpace(r.PathValue("name"))
+	if oldName == "" {
+		writeErrorStatus(w, http.StatusBadRequest, fmt.Errorf("project name is required"))
+		return
+	}
+	var body struct {
+		NewName string `json:"new_name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErrorStatus(w, http.StatusBadRequest, err)
+		return
+	}
+	newName := strings.TrimSpace(body.NewName)
+	if newName == "" {
+		writeErrorStatus(w, http.StatusBadRequest, fmt.Errorf("new_name is required"))
+		return
+	}
+	if err := s.backend.RenameProject(r.Context(), oldName, newName); err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{
+		"message": fmt.Sprintf("project %q renamed to %q", oldName, newName),
+	})
+}
+
 func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	jobs, err := s.backend.ListJobs(r.Context())
 	if err != nil {
@@ -271,6 +304,81 @@ func (s *Server) handleDryRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, tasks)
+}
+
+func (s *Server) handleGetTask(w http.ResponseWriter, r *http.Request) {
+	view, _, err := s.backend.GetTask(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, view)
+}
+
+func (s *Server) handleTaskLog(w http.ResponseWriter, r *http.Request) {
+	_, logPath, err := s.backend.GetTask(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		return
+	}
+	if logPath == "" {
+		writeJSON(w, http.StatusOK, map[string]any{"lines": []string{}, "total_lines": 0, "start": 0, "end": 0})
+		return
+	}
+
+	tail := 500
+	if v := r.URL.Query().Get("tail"); v != "" {
+		if n, e := strconv.Atoi(v); e == nil && n > 0 && n <= 5000 {
+			tail = n
+		}
+	}
+	offset := 0
+	if v := r.URL.Query().Get("offset"); v != "" {
+		if n, e := strconv.Atoi(v); e == nil && n >= 0 {
+			offset = n
+		}
+	}
+
+	f, err := os.Open(logPath)
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"lines": []string{}, "total_lines": 0, "start": 0, "end": 0, "error": "log file not accessible"})
+		return
+	}
+	defer f.Close()
+
+	var allLines []string
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		allLines = append(allLines, scanner.Text())
+	}
+	total := len(allLines)
+	end := total - offset
+	if end < 0 {
+		end = 0
+	}
+	start := end - tail
+	if start < 0 {
+		start = 0
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"lines":       allLines[start:end],
+		"total_lines": total,
+		"start":       start,
+		"end":         end,
+	})
+}
+
+func (s *Server) handleTaskMetrics(w http.ResponseWriter, r *http.Request) {
+	points, err := s.backend.TaskMetrics(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		return
+	}
+	if points == nil {
+		points = []MetricPoint{}
+	}
+	writeJSON(w, http.StatusOK, points)
 }
 
 func (s *Server) handleKillTask(w http.ResponseWriter, r *http.Request) {

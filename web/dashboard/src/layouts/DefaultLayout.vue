@@ -42,7 +42,7 @@
       <div class="pa-2 flex-grow-1 overflow-y-auto">
         <div v-if="!collapsed" class="text-caption text-on-surface-variant px-2 mb-1 d-flex align-center justify-space-between">
           Projects
-          <v-btn icon size="x-small" variant="text" @click="projects.fetch()">
+          <v-btn icon size="x-small" variant="text" @click="refreshShellData">
             <v-icon size="12">mdi-refresh</v-icon>
           </v-btn>
         </div>
@@ -109,7 +109,7 @@
           <div class="d-flex align-center ga-2 px-3 py-1">
             <div class="status-dot" :class="conn.connected.value ? 'status-dot--completed' : 'status-dot--failed'" />
             <span v-if="!collapsed" class="text-caption text-on-surface-variant">
-              {{ conn.connected.value ? 'Connected' : 'Disconnected' }}
+              {{ t(conn.statusKey.value) }}
             </span>
           </div>
         </div>
@@ -156,6 +156,7 @@ import { useConfigStore } from '@/stores/config'
 import { useGPUStore } from '@/stores/gpu'
 import { useSettingsStore } from '@/stores/settings'
 import { useProjectStore } from '@/stores/projects'
+import { useJobsStore } from '@/stores/jobs'
 import { useConnection } from '@/composables/useConnection'
 import RunqLogo from '@/components/RunqLogo.vue'
 
@@ -167,6 +168,7 @@ const config = useConfigStore()
 const gpu = useGPUStore()
 const settings = useSettingsStore()
 const projects = useProjectStore()
+const jobs = useJobsStore()
 const conn = useConnection()
 
 const drawerOpen = ref(true)
@@ -198,7 +200,14 @@ const breadcrumbs = computed(() => {
     items.push({ title: String(route.params.project), to: { name: 'project', params: { project: route.params.project } } })
   }
   if (route.params.jobId) {
-    items.push({ title: String(route.params.jobId).slice(0, 8), disabled: true })
+    items.push({
+      title: String(route.params.jobId).slice(0, 8),
+      to: route.params.taskId ? { name: 'job-detail', params: { project: route.params.project, jobId: route.params.jobId } } : undefined,
+      disabled: !route.params.taskId,
+    })
+  }
+  if (route.params.taskId) {
+    items.push({ title: String(route.params.taskId).slice(0, 8), disabled: true })
   }
   return items
 })
@@ -210,11 +219,16 @@ function projectColor(name: string): string {
   return PROJECT_COLORS[Math.abs(hash) % PROJECT_COLORS.length]
 }
 
+function refreshShellData() {
+  projects.fetch()
+  jobs.fetchJobs()
+}
+
 onMounted(async () => {
   try {
     if (!config.loaded) await config.fetchConfig()
     if (config.features.gpu_map) gpu.fetchGPU()
-    projects.fetch()
+    refreshShellData()
   } catch {}
 })
 </script>
