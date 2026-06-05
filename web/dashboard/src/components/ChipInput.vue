@@ -157,9 +157,13 @@ function onPaste(e: ClipboardEvent) {
 
 <style scoped>
 .chip-input-box {
-  border: 1px solid rgba(0,0,0,0.12);
+  border: 1px solid rgb(var(--v-theme-outline-variant));
   min-height: 36px;
   cursor: text;
+  transition: border-color 0.15s ease;
+}
+.chip-input-box:focus-within {
+  border-color: rgb(var(--v-theme-primary));
 }
 .chip-input-field {
   border: none;

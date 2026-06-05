@@ -67,6 +67,18 @@ type Config struct {
 	Resume      ResumeConfig      `yaml:"resume,omitempty" json:"resume,omitempty"`
 	PythonEnv   PythonEnvConfig   `yaml:"python_env,omitempty" json:"python_env,omitempty"`
 	Wandb       *WandbConfig      `yaml:"wandb,omitempty" json:"wandb,omitempty"`
+	Params      []ParamDef        `yaml:"params,omitempty" json:"params,omitempty"`
+}
+
+// ParamDef defines a parameter's metadata for the web UI.
+// Discovered from script argparse or manually defined.
+type ParamDef struct {
+	Name    string   `yaml:"name" json:"name"`
+	Type    string   `yaml:"type" json:"type"` // int, float, str, bool, file, folder, list
+	Default string   `yaml:"default,omitempty" json:"default,omitempty"`
+	Choices []string `yaml:"choices,omitempty" json:"choices,omitempty"` // selectable values for str/file/folder
+	Min     *float64 `yaml:"min,omitempty" json:"min,omitempty"`         // valid range for int/float
+	Max     *float64 `yaml:"max,omitempty" json:"max,omitempty"`         // valid range for int/float
 }
 
 type WandbConfig struct {

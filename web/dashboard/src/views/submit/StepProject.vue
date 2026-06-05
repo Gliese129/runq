@@ -1,5 +1,5 @@
 <template>
-  <v-row no-gutters style="max-width: 1060px; margin: 0 auto">
+  <v-row no-gutters style="max-width: 960px; margin: 0 auto">
     <!-- Left: project list -->
     <v-col cols="12" md="4" class="pr-md-4">
       <v-card class="pa-3">
@@ -48,53 +48,23 @@
       </v-card>
     </v-col>
 
-    <!-- Right: preview / create form -->
+    <!-- Right: unified form (select=readonly, create=editable) -->
     <v-col cols="12" md="8">
-      <!-- Preview existing project -->
-      <v-card v-if="mode === 'select' && selectedConfig" class="pa-5">
-        <div class="text-h6 font-weight-medium mb-4">{{ selectedConfig.project_name }}</div>
-        <div class="d-flex flex-column ga-3">
-          <div>
-            <div class="text-caption text-on-surface-variant">Working directory</div>
-            <code class="text-body-2">{{ selectedConfig.working_dir }}</code>
-          </div>
-          <div>
-            <div class="text-caption text-on-surface-variant">Command template</div>
-            <code class="text-body-2">{{ selectedConfig.command_template }}</code>
-          </div>
-          <div class="d-flex ga-6">
-            <div>
-              <div class="text-caption text-on-surface-variant">GPUs / task</div>
-              <span class="text-body-2">{{ selectedConfig.defaults?.gpus_per_task || 1 }}</span>
-            </div>
-            <div>
-              <div class="text-caption text-on-surface-variant">Max retry</div>
-              <span class="text-body-2">{{ selectedConfig.defaults?.max_retry ?? 0 }}</span>
-            </div>
-            <div v-if="selectedConfig.python_env?.type">
-              <div class="text-caption text-on-surface-variant">Python env</div>
-              <span class="text-body-2">{{ selectedConfig.python_env.type }}{{ selectedConfig.python_env.name ? ':' + selectedConfig.python_env.name : '' }}</span>
-            </div>
-          </div>
-          <div v-if="selectedConfig.resume?.enabled">
-            <div class="text-caption text-on-surface-variant">Resume</div>
-            <span class="text-body-2">Enabled{{ selectedConfig.resume.extra_args ? ` (${selectedConfig.resume.extra_args})` : '' }}</span>
-          </div>
-        </div>
-      </v-card>
-
-      <!-- Empty state -->
-      <v-card v-else-if="mode === 'select'" class="pa-5 d-flex flex-column align-center justify-center" style="min-height: 300px">
+      <!-- Empty state: nothing selected -->
+      <v-card v-if="mode === 'select' && !state.projectName" class="pa-5 d-flex flex-column align-center justify-center" style="min-height: 300px">
         <v-icon size="48" color="on-surface-variant" class="mb-3">mdi-folder-open-outline</v-icon>
         <div class="text-body-1 text-on-surface-variant">Select a project or create a new one</div>
       </v-card>
 
-      <!-- Create new project form -->
+      <!-- Project form -->
       <v-card v-else class="pa-5">
-        <div class="text-subtitle-1 font-weight-medium mb-4">New Project</div>
+        <div class="text-subtitle-1 font-weight-medium mb-4">
+          {{ isCreating ? 'New Project' : form.name }}
+        </div>
 
-        <!-- Script file trigger -->
+        <!-- Script file trigger (create only) -->
         <v-text-field
+          v-if="isCreating"
           :model-value="scriptDisplay"
           label="Script file"
           variant="outlined" density="compact" class="mb-3"
@@ -106,25 +76,46 @@
           @click:append-inner="showFileBrowser = true"
         />
 
-        <v-text-field
-          v-model="form.name"
-          label="Project name"
-          variant="outlined" density="compact" class="mb-3"
-          :error-messages="form.error"
-        />
+        <div class="d-flex align-center ga-2 mb-3">
+          <v-text-field
+            v-model="form.name"
+            label="Project name"
+            variant="outlined" density="compact"
+            hide-details="auto"
+            :error-messages="form.error"
+          />
+          <v-btn
+            v-if="!isCreating && form.name !== state.projectName && form.name.trim()"
+            size="small" variant="tonal" color="primary"
+            :loading="renaming"
+            @click="doRename"
+          >Rename</v-btn>
+        </div>
 
         <!-- Working directory: clickable breadcrumb -->
         <div class="mb-3">
           <div class="text-caption text-on-surface-variant mb-1">Working directory</div>
-          <div v-if="form.workDir" class="d-flex align-center flex-wrap ga-1 pa-2 rounded workdir-breadcrumb">
-            <template v-for="(seg, i) in workDirSegments" :key="i">
-              <v-icon v-if="i > 0" size="10" color="on-surface-variant">mdi-chevron-right</v-icon>
-              <span
-                class="text-body-2 cursor-pointer workdir-seg"
-                :class="{ 'font-weight-medium text-primary': i === workDirSegments.length - 1 }"
-                @click="truncateWorkDir(i)"
-              >{{ seg }}</span>
-            </template>
+          <div v-if="form.workDir" class="d-flex align-center pa-2 rounded workdir-breadcrumb">
+            <div class="d-flex align-center flex-wrap ga-1 flex-grow-1">
+              <template v-for="(seg, i) in workDirSegments" :key="i">
+                <v-icon v-if="i > 0" size="10" color="on-surface-variant">mdi-chevron-right</v-icon>
+                <span
+                  class="text-body-2"
+                  :class="[
+                    i === workDirSegments.length - 1 ? 'font-weight-medium text-primary' : '',
+                    isCreating ? 'cursor-pointer workdir-seg' : '',
+                  ]"
+                  @click="isCreating && truncateWorkDir(i)"
+                >{{ seg }}</span>
+              </template>
+            </div>
+            <v-btn
+              v-if="isCreating"
+              icon size="x-small" variant="text"
+              @click="editWorkDir"
+            >
+              <v-icon size="14" color="on-surface-variant">mdi-pencil-outline</v-icon>
+            </v-btn>
           </div>
           <div v-else class="text-caption text-on-surface-variant pa-2">Select a script first</div>
         </div>
@@ -142,13 +133,13 @@
             <v-text-field
               v-model.number="form.gpus" label="GPUs per task"
               variant="outlined" density="compact" type="number" :min="0" hide-details
-            />
+                              />
           </v-col>
           <v-col cols="6">
             <v-text-field
               v-model.number="form.maxRetry" label="Max retry"
               variant="outlined" density="compact" type="number" :min="0" hide-details
-            />
+                />
           </v-col>
         </v-row>
 
@@ -166,7 +157,7 @@
                 variant="outlined"
                 hide-details
                 placeholder="system"
-              />
+                              />
             </v-col>
             <v-col cols="8">
               <!-- venv/uv: auto-detected path (editable) -->
@@ -204,184 +195,71 @@
           </v-row>
         </div>
 
-        <!-- Discovered params -->
-        <div v-if="form.params.length > 0" class="mb-4">
+        <!-- Parameters -->
+        <div class="mb-4">
           <div class="d-flex align-center justify-space-between mb-2">
             <div class="text-caption text-on-surface-variant d-flex align-center ga-1">
               <v-icon size="12">mdi-variable</v-icon>
-              Discovered parameters
-              <v-chip size="x-small" variant="tonal">{{ form.params.length }}</v-chip>
+              Parameters
+              <v-chip size="x-small" variant="tonal">{{ includedCount }} / {{ form.params.length }}</v-chip>
             </div>
-            <v-btn size="x-small" variant="text" @click="toggleAllParams">
-              {{ allParamsIncluded ? 'Deselect all' : 'Select all' }}
-            </v-btn>
+            <div class="d-flex align-center ga-1">
+              <v-btn v-if="!compactMode && form.params.length > 0" size="x-small" variant="text" @click="toggleAllParams">
+                {{ allParamsIncluded ? 'Deselect all' : 'Select all' }}
+              </v-btn>
+              <v-btn icon size="x-small" variant="text" @click="showParamEditor = true">
+                <v-icon size="16">mdi-arrow-expand</v-icon>
+              </v-btn>
+            </div>
           </div>
-          <!-- Header -->
-          <div class="params-list rounded">
-            <div class="d-flex align-center ga-2 px-3 py-2 params-header text-caption text-on-surface-variant">
-              <div style="width: 28px"></div>
-              <div style="width: 120px">Name</div>
-              <div style="width: 100px">Type</div>
-              <div class="flex-grow-1">Default</div>
-            </div>
-            <!-- Rows -->
-            <div style="max-height: 240px; overflow-y: auto">
-              <div
-                v-for="p in form.params" :key="p.name"
-                class="d-flex align-center ga-2 px-3 py-1 param-row"
-              >
+
+          <div v-if="visibleParams.length > 0" class="params-list rounded">
+            <div style="max-height: 320px; overflow-y: auto">
+              <div v-for="p in visibleParams" :key="p.name" class="d-flex align-center ga-2 px-3 py-2 param-row">
                 <v-checkbox-btn
                   v-model="p.include"
-                  density="compact" hide-details
-                  color="primary"
-                  style="width: 28px; flex: none"
+                  density="compact" hide-details color="primary"
+                  style="flex: none"
                 />
-                <code class="text-body-2" style="width: 120px; flex: none">{{ p.name }}</code>
-                <v-select
-                  v-model="p.type"
-                  :items="paramTypes"
-                  density="compact" variant="underlined" hide-details
-                  style="width: 100px; flex: none; font-size: 13px"
-                />
+                <code class="text-body-2" style="min-width: 80px; flex: none">{{ p.name }}</code>
+                <v-chip size="x-small" variant="tonal" class="flex-shrink-0">{{ p.type }}</v-chip>
                 <v-text-field
                   v-model="p.default"
-                  placeholder="value"
+                  placeholder="default"
                   density="compact" variant="underlined" hide-details
-                  :rules="[v => validateParam(v, p.type)]"
                   class="flex-grow-1"
                   style="font-family: monospace; font-size: 13px"
                 />
               </div>
             </div>
+            <div v-if="hiddenCount > 0" class="d-flex align-center justify-center ga-1 pa-2 compact-hint" @click="showParamEditor = true">
+              <v-icon size="12" color="on-surface-variant">mdi-dots-horizontal</v-icon>
+              <span class="text-caption text-on-surface-variant">{{ hiddenCount }} more hidden —</span>
+              <span class="text-caption text-primary cursor-pointer">expand to edit all</span>
+            </div>
+          </div>
+          <div v-else-if="form.params.length === 0" class="text-caption text-on-surface-variant pa-3 text-center">
+            No parameters
           </div>
         </div>
 
-        <v-btn
-          color="primary" variant="flat" block
-          :disabled="!form.name.trim() || !form.workDir"
-          :loading="form.creating"
-          @click="$emit('create')"
-        >
-          <v-icon start size="16">mdi-check</v-icon>
-          Register & Continue
-        </v-btn>
+        <!-- Next button in parent handles save -->
       </v-card>
 
       <!-- File browser dialog -->
-      <v-dialog v-model="showFileBrowser" max-width="720">
-        <v-card class="pa-4">
-          <div class="d-flex align-center justify-space-between mb-3">
-            <div class="text-subtitle-1 font-weight-medium">Select Script</div>
-            <v-btn icon size="small" variant="text" @click="showFileBrowser = false">
-              <v-icon>mdi-close</v-icon>
-            </v-btn>
-          </div>
+      <FileBrowserDialog
+        v-model="showFileBrowser"
+        :mode="workDirEditMode ? 'directory' : 'script'"
+        :initial-dir="form.workDir"
+        @select="onBrowserSelect"
+      />
 
-          <v-row no-gutters>
-            <!-- Sidebar: favorites + recent -->
-            <v-col cols="4" class="pr-3" style="max-height: 460px; overflow-y: auto">
-              <!-- Pinned workspaces -->
-              <div v-if="prefs.preferredWorkspaces.value.length > 0" class="mb-3">
-                <div class="text-caption text-on-surface-variant mb-1 d-flex align-center ga-1">
-                  <v-icon size="11">mdi-star</v-icon> Favorites
-                </div>
-                <div
-                  v-for="ws in prefs.preferredWorkspaces.value" :key="ws"
-                  class="quick-item d-flex align-center ga-2 pa-2 rounded cursor-pointer"
-                  :class="{ 'bg-primary': browserCurrentDir === ws }"
-                  @click="loadBrowserDir(ws)"
-                >
-                  <v-icon size="14" :color="browserCurrentDir === ws ? 'on-primary' : 'primary'">mdi-folder-star-outline</v-icon>
-                  <span class="text-body-2 text-truncate" :class="browserCurrentDir === ws ? 'text-on-primary' : ''">
-                    {{ ws.split('/').filter(Boolean).pop() || ws }}
-                  </span>
-                </div>
-              </div>
-
-              <!-- Recent scripts -->
-              <div v-if="prefs.recentScripts.value.length > 0">
-                <div class="text-caption text-on-surface-variant mb-1 d-flex align-center ga-1">
-                  <v-icon size="11">mdi-clock-outline</v-icon> Recent
-                </div>
-                <div
-                  v-for="s in prefs.recentScripts.value" :key="s.path"
-                  class="quick-item d-flex align-center ga-2 pa-2 rounded cursor-pointer"
-                  @click="onScriptPicked({ path: s.path, name: s.name, is_dir: false, size: 0 })"
-                >
-                  <v-icon size="14" color="primary">mdi-file-code-outline</v-icon>
-                  <div class="flex-grow-1" style="min-width: 0">
-                    <div class="text-body-2 font-weight-medium text-truncate">{{ s.name }}</div>
-                    <div class="text-caption text-on-surface-variant">{{ s.project }}</div>
-                  </div>
-                </div>
-              </div>
-
-              <div v-if="prefs.preferredWorkspaces.value.length === 0 && prefs.recentScripts.value.length === 0"
-                class="text-caption text-on-surface-variant pa-2"
-              >
-                No favorites or recent scripts yet
-              </div>
-            </v-col>
-
-            <!-- File browser -->
-            <v-col cols="8">
-              <!-- Path input -->
-              <v-text-field
-                v-model="browserPath"
-                placeholder="Paste path or browse..."
-                prepend-inner-icon="mdi-link-variant"
-                density="compact" variant="outlined" hide-details clearable
-                class="mb-2"
-                style="font-family: monospace; font-size: 12px"
-                @keydown.enter="useBrowserPath"
-              />
-
-              <!-- Breadcrumb -->
-              <div class="d-flex align-center flex-wrap ga-1 text-caption text-on-surface-variant mb-2">
-                <span class="cursor-pointer breadcrumb-seg" @click="loadBrowserDir('')">~</span>
-                <template v-for="(seg, i) in browserSegments" :key="i">
-                  <v-icon size="10">mdi-chevron-right</v-icon>
-                  <span
-                    class="cursor-pointer breadcrumb-seg"
-                    :class="{ 'font-weight-medium': i === browserSegments.length - 1 }"
-                    @click="loadBrowserDir('/' + browserSegments.slice(0, i + 1).join('/'))"
-                  >{{ seg }}</span>
-                </template>
-                <!-- Pin button -->
-                <v-btn
-                  v-if="browserCurrentDir"
-                  icon size="x-small" variant="text"
-                  :color="isBrowserDirPinned ? 'primary' : undefined"
-                  @click="togglePinBrowserDir"
-                  class="ml-1"
-                >
-                  <v-icon size="14">{{ isBrowserDirPinned ? 'mdi-star' : 'mdi-star-outline' }}</v-icon>
-                </v-btn>
-              </div>
-
-              <!-- File list -->
-              <v-list density="compact" class="rounded pa-0" style="max-height: 340px; overflow-y: auto">
-                <v-list-item v-if="browserCurrentDir" @click="browserNavigateUp" class="rounded">
-                  <template #prepend><v-icon size="16" color="on-surface-variant">mdi-arrow-up</v-icon></template>
-                  <v-list-item-title class="text-body-2 text-on-surface-variant">..</v-list-item-title>
-                </v-list-item>
-                <v-list-item
-                  v-for="entry in browserFilteredEntries" :key="entry.path"
-                  @click="entry.is_dir ? loadBrowserDir(entry.path) : onScriptPicked(entry)"
-                  class="rounded"
-                >
-                  <template #prepend>
-                    <v-icon size="16" :color="entry.is_dir ? 'warning' : 'primary'">
-                      {{ entry.is_dir ? 'mdi-folder' : 'mdi-file-code-outline' }}
-                    </v-icon>
-                  </template>
-                  <v-list-item-title class="text-body-2">{{ entry.name }}</v-list-item-title>
-                </v-list-item>
-              </v-list>
-            </v-col>
-          </v-row>
-        </v-card>
-      </v-dialog>
+      <!-- Param editor full-screen dialog -->
+      <ParamEditorDialog
+        v-model="showParamEditor"
+        :params="form.params"
+        @update:params="form.params = $event"
+      />
     </v-col>
   </v-row>
 </template>
@@ -393,14 +271,40 @@ import { api } from '@/apis/client'
 import { usePreferences } from '@/composables/usePreferences'
 import type { FSEntry, ParseResult, ProjectConfig, ProjectSummary } from '@/types/api'
 import { SUBMIT_STATE_KEY } from '@/types/submit'
+import ParamEditorDialog from './ParamEditorDialog.vue'
+import FileBrowserDialog from '@/components/FileBrowserDialog.vue'
 
-const emit = defineEmits<{ create: [] }>()
+// No emits — save handled by parent's goNext
 const { t } = useI18n()
 const state = inject(SUBMIT_STATE_KEY)!
 const prefs = usePreferences()
 
+// ── Rename ──
+const renaming = ref(false)
+
+async function doRename() {
+  const newName = form.name.trim()
+  if (!newName || newName === state.projectName) return
+  renaming.value = true
+  try {
+    await api.post(`/projects/${encodeURIComponent(state.projectName)}/rename`, { new_name: newName })
+    const proj = state.matchedProjects.find(p => p.name === state.projectName)
+    if (proj) proj.name = newName
+    state.projectName = newName
+    prefs.lastProject.value = newName
+  } catch (e: any) {
+    form.error = e?.message || 'Rename failed'
+  } finally {
+    renaming.value = false
+  }
+}
+
+// ── Param editor dialog ──
+const showParamEditor = ref(false)
+
 // ── Mode ──
-const mode = ref<'select' | 'create'>(state.matchedProjects.length > 0 ? 'select' : 'create')
+const mode = ref<'select' | 'create'>('select') // updated after API load in onMounted
+const isCreating = computed(() => mode.value === 'create')
 
 // ── Select existing ──
 const selectedConfig = ref<ProjectConfig | null>(null)
@@ -411,14 +315,14 @@ async function selectProject(name: string) {
 	try {
 		const cfg = await api.get<ProjectConfig>(`/projects/${encodeURIComponent(name)}`)
 		selectedConfig.value = cfg
-		applyProjectConfig(cfg)
+		applyProjectConfig(cfg, state.groups.length === 0)
 		await refreshParamsFromProject(cfg)
 	} catch {
 		selectedConfig.value = null
 	}
 }
 
-function applyProjectConfig(cfg: ProjectConfig) {
+function applyProjectConfig(cfg: ProjectConfig, resetGroups = true) {
 	form.name = cfg.project_name
 	form.workDir = cfg.working_dir
 	form.cmd = cfg.command_template
@@ -428,25 +332,50 @@ function applyProjectConfig(cfg: ProjectConfig) {
 	form.envPath = cfg.python_env?.path || ''
 	form.envName = cfg.python_env?.name || ''
 	form.error = ''
-	state.groups = []
+	// Load persisted params from project config
+	form.params = ((cfg as any).params || []).map((p: any) => normalizeParam(p))
+	autoIncludeCommonParams()
+	if (resetGroups) state.groups = []
 }
 
 async function refreshParamsFromProject(cfg: ProjectConfig) {
-	form.params = []
 	const path = inferScriptPath(cfg)
 	if (!path) return
 	scriptPath.value = path
 	try {
 		const result = await api.post<ParseResult>('/fs/parse-script', { path }, { silent: true })
-		form.params = (result.args || []).map(a => ({
-			name: a.name,
-			type: normalizeType(a.type),
-			default: a.default || '',
-			include: true,
-		}))
+		mergeParsedParams(result.args || [])
+		autoIncludeCommonParams()
 	} catch {
-		form.params = []
+		// Keep persisted project.yaml params when script parsing is unavailable.
 	}
+}
+
+function mergeParsedParams(args: ParseResult['args']) {
+  const existing = new Map(form.params.map(p => [p.name, p]))
+  const merged: import('@/types/submit').ProjectParam[] = []
+
+  for (const arg of args || []) {
+    const discovered = normalizeParam(arg)
+    const saved = existing.get(discovered.name)
+    if (!saved) {
+      merged.push(discovered)
+      continue
+    }
+    existing.delete(discovered.name)
+    merged.push({
+      ...discovered,
+      ...saved,
+      values: saved.values?.length ? [...saved.values] : discovered.values ? [...discovered.values] : undefined,
+      min: saved.min ?? discovered.min,
+      max: saved.max ?? discovered.max,
+    })
+  }
+
+  for (const saved of existing.values()) {
+    merged.push(saved)
+  }
+  form.params = merged
 }
 
 function inferScriptPath(cfg: ProjectConfig): string {
@@ -479,6 +408,13 @@ function truncateWorkDir(index: number) {
   form.workDir = '/' + segs.join('/')
   // Update project name suggestion to match new dir
   form.name = segs[segs.length - 1] || form.name
+}
+
+const workDirEditMode = ref(false)
+
+function editWorkDir() {
+  workDirEditMode.value = true
+  showFileBrowser.value = true
 }
 
 function enterCreateMode() {
@@ -526,17 +462,73 @@ watch(() => form.envType, async (type) => {
 })
 
 // Params helpers
-const paramTypes = ['int', 'float', 'string', 'bool', 'any']
-const allParamsIncluded = computed(() => form.params.length > 0 && form.params.every(p => p.include))
+const paramTypes = ['int', 'float', 'str', 'bool', 'file', 'folder', 'list']
+
+// Common param names to auto-include in compact mode
+const COMMON_PARAMS = new Set([
+  'epoch', 'epochs', 'num_epochs', 'n_epochs', 'max_epochs',
+  'lr', 'learning_rate', 'learning-rate',
+  'bs', 'batch_size', 'batch-size', 'batch_size',
+  'seed', 'num_workers', 'device', 'output', 'output_dir',
+])
+
+const compactMode = computed(() => form.params.length > 5)
+
+const visibleParams = computed(() => {
+  if (!compactMode.value) return form.params
+  return form.params.filter(p => p.include)
+})
+
+const hiddenCount = computed(() => form.params.length - visibleParams.value.length)
+
+/** Auto-select common params when > 5 params discovered.
+ *  All others default to deselected — edit in expand dialog. */
+function autoIncludeCommonParams() {
+  if (form.params.length <= 5) return // small set: keep all included
+  // Deselect all, then select common ones
+  for (const p of form.params) {
+    p.include = COMMON_PARAMS.has(p.name.toLowerCase())
+  }
+  // If nothing matched, include the first 5
+  if (!form.params.some(p => p.include)) {
+    for (let i = 0; i < Math.min(5, form.params.length); i++) {
+      form.params[i].include = true
+    }
+  }
+}
+
+const includedCount = computed(() => form.params.filter(p => p.include).length)
+const allParamsIncluded = computed(() => form.params.length > 0 && includedCount.value === form.params.length)
 
 function normalizeType(t: string): string {
   const lower = (t || '').toLowerCase()
-  if (lower === 'str' || lower === 'string') return 'string'
+  if (lower === 'str' || lower === 'string') return 'str'
   if (lower === 'int' || lower === 'integer') return 'int'
   if (lower === 'float' || lower === 'number') return 'float'
   if (lower === 'bool' || lower === 'boolean') return 'bool'
+  if (lower === 'file') return 'file'
+  if (lower === 'folder' || lower === 'dir' || lower === 'directory') return 'folder'
+  if (lower === 'path') return 'file'
+  if (lower === 'list' || lower === 'array') return 'list'
   if (paramTypes.includes(lower)) return lower
-  return 'any'
+  return 'str'
+}
+
+/** Build a ProjectParam from a parsed arg, moving default into values for str/file/folder. */
+function normalizeParam(a: { name: string; type: string; default?: string; choices?: string[]; min?: number; max?: number }): import('@/types/submit').ProjectParam {
+  const type = normalizeType(a.type)
+  const def = a.default || ''
+  // Read choices from backend → values in frontend
+  const values = Array.isArray((a as any).choices) ? (a as any).choices.map(String) : []
+  // str/file/folder: ensure default is in values[0]
+  if (['str', 'file', 'folder'].includes(type) && def && !values.includes(def)) {
+    values.unshift(def)
+  }
+  return {
+    name: a.name, type, default: def, include: true,
+    values: values.length > 0 ? values : undefined,
+    min: a.min, max: a.max,
+  }
 }
 
 function validateParam(value: string, type: string): boolean | string {
@@ -558,7 +550,19 @@ function toggleAllParams() {
   for (const p of form.params) p.include = newVal
 }
 
+function onBrowserSelect(path: string) {
+  if (workDirEditMode.value) {
+    form.workDir = path
+    workDirEditMode.value = false
+    return
+  }
+  // Script selected
+  const name = path.split(/[\\/]/).pop() || path
+  onScriptPicked({ path, name, is_dir: false, size: 0 })
+}
+
 async function onScriptPicked(entry: FSEntry) {
+  workDirEditMode.value = false
   scriptPath.value = entry.path
   showFileBrowser.value = false
 
@@ -592,12 +596,8 @@ async function onScriptPicked(entry: FSEntry) {
     }
 
     // Populate discovered params
-    form.params = (result.args || []).map(a => ({
-      name: a.name,
-      type: normalizeType(a.type),
-      default: a.default || '',
-      include: true,
-    }))
+    form.params = (result.args || []).map(a => normalizeParam(a))
+    autoIncludeCommonParams()
   } catch {
     form.params = []
   }
@@ -606,81 +606,41 @@ async function onScriptPicked(entry: FSEntry) {
   prefs.addRecentScript(entry.path, entry.name, form.name)
 }
 
-// ── File browser ──
-const browserCurrentDir = ref('')
-const browserEntries = ref<FSEntry[]>([])
-const browserPath = ref('')
-
-const browserSegments = computed(() =>
-  browserCurrentDir.value ? browserCurrentDir.value.split('/').filter(Boolean) : []
-)
-
-const browserFilteredEntries = computed(() =>
-  browserEntries.value.filter(e => !e.name.startsWith('.') && (e.is_dir || e.name.endsWith('.py')))
-)
-
-const isBrowserDirPinned = computed(() =>
-  browserCurrentDir.value !== '' && prefs.preferredWorkspaces.value.includes(browserCurrentDir.value)
-)
-
-function togglePinBrowserDir() {
-  if (!browserCurrentDir.value) return
-  if (isBrowserDirPinned.value) prefs.removePreferredWorkspace(browserCurrentDir.value)
-  else prefs.addPreferredWorkspace(browserCurrentDir.value)
-}
-
-async function loadBrowserDir(path: string) {
-  browserCurrentDir.value = path
-  browserPath.value = path ? path + '/' : ''
-  try {
-    browserEntries.value = await api.get<FSEntry[]>(`/fs/list?path=${encodeURIComponent(path)}`)
-  } catch { browserEntries.value = [] }
-}
-
-function browserNavigateUp() {
-  const parts = browserCurrentDir.value.split('/').filter(Boolean)
-  parts.pop()
-  loadBrowserDir(parts.length > 0 ? '/' + parts.join('/') : '')
-}
-
-function useBrowserPath() {
-  const p = browserPath.value.trim()
-  if (!p) return
-  if (p.endsWith('.py')) {
-    const name = p.split('/').pop() || p
-    onScriptPicked({ path: p, name, is_dir: false, size: 0 })
-  } else {
-    loadBrowserDir(p.replace(/\/+$/, ''))
-  }
-}
 
 // ── Init ──
 onMounted(async () => {
+  // Refresh project list from backend
   try {
     state.matchedProjects = await api.get<ProjectSummary[]>('/projects')
   } catch { state.matchedProjects = [] }
 
+  // If form already has data (user came back), preserve state
+  const hasFormData = !!form.name
   if (state.matchedProjects.length === 0) {
     mode.value = 'create'
-  } else if (state.projectName) {
-    await selectProject(state.projectName)
+  } else {
+    mode.value = 'select'
+    if (state.projectName && !hasFormData) {
+      await selectProject(state.projectName)
+    } else if (state.projectName) {
+      // Came back — keep form, just restore mode + selectedConfig
+      mode.value = 'select'
+      try {
+        selectedConfig.value = await api.get<any>(`/projects/${encodeURIComponent(state.projectName)}`)
+      } catch { selectedConfig.value = null }
+    }
   }
 
-  // Pre-load browser at first favorite or home
-  loadBrowserDir(prefs.preferredWorkspaces.value[0] || '')
 })
 </script>
 
 <style scoped>
-.quick-item { transition: background 0.15s ease; }
-.quick-item:hover { background: rgb(var(--v-theme-surface-variant)); }
-.breadcrumb-seg { text-decoration: underline dotted; text-underline-offset: 2px; }
-.breadcrumb-seg:hover { color: rgb(var(--v-theme-primary)); }
 .workdir-breadcrumb { background: rgb(var(--v-theme-surface-variant), 0.3); border: 1px solid rgb(var(--v-theme-outline-variant)); }
 .workdir-seg { text-decoration: underline dotted; text-underline-offset: 2px; }
 .workdir-seg:hover { color: rgb(var(--v-theme-primary)); }
 .params-list { background: rgb(var(--v-theme-surface-variant), 0.2); border: 1px solid rgb(var(--v-theme-outline-variant)); overflow: hidden; }
-.params-header { border-bottom: 1px solid rgb(var(--v-theme-outline-variant)); font-weight: 500; }
 .param-row:hover { background: rgb(var(--v-theme-surface-variant), 0.3); }
 .param-row + .param-row { border-top: 1px solid rgb(var(--v-theme-outline-variant), 0.3); }
+.compact-hint { border-top: 1px solid rgb(var(--v-theme-outline-variant), 0.3); cursor: pointer; transition: background 0.15s ease; }
+.compact-hint:hover { background: rgb(var(--v-theme-surface-variant), 0.3); }
 </style>

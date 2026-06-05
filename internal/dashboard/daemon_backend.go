@@ -127,6 +127,10 @@ func (b *DaemonBackend) CreateProject(ctx context.Context, cfg project.Config) e
 	return b.do(ctx, "POST", "/api/projects", cfg, nil)
 }
 
+func (b *DaemonBackend) UpdateProject(ctx context.Context, cfg project.Config) error {
+	return b.do(ctx, "PUT", "/api/projects/"+cfg.ProjectName, cfg, nil)
+}
+
 func (b *DaemonBackend) GetProject(ctx context.Context, name string) (*project.Config, error) {
 	var cfg project.Config
 	if err := b.do(ctx, "GET", "/api/projects/"+url.PathEscape(name), nil, &cfg); err != nil {

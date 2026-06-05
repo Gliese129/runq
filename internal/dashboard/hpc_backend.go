@@ -141,6 +141,11 @@ func (b *HPCBackend) CreateProject(_ context.Context, cfg project.Config) error 
 	return reg.Add(cfg)
 }
 
+func (b *HPCBackend) UpdateProject(_ context.Context, cfg project.Config) error {
+	reg := project.NewRegistry(b.store.DB())
+	return reg.Update(cfg)
+}
+
 func (b *HPCBackend) GetProject(_ context.Context, name string) (*project.Config, error) {
 	reg := project.NewRegistry(b.store.DB())
 	return reg.Get(name)

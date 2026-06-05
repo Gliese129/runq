@@ -79,6 +79,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/dashboard/projects/match", s.handleMatchProjects)
 	s.mux.HandleFunc("GET /api/dashboard/projects/{name}", s.handleGetProject)
 	s.mux.HandleFunc("POST /api/dashboard/projects", s.handleCreateProject)
+	s.mux.HandleFunc("PUT /api/dashboard/projects/{name}", s.handleUpdateProject)
 	s.mux.HandleFunc("GET /api/dashboard/gpu", s.handleGPU)
 	s.mux.HandleFunc("POST /api/dashboard/jobs", s.handleSubmitJob)
 	s.mux.HandleFunc("POST /api/dashboard/jobs/dry-run", s.handleDryRun)
@@ -167,6 +168,27 @@ func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusCreated, map[string]string{
 		"message": fmt.Sprintf("project %q created", cfg.ProjectName),
+	})
+}
+
+func (s *Server) handleUpdateProject(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimSpace(r.PathValue("name"))
+	if name == "" {
+		writeErrorStatus(w, http.StatusBadRequest, fmt.Errorf("project name is required"))
+		return
+	}
+	var cfg project.Config
+	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+		writeErrorStatus(w, http.StatusBadRequest, err)
+		return
+	}
+	cfg.ProjectName = name
+	if err := s.backend.UpdateProject(r.Context(), cfg); err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{
+		"message": fmt.Sprintf("project %q updated", name),
 	})
 }
 

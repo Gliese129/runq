@@ -83,6 +83,48 @@ func TestExpandEmptySweepRunsOnce(t *testing.T) {
 	}
 }
 
+func TestExpandFixedParamsOnlyRunsOnce(t *testing.T) {
+	tasks, err := Expand(&JobConfig{
+		Project:     "test",
+		FixedParams: map[string]any{"batch_size": 32, "seed": 7},
+	})
+	if err != nil {
+		t.Fatalf("expand: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("expected one fixed-param task, got %d: %#v", len(tasks), tasks)
+	}
+	want := TaskParams{"batch_size": 32, "seed": 7}
+	if !reflect.DeepEqual(tasks[0], want) {
+		t.Fatalf("task = %#v, want %#v", tasks[0], want)
+	}
+}
+
+func TestExpandMergesFixedParamsWithSweepOverride(t *testing.T) {
+	cfg := &JobConfig{
+		Project:     "test",
+		FixedParams: map[string]any{"batch_size": 32, "seed": 7},
+		Sweep: []SweepBlock{{
+			Method: "grid",
+			Parameters: map[string]ParameterSpec{
+				"lr":         {Values: []any{0.001, 0.01}},
+				"batch_size": {Values: []any{64}},
+			},
+		}},
+	}
+	tasks, err := Expand(cfg)
+	if err != nil {
+		t.Fatalf("expand: %v", err)
+	}
+	expected := []TaskParams{
+		{"batch_size": 64, "seed": 7, "lr": 0.001},
+		{"batch_size": 64, "seed": 7, "lr": 0.01},
+	}
+	if !reflect.DeepEqual(tasks, expected) {
+		t.Fatalf("tasks = %#v, want %#v", tasks, expected)
+	}
+}
+
 func TestExpandList(t *testing.T) {
 	cfg := &JobConfig{
 		Project: "test",

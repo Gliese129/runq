@@ -17,16 +17,20 @@
           class="flex-grow-1 rounded-pill"
           :style="{
             height: '4px',
-            background: step > i ? 'rgb(var(--v-theme-primary))' : 'rgb(var(--v-theme-surface-variant))',
+            background: step > i
+              ? 'rgb(var(--v-theme-primary))'
+              : step === i
+                ? 'rgb(var(--v-theme-primary), 0.4)'
+                : 'rgb(var(--v-theme-surface-variant))',
             transition: 'background 0.3s ease',
           }"
         />
       </div>
     </div>
 
-    <StepProject v-if="step === 0" @create="onCreateProject" />
-    <StepConfigure v-else-if="step === 1" />
-    <StepReview v-else-if="step === 2" />
+    <KeepAlive>
+      <component :is="stepComponents[step]" :key="step" />
+    </KeepAlive>
 
     <!-- Navigation -->
     <div class="d-flex align-center mt-5 ga-2" style="max-width: 960px; margin: 0 auto">
@@ -36,19 +40,10 @@
       </v-btn>
       <v-spacer />
       <v-btn
-        v-if="step === 0"
+        v-if="step < 2"
         color="primary"
         variant="tonal"
-        :disabled="!projectName"
-        @click="goNext"
-      >
-        {{ t('common.next') }}
-        <v-icon end>mdi-arrow-right</v-icon>
-      </v-btn>
-      <v-btn
-        v-else-if="step === 1"
-        color="primary"
-        variant="tonal"
+        :disabled="step === 0 && !projectName && !newProject.name.trim()"
         @click="goNext"
       >
         {{ t('common.next') }}
@@ -67,11 +62,22 @@
         {{ t('submit.submit') }} ({{ dryRunResult.length }} tasks)
       </v-btn>
     </div>
+
+    <!-- Persistent submit error -->
+    <v-alert
+      v-if="submitError && step === 2"
+      type="error" variant="tonal" density="compact" closable
+      class="mt-3"
+      style="max-width: 960px; margin: 0 auto"
+      @click:close="submitError = ''"
+    >
+      {{ submitError }}
+    </v-alert>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, provide, reactive } from 'vue'
+import { ref, computed, provide, reactive, markRaw } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { api } from '@/apis/client'
@@ -83,6 +89,8 @@ import StepProject from './StepProject.vue'
 import StepConfigure from './StepConfigure.vue'
 import StepReview from './StepReview.vue'
 import { SUBMIT_STATE_KEY, type SweepGroup } from '@/types/submit'
+
+const stepComponents = [markRaw(StepProject), markRaw(StepConfigure), markRaw(StepReview)]
 
 const { t } = useI18n()
 const router = useRouter()
@@ -105,7 +113,7 @@ const newProject = reactive({
   envName: '',
   creating: false,
   error: '',
-  params: [] as Array<{ name: string; type: string; default: string; include: boolean }>,
+  params: [] as import('@/types/submit').ProjectParam[],
 })
 const note = ref('')
 
@@ -129,17 +137,23 @@ const usedParamNames = computed(() => {
 
 function groupTaskCount(group: SweepGroup): number {
   if (group.params.length === 0) return 0
+  const counts = group.params.map(p => activeValues(p).length)
+  if (counts.every(c => c === 0)) return 0
   if (group.type === 'grid') {
-    return group.params.reduce((acc, p) => acc * Math.max(p.values.length, 1), 1)
+    // Grid: cartesian product — only params with values contribute
+    return counts.filter(c => c > 0).reduce((acc, c) => acc * c, 1)
   }
-  return Math.max(...group.params.map(p => p.values.length), 0)
+  // List: all params must have same count (backend enforces), show min for safety
+  const nonZero = counts.filter(c => c > 0)
+  return nonZero.length > 0 ? Math.min(...nonZero) : 0
 }
 
 const totalTaskCount = computed(() => {
-  if (groups.value.length === 0) return 1 // no sweep = 1 task
   const activeGroups = groups.value.filter(g => g.params.length > 0)
-  if (activeGroups.length === 0) return 0 // explicit empty groups = 0 tasks
-  return activeGroups.reduce((product, g) => product * (groupTaskCount(g) || 1), 1)
+  if (activeGroups.length === 0) return 1
+  const counts = activeGroups.map(g => groupTaskCount(g))
+  if (counts.some(c => c === 0)) return 0 // has params but no values = invalid, not 1
+  return counts.reduce((product, c) => product * c, 1)
 })
 
 const displayTaskCount = computed(() => {
@@ -153,7 +167,7 @@ const sweepSummary = computed(() => {
     .filter(g => g.params.length > 0)
     .map(g => {
       const label = g.type === 'grid' ? 'Grid' : 'List'
-      const parts = g.params.map(p => `${p.name}(${p.values.length})`)
+      const parts = g.params.map(p => `${p.name}(${activeValues(p).length})`)
       return `[${label}] ${parts.join(g.type === 'grid' ? ' x ' : ', ')}`
     })
     .join(' + ')
@@ -161,7 +175,16 @@ const sweepSummary = computed(() => {
 
 const dryRunHeaders = computed(() => {
   if (dryRunResult.value.length === 0) return []
-  return Object.keys(dryRunResult.value[0]).map(k => ({ title: k, key: k }))
+  const keys = new Set<string>()
+  for (const row of dryRunResult.value) {
+    for (const key of Object.keys(row)) keys.add(key)
+  }
+  const ordered: string[] = []
+  for (const p of newProject.params) {
+    if (keys.delete(p.name)) ordered.push(p.name)
+  }
+  ordered.push(...Array.from(keys).sort())
+  return ordered.map(k => ({ title: k, key: k }))
 })
 
 // ── Provide ──
@@ -190,62 +213,107 @@ provide(SUBMIT_STATE_KEY, reactive({
 
 // ── Actions ──
 
-async function onCreateProject() {
+function buildProjectPayload() {
+  const payload: Record<string, any> = {
+    project_name: newProject.name.trim(),
+    working_dir: newProject.workDir,
+    command_template: newProject.cmd,
+    defaults: { gpus_per_task: newProject.gpus, max_retry: newProject.maxRetry },
+  }
+  if (newProject.envType) {
+    payload.python_env = {
+      type: newProject.envType,
+      path: newProject.envPath || undefined,
+      name: newProject.envName || undefined,
+    }
+  }
+  // Persist all param metadata. `include` is submit-flow state, not project YAML state.
+  const params = newProject.params.filter(p => p.name.trim())
+  if (params.length > 0) {
+    payload.params = params.map(p => {
+      const choices = p.values?.filter(v => !isBlankValue(v))
+      return {
+        name: p.name.trim(),
+        type: p.type,
+        default: !isBlankValue(p.default) ? p.default : undefined,
+        choices: choices?.length ? choices : undefined,
+        min: p.min ?? undefined,
+        max: p.max ?? undefined,
+      }
+    })
+  }
+  return payload
+}
+
+async function saveProject(): Promise<boolean> {
   newProject.error = ''
   newProject.creating = true
   try {
-    const payload: Record<string, any> = {
-      project_name: newProject.name.trim(),
-      working_dir: newProject.workDir,
-      command_template: newProject.cmd,
-      defaults: { gpus_per_task: newProject.gpus, max_retry: newProject.maxRetry },
+    const payload = buildProjectPayload()
+    const targetName = newProject.name.trim()
+    const selectedName = projectName.value.trim()
+    const selectedExists = selectedName && matchedProjects.value.some(p => p.name === selectedName)
+    if (selectedExists && targetName !== selectedName) {
+      newProject.error = 'Use Rename before continuing'
+      return false
     }
-    if (newProject.envType) {
-      payload.python_env = {
-        type: newProject.envType,
-        path: newProject.envPath || undefined,
-        name: newProject.envName || undefined,
-      }
+    const isNew = !matchedProjects.value.some(p => p.name === targetName)
+    if (isNew) {
+      await api.post('/projects', payload)
+      matchedProjects.value.push({
+        name: targetName,
+        work_dir: newProject.workDir,
+        job_count: 0,
+      })
+      snack.success(`Project "${targetName}" registered`)
+    } else {
+      await api.put(`/projects/${encodeURIComponent(targetName)}`, payload)
     }
-    await api.post('/projects', payload)
-    matchedProjects.value.push({
-      name: newProject.name.trim(),
-      work_dir: newProject.workDir,
-      job_count: 0,
-    })
-    projectName.value = newProject.name.trim()
-    snack.success(`Project "${projectName.value}" registered`)
-    seedGroupsFromParams()
-    step.value++ // advance to configure
+    projectName.value = targetName
+    prefs.lastProject.value = projectName.value
+    return true
   } catch (e: any) {
-    newProject.error = e?.message || 'Failed to create project'
+    newProject.error = e?.message || 'Failed to save project'
+    return false
   } finally {
     newProject.creating = false
   }
 }
 
-function seedGroupsFromParams() {
-  const included = newProject.params.filter(p => p.include)
-  if (included.length === 0 || groups.value.length > 0) return
-  const id = ++groupIdCounter
-  const params = included.map(p => ({
-    name: p.name,
-    type: p.type,
-    default: p.default,
-    values: p.default ? [p.default] : [],
-  }))
-  groups.value.push({ id: `g${id}`, type: 'grid', expanded: true, params })
-}
-
 async function goNext() {
   if (step.value === 0) {
-    prefs.lastProject.value = projectName.value
-    // Seed configure from discovered params (for existing projects, groups stay as-is)
-    if (groups.value.length === 0 && newProject.params.length > 0) {
-      seedGroupsFromParams()
-    }
+    // Always save project (create or update) — writes yaml + DB
+    if (!projectName.value && !newProject.name.trim()) return
+    const ok = await saveProject()
+    if (!ok) return
   }
   if (step.value === 1) {
+    // ── Validation ──
+    const activeGroups = groups.value.filter(g => g.params.length > 0)
+    // Check for params with no values
+    for (const g of activeGroups) {
+      const emptyParams = g.params.filter(p => activeValues(p).length === 0)
+      if (emptyParams.length > 0) {
+        snack.error(`"${emptyParams[0].name}" has no values — add values or remove it`)
+        return
+      }
+      for (const p of g.params) {
+        const invalid = activeValues(p).find(v => validateTypedValue(v, p.type))
+        if (invalid != null) {
+          snack.error(`"${p.name}" has invalid ${p.type} value: ${invalid}`)
+          return
+        }
+      }
+    }
+    // List groups: equal non-empty value counts
+    for (const g of groups.value) {
+      if (g.type !== 'list' || g.params.length === 0) continue
+      const lengths = g.params.map(p => activeValues(p).length).filter(l => l > 0)
+      if (lengths.length > 0 && new Set(lengths).size > 1) {
+        snack.error(t('submit.list_length_mismatch', 'List group 中各参数的值数量必须相等'))
+        return
+      }
+    }
     // Run dry-run before entering review
     prefs.lastProject.value = projectName.value
     dryRunLoading.value = true
@@ -266,40 +334,79 @@ async function goNext() {
 
 function buildJobConfig() {
   const sweep: { method: string; parameters: Record<string, { values: any[] }> }[] = []
+  const sweptNames = new Set<string>()
 
   for (const g of groups.value) {
-    const active = g.params.filter(p => p.values.length > 0)
+    const active = g.params.filter(p => activeValues(p).length > 0)
     if (active.length === 0) continue
     const parameters: Record<string, { values: any[] }> = {}
     for (const p of active) {
-      parameters[p.name] = { values: p.values.map(inferType) }
+      const cleaned = activeValues(p)
+      parameters[p.name] = { values: cleaned.map(v => coerceValue(v, p.type)) }
+      sweptNames.add(p.name)
     }
     sweep.push({ method: g.type, parameters })
+  }
+
+  // Collect fixed_params: included params with default that aren't in sweep
+  const fixedParams: Record<string, any> = {}
+  for (const p of newProject.params) {
+    if (!p.include || isBlankValue(p.default) || sweptNames.has(p.name)) continue
+    fixedParams[p.name] = coerceValue(p.default, p.type)
   }
 
   return {
     project: projectName.value,
     note: note.value,
+    fixed_params: Object.keys(fixedParams).length > 0 ? fixedParams : undefined,
     sweep,
   }
 }
 
-function inferType(v: string): any {
-  if (v === 'true') return true
-  if (v === 'false') return false
-  const n = Number(v)
-  if (!isNaN(n) && v.trim() !== '') return n
-  return v
+function coerceValue(v: string, type: string): any {
+  const trimmed = v.trim()
+  switch (type) {
+    case 'int': { const n = parseInt(trimmed, 10); return isNaN(n) ? v : n }
+    case 'float': { const n = parseFloat(trimmed); return isNaN(n) ? v : n }
+    case 'bool': return trimmed.toLowerCase() === 'true' || trimmed === '1'
+    case 'str': case 'file': case 'folder': case 'list': return v
+    default: return v
+  }
 }
+
+function isBlankValue(v: string): boolean {
+  return String(v ?? '').trim() === ''
+}
+
+function activeValues(p: { values: string[] }): string[] {
+  return p.values.filter(v => !isBlankValue(v))
+}
+
+function validateTypedValue(value: string, type: string): string {
+  const trimmed = value.trim()
+  switch (type) {
+    case 'int':
+      return /^-?\d+$/.test(trimmed) ? '' : value
+    case 'float':
+      return trimmed !== '' && Number.isFinite(Number(trimmed)) ? '' : value
+    case 'bool':
+      return ['true', 'false', '1', '0'].includes(trimmed.toLowerCase()) ? '' : value
+    default:
+      return ''
+  }
+}
+
+const submitError = ref('')
 
 async function submit() {
   submitting.value = true
+  submitError.value = ''
   try {
     const res = await api.post<{ job_id: string }>('/jobs', buildJobConfig())
     snack.success(t('submit.success'))
     router.push({ name: 'job-detail', params: { project: projectName.value, jobId: res.job_id } })
-  } catch {
-    // toast handled by api client
+  } catch (e: any) {
+    submitError.value = e?.message || 'Submit failed'
   } finally {
     submitting.value = false
   }

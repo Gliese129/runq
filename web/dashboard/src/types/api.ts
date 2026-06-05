@@ -90,6 +90,9 @@ export interface ScriptArg {
   name: string
   type: string
   default?: string
+  choices?: string[]
+  min?: number
+  max?: number
 }
 
 export interface ProjectSummary {
@@ -123,6 +126,14 @@ export interface ProjectConfig {
     tags?: string[]
     mode?: string
   }
+  params?: Array<{
+    name: string
+    type: string
+    default?: string
+    choices?: string[]
+    min?: number
+    max?: number
+  }>
 }
 
 export interface WebhookConfig {

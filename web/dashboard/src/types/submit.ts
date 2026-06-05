@@ -1,11 +1,32 @@
 import type { InjectionKey } from 'vue'
 import type { ProjectSummary } from '@/types/api'
 
+// ── Parameter types ──
+export const PARAM_TYPES = ['int', 'float', 'bool', 'str', 'file', 'folder', 'list'] as const
+export type ParamType = (typeof PARAM_TYPES)[number]
+
+export interface ProjectParam {
+  name: string
+  type: string            // ParamType
+  default: string
+  include: boolean
+  min?: number            // int/float: valid range
+  max?: number            // int/float: valid range
+  values?: string[]       // str: selectable choices; list: items; file/folder: paths
+}
+
+export interface ParamMeta {
+  min?: number
+  max?: number
+  step?: number
+}
+
 export interface GroupParam {
   name: string
-  type: string
+  type: string            // int | float | bool | str | file | folder | list
   default: string
   values: string[]
+  meta?: ParamMeta
 }
 
 export interface SweepGroup {
@@ -25,12 +46,12 @@ export interface SubmitState {
     cmd: string
     gpus: number
     maxRetry: number
-    envType: string        // 'venv' | 'conda' | 'uv' | 'system' | ''
-    envPath: string        // venv/uv: relative dir
-    envName: string        // conda: env name
+    envType: string
+    envPath: string
+    envName: string
     creating: boolean
     error: string
-    params: Array<{ name: string; type: string; default: string; include: boolean }>
+    params: ProjectParam[]
   }
   note: string
   groups: SweepGroup[]

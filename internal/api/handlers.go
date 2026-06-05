@@ -29,6 +29,7 @@ func (s *Server) registerRoutes() {
 		projects.GET("/match", s.handleProjectMatch) // before /:name
 		projects.GET("/:name", s.handleProjectGet)
 		projects.PUT("/:name", s.handleProjectUpdate)
+		projects.POST("/:name/rename", s.handleProjectRename)
 		projects.DELETE("/:name", s.handleProjectDelete)
 	}
 
@@ -139,6 +140,28 @@ func (s *Server) handleProjectUpdate(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"message": fmt.Sprintf("project %q updated", name)})
+}
+
+func (s *Server) handleProjectRename(c *gin.Context) {
+	oldName := c.Param("name")
+	var body struct {
+		NewName string `json:"new_name" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "new_name is required"})
+		return
+	}
+	if err := s.deps.Registry.Rename(oldName, body.NewName); err != nil {
+		status := http.StatusBadRequest
+		if strings.Contains(err.Error(), "not found") {
+			status = http.StatusNotFound
+		} else if strings.Contains(err.Error(), "already exists") {
+			status = http.StatusConflict
+		}
+		c.JSON(status, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": fmt.Sprintf("project %q renamed to %q", oldName, body.NewName)})
 }
 
 func (s *Server) handleProjectDelete(c *gin.Context) {

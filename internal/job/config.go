@@ -8,11 +8,12 @@ import (
 
 // JobConfig represents a parsed job.yaml file.
 type JobConfig struct {
-	Project     string       `yaml:"project" json:"project"`
-	Description string       `yaml:"description,omitempty" json:"description,omitempty"`
-	Note        string       `yaml:"note,omitempty" json:"note,omitempty"`
-	Sweep       []SweepBlock `yaml:"sweep" json:"sweep"`
-	Overrides   *Overrides   `yaml:"overrides,omitempty" json:"overrides,omitempty"`
+	Project     string         `yaml:"project" json:"project"`
+	Description string         `yaml:"description,omitempty" json:"description,omitempty"`
+	Note        string         `yaml:"note,omitempty" json:"note,omitempty"`
+	FixedParams map[string]any `yaml:"fixed_params,omitempty" json:"fixed_params,omitempty"` // params with fixed values (not swept)
+	Sweep       []SweepBlock   `yaml:"sweep" json:"sweep"`
+	Overrides   *Overrides     `yaml:"overrides,omitempty" json:"overrides,omitempty"`
 }
 
 // SweepBlock is one block inside the sweep array.

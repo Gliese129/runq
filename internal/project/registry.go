@@ -155,6 +155,66 @@ func (r *Registry) Match(dir string) ([]Config, error) {
 	return matched, nil
 }
 
+// Rename atomically renames a project from oldName to newName.
+// Updates all references in jobs and tasks within a transaction,
+// then rewrites project.yaml with the new name.
+func (r *Registry) Rename(oldName, newName string) error {
+	if oldName == newName {
+		return nil
+	}
+	// Check new name doesn't already exist
+	var existing int
+	if err := r.db.QueryRow(`SELECT 1 FROM projects WHERE name = ?`, newName).Scan(&existing); err == nil {
+		return fmt.Errorf("project %q already exists", newName)
+	}
+
+	tx, err := r.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Get old config
+	var raw string
+	if err := tx.QueryRow(`SELECT config_json FROM projects WHERE name = ?`, oldName).Scan(&raw); err != nil {
+		return fmt.Errorf("project %q not found", oldName)
+	}
+
+	var cfg Config
+	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
+		return fmt.Errorf("unmarshal project %q: %w", oldName, err)
+	}
+
+	cfg.ProjectName = newName
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("marshal project config: %w", err)
+	}
+
+	// Insert new, update references, delete old
+	if _, err := tx.Exec(`INSERT INTO projects (name, config_json) VALUES (?, ?)`, newName, string(data)); err != nil {
+		return fmt.Errorf("insert renamed project: %w", err)
+	}
+	if _, err := tx.Exec(`UPDATE jobs SET project_name = ? WHERE project_name = ?`, newName, oldName); err != nil {
+		return fmt.Errorf("update jobs: %w", err)
+	}
+	if _, err := tx.Exec(`UPDATE tasks SET project_name = ? WHERE project_name = ?`, newName, oldName); err != nil {
+		return fmt.Errorf("update tasks: %w", err)
+	}
+	if _, err := tx.Exec(`DELETE FROM projects WHERE name = ?`, oldName); err != nil {
+		return fmt.Errorf("delete old project: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit rename: %w", err)
+	}
+
+	// Rewrite project.yaml with new name
+	_ = cfg.OverwriteYAML()
+
+	return nil
+}
+
 // Remove deletes a project by name.
 // Returns an error if the project does not exist.
 func (r *Registry) Remove(name string) error {

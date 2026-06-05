@@ -4,6 +4,9 @@
 cmd/*/runq
 cmd/*/runqd
 
+.claude
+.codex
+
 demo/
 docs/
 

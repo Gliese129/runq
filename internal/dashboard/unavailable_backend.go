@@ -76,6 +76,10 @@ func (b *UnavailableBackend) CreateProject(ctx context.Context, cfg project.Conf
 	return b.wrap()
 }
 
+func (b *UnavailableBackend) UpdateProject(ctx context.Context, cfg project.Config) error {
+	return b.wrap()
+}
+
 func (b *UnavailableBackend) wrap() error {
 	return fmt.Errorf("dashboard backend unavailable: %w", b.err)
 }

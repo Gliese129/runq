@@ -42,6 +42,7 @@ type Backend interface {
 	ListProjects(ctx context.Context) ([]ProjectSummary, error)
 	MatchProjects(ctx context.Context, dir string) ([]ProjectSummary, error)
 	CreateProject(ctx context.Context, cfg project.Config) error
+	UpdateProject(ctx context.Context, cfg project.Config) error
 }
 
 // ---- builders: store rows → view types ----

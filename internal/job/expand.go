@@ -17,8 +17,14 @@ type TaskParams map[string]any
 // then blocks are combined via cross-product.
 func Expand(cfg *JobConfig) ([]TaskParams, error) {
 	if len(cfg.Sweep) == 0 {
-		return []TaskParams{{}}, nil
+		// No sweep: return one task with just fixed_params (if any).
+		base := make(TaskParams, len(cfg.FixedParams))
+		for k, v := range cfg.FixedParams {
+			base[k] = v
+		}
+		return []TaskParams{base}, nil
 	}
+
 	blocks := make([][]TaskParams, 0, len(cfg.Sweep))
 	for _, sweep := range cfg.Sweep {
 		tasks, err := expandBlock(sweep)
@@ -27,7 +33,26 @@ func Expand(cfg *JobConfig) ([]TaskParams, error) {
 		}
 		blocks = append(blocks, tasks)
 	}
-	return cartesianProduct(blocks)
+	expanded, err := cartesianProduct(blocks)
+	if err != nil {
+		return nil, err
+	}
+
+	// Merge fixed_params as base: fixed first, sweep overrides.
+	if len(cfg.FixedParams) > 0 {
+		for i := range expanded {
+			merged := make(TaskParams, len(cfg.FixedParams)+len(expanded[i]))
+			for k, v := range cfg.FixedParams {
+				merged[k] = v
+			}
+			for k, v := range expanded[i] {
+				merged[k] = v // sweep overrides fixed
+			}
+			expanded[i] = merged
+		}
+	}
+
+	return expanded, nil
 }
 
 // expandBlock dispatches to the appropriate expansion strategy.
