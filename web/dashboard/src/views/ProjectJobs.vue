@@ -18,7 +18,7 @@
         size="small"
         @click="statusFilter = statusFilter === s.value ? '' : s.value"
       >
-        <div v-if="s.dot" class="status-dot mr-1" :class="`status-dot--${s.dot}`" style="width: 6px; height: 6px" />
+        <StatusDot v-if="s.dot" :status="s.dot" :kind="s.kind" :size="6" class="mr-1" />
         {{ s.label }}
       </v-chip>
       <v-spacer />
@@ -64,7 +64,7 @@
               class="cursor-pointer"
               @click="router.push({ name: 'job-detail', params: { project, jobId: j.id } })"
             >
-              <td><div class="status-dot" :class="`status-dot--${j.status}`" /></td>
+              <td><StatusDot :status="j.status" kind="job" /></td>
               <td><code>{{ j.id.slice(0, 8) }}</code></td>
               <td class="text-on-surface-variant">{{ j.note || '—' }}</td>
               <td>
@@ -99,6 +99,7 @@ import { ref, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { useJobsStore } from '@/stores/jobs'
+import StatusDot from '@/components/StatusDot.vue'
 
 const props = defineProps<{ project: string }>()
 const { t } = useI18n()
@@ -110,12 +111,14 @@ const searchQuery = ref('')
 const sortKey = ref('created_at')
 const sortDesc = ref(true)
 
-const statusFilters = [
-  { value: '', label: 'All', dot: '' },
-  { value: 'running', label: 'Running', dot: 'running' },
-  { value: 'done', label: 'Done', dot: 'completed' },
-  { value: 'failed', label: 'Failed', dot: 'failed' },
-  { value: 'pending', label: 'Pending', dot: 'pending' },
+// dot/kind reference statusGrammar — 'done' is a job-level status, the
+// rest filter on task counts, hence task-level statuses.
+const statusFilters: { value: string; label: string; dot: string; kind: 'task' | 'job' }[] = [
+  { value: '', label: 'All', dot: '', kind: 'task' },
+  { value: 'running', label: 'Running', dot: 'running', kind: 'task' },
+  { value: 'done', label: 'Done', dot: 'done', kind: 'job' },
+  { value: 'failed', label: 'Failed', dot: 'failed', kind: 'task' },
+  { value: 'pending', label: 'Pending', dot: 'pending', kind: 'task' },
 ]
 
 const projectJobs = computed(() => jobs.jobsByProject.get(props.project) ?? [])

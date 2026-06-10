@@ -20,7 +20,7 @@
         size="small"
         @click="statusFilter = statusFilter === s.value ? '' : s.value"
       >
-        <div v-if="s.dot" class="status-dot mr-1" :class="`status-dot--${s.dot}`" style="width:6px;height:6px" />
+        <StatusDot v-if="s.dot" :status="s.dot" :size="6" class="mr-1" />
         {{ s.label }}
       </v-chip>
     </div>
@@ -71,6 +71,7 @@ import { usePolling } from '@/composables/usePolling'
 import { useSnackbar } from '@/composables/useSnackbar'
 import JobHeader from './JobHeader.vue'
 import TaskTable from './TaskTable.vue'
+import StatusDot from '@/components/StatusDot.vue'
 
 const props = defineProps<{ project: string; jobId: string }>()
 const router = useRouter()
@@ -81,10 +82,12 @@ const snack = useSnackbar()
 
 const statusFilter = ref(prefs.lastStatusFilter.value)
 
+// Task-level filter — the "done" option matches success tasks, so it uses
+// the task success dot from statusGrammar.
 const statusOptions = [
   { value: '', label: 'All', dot: '' },
   { value: 'running', label: 'Running', dot: 'running' },
-  { value: 'done', label: 'Done', dot: 'completed' },
+  { value: 'done', label: 'Done', dot: 'success' },
   { value: 'failed', label: 'Failed', dot: 'failed' },
   { value: 'pending', label: 'Pending', dot: 'pending' },
 ]

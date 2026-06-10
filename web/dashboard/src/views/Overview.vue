@@ -31,7 +31,7 @@
               <div class="text-caption text-on-surface-variant">{{ m.label }}</div>
               <div class="text-h5 font-weight-medium">{{ m.value }}</div>
             </div>
-            <div class="status-dot" :class="`status-dot--${m.dotClass}`" style="width: 10px; height: 10px" />
+            <StatusDot :status="m.status" :size="10" />
           </div>
         </v-card>
       </v-col>
@@ -49,7 +49,10 @@
     <v-card v-if="activeFilter" class="mb-4 pa-3">
       <div class="d-flex align-center justify-space-between mb-2">
         <div class="d-flex align-center ga-2">
-          <div class="status-dot" :class="`status-dot--${activeFilter}`" />
+          <StatusDot
+            :status="activeFilter === 'done' ? 'done' : activeFilter"
+            :kind="activeFilter === 'done' ? 'job' : 'task'"
+          />
           <span class="text-body-2 font-weight-medium">{{ filteredJobs.length }} jobs</span>
         </div>
         <v-btn size="x-small" variant="text" @click="activeFilter = ''">
@@ -91,7 +94,7 @@
                 class="cursor-pointer"
                 @click="router.push({ name: 'job-detail', params: { project: j.project, jobId: j.id } })"
               >
-                <td style="width: 24px"><div class="status-dot" :class="`status-dot--${j.status}`" /></td>
+                <td style="width: 24px"><StatusDot :status="j.status" kind="job" /></td>
                 <td><code>{{ j.id.slice(0, 8) }}</code></td>
                 <td class="font-weight-medium">{{ j.project }}</td>
                 <td class="text-on-surface-variant">{{ j.note || '—' }}</td>
@@ -137,6 +140,7 @@ import { useConfigStore } from '@/stores/config'
 import { usePolling } from '@/composables/usePolling'
 import { useConnection } from '@/composables/useConnection'
 import GPUBar from '@/components/GPUBar.vue'
+import StatusDot from '@/components/StatusDot.vue'
 
 const { t } = useI18n()
 const router = useRouter()
@@ -147,10 +151,10 @@ const conn = useConnection()
 const activeFilter = ref('')
 
 const metrics = computed(() => [
-  { key: 'running', label: t('overview.running'), value: jobs.totalRunning, dotClass: 'running' },
-  { key: 'pending', label: t('overview.pending'), value: jobs.totalPending, dotClass: 'pending' },
-  { key: 'failed', label: t('overview.failed'), value: jobs.totalFailed, dotClass: 'failed' },
-  { key: 'done', label: t('overview.completed'), value: totalCompleted.value, dotClass: 'completed' },
+  { key: 'running', label: t('overview.running'), value: jobs.totalRunning, status: 'running' },
+  { key: 'pending', label: t('overview.pending'), value: jobs.totalPending, status: 'pending' },
+  { key: 'failed', label: t('overview.failed'), value: jobs.totalFailed, status: 'failed' },
+  { key: 'done', label: t('overview.completed'), value: totalCompleted.value, status: 'success' },
 ])
 
 const totalCompleted = computed(() =>

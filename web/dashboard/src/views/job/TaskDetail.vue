@@ -4,9 +4,8 @@
     <v-card class="mb-4 pa-4">
       <div class="d-flex align-center justify-space-between mb-3">
         <div class="d-flex align-center ga-2">
-          <div class="status-dot" :class="`status-dot--${task.status}`" style="width:10px;height:10px" />
           <code class="text-h6">{{ task.id.slice(0, 8) }}</code>
-          <v-chip size="small" variant="tonal">{{ task.status }}</v-chip>
+          <TaskStatusBadge :status="task.status" />
         </div>
         <div class="d-flex ga-1">
           <v-btn v-if="task.status === 'running'" size="x-small" variant="tonal" color="error" @click="killTask">
@@ -108,6 +107,7 @@ import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { tasksApi } from '@/apis/tasks'
 import { useSnackbar } from '@/composables/useSnackbar'
 import MetricsChart from '@/components/MetricsChart.vue'
+import TaskStatusBadge from '@/components/TaskStatusBadge.vue'
 import type { TaskLogResponse, TaskView } from '@/types/api'
 
 const props = defineProps<{ project: string; jobId: string; taskId: string }>()

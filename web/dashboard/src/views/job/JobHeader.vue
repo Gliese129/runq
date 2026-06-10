@@ -2,7 +2,7 @@
   <v-card class="mb-4 pa-4">
     <div class="d-flex align-center justify-space-between mb-3">
       <div class="d-flex align-center ga-2">
-        <div class="status-dot" :class="`status-dot--${detail.job.status}`" style="width:10px;height:10px" />
+        <JobStatusBadge :status="detail.job.status" />
         <span v-if="detail.job.note" class="text-body-2 text-on-surface-variant">{{ detail.job.note }}</span>
         <span class="text-caption text-on-surface-variant">{{ relativeTime(detail.job.created_at) }}</span>
       </div>
@@ -57,6 +57,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import type { JobDetail, CompareRow, TaskView } from '@/types/api'
+import JobStatusBadge from '@/components/JobStatusBadge.vue'
 
 const props = defineProps<{
   detail: JobDetail

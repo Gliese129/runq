@@ -15,7 +15,7 @@
         v-for="col in availableMetricCols" :key="col"
         size="x-small"
         :variant="visibleCols.has(col) ? 'flat' : 'outlined'"
-        :color="visibleCols.has(col) ? 'success' : undefined"
+        :color="visibleCols.has(col) ? 'primary' : undefined"
         @click="toggleCol(col)"
       >
         <v-icon start size="10">mdi-chart-line</v-icon>{{ col }}
@@ -49,7 +49,7 @@
             class="cursor-pointer"
             @click="$emit('click-task', task.id)"
           >
-            <td><div class="status-dot" :class="`status-dot--${task.status}`" /></td>
+            <td><StatusDot :status="task.status" /></td>
             <td><code>{{ task.id.slice(0, 8) }}</code></td>
             <td v-for="col in shownCols" :key="col" :class="paramColClass(col)">
               {{ task.params[col] ?? task.metrics?.[col] ?? '—' }}
@@ -89,6 +89,7 @@ import { ref, computed, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import type { TaskView, WandbInfo } from '@/types/api'
 import { usePreferences } from '@/composables/usePreferences'
+import StatusDot from '@/components/StatusDot.vue'
 
 const { t } = useI18n()
 const prefs = usePreferences()

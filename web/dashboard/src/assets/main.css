@@ -59,7 +59,8 @@
   background: rgb(var(--v-theme-surface-variant), 0.4);
 }
 
-/* Status dots — high saturation, small (8px) */
+/* Status dots — colors come EXCLUSIVELY from statusGrammar.ts via
+   <StatusDot>. Do not add per-status color rules here (philosophy U3). */
 .status-dot {
   display: inline-block;
   width: 8px;
@@ -67,24 +68,27 @@
   border-radius: 50%;
   flex-shrink: 0;
 }
-.status-dot--running { background: #F59E0B; box-shadow: 0 0 4px #F59E0B80; }
-.status-dot--pending  { background: #94A3B8; }
-.status-dot--done,
-.status-dot--completed { background: #22C55E; }
-.status-dot--failed,
-.status-dot--killed  { background: #EF4444; }
-.status-dot--paused  { background: #A78BFA; }
 
-/* Pulsing animation for running status */
+/* Pulsing animation for active states (running / cancelling) */
 @keyframes status-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.5; }
 }
-.status-dot--running {
+.status-dot--pulse {
   animation: status-pulse 2s ease-in-out infinite;
 }
+
+/* Spinning icon for active states inside status badges */
+@keyframes icon-spin {
+  to { transform: rotate(360deg); }
+}
+.icon-spin {
+  animation: icon-spin 1.6s linear infinite;
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .status-dot--running {
+  .status-dot--pulse,
+  .icon-spin {
     animation: none;
   }
 }
