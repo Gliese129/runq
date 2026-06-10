@@ -1,524 +1,465 @@
 <template>
-  <v-row no-gutters style="max-width: 960px; margin: 0 auto">
-    <!-- Left panel: project + param palette -->
-    <v-col cols="12" md="4" class="pr-md-4" style="position: sticky; top: 80px; align-self: flex-start">
-      <v-card class="mb-3 pa-3">
-        <div class="d-flex align-center ga-2 mb-2">
-          <v-icon size="16" color="primary">mdi-folder-outline</v-icon>
-          <span class="text-body-2 font-weight-medium">{{ state.projectName }}</span>
-        </div>
+  <div class="mx-auto" style="max-width: 760px">
+    <!-- Project + note -->
+    <v-card class="pa-3 mb-3">
+      <div class="d-flex align-center ga-2">
+        <v-icon size="16" color="primary">mdi-folder-outline</v-icon>
+        <span class="text-body-2 font-weight-medium flex-shrink-0">{{ state.projectName }}</span>
         <v-text-field
           v-model="state.note"
           :label="t('submit.note')"
           :placeholder="t('submit.note_placeholder')"
           prepend-inner-icon="mdi-text-short"
-          density="compact"
-          variant="outlined"
-          hide-details
+          density="compact" variant="outlined" hide-details class="ml-4"
         />
-      </v-card>
+      </div>
+    </v-card>
 
-      <v-card class="pa-3">
-        <div class="d-flex align-center justify-space-between mb-2">
-          <div class="text-caption text-on-surface-variant d-flex align-center ga-1">
-            Parameters
-            <v-chip size="x-small" variant="tonal">{{ paletteParams.length }}</v-chip>
-          </div>
-          <v-btn
-            v-if="paletteParams.some(p => !usedParamNames.has(p.name))"
-            size="x-small" variant="text" color="primary" class="text-none"
-            @click="addAllUnused"
-          >Add all</v-btn>
-        </div>
-
-        <draggable
-          :list="paletteParams"
-          :group="{ name: 'params', pull: 'clone', put: false }"
-          :sort="false"
-          :clone="cloneParamForGroup"
-          item-key="name"
-          class="d-flex flex-column overflow-y-auto"
-          :style="{ maxHeight: 'calc(100vh - 420px)' }"
-        >
-          <template #item="{ element: param }">
-            <div
-              class="palette-item d-flex align-center ga-2 pa-2 rounded mb-1"
-              :class="{ 'text-disabled': usedParamNames.has(param.name) }"
-            >
-              <v-icon size="12" color="on-surface-variant" class="cursor-grab flex-shrink-0">mdi-drag-vertical</v-icon>
-              <div class="flex-grow-1" style="min-width: 0">
-                <div class="d-flex align-center ga-1">
-                  <span class="text-body-2 font-weight-medium text-truncate">{{ param.name }}</span>
-                  <span class="text-caption text-on-surface-variant">{{ param.type }}</span>
-                </div>
-                <div v-if="param.default" class="text-caption text-on-surface-variant text-truncate" style="font-family: monospace; font-size: 11px">
-                  = {{ param.default }}
-                </div>
-              </div>
-              <span v-if="usedParamNames.has(param.name)" class="text-caption text-on-surface-variant flex-shrink-0" style="font-size: 10px">
-                {{ getGroupLabel(param.name) }}
-              </span>
-              <v-btn
-                v-else
-                icon size="x-small" variant="text" color="primary" class="flex-shrink-0"
-                @click.stop="sendToGroup(param.name)"
-              >
-                <v-icon size="14">mdi-chevron-right</v-icon>
-              </v-btn>
-            </div>
-          </template>
-        </draggable>
-
-        <!-- Manual add -->
-        <div class="d-flex ga-2 mt-2">
-          <v-text-field
-            v-model="newParamName"
-            placeholder="custom param..."
-            density="compact"
-            variant="underlined"
-            hide-details
-            style="font-family: monospace; font-size: 13px"
-            @keydown.enter="addCustomParam"
-          />
-          <v-btn
-            icon size="x-small" variant="text" color="primary"
-            :disabled="!newParamName.trim()"
-            @click="addCustomParam"
-          >
-            <v-icon size="14">mdi-plus</v-icon>
-          </v-btn>
-        </div>
-      </v-card>
-    </v-col>
-
-    <!-- Right panel: sweep group builder -->
-    <v-col cols="12" md="8">
-      <div class="d-flex align-center justify-space-between mb-3">
-        <div class="text-subtitle-2">Sweep Groups</div>
-        <code class="text-body-2 text-on-surface-variant">
-          = {{ state.totalTaskCount }} {{ state.totalTaskCount === 1 ? 'task' : 'tasks' }}
+    <!-- Flat param table -->
+    <v-card class="pa-0">
+      <div class="d-flex align-center justify-space-between px-4 py-3 border-b">
+        <span class="text-subtitle-2">Parameters</span>
+        <code class="text-body-2" :class="validation.ok ? 'text-on-surface-variant' : 'text-error'">
+          {{ formula }}
         </code>
       </div>
 
-      <v-alert
-        v-if="state.groups.length === 0"
-        density="compact"
-        variant="tonal"
-        color="primary"
-        icon="mdi-pin-outline"
-        class="mb-3"
+      <!-- Speed tip (one-time, dismissible) -->
+      <div v-if="!prefs.sugarTipDismissed.value" class="d-flex align-center ga-2 px-4 py-2 border-b text-caption text-on-surface-variant">
+        <v-icon size="12" color="primary">mdi-lightning-bolt-outline</v-icon>
+        <span>
+          Speed tip: type <code>log 1e-4 1e-1 4</code>, <code>linear 1 5 1</code> or <code>seeds 3</code>
+          directly in a numeric cell — preview appears, Enter expands.
+        </span>
+        <v-spacer />
+        <v-btn size="x-small" variant="text" @click="prefs.sugarTipDismissed.value = true">Got it</v-btn>
+      </div>
+
+      <div
+        v-for="row in state.rows" :key="row.name"
+        class="row-line d-flex px-3 py-2 border-b"
+        :style="rowStyle(row.name)"
       >
-        No sweep configured. Dry-run will create one task; {{ fixedDefaultCount }} default {{ fixedDefaultCount === 1 ? 'param' : 'params' }} will stay fixed.
-      </v-alert>
+        <!-- select -->
+        <div class="flex-shrink-0 d-flex align-start pt-1">
+          <v-checkbox-btn
+            :model-value="selected.has(row.name)"
+            density="compact" class="row-check"
+            :class="{ 'row-check--visible': selected.size > 0 || isLinked(row.name) }"
+            @update:model-value="toggleSelect(row.name)"
+          />
+        </div>
 
-      <div class="d-flex flex-column ga-2 overflow-y-auto" :style="{ maxHeight: 'calc(100vh - 280px)' }">
-        <v-card
-          v-for="group in state.groups"
-          :key="group.id"
-          class="group-card"
-          :class="{
-            'group-card--grid': group.type === 'grid',
-            'group-card--list': group.type === 'list',
-            'group-focused': lastFocusedGroupId === group.id,
-          }"
-          @click="lastFocusedGroupId = group.id"
+        <!-- name + type + link icon -->
+        <div class="flex-shrink-0 pt-2" style="width: 170px">
+          <div class="d-flex align-center ga-1">
+            <v-icon
+              v-if="isLinked(row.name)" size="13"
+              :style="{ color: linkColorOf(row.name) }"
+              class="cursor-pointer"
+              :title="'Show aligned view'"
+              @click="toggleAligned(setIdOf(row.name))"
+            >mdi-link</v-icon>
+            <span class="text-body-2 font-weight-medium text-truncate font-mono">{{ row.name }}</span>
+          </div>
+          <div class="mt-1">
+            <span class="text-caption text-on-surface-variant">{{ row.type }}</span>
+          </div>
+        </div>
+
+        <!-- values -->
+        <div class="flex-grow-1 min-w-0 px-2">
+          <ParamValueEditor
+            v-model="row.values"
+            :type="row.type || 'str'"
+            placeholder="Type value + Enter"
+            color="primary"
+            :default-value="row.default"
+            :suggestions="suggestionsFor(row.name)"
+            :collapsible="!isLinked(row.name)"
+          />
+        </div>
+
+        <!-- effect + custom-row delete -->
+        <div class="flex-shrink-0 d-flex align-center justify-end ga-1 pt-1" style="width: 86px">
+          <span class="text-caption font-mono" :style="effectStyle(row)">{{ effectLabel(row) }}</span>
+          <v-btn
+            v-if="customNames.has(row.name)"
+            icon size="x-small" variant="text" class="row-delete"
+            :aria-label="`Remove ${row.name}`" :title="`Remove ${row.name}`"
+            @click="removeCustomParam(row.name)"
+          >
+            <v-icon size="13" color="on-surface-variant">mdi-close</v-icon>
+          </v-btn>
+        </div>
+      </div>
+
+      <!-- Aligned view for an expanded link set -->
+      <div v-if="alignedSet" class="px-4 py-3 border-b" :style="{ background: tint(alignedColor, '12') }">
+        <div class="d-flex align-center ga-2 mb-2">
+          <v-icon size="13" :style="{ color: alignedColor }">mdi-link</v-icon>
+          <span class="text-caption" :style="{ color: alignedColor }">Aligned view — values pair up row by row</span>
+          <v-spacer />
+          <v-btn size="x-small" variant="text" @click="alignedSetId = null">Close</v-btn>
+        </div>
+        <table class="w-100 data-mono" style="font-size: 12px">
+          <thead>
+            <tr>
+              <th class="text-caption" style="width: 32px">#</th>
+              <th v-for="m in alignedSet.members" :key="m" class="text-caption font-weight-medium">{{ m }}</th>
+              <th style="width: 32px"></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="(_, i) in alignedRowCount" :key="i">
+              <td class="text-caption text-on-surface-variant">{{ i + 1 }}</td>
+              <td v-for="m in alignedSet.members" :key="m">
+                <input
+                  class="aligned-cell"
+                  :value="rowByName(m)?.values[i] ?? ''"
+                  @input="setAlignedCell(m, i, ($event.target as HTMLInputElement).value)"
+                />
+              </td>
+              <td>
+                <v-btn icon size="x-small" variant="text" @click="removeAlignedRow(i)">
+                  <v-icon size="12" color="on-surface-variant">mdi-close</v-icon>
+                </v-btn>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <v-btn size="x-small" variant="text" class="mt-1" :style="{ color: alignedColor }" @click="addAlignedRow">
+          <v-icon start size="12">mdi-plus</v-icon> Add pair
+        </v-btn>
+      </div>
+
+      <!-- Custom param add — suggests project params hidden by curation -->
+      <div class="d-flex align-center ga-2 px-4 py-2">
+        <v-combobox
+          v-model="newParamName"
+          :items="hiddenParamSuggestions"
+          placeholder="custom param..."
+          density="compact" variant="underlined" hide-details
+          class="font-mono" style="max-width: 260px; font-size: 13px"
+          @keydown.enter="addCustomParam"
         >
-          <v-expansion-panels v-model="group.expanded">
-            <v-expansion-panel :value="true" elevation="0">
-              <v-expansion-panel-title class="py-2 pr-2">
-                <v-btn-toggle
-                  :model-value="group.type"
-                  @update:model-value="group.type = $event || group.type"
-                  mandatory density="compact" variant="outlined" divided
-                  class="mr-2 flex-shrink-0"
-                  @click.stop
-                >
-                  <v-btn value="grid" size="x-small" :color="group.type === 'grid' ? 'primary' : undefined">
-                    <v-icon start size="12">mdi-grid</v-icon> Grid
-                  </v-btn>
-                  <v-btn value="list" size="x-small" :color="group.type === 'list' ? 'success' : undefined">
-                    <v-icon start size="12">mdi-table</v-icon> List
-                  </v-btn>
-                </v-btn-toggle>
-
-                <div v-if="group.expanded !== true && group.params.length > 0" class="flex-grow-1" style="min-width: 0">
-                  <div class="text-caption text-on-surface-variant text-truncate">
-                    {{ group.params.map(p => `${p.name}(${p.values.filter(v => !isBlankValue(v)).length})`).join(group.type === 'grid' ? ' × ' : ', ') }}
-                  </div>
-                  <div class="text-caption font-weight-medium mt-1" :class="group.type === 'grid' ? 'text-primary' : 'text-success'">
-                    = {{ state.groupTaskCount(group) }} {{ group.type === 'grid' ? 'combinations' : 'runs' }}
-                  </div>
-                </div>
-                <span v-else-if="group.expanded !== true" class="text-caption text-on-surface-variant">
-                  Empty — add params from palette
-                </span>
-
-                <template #actions="{ expanded }">
-                  <div class="d-flex align-center ga-1">
-                    <v-btn icon size="x-small" variant="text" @click.stop="removeGroup(group.id)">
-                      <v-icon size="14" color="error">mdi-trash-can-outline</v-icon>
-                    </v-btn>
-                    <v-icon size="16">{{ expanded ? 'mdi-chevron-up' : 'mdi-chevron-down' }}</v-icon>
-                  </div>
-                </template>
-              </v-expansion-panel-title>
-
-              <v-expansion-panel-text>
-                <!-- Quick actions -->
-                <div v-if="group.params.some(p => p.default && !p.values.includes(p.default))" class="d-flex ga-2 mb-2">
-                  <v-btn size="x-small" variant="text" color="primary" class="text-none" @click="useDefaultsForGroup(group)">
-                    <v-icon start size="12">mdi-auto-fix</v-icon> Use all defaults
-                  </v-btn>
-                </div>
-
-                <!-- ═══ Grid mode: per-param value editor ═══ -->
-                <template v-if="group.type === 'grid'">
-                  <draggable
-                    :list="group.params"
-                    :group="{ name: 'params', pull: false, put: true }"
-                    item-key="name"
-                    class="d-flex flex-column ga-2"
-                    @add="onGroupDragAdd(group.id, $event)"
-                  >
-                    <template #item="{ element: p }">
-                      <div class="param-sheet pa-3 rounded">
-                        <div class="d-flex align-center justify-space-between mb-1">
-                          <div class="d-flex align-center ga-1">
-                            <v-icon size="12" color="on-surface-variant">mdi-drag-vertical</v-icon>
-                            <span class="text-body-2 font-weight-medium">{{ p.name }}</span>
-                            <span class="text-caption text-on-surface-variant">{{ p.type }}</span>
-                            <!-- Default chip + Use default -->
-                            <template v-if="p.default">
-                              <v-chip size="x-small" variant="outlined" class="ml-1">default: {{ p.default }}</v-chip>
-                              <v-btn
-                                v-if="!p.values.includes(p.default)"
-                                size="x-small" variant="text" color="primary" class="text-none"
-                                @click="p.values.push(p.default)"
-                              >+ use</v-btn>
-                            </template>
-                          </div>
-                          <v-btn icon size="x-small" variant="text" @click="removeParamFromGroup(group.id, p.name)">
-                            <v-icon size="14" color="on-surface-variant">mdi-close</v-icon>
-                          </v-btn>
-                        </div>
-                        <ParamValueEditor
-                          v-model="p.values"
-                          :type="p.type || 'str'"
-                          placeholder="Type value + Enter"
-                          color="primary"
-                          :min="p.meta?.min"
-                          :max="p.meta?.max"
-                          :step="p.meta?.step"
-                          :suggestions="getParamSuggestions(p.name)"
-                        />
-                      </div>
-                    </template>
-                  </draggable>
-                </template>
-
-                <!-- ═══ List mode: editable table ═══ -->
-                <template v-else-if="group.type === 'list'">
-                  <!-- Drop zone for params (hidden once params exist) -->
-                  <draggable
-                    :list="group.params"
-                    :group="{ name: 'params', pull: false, put: true }"
-                    item-key="name"
-                    class="list-drop-zone mb-2"
-                    :class="{ 'list-drop-zone--empty': group.params.length === 0 }"
-                    @add="onGroupDragAdd(group.id, $event)"
-                  >
-                    <template #item="{ element: p }">
-                      <v-chip size="x-small" closable variant="tonal" color="success" class="ma-1"
-                        @click:close="removeParamFromGroup(group.id, p.name)"
-                      >{{ p.name }}</v-chip>
-                    </template>
-                  </draggable>
-
-                  <!-- Table -->
-                  <div v-if="group.params.length > 0" class="overflow-x-auto">
-                    <table class="data-mono" style="width: 100%">
-                      <thead>
-                        <tr>
-                          <th class="text-caption" style="width: 32px">#</th>
-                          <th v-for="p in group.params" :key="p.name" class="text-caption font-weight-medium">
-                            {{ p.name }}
-                            <span class="text-on-surface-variant font-weight-regular"> {{ p.type }}</span>
-                          </th>
-                          <th style="width: 32px"></th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        <tr v-for="(_, rowIdx) in listRowCount(group)" :key="rowIdx">
-                          <td class="text-caption text-on-surface-variant">{{ rowIdx + 1 }}</td>
-                          <td v-for="p in group.params" :key="p.name">
-                            <input
-                              class="list-cell"
-                              :value="p.values[rowIdx] || ''"
-                              placeholder=""
-                              @input="setListCell(group, p.name, rowIdx, ($event.target as HTMLInputElement).value)"
-                            />
-                          </td>
-                          <td>
-                            <v-btn icon size="x-small" variant="text" @click="removeListRow(group, rowIdx)">
-                              <v-icon size="12" color="on-surface-variant">mdi-close</v-icon>
-                            </v-btn>
-                          </td>
-                        </tr>
-                      </tbody>
-                    </table>
-                    <v-btn size="x-small" variant="text" color="success" class="mt-1" @click="addListRow(group)">
-                      <v-icon start size="12">mdi-plus</v-icon> Add row
-                    </v-btn>
-                  </div>
-                </template>
-
-                <!-- Empty state (shared) -->
-                <div v-if="group.params.length === 0" class="drop-hint text-center pa-6 rounded">
-                  <v-icon size="20" color="on-surface-variant" class="mb-1">mdi-drag-variant</v-icon>
-                  <div class="text-caption text-on-surface-variant">Drag params here or click "›" in the palette</div>
-                </div>
-              </v-expansion-panel-text>
-            </v-expansion-panel>
-          </v-expansion-panels>
-        </v-card>
-      </div>
-
-      <div class="d-flex justify-center ga-2 mt-4">
-        <v-btn size="small" variant="tonal" color="primary" @click="addGroup('grid')">
-          <v-icon start size="14">mdi-grid</v-icon> Grid
+          <template #item="{ item, props: itemProps }">
+            <v-list-item v-bind="itemProps" density="compact">
+              <template #append>
+                <span class="text-caption text-on-surface-variant">project param</span>
+              </template>
+            </v-list-item>
+          </template>
+        </v-combobox>
+        <v-btn icon size="x-small" variant="text" color="primary" :disabled="!(newParamName || '').trim()" @click="addCustomParam">
+          <v-icon size="14">mdi-plus</v-icon>
         </v-btn>
-        <v-btn size="small" variant="tonal" color="success" @click="addGroup('list')">
-          <v-icon start size="14">mdi-table</v-icon> List
-        </v-btn>
+        <v-spacer />
+        <span v-if="!validation.ok" class="text-caption text-error">{{ validation.message }}</span>
       </div>
-    </v-col>
-  </v-row>
+    </v-card>
+
+    <!-- Selection action bar -->
+    <v-slide-y-reverse-transition>
+      <v-card v-if="selected.size > 0" class="mt-3 px-4 py-2 d-flex align-center ga-3">
+        <span class="text-caption text-on-surface-variant">{{ selected.size }} selected</span>
+        <v-btn
+          v-if="canLink" size="small" variant="tonal" color="primary"
+          @click="linkSelected"
+        >
+          <v-icon start size="14">mdi-link</v-icon> Link
+        </v-btn>
+        <v-btn
+          v-if="canUnlink" size="small" variant="tonal"
+          @click="unlinkSelected"
+        >
+          <v-icon start size="14">mdi-link-off</v-icon> Unlink
+        </v-btn>
+        <span v-if="linkPreview" class="text-caption" :class="linkPreview.warn ? 'text-error' : 'text-on-surface-variant'">
+          {{ linkPreview.text }}
+        </span>
+        <v-spacer />
+        <v-btn size="x-small" variant="text" @click="selected.clear()">Clear</v-btn>
+      </v-card>
+    </v-slide-y-reverse-transition>
+
+    <p v-if="state.rows.length > 1 && state.linkSets.length === 0 && !hintDismissed" class="text-caption text-on-surface-variant mt-2 px-1">
+      <v-icon size="12">mdi-lightbulb-outline</v-icon>
+      Want some params to vary together (zip)? Select their rows, then Link.
+      <v-btn size="x-small" variant="text" @click="hintDismissed = true">Got it</v-btn>
+    </p>
+  </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, inject } from 'vue'
+import { ref, computed, reactive, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import draggable from 'vuedraggable'
 import ParamValueEditor from '@/components/ParamValueEditor.vue'
-import { SUBMIT_STATE_KEY, type GroupParam, type SweepGroup } from '@/types/submit'
+import { usePreferences } from '@/composables/usePreferences'
+import { SUBMIT_STATE_KEY } from '@/types/submit'
+import { inject } from 'vue'
+import {
+  activeValues, linkColor, rowEffect, validateTable, taskCount,
+  type LinkSet, type ParamRow,
+} from './paramTable'
+import { sweepSummary } from './submitFlow'
 
 const { t } = useI18n()
 const state = inject(SUBMIT_STATE_KEY)!
+const prefs = usePreferences()
 
+const selected = reactive(new Set<string>())
 const newParamName = ref('')
-const lastFocusedGroupId = ref<string | null>(null)
+const customNames = reactive(new Set<string>())
+const hintDismissed = ref(false)
+let setCounter = 0
 
-// ── Param palette ──
-// Sourced from discovered params (StepProject) + any custom-added ones
-const extraParams = ref<Array<{ name: string; type: string; default: string }>>([])
-
-const paletteParams = computed(() => {
-  const fromProject = (state.newProject.params || [])
-    .filter(p => p.include)
-    .map(p => ({
-      name: p.name,
-      type: p.type || 'str',
-      default: p.default || '',
-      min: p.min,
-      max: p.max,
-      values: p.values,
-    }))
-  const combined = [...fromProject, ...extraParams.value]
-  // Dedupe by name
-  const seen = new Set<string>()
-  return combined.filter(p => {
-    if (seen.has(p.name)) return false
-    seen.add(p.name)
-    return true
-  })
-})
-
-const usedParamNames = computed(() => {
-  const names = new Set<string>()
-  for (const g of state.groups) {
-    for (const p of g.params) names.add(p.name)
-  }
-  return names
-})
-
-const fixedDefaultCount = computed(() =>
-  (state.newProject.params || []).filter(p => p.include && !isBlankValue(p.default)).length
+// ── Row sync: project params (include) → rows, preserving user edits ──
+watch(
+  () => state.newProject.params,
+  () => {
+    const byName = new Map(state.rows.map(r => [r.name, r]))
+    const next: ParamRow[] = []
+    for (const p of state.newProject.params.filter(p => p.include)) {
+      const existing = byName.get(p.name)
+      if (existing) {
+        existing.type = p.type || existing.type
+        existing.default = p.default || ''
+        next.push(existing)
+      } else {
+        const meta: ParamRow['meta'] = {}
+        if (p.min != null) meta.min = p.min
+        if (p.max != null) meta.max = p.max
+        next.push({ name: p.name, type: p.type || 'str', default: p.default || '', values: [], meta })
+      }
+      byName.delete(p.name)
+    }
+    for (const [name, row] of byName) {
+      // Keep rows added by hand AND rows carrying values (e.g. decompiled
+      // from a re-run template before the project palette has loaded).
+      if (customNames.has(name) || row.values.length > 0) next.push(row)
+    }
+    state.rows = next
+    pruneLinkSets()
+  },
+  { deep: true, immediate: true },
 )
 
-function isBlankValue(v: string): boolean {
-  return String(v ?? '').trim() === ''
+function pruneLinkSets() {
+  const names = new Set(state.rows.map(r => r.name))
+  state.linkSets = state.linkSets
+    .map(s => ({ ...s, members: s.members.filter(m => names.has(m)) }))
+    .filter(s => s.members.length >= 2)
 }
 
-function getGroupLabel(paramName: string): string {
-  for (const g of state.groups) {
-    if (g.params.some((p: GroupParam) => p.name === paramName)) {
-      const idx = state.groups.filter((x: SweepGroup) => x.type === g.type).indexOf(g) + 1
-      return `${g.type === 'grid' ? 'Grid' : 'List'} ${idx}`
-    }
-  }
-  return ''
+// ── Link sets ──
+
+function setOf(name: string): LinkSet | undefined {
+  return state.linkSets.find(s => s.members.includes(name))
+}
+function isLinked(name: string): boolean { return !!setOf(name) }
+function setIdOf(name: string): string | null { return setOf(name)?.id ?? null }
+function setIndexOf(name: string): number {
+  return state.linkSets.findIndex(s => s.members.includes(name))
+}
+function linkColorOf(name: string): string {
+  const i = setIndexOf(name)
+  return i >= 0 ? linkColor(i) : 'inherit'
 }
 
-// ── Draggable ──
+// A link set is atomic in selection: selecting any member selects the whole
+// set, deselecting deselects the whole set. Linking a selection that already
+// contains linked rows MERGES everything into one new set.
+const canLink = computed(() => {
+  if (selected.size < 2) return false
+  // No-op guard: selection exactly equals one existing set → nothing to merge
+  return !state.linkSets.some(s =>
+    s.members.length === selected.size && s.members.every(m => selected.has(m)),
+  )
+})
+const canUnlink = computed(() =>
+  selected.size > 0 && [...selected].some(n => isLinked(n)),
+)
 
-function cloneParamForGroup(src: any): GroupParam {
-  const meta: any = {}
-  if (src.min != null) meta.min = src.min
-  if (src.max != null) meta.max = src.max
-  return { name: src.name, type: src.type, default: src.default, values: [], meta }
+const linkPreview = computed(() => {
+  if (!canLink.value) return null
+  const lengths = [...selected].map(n => activeValues(rowByName(n) ?? { values: [] }).length)
+  const merging = [...selected].some(n => isLinked(n))
+  const verb = merging ? 'merge into one zip' : 'zip'
+  const uniq = new Set(lengths)
+  if (uniq.size === 1) return { text: `${lengths.join(' + ')} values → ${verb} ×${lengths[0]}`, warn: false }
+  return { text: `${lengths.join(' + ')} values → lengths must match after linking`, warn: true }
+})
+
+function linkSelected() {
+  if (!canLink.value) return
+  // Dissolve any sets touched by the selection, then create one merged set
+  // in table row order (deterministic zip column order).
+  const touched = new Set([...selected].map(n => setIdOf(n)).filter(Boolean))
+  state.linkSets = state.linkSets.filter(s => !touched.has(s.id))
+  const members = state.rows.filter(r => selected.has(r.name)).map(r => r.name)
+  state.linkSets.push({ id: `ls${setCounter++}`, members })
+  if (alignedSetId.value && touched.has(alignedSetId.value)) alignedSetId.value = null
+  selected.clear()
 }
 
-function onGroupDragAdd(groupId: string, _evt: any) {
-  const group = state.groups.find((g: SweepGroup) => g.id === groupId)
-  if (!group) return
-  // Dedupe within group
-  const seen = new Set<string>()
-  group.params = group.params.reduceRight<GroupParam[]>((acc, p) => {
-    if (seen.has(p.name)) return acc
-    seen.add(p.name)
-    acc.unshift(p)
-    return acc
-  }, [])
-  // Remove from other groups
-  const otherUsed = new Set<string>()
-  for (const g of state.groups) {
-    if (g.id === groupId) continue
-    for (const p of g.params) otherUsed.add(p.name)
-  }
-  group.params = group.params.filter((p: GroupParam) => !otherUsed.has(p.name))
-  group.expanded = true
-  lastFocusedGroupId.value = groupId
+function unlinkSelected() {
+  const hit = new Set([...selected].map(n => setIdOf(n)).filter(Boolean))
+  state.linkSets = state.linkSets.filter(s => !hit.has(s.id))
+  selected.clear()
+  if (alignedSetId.value && hit.has(alignedSetId.value)) alignedSetId.value = null
 }
 
-// ── Send via button ──
-
-function sendToGroup(paramName: string) {
-  if (usedParamNames.value.has(paramName)) return
-  let targetId = lastFocusedGroupId.value
-  if (!targetId || !state.groups.find((g: SweepGroup) => g.id === targetId)) {
-    if (state.groups.length === 0) addGroup('grid')
-    targetId = state.groups[state.groups.length - 1].id
-  }
-  const group = state.groups.find((g: SweepGroup) => g.id === targetId)
-  const src = paletteParams.value.find(p => p.name === paramName)
-  if (!group || !src || group.params.some((p: GroupParam) => p.name === paramName)) return
-  const meta: any = {}
-  if ((src as any).min != null) meta.min = (src as any).min
-  if ((src as any).max != null) meta.max = (src as any).max
-  group.params.push({ name: src.name, type: src.type, default: src.default, values: [], meta })
-  group.expanded = true
-  lastFocusedGroupId.value = targetId
-}
-
-/** Get pre-defined values from project param definition (for combobox suggestions) */
-function getParamSuggestions(paramName: string): string[] {
-  const proj = (state.newProject.params || []).find(p => p.name === paramName)
-  return (proj as any)?.values || []
-}
-
-function useDefaultsForGroup(group: SweepGroup) {
-  for (const p of group.params) {
-    if (p.default && !p.values.includes(p.default)) {
-      p.values.push(p.default)
-    }
+function toggleSelect(name: string) {
+  // Atomic set selection: toggling any member toggles all of them.
+  const names = setOf(name)?.members ?? [name]
+  const on = !selected.has(name)
+  for (const n of names) {
+    if (on) selected.add(n)
+    else selected.delete(n)
   }
 }
 
-function addAllUnused() {
-  const unused = paletteParams.value.filter(p => !usedParamNames.value.has(p.name))
-  if (unused.length === 0) return
-  if (state.groups.length === 0) addGroup('grid')
-  const targetId = lastFocusedGroupId.value || state.groups[state.groups.length - 1].id
-  const group = state.groups.find((g: SweepGroup) => g.id === targetId)
-  if (!group) return
-  for (const src of unused) {
-    if (group.params.some((p: GroupParam) => p.name === src.name)) continue
-    const meta: any = {}
-    if ((src as any).min != null) meta.min = (src as any).min
-    if ((src as any).max != null) meta.max = (src as any).max
-    group.params.push({ name: src.name, type: src.type, default: src.default, values: [], meta })
+// ── Aligned view ──
+
+const alignedSetId = ref<string | null>(null)
+const alignedSet = computed(() => state.linkSets.find(s => s.id === alignedSetId.value) ?? null)
+const alignedColor = computed(() => {
+  const i = state.linkSets.findIndex(s => s.id === alignedSetId.value)
+  return i >= 0 ? linkColor(i) : 'inherit'
+})
+const alignedRowCount = computed(() => {
+  if (!alignedSet.value) return 0
+  return Math.max(1, ...alignedSet.value.members.map(m => rowByName(m)?.values.length ?? 0))
+})
+
+function toggleAligned(id: string | null) {
+  alignedSetId.value = alignedSetId.value === id ? null : id
+}
+function setAlignedCell(member: string, idx: number, value: string) {
+  const row = rowByName(member)
+  if (!row) return
+  while (row.values.length <= idx) row.values.push('')
+  row.values[idx] = value
+}
+function addAlignedRow() {
+  for (const m of alignedSet.value?.members ?? []) rowByName(m)?.values.push('')
+}
+function removeAlignedRow(idx: number) {
+  for (const m of alignedSet.value?.members ?? []) {
+    const row = rowByName(m)
+    if (row && idx < row.values.length) row.values.splice(idx, 1)
   }
-  group.expanded = true
 }
 
-// ── Manual add ──
+// ── Row helpers ──
+
+function rowByName(name: string): ParamRow | undefined {
+  return state.rows.find(r => r.name === name)
+}
+
+function suggestionsFor(name: string): string[] {
+  const p = (state.newProject.params || []).find(p => p.name === name)
+  return (p as any)?.values || []
+}
+
+// Project params hidden by curation (include=false) — surfaced as
+// suggestions so step 2 users can pull one in without going back to step 1.
+const hiddenParamSuggestions = computed(() =>
+  (state.newProject.params || [])
+    .filter(p => !p.include && !state.rows.some(r => r.name === p.name))
+    .map(p => p.name),
+)
 
 function addCustomParam() {
-  const name = newParamName.value.trim()
-  if (!name) return
-  // Check not already in palette
-  if (paletteParams.value.some(p => p.name === name)) {
-    // Already exists — just send to group
-    sendToGroup(name)
+  const name = (newParamName.value || '').trim()
+  if (!name || state.rows.some(r => r.name === name)) { newParamName.value = ''; return }
+  // If it's a known (but unchecked) project param, inherit its definition.
+  const def = (state.newProject.params || []).find(p => p.name === name)
+  customNames.add(name)
+  if (def) {
+    const meta: import('./paramTable').ParamRow['meta'] = {}
+    if (def.min != null) meta.min = def.min
+    if (def.max != null) meta.max = def.max
+    state.rows.push({ name, type: def.type || 'str', default: def.default || '', values: [], meta })
   } else {
-    extraParams.value.push({ name, type: 'str', default: '' })
-    // Auto-send to group
-    sendToGroup(name)
+    state.rows.push({ name, type: 'str', default: '', values: [] })
   }
   newParamName.value = ''
 }
 
-// ── Group management ──
-
-function addGroup(type: 'grid' | 'list') {
-  const id = state.getNextGroupId()
-  state.groups.push({ id: `g${id}`, type, expanded: true, params: [] })
-  lastFocusedGroupId.value = `g${id}`
-}
-
-function removeGroup(id: string) {
-  state.groups = state.groups.filter((g: SweepGroup) => g.id !== id)
-  if (lastFocusedGroupId.value === id) {
-    lastFocusedGroupId.value = state.groups.length > 0 ? state.groups[state.groups.length - 1].id : null
+/** Custom rows are deletable (project rows are managed by StepProject's
+ *  include toggle — deleting them here would just resurrect on next sync). */
+function removeCustomParam(name: string) {
+  if (!customNames.has(name)) return
+  customNames.delete(name)
+  selected.delete(name)
+  state.rows = state.rows.filter(r => r.name !== name)
+  pruneLinkSets()
+  if (alignedSetId.value && !state.linkSets.some(s => s.id === alignedSetId.value)) {
+    alignedSetId.value = null
   }
 }
 
-// ── List mode table helpers ──
+// ── Display ──
 
-function listRowCount(group: SweepGroup): number {
-  if (group.params.length === 0) return 0
-  return Math.max(...group.params.map(p => p.values.length), 1)
+function tint(color: string, alpha: string): string {
+  return color === 'inherit' ? 'transparent' : `${color}${alpha}`
 }
 
-function setListCell(group: SweepGroup, paramName: string, rowIdx: number, value: string) {
-  const param = group.params.find((p: GroupParam) => p.name === paramName)
-  if (!param) return
-  // Extend values array if needed
-  while (param.values.length <= rowIdx) param.values.push('')
-  param.values[rowIdx] = value
+function rowStyle(name: string) {
+  const i = setIndexOf(name)
+  if (i < 0) return {}
+  const c = linkColor(i)
+  return { borderLeft: `3px solid ${c}`, background: tint(c, '0D') }
 }
 
-function addListRow(group: SweepGroup) {
-  for (const p of group.params) {
-    p.values.push('')
+function effectLabel(row: ParamRow): string {
+  switch (rowEffect(row, state.linkSets)) {
+    case 'linked': {
+      const set = setOf(row.name)!
+      const lengths = set.members.map(m => activeValues(rowByName(m) ?? { values: [] }).length)
+      const n = activeValues(row).length
+      return new Set(lengths).size > 1 ? `${n} ≠` : `zip ×${n}`
+    }
+    case 'sweep': return `×${activeValues(row).length}`
+    case 'fixed': return 'fixed'
+    case 'fixed-default': return 'default'
+    default: return '—'
   }
 }
 
-function removeListRow(group: SweepGroup, rowIdx: number) {
-  for (const p of group.params) {
-    if (rowIdx < p.values.length) p.values.splice(rowIdx, 1)
+function effectStyle(row: ParamRow) {
+  const effect = rowEffect(row, state.linkSets)
+  if (effect === 'linked') {
+    const set = setOf(row.name)!
+    const lengths = set.members.map(m => activeValues(rowByName(m) ?? { values: [] }).length)
+    if (new Set(lengths).size > 1) return { color: 'rgb(var(--v-theme-error))' }
+    return { color: linkColorOf(row.name) }
   }
+  if (effect === 'sweep') return { color: 'rgb(var(--v-theme-primary))' }
+  return { color: 'rgb(var(--v-theme-on-surface-variant))' }
 }
 
-function removeParamFromGroup(groupId: string, paramName: string) {
-  const group = state.groups.find((g: SweepGroup) => g.id === groupId)
-  if (!group) return
-  group.params = group.params.filter((p: GroupParam) => p.name !== paramName)
-  if (group.params.length === 0) removeGroup(groupId)
-}
+const validation = computed(() => validateTable(state.rows, state.linkSets))
+
+const formula = computed(() => {
+  const summary = sweepSummary(state.rows, state.linkSets)
+  const n = taskCount(state.rows, state.linkSets)
+  return summary ? `${summary} = ${n} ${n === 1 ? 'task' : 'tasks'}` : '1 task (no sweep)'
+})
 </script>
 
 <style scoped>
-.group-card--grid { border-left: 3px solid rgb(var(--v-theme-primary), 0.3) !important; }
-.group-card--list { border-left: 3px solid rgb(var(--v-theme-success), 0.3) !important; }
-.group-card--grid.group-focused { border-left-color: rgb(var(--v-theme-primary)) !important; box-shadow: 0 0 0 1px rgb(var(--v-theme-primary), 0.2); }
-.group-card--list.group-focused { border-left-color: rgb(var(--v-theme-success)) !important; box-shadow: 0 0 0 1px rgb(var(--v-theme-success), 0.2); }
-.param-sheet { background: rgb(var(--v-theme-surface-variant), 0.3); border: 0.5px solid rgb(var(--v-theme-surface-variant)); }
-.palette-item { transition: background 0.15s ease; }
-.palette-item:hover { background: rgb(var(--v-theme-surface-variant), 0.5); }
-.drop-hint { border: 1.5px dashed rgb(var(--v-theme-outline-variant)); }
-.list-drop-zone { display: flex; flex-wrap: wrap; min-height: 28px; padding: 4px; border-radius: 4px; border: 1px dashed rgb(var(--v-theme-outline-variant)); }
-.list-drop-zone--empty { min-height: 48px; align-items: center; justify-content: center; }
-.list-cell { width: 100%; border: none; background: transparent; outline: none; font-family: inherit; font-size: inherit; padding: 2px 0; border-bottom: 1px solid transparent; color: inherit; }
-.list-cell:focus { border-bottom-color: rgb(var(--v-theme-success)); }
+.border-b { border-bottom: 0.5px solid rgb(var(--v-theme-outline-variant)); }
+.font-mono { font-family: monospace; }
+.min-w-0 { min-width: 0; }
+.row-line { transition: background 0.15s ease; }
+.row-line:hover { background: rgb(var(--v-theme-surface-variant), 0.3); }
+.row-check { opacity: 0; transition: opacity 0.15s ease; }
+.row-line:hover .row-check, .row-check--visible { opacity: 1; }
+.row-delete { opacity: 0; transition: opacity 0.15s ease; }
+.row-line:hover .row-delete { opacity: 1; }
+.aligned-cell { width: 100%; border: none; background: transparent; outline: none; font-family: inherit; font-size: inherit; padding: 2px 0; border-bottom: 1px solid transparent; color: inherit; }
+.aligned-cell:focus { border-bottom-color: rgb(var(--v-theme-primary)); }
 </style>

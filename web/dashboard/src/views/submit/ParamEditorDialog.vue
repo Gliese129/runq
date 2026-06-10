@@ -34,10 +34,6 @@
           v-model="filter" placeholder="Filter..." prepend-inner-icon="mdi-magnify"
           density="compact" variant="outlined" hide-details clearable style="max-width: 220px"
         />
-        <v-spacer />
-        <v-btn v-if="params.length - includedCount > 0" size="x-small" variant="tonal" color="error" @click="deleteUnchecked">
-          <v-icon start size="12">mdi-trash-can-outline</v-icon> Remove unchecked ({{ params.length - includedCount }})
-        </v-btn>
       </div>
 
       <!-- ═══ Inline table ═══ -->
@@ -45,11 +41,12 @@
         <table class="param-table">
           <thead>
             <tr>
-              <th style="width: 36px"></th>
+              <th style="width: 36px" title="Checked = appears in the next step's param table">Use</th>
               <th class="text-left">Name</th>
               <th style="width: 120px">Type</th>
               <th>Value / Default</th>
               <th style="width: 200px">Constraints</th>
+              <th style="width: 36px"></th>
             </tr>
           </thead>
           <tbody>
@@ -64,20 +61,22 @@
               </td>
               <!-- Value / Default -->
               <td>
-                <!-- bool: switch -->
-                <v-switch
-                  v-if="p.type === 'bool'"
-                  :model-value="p.default === 'true'"
-                  @update:model-value="autoInclude(p); p.default = $event ? 'true' : 'false'"
-                  density="compact" hide-details color="primary" inline
-                  :label="p.default === 'true' ? 'true' : 'false'"
-                />
+                <!-- bool: three states — a bool without a default is a valid state -->
+                <div v-if="p.type === 'bool'" class="d-flex ga-1">
+                  <v-chip
+                    v-for="opt in ['true', 'false']" :key="opt"
+                    size="x-small"
+                    :color="p.default === opt ? 'primary' : undefined"
+                    :variant="p.default === opt ? 'flat' : 'outlined'"
+                    @click="setBoolDefault(p, opt)"
+                  >{{ opt }}</v-chip>
+                  <span v-if="!p.default" class="text-caption text-on-surface-variant align-self-center">no default</span>
+                </div>
                 <!-- list: inline chips -->
                 <div v-else-if="p.type === 'list'" class="d-flex flex-wrap align-center ga-1">
                   <v-chip v-for="(v, i) in (p.values || [])" :key="i" size="x-small" closable variant="tonal" @click:close="p.values!.splice(i, 1)">{{ v }}</v-chip>
                   <input
                     class="inline-add" placeholder="+ add"
-                    @focus="autoInclude(p)"
                     @keydown.enter.prevent="addListFromInline(p, $event.target as HTMLInputElement)"
                   />
                 </div>
@@ -86,15 +85,14 @@
                   v-else-if="p.type === 'str' || p.type === 'file' || p.type === 'folder'"
                   :value="(p.values || [])[0] || ''"
                   @input="setValues0(p, ($event.target as HTMLInputElement).value)"
-                  @focus="autoInclude(p)"
                   class="cell-input"
                   :placeholder="p.type === 'file' || p.type === 'folder' ? '/path/...' : '—'"
                 />
                 <!-- int/float/other: plain default -->
                 <input
                   v-else
-                  v-model="p.default"
-                  @focus="autoInclude(p)"
+                  :value="p.default"
+                  @input="setDefault(p, ($event.target as HTMLInputElement).value)"
                   class="cell-input"
                   placeholder="—"
                 />
@@ -103,9 +101,9 @@
               <td>
                 <!-- int/float: min max -->
                 <div v-if="p.type === 'int' || p.type === 'float'" class="d-flex align-center ga-1">
-                  <input v-model.number="p.min" class="cell-input cell-sm" placeholder="min" type="number" @focus="autoInclude(p)" />
+                  <input v-model.number="p.min" class="cell-input cell-sm" placeholder="min" type="number" @input="autoInclude(p)" />
                   <span class="text-on-surface-variant">–</span>
-                  <input v-model.number="p.max" class="cell-input cell-sm" placeholder="max" type="number" @focus="autoInclude(p)" />
+                  <input v-model.number="p.max" class="cell-input cell-sm" placeholder="max" type="number" @input="autoInclude(p)" />
                 </div>
                 <!-- str: values popover -->
                 <v-menu v-else-if="p.type === 'str'" :close-on-content-click="false" location="bottom end">
@@ -116,9 +114,16 @@
                     </v-btn>
                   </template>
                   <v-card class="pa-3" style="min-width: 280px; max-width: 400px">
-                    <div class="text-caption text-on-surface-variant mb-2">Selectable values</div>
+                    <div class="text-caption text-on-surface-variant mb-2">Selectable values — first is the default</div>
                     <div class="d-flex flex-wrap ga-1 mb-2">
-                      <v-chip v-for="(val, i) in (p.values || [])" :key="i" size="small" closable variant="tonal" @click:close="p.values!.splice(i, 1)">{{ val }}</v-chip>
+                      <v-chip
+                        v-for="(val, i) in (p.values || [])" :key="i"
+                        size="small" closable variant="tonal"
+                        :color="i === 0 ? 'primary' : undefined"
+                        @click:close="p.values!.splice(i, 1)"
+                      >
+                        {{ val }}<span v-if="i === 0" class="text-caption ml-1 opacity-60">default</span>
+                      </v-chip>
                       <span v-if="!p.values?.length" class="text-caption text-on-surface-variant">None yet</span>
                     </div>
                     <div class="d-flex ga-1">
@@ -170,6 +175,16 @@
                   </v-menu>
                 </template>
                 <!-- list/bool: no constraints -->
+              </td>
+              <!-- Delete (independent of include — unchecked ≠ to-be-deleted) -->
+              <td>
+                <v-btn
+                  icon size="x-small" variant="text" class="row-delete"
+                  :aria-label="`Delete ${p.name}`" :title="`Delete ${p.name}`"
+                  @click="removeParam(p.name)"
+                >
+                  <v-icon size="14" color="on-surface-variant">mdi-close</v-icon>
+                </v-btn>
               </td>
             </tr>
           </tbody>
@@ -274,22 +289,35 @@ const filteredParams = computed(() => {
     .map(s => s.param)
 })
 
-function deleteUnchecked() {
-  params.value = params.value.filter(p => p.include)
+function removeParam(name: string) {
+  params.value = params.value.filter(p => p.name !== name)
 }
 
-/** Auto-include a param when user starts editing it */
+/** Auto-include only on actual edits (typing a value, picking a type) —
+ *  never on focus, so unchecking sticks until the user changes something. */
 function autoInclude(p: ProjectParam) {
   if (!p.include) p.include = true
 }
 
 // ── Value helpers ──
 
+function setBoolDefault(p: ProjectParam, opt: string) {
+  // Clicking the active state clears it back to "no default".
+  p.default = p.default === opt ? '' : opt
+  if (p.default) autoInclude(p)
+}
+
+function setDefault(p: ProjectParam, val: string) {
+  p.default = val
+  if (val.trim()) autoInclude(p)
+}
+
 /** For str/file/folder: default = values[0]. Editing default edits values[0]. */
 function setValues0(p: ProjectParam, val: string) {
   if (!p.values) p.values = []
   if (p.values.length === 0) p.values.push(val)
   else p.values[0] = val
+  if (val.trim()) autoInclude(p)
 }
 
 function addValue(p: ProjectParam) {
@@ -404,6 +432,8 @@ function confirmImport(mode: 'replace' | 'append') {
 }
 .param-table tbody tr:hover { background: rgb(var(--v-theme-surface-variant), 0.3); }
 .row-excluded { opacity: 0.45; }
+.row-delete { opacity: 0; transition: opacity 0.15s ease; }
+.param-table tbody tr:hover .row-delete { opacity: 1; }
 .cell-input {
   width: 100%;
   border: none;

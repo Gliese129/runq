@@ -38,6 +38,22 @@ type SubmitJobOpts struct {
 	SkipPreflight bool
 }
 
+// resolveNote renders note placeholders against this project's existing
+// job notes ({{version}} family scan needs them).
+func resolveNote(ctx context.Context, st *store.Store, cfg job.JobConfig) (string, error) {
+	rows, err := st.ListJobs(ctx, cfg.Project)
+	if err != nil {
+		return "", fmt.Errorf("list jobs for note rendering: %w", err)
+	}
+	notes := make([]string, 0, len(rows))
+	for _, r := range rows {
+		notes = append(notes, r.Note)
+	}
+	return job.RenderNote(&cfg, job.NoteContext{
+		Project: cfg.Project, Now: time.Now(), ExistingNotes: notes,
+	})
+}
+
 // JobSummary is the API response for job listing.
 type JobSummary struct {
 	JobID       string         `json:"job_id"`
@@ -83,7 +99,18 @@ func (s *JobService) SubmitJobWithOpts(ctx context.Context, jobCfg job.JobConfig
 	jobID := utils.GenerateID()
 	jobRoot := filepath.Join(wsRoot, jobID)
 
-	plan, err := submitplan.Build(ctx, jobCfg, proj, submitplan.Deps{
+	// Resolve note placeholders ({{version}}, {{date}}, params, ...) for
+	// display: the plan carries the RESOLVED note (job row, workspace files),
+	// while ConfigJSON below keeps the original template so re-submitting
+	// the same config keeps incrementing {{version}}.
+	planCfg := jobCfg
+	if resolved, nerr := resolveNote(ctx, s.Store, jobCfg); nerr != nil {
+		return "", 0, nerr
+	} else {
+		planCfg.Note = resolved
+	}
+
+	plan, err := submitplan.Build(ctx, planCfg, proj, submitplan.Deps{
 		JobID: jobID,
 		IDGen: utils.GenerateID,
 		Paths: submitplan.Paths{

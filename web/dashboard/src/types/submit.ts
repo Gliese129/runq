@@ -1,5 +1,6 @@
 import type { InjectionKey } from 'vue'
 import type { ProjectSummary } from '@/types/api'
+import type { ParamRow, LinkSet } from '@/views/submit/paramTable'
 
 // ── Parameter types ──
 export const PARAM_TYPES = ['int', 'float', 'bool', 'str', 'file', 'folder', 'list'] as const
@@ -21,21 +22,6 @@ export interface ParamMeta {
   step?: number
 }
 
-export interface GroupParam {
-  name: string
-  type: string            // int | float | bool | str | file | folder | list
-  default: string
-  values: string[]
-  meta?: ParamMeta
-}
-
-export interface SweepGroup {
-  id: string
-  type: 'grid' | 'list'
-  expanded: boolean
-  params: GroupParam[]
-}
-
 export interface SubmitState {
   step: number
   projectName: string
@@ -52,11 +38,16 @@ export interface SubmitState {
     creating: boolean
     error: string
     params: ProjectParam[]
+    // True once the user actually edited project config in this session.
+    // goNext only saves the project when dirty (or when creating) — selecting
+    // an existing project and clicking Next is side-effect free.
+    dirty: boolean
   }
   note: string
-  groups: SweepGroup[]
-  groupIdCounter: number
-  usedParamNames: Set<string>
+  // Flat param model (see paramTable.ts): one row per param; sweep
+  // structure is derived from value counts + link sets, never hand-built.
+  rows: ParamRow[]
+  linkSets: LinkSet[]
   totalTaskCount: number
   displayTaskCount: number
   sweepSummary: string
@@ -67,8 +58,6 @@ export interface SubmitState {
   submitting: boolean
   preflightEnabled: boolean
   prefs: any
-  groupTaskCount: (group: SweepGroup) => number
-  getNextGroupId: () => number
 }
 
 export const SUBMIT_STATE_KEY: InjectionKey<SubmitState> = Symbol('submit-state')

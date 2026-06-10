@@ -39,6 +39,22 @@ type SubmitOpts struct {
 // submit. Unlike the daemon there is no atomic all-or-nothing — sbatch is an
 // external side effect, so a mid-batch failure leaves the already-submitted
 // tasks recorded and returns how many made it.
+// resolveNote renders note placeholders against this project's existing
+// job notes ({{version}} family scan needs them).
+func resolveNote(ctx context.Context, st *store.Store, cfg job.JobConfig) (string, error) {
+	rows, err := st.ListJobs(ctx, cfg.Project)
+	if err != nil {
+		return "", fmt.Errorf("list jobs for note rendering: %w", err)
+	}
+	notes := make([]string, 0, len(rows))
+	for _, r := range rows {
+		notes = append(notes, r.Note)
+	}
+	return job.RenderNote(&cfg, job.NoteContext{
+		Project: cfg.Project, Now: time.Now(), ExistingNotes: notes,
+	})
+}
+
 func (b *Backend) Submit(ctx context.Context, jobCfg job.JobConfig, proj *project.Config, opts SubmitOpts) (jobID string, submitted int, err error) {
 	// Satisfy the jobs.project_name foreign key: ensure the project exists in
 	// the HPC store. Add-if-missing covers both "resolved from registry" and
@@ -57,7 +73,16 @@ func (b *Backend) Submit(ctx context.Context, jobCfg job.JobConfig, proj *projec
 	}
 	jobRoot := filepath.Join(wsRoot, jobID)
 
-	plan, err := submitplan.Build(ctx, jobCfg, proj, submitplan.Deps{
+	// Resolved note for display (job row, workspace files); ConfigJSON keeps
+	// the template so re-submission keeps incrementing {{version}}.
+	planCfg := jobCfg
+	if resolved, nerr := resolveNote(ctx, b.Store, jobCfg); nerr != nil {
+		return "", 0, nerr
+	} else {
+		planCfg.Note = resolved
+	}
+
+	plan, err := submitplan.Build(ctx, planCfg, proj, submitplan.Deps{
 		JobID: jobID,
 		IDGen: utils.GenerateID,
 		Paths: submitplan.Paths{

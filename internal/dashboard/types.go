@@ -1,5 +1,7 @@
 package dashboard
 
+import "encoding/json"
+
 // View types shared by HTTP responses and CLI --json output.
 // Keep this file free of business logic — only struct definitions.
 
@@ -31,10 +33,11 @@ type WandbInfo struct {
 }
 
 type JobDetail struct {
-	Job        JobSummary `json:"job"`
-	Tasks      []TaskView `json:"tasks"`
-	MetricKeys []string   `json:"metric_keys"`
-	Wandb      *WandbInfo `json:"wandb,omitempty"`
+	Job        JobSummary      `json:"job"`
+	Tasks      []TaskView      `json:"tasks"`
+	MetricKeys []string        `json:"metric_keys"`
+	Wandb      *WandbInfo      `json:"wandb,omitempty"`
+	Config     json.RawMessage `json:"config,omitempty"` // raw JobConfig (re-run as template)
 }
 
 type TaskView struct {

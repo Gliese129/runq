@@ -11,6 +11,7 @@
       @resume="togglePause"
       @kill="killJob"
       @refresh="onRefresh"
+      @rerun="router.push({ name: 'submit', query: { fromJob: props.jobId } })"
     />
 
     <!-- Filter bar -->

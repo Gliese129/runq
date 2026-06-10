@@ -35,6 +35,12 @@ const lastProject = ref(load('last-project', ''))
 
 watch(lastProject, (v) => save('last-project', v))
 
+// --- One-time hints (dismissed = never show again) ---
+
+const sugarTipDismissed = ref(load('sugar-tip-dismissed', false))
+
+watch(sugarTipDismissed, (v) => save('sugar-tip-dismissed', v))
+
 // --- Preferred metric key per job ---
 
 const preferredMetrics = ref<Record<string, string>>(load('preferred-metrics', {}))
@@ -121,6 +127,7 @@ export function usePreferences() {
     recentScripts,
     addRecentScript,
     lastProject,
+    sugarTipDismissed,
     preferredMetrics,
     setPreferredMetric,
     lastStatusFilter,

@@ -20,6 +20,14 @@ export interface JobSummary {
   refreshed_at?: number
 }
 
+/** Raw job config as submitted (note keeps its {{...}} template form). */
+export interface RawJobConfig {
+  project: string
+  note?: string
+  fixed_params?: Record<string, any>
+  sweep?: Array<{ method: string; parameters: Record<string, { values: any[] } | any[]> }>
+}
+
 export interface TaskView {
   id: string
   status: string
@@ -55,6 +63,8 @@ export interface JobDetail {
   tasks: TaskView[]
   metric_keys: string[]
   wandb?: WandbInfo
+  /** raw config as submitted — powers "re-run as template" */
+  config?: RawJobConfig
 }
 
 export interface CompareRow {
@@ -179,6 +189,8 @@ export interface ProjectConfig {
     choices?: string[]
     min?: number
     max?: number
+    /** user curation: appears in submit param table. absent = never curated */
+    include?: boolean
   }>
 }
 
@@ -202,6 +214,8 @@ export interface ProjectPayload {
     choices?: string[]
     min?: number
     max?: number
+    /** user curation: appears in submit param table. absent = never curated */
+    include?: boolean
   }>
 }
 

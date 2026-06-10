@@ -79,6 +79,11 @@ type ParamDef struct {
 	Choices []string `yaml:"choices,omitempty" json:"choices,omitempty"` // selectable values for str/file/folder
 	Min     *float64 `yaml:"min,omitempty" json:"min,omitempty"`         // valid range for int/float
 	Max     *float64 `yaml:"max,omitempty" json:"max,omitempty"`         // valid range for int/float
+	// Include is the user's curation: whether this param appears in the
+	// submit flow's param table. Pointer on purpose — nil means "never
+	// curated" (older configs / fresh discovery), which lets the UI apply
+	// its first-time heuristic exactly once and persist the result.
+	Include *bool `yaml:"include,omitempty" json:"include,omitempty"`
 }
 
 type WandbConfig struct {

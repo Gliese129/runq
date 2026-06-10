@@ -8,9 +8,18 @@
           Projects
         </div>
 
-        <v-list density="compact" class="pa-0" style="max-height: calc(100vh - 340px); overflow-y: auto">
+        <v-text-field
+          v-if="state.matchedProjects.length > 8"
+          v-model="projectFilter"
+          placeholder="Filter..."
+          prepend-inner-icon="mdi-magnify"
+          density="compact" variant="outlined" hide-details clearable
+          class="mb-2"
+        />
+
+        <v-list density="compact" class="pa-0" style="max-height: calc(100vh - 380px); overflow-y: auto">
           <v-list-item
-            v-for="p in state.matchedProjects"
+            v-for="p in sortedProjects"
             :key="p.name"
             :active="state.projectName === p.name && mode === 'select'"
             rounded
@@ -23,6 +32,7 @@
             <v-list-item-title class="text-body-2 font-weight-medium">{{ p.name }}</v-list-item-title>
             <v-list-item-subtitle class="text-caption">
               {{ p.job_count }} {{ p.job_count === 1 ? 'job' : 'jobs' }}
+              <span v-if="p.name === prefs.lastProject.value" class="text-primary"> · recent</span>
             </v-list-item-subtitle>
           </v-list-item>
 
@@ -31,7 +41,7 @@
             class="text-center text-on-surface-variant pa-4"
             disabled
           >
-            <div class="text-caption">No projects registered</div>
+            <div class="text-caption">No projects yet — create one below</div>
           </v-list-item>
         </v-list>
 
@@ -48,7 +58,7 @@
       </v-card>
     </v-col>
 
-    <!-- Right: unified form (select=readonly, create=editable) -->
+    <!-- Right -->
     <v-col cols="12" md="8">
       <!-- Empty state: nothing selected -->
       <v-card v-if="mode === 'select' && !state.projectName" class="pa-5 d-flex flex-column align-center justify-center" style="min-height: 300px">
@@ -56,16 +66,99 @@
         <div class="text-body-1 text-on-surface-variant">Select a project or create a new one</div>
       </v-card>
 
-      <!-- Project form -->
-      <v-card v-else class="pa-5">
-        <div class="text-subtitle-1 font-weight-medium mb-4">
-          {{ isCreating ? 'New Project' : form.name }}
+      <!-- ═══ Path A: read-only summary card (the frequent path) ═══ -->
+      <v-card v-else-if="mode === 'select' && !editingProject" class="pa-5">
+        <div class="d-flex align-center flex-wrap ga-2 mb-4">
+          <span class="text-subtitle-1 font-weight-medium">{{ form.name }}</span>
+          <v-chip size="x-small" variant="tonal">{{ envSummary }}</v-chip>
+          <v-chip size="x-small" variant="tonal">{{ form.gpus }} GPU{{ form.gpus === 1 ? '' : 's' }}</v-chip>
+          <v-chip size="x-small" variant="tonal">retry {{ form.maxRetry }}</v-chip>
         </div>
 
-        <!-- Script file trigger (create only) -->
+        <table class="summary-table">
+          <tbody>
+            <tr>
+              <td class="summary-label">workdir</td>
+              <td class="font-mono text-body-2 text-on-surface-variant text-truncate" style="max-width: 420px">{{ form.workDir || '—' }}</td>
+            </tr>
+            <tr>
+              <td class="summary-label">command</td>
+              <td class="font-mono text-body-2 text-on-surface-variant">{{ form.cmd || '—' }}</td>
+            </tr>
+            <tr>
+              <td class="summary-label" style="vertical-align: top">params</td>
+              <td>
+                <div class="d-flex align-center flex-wrap ga-1">
+                  <v-chip
+                    v-for="p in includedParams.slice(0, 8)" :key="p.name"
+                    size="x-small" variant="tonal" class="font-mono"
+                  >{{ p.name }}</v-chip>
+                  <span v-if="includedParams.length > 8" class="text-caption text-on-surface-variant">
+                    +{{ includedParams.length - 8 }} more
+                  </span>
+                  <span v-if="includedParams.length === 0" class="text-caption text-on-surface-variant">none</span>
+                </div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div class="d-flex align-center justify-space-between mt-4 pt-3" style="border-top: 0.5px solid rgb(var(--v-theme-outline-variant))">
+          <v-btn size="small" variant="text" color="primary" @click="enterEditMode">
+            <v-icon start size="14">mdi-pencil-outline</v-icon> Edit project
+          </v-btn>
+          <span class="text-caption text-on-surface-variant">Read-only — Next won't modify the project</span>
+        </div>
+      </v-card>
+
+      <!-- ═══ Path B resting state: script picker first ═══ -->
+      <v-card v-else-if="isCreating && !scriptPicked && !form.name" class="pa-5">
+        <div
+          class="script-drop d-flex flex-column align-center justify-center pa-8 rounded mb-4 cursor-pointer"
+          @click="showFileBrowser = true"
+        >
+          <v-icon size="36" color="primary" class="mb-2">mdi-file-code-outline</v-icon>
+          <div class="text-body-1 font-weight-medium">Select your training script</div>
+          <div class="text-caption text-on-surface-variant mt-1">
+            name · workdir · command · params · env will be auto-detected
+          </div>
+        </div>
+
+        <template v-if="prefs.recentScripts.value.length > 0">
+          <div class="text-caption text-on-surface-variant mb-1">RECENT</div>
+          <div
+            v-for="s in prefs.recentScripts.value.slice(0, 5)" :key="s.path"
+            class="d-flex align-center ga-2 px-2 py-1 rounded recent-row cursor-pointer"
+            @click="onBrowserSelect(s.path)"
+          >
+            <v-icon size="14" color="on-surface-variant">mdi-history</v-icon>
+            <code class="text-body-2">{{ s.name }}</code>
+            <span class="text-caption text-on-surface-variant text-truncate">{{ s.path }}</span>
+          </div>
+        </template>
+
+        <div class="text-center mt-3">
+          <v-btn size="x-small" variant="text" @click="skipScript">
+            skip — fill in manually
+          </v-btn>
+        </div>
+      </v-card>
+
+      <!-- ═══ Edit form (create after script, or Edit project) ═══ -->
+      <v-card v-else class="pa-5">
+        <div class="d-flex align-center justify-space-between mb-4">
+          <div class="text-subtitle-1 font-weight-medium">
+            {{ isCreating ? 'New Project' : form.name }}
+          </div>
+          <v-btn v-if="!isCreating" size="x-small" variant="text" @click="editingProject = false">
+            <v-icon start size="12">mdi-chevron-up</v-icon> Collapse
+          </v-btn>
+        </div>
+
+        <!-- Script summary line (create only) -->
         <v-text-field
           v-if="isCreating"
-          :model-value="scriptDisplay"
+          :model-value="scriptSummary"
           label="Script file"
           variant="outlined" density="compact" class="mb-3"
           prepend-inner-icon="mdi-file-code-outline"
@@ -83,12 +176,12 @@
             variant="outlined" density="compact"
             hide-details="auto"
             :error-messages="form.error"
+            :readonly="!isCreating"
           />
           <v-btn
-            v-if="!isCreating && form.name !== state.projectName && form.name.trim()"
-            size="small" variant="tonal" color="primary"
-            :loading="renaming"
-            @click="doRename"
+            v-if="!isCreating"
+            size="small" variant="text"
+            @click="renameDialog = true"
           >Rename</v-btn>
         </div>
 
@@ -100,20 +193,13 @@
               <template v-for="(seg, i) in workDirSegments" :key="i">
                 <v-icon v-if="i > 0" size="10" color="on-surface-variant">mdi-chevron-right</v-icon>
                 <span
-                  class="text-body-2"
-                  :class="[
-                    i === workDirSegments.length - 1 ? 'font-weight-medium text-primary' : '',
-                    isCreating ? 'cursor-pointer workdir-seg' : '',
-                  ]"
-                  @click="isCreating && truncateWorkDir(i)"
+                  class="text-body-2 cursor-pointer workdir-seg"
+                  :class="i === workDirSegments.length - 1 ? 'font-weight-medium text-primary' : ''"
+                  @click="truncateWorkDir(i)"
                 >{{ seg }}</span>
               </template>
             </div>
-            <v-btn
-              v-if="isCreating"
-              icon size="x-small" variant="text"
-              @click="editWorkDir"
-            >
+            <v-btn icon size="x-small" variant="text" @click="editWorkDir">
               <v-icon size="14" color="on-surface-variant">mdi-pencil-outline</v-icon>
             </v-btn>
           </div>
@@ -130,16 +216,18 @@
 
         <v-row dense class="mb-3">
           <v-col cols="6">
-            <v-text-field
-              v-model.number="form.gpus" label="GPUs per task"
-              variant="outlined" density="compact" type="number" :min="0" hide-details
-                              />
+            <v-number-input
+              v-model="form.gpus" label="GPUs per task"
+              variant="outlined" density="compact" :min="0" hide-details
+              control-variant="stacked"
+            />
           </v-col>
           <v-col cols="6">
-            <v-text-field
-              v-model.number="form.maxRetry" label="Max retry"
-              variant="outlined" density="compact" type="number" :min="0" hide-details
-                />
+            <v-number-input
+              v-model="form.maxRetry" label="Max retry"
+              variant="outlined" density="compact" :min="0" hide-details
+              control-variant="stacked"
+            />
           </v-col>
         </v-row>
 
@@ -157,10 +245,9 @@
                 variant="outlined"
                 hide-details
                 placeholder="system"
-                              />
+              />
             </v-col>
             <v-col cols="8">
-              <!-- venv/uv: auto-detected path (editable) -->
               <v-text-field
                 v-if="form.envType === 'venv' || form.envType === 'uv'"
                 v-model="form.envPath"
@@ -175,7 +262,6 @@
                 </template>
               </v-text-field>
 
-              <!-- conda: select from env list or type -->
               <v-combobox
                 v-else-if="form.envType === 'conda'"
                 v-model="form.envName"
@@ -187,7 +273,6 @@
                 placeholder="base"
               />
 
-              <!-- system or empty: nothing -->
               <div v-else class="text-caption text-on-surface-variant pa-2">
                 Uses system Python
               </div>
@@ -195,56 +280,45 @@
           </v-row>
         </div>
 
-        <!-- Parameters -->
-        <div class="mb-4">
+        <!-- Parameters: chips summary, single editor = the dialog -->
+        <div class="mb-2">
           <div class="d-flex align-center justify-space-between mb-2">
             <div class="text-caption text-on-surface-variant d-flex align-center ga-1">
               <v-icon size="12">mdi-variable</v-icon>
               Parameters
-              <v-chip size="x-small" variant="tonal">{{ includedCount }} / {{ form.params.length }}</v-chip>
+              <v-chip size="x-small" variant="tonal">{{ includedParams.length }} / {{ form.params.length }}</v-chip>
             </div>
-            <div class="d-flex align-center ga-1">
-              <v-btn v-if="!compactMode && form.params.length > 0" size="x-small" variant="text" @click="toggleAllParams">
-                {{ allParamsIncluded ? 'Deselect all' : 'Select all' }}
-              </v-btn>
-              <v-btn icon size="x-small" variant="text" @click="showParamEditor = true">
-                <v-icon size="16">mdi-arrow-expand</v-icon>
-              </v-btn>
-            </div>
+            <v-btn size="x-small" variant="tonal" color="primary" @click="showParamEditor = true">
+              <v-icon start size="12">mdi-pencil-outline</v-icon> Edit parameters
+            </v-btn>
           </div>
-
-          <div v-if="visibleParams.length > 0" class="params-list rounded">
-            <div style="max-height: 320px; overflow-y: auto">
-              <div v-for="p in visibleParams" :key="p.name" class="d-flex align-center ga-2 px-3 py-2 param-row">
-                <v-checkbox-btn
-                  v-model="p.include"
-                  density="compact" hide-details color="primary"
-                  style="flex: none"
-                />
-                <code class="text-body-2" style="min-width: 80px; flex: none">{{ p.name }}</code>
-                <v-chip size="x-small" variant="tonal" class="flex-shrink-0">{{ p.type }}</v-chip>
-                <v-text-field
-                  v-model="p.default"
-                  placeholder="default"
-                  density="compact" variant="underlined" hide-details
-                  class="flex-grow-1"
-                  style="font-family: monospace; font-size: 13px"
-                />
-              </div>
-            </div>
-            <div v-if="hiddenCount > 0" class="d-flex align-center justify-center ga-1 pa-2 compact-hint" @click="showParamEditor = true">
-              <v-icon size="12" color="on-surface-variant">mdi-dots-horizontal</v-icon>
-              <span class="text-caption text-on-surface-variant">{{ hiddenCount }} more hidden —</span>
-              <span class="text-caption text-primary cursor-pointer">expand to edit all</span>
-            </div>
-          </div>
-          <div v-else-if="form.params.length === 0" class="text-caption text-on-surface-variant pa-3 text-center">
-            No parameters
+          <div class="d-flex align-center flex-wrap ga-1">
+            <v-chip
+              v-for="p in includedParams" :key="p.name"
+              size="x-small" variant="tonal" class="font-mono"
+              @click="showParamEditor = true"
+            >{{ p.name }}<span v-if="p.default" class="text-on-surface-variant">&nbsp;= {{ p.default }}</span></v-chip>
+            <span v-if="form.params.length === 0" class="text-caption text-on-surface-variant">
+              No parameters — select a script or add them in the editor
+            </span>
           </div>
         </div>
-
-        <!-- Next button in parent handles save -->
       </v-card>
+
+      <!-- Rename confirm dialog -->
+      <v-dialog v-model="renameDialog" max-width="380">
+        <v-card class="pa-4">
+          <div class="text-subtitle-2 mb-3">Rename project</div>
+          <v-text-field
+            v-model="renameTo" label="New name"
+            variant="outlined" density="compact" hide-details autofocus
+          />
+          <div class="d-flex justify-end ga-2 mt-4">
+            <v-btn size="small" variant="text" @click="renameDialog = false">Cancel</v-btn>
+            <v-btn size="small" variant="tonal" color="primary" :loading="renaming" :disabled="!renameTo.trim() || renameTo.trim() === state.projectName" @click="doRename">Rename</v-btn>
+          </div>
+        </v-card>
+      </v-dialog>
 
       <!-- File browser dialog -->
       <FileBrowserDialog
@@ -258,7 +332,7 @@
       <ParamEditorDialog
         v-model="showParamEditor"
         :params="form.params"
-        @update:params="form.params = $event"
+        @update:params="onParamsEdited"
       />
     </v-col>
   </v-row>
@@ -266,7 +340,6 @@
 
 <script setup lang="ts">
 import { ref, computed, inject, watch, onMounted } from 'vue'
-import { useI18n } from 'vue-i18n'
 import { envApi } from '@/apis/env'
 import { filesApi } from '@/apis/files'
 import { projectsApi } from '@/apis/projects'
@@ -276,16 +349,57 @@ import { SUBMIT_STATE_KEY } from '@/types/submit'
 import ParamEditorDialog from './ParamEditorDialog.vue'
 import FileBrowserDialog from '@/components/FileBrowserDialog.vue'
 
-// No emits — save handled by parent's goNext
-const { t } = useI18n()
+// No emits — save handled by parent's goNext (only when dirty; see below)
 const state = inject(SUBMIT_STATE_KEY)!
 const prefs = usePreferences()
 
-// ── Rename ──
+// ── Mode ──
+const mode = ref<'select' | 'create'>('select')
+const isCreating = computed(() => mode.value === 'create')
+// Path A is read-only by default; this expands the edit form.
+const editingProject = ref(false)
+
+// ── Dirty tracking ──
+// goNext saves the project ONLY when something was actually edited (or in
+// create mode). Selecting a project and clicking Next is side-effect free.
+let applying = false
+watch(
+  () => [form_(), state.newProject.params],
+  () => { if (!applying) state.newProject.dirty = true },
+  { deep: true },
+)
+function form_() {
+  const { name, workDir, cmd, gpus, maxRetry, envType, envPath, envName } = state.newProject
+  return { name, workDir, cmd, gpus, maxRetry, envType, envPath, envName }
+}
+
+function enterEditMode() {
+  editingProject.value = true
+}
+
+// ── Project list ──
+const projectFilter = ref('')
+const sortedProjects = computed(() => {
+  const q = projectFilter.value.trim().toLowerCase()
+  let list = state.matchedProjects
+  if (q) list = list.filter(p => p.name.toLowerCase().includes(q))
+  // Recent project pinned first, rest by job count desc
+  return [...list].sort((a, b) => {
+    if (a.name === prefs.lastProject.value) return -1
+    if (b.name === prefs.lastProject.value) return 1
+    return b.job_count - a.job_count
+  })
+})
+
+// ── Rename (explicit dialog — name field is read-only in select mode) ──
+const renameDialog = ref(false)
+const renameTo = ref('')
 const renaming = ref(false)
 
+watch(renameDialog, (v) => { if (v) renameTo.value = state.projectName })
+
 async function doRename() {
-  const newName = form.name.trim()
+  const newName = renameTo.value.trim()
   if (!newName || newName === state.projectName) return
   renaming.value = true
   try {
@@ -293,7 +407,11 @@ async function doRename() {
     const proj = state.matchedProjects.find(p => p.name === state.projectName)
     if (proj) proj.name = newName
     state.projectName = newName
+    applying = true
+    form.name = newName
+    applying = false
     prefs.lastProject.value = newName
+    renameDialog.value = false
   } catch (e: any) {
     form.error = e?.message || 'Rename failed'
   } finally {
@@ -304,53 +422,64 @@ async function doRename() {
 // ── Param editor dialog ──
 const showParamEditor = ref(false)
 
-// ── Mode ──
-const mode = ref<'select' | 'create'>('select') // updated after API load in onMounted
-const isCreating = computed(() => mode.value === 'create')
+function onParamsEdited(params: import('@/types/submit').ProjectParam[]) {
+  form.params = params
+  state.newProject.dirty = true
+}
 
 // ── Select existing ──
 const selectedConfig = ref<ProjectConfig | null>(null)
 
 async function selectProject(name: string) {
-	mode.value = 'select'
-	state.projectName = name
-	try {
-		const cfg = await projectsApi.get(name)
-		selectedConfig.value = cfg
-		applyProjectConfig(cfg, state.groups.length === 0)
-		await refreshParamsFromProject(cfg)
-	} catch {
-		selectedConfig.value = null
-	}
+  mode.value = 'select'
+  editingProject.value = false
+  state.projectName = name
+  try {
+    const cfg = await projectsApi.get(name)
+    selectedConfig.value = cfg
+    applyProjectConfig(cfg, state.rows.length === 0)
+    await refreshParamsFromProject(cfg)
+  } catch {
+    selectedConfig.value = null
+  }
 }
 
 function applyProjectConfig(cfg: ProjectConfig, resetGroups = true) {
-	form.name = cfg.project_name
-	form.workDir = cfg.working_dir
-	form.cmd = cfg.command_template
-	form.gpus = cfg.defaults?.gpus_per_task || 1
-	form.maxRetry = cfg.defaults?.max_retry ?? 0
-	form.envType = cfg.python_env?.type || ''
-	form.envPath = cfg.python_env?.path || ''
-	form.envName = cfg.python_env?.name || ''
-	form.error = ''
-	// Load persisted params from project config
-	form.params = ((cfg as any).params || []).map((p: any) => normalizeParam(p))
-	autoIncludeCommonParams()
-	if (resetGroups) state.groups = []
+  applying = true
+  form.name = cfg.project_name
+  form.workDir = cfg.working_dir
+  form.cmd = cfg.command_template
+  form.gpus = cfg.defaults?.gpus_per_task || 1
+  form.maxRetry = cfg.defaults?.max_retry ?? 0
+  form.envType = cfg.python_env?.type || ''
+  form.envPath = cfg.python_env?.path || ''
+  form.envName = cfg.python_env?.name || ''
+  form.error = ''
+  const rawParams = ((cfg as any).params || []) as any[]
+  form.params = rawParams.map(p => normalizeParam(p))
+  // First-time heuristic ONLY: once any include flag has been persisted,
+  // the user's curation is the truth — never clobber it.
+  if (!rawParams.some(p => p.include !== undefined)) {
+    autoIncludeCommonParams()
+  }
+  state.newProject.dirty = false
+  applying = false
+  if (resetGroups) { state.rows = []; state.linkSets = [] }
 }
 
 async function refreshParamsFromProject(cfg: ProjectConfig) {
-	const path = inferScriptPath(cfg)
-	if (!path) return
-	scriptPath.value = path
-	try {
-		const result = await filesApi.parseScript(path, { silent: true })
-		mergeParsedParams(result.args || [])
-		autoIncludeCommonParams()
-	} catch {
-		// Keep persisted project.yaml params when script parsing is unavailable.
-	}
+  const path = inferScriptPath(cfg)
+  if (!path) return
+  scriptPath.value = path
+  try {
+    const result = await filesApi.parseScript(path, { silent: true })
+    applying = true
+    mergeParsedParams(result.args || [])
+    state.newProject.dirty = false
+    applying = false
+  } catch {
+    // Keep persisted project.yaml params when script parsing is unavailable.
+  }
 }
 
 function mergeParsedParams(args: ParseResult['args']) {
@@ -381,24 +510,31 @@ function mergeParsedParams(args: ParseResult['args']) {
 }
 
 function inferScriptPath(cfg: ProjectConfig): string {
-	const cmd = cfg.command_template || ''
-	const match = cmd.match(/(?:^|\s)([^\s"'`]+\.py)(?:\s|$)/)
-	if (!match) return ''
-	const script = match[1]
-	if (script.startsWith('/')) return script
-	const base = (cfg.working_dir || '').replace(/\/+$/, '')
-	return base ? `${base}/${script}` : script
+  const cmd = cfg.command_template || ''
+  const match = cmd.match(/(?:^|\s)([^\s"'`]+\.py)(?:\s|$)/)
+  if (!match) return ''
+  const script = match[1]
+  if (script.startsWith('/')) return script
+  const base = (cfg.working_dir || '').replace(/\/+$/, '')
+  return base ? `${base}/${script}` : script
 }
 
 // ── Create new ──
 const form = state.newProject
 const scriptPath = ref('')
 const showFileBrowser = ref(false)
+const scriptPicked = ref(false)
+const detectedSummary = ref('')
 
-const scriptDisplay = computed(() => {
+const scriptSummary = computed(() => {
   if (!scriptPath.value) return ''
-  return scriptPath.value.split(/[\\/]/).pop() || scriptPath.value
+  const name = scriptPath.value.split(/[\\/]/).pop() || scriptPath.value
+  return detectedSummary.value ? `${name} · ${detectedSummary.value}` : name
 })
+
+function skipScript() {
+  scriptPicked.value = true // show the form without a script
+}
 
 // Working dir breadcrumb
 const workDirSegments = computed(() =>
@@ -408,8 +544,7 @@ const workDirSegments = computed(() =>
 function truncateWorkDir(index: number) {
   const segs = workDirSegments.value.slice(0, index + 1)
   form.workDir = '/' + segs.join('/')
-  // Update project name suggestion to match new dir
-  form.name = segs[segs.length - 1] || form.name
+  if (isCreating.value) form.name = segs[segs.length - 1] || form.name
 }
 
 const workDirEditMode = ref(false)
@@ -420,25 +555,31 @@ function editWorkDir() {
 }
 
 function enterCreateMode() {
-	mode.value = 'create'
-	state.projectName = ''
-	selectedConfig.value = null
-	resetProjectForm()
-	state.groups = []
+  mode.value = 'create'
+  editingProject.value = false
+  state.projectName = ''
+  selectedConfig.value = null
+  resetProjectForm()
+  state.rows = []; state.linkSets = []
 }
 
 function resetProjectForm() {
-	form.name = ''
-	form.workDir = ''
-	form.cmd = ''
-	form.gpus = 1
-	form.maxRetry = 0
-	form.envType = ''
-	form.envPath = ''
-	form.envName = ''
-	form.error = ''
-	form.params = []
-	scriptPath.value = ''
+  applying = true
+  form.name = ''
+  form.workDir = ''
+  form.cmd = ''
+  form.gpus = 1
+  form.maxRetry = 0
+  form.envType = ''
+  form.envPath = ''
+  form.envName = ''
+  form.error = ''
+  form.params = []
+  state.newProject.dirty = false
+  applying = false
+  scriptPath.value = ''
+  scriptPicked.value = false
+  detectedSummary.value = ''
 }
 
 // ── Python env ──
@@ -451,6 +592,15 @@ const envTypes = [
 const condaEnvs = ref<string[]>([])
 const condaEnvsLoading = ref(false)
 let condaEnvsLoaded = false
+
+const envSummary = computed(() => {
+  switch (form.envType) {
+    case 'conda': return `conda: ${form.envName || 'base'}`
+    case 'venv': return `venv: ${form.envPath || '.venv'}`
+    case 'uv': return `uv: ${form.envPath || '.venv'}`
+    default: return 'system python'
+  }
+})
 
 watch(() => form.envType, async (type) => {
   if (type === 'conda' && !condaEnvsLoaded) {
@@ -466,41 +616,27 @@ watch(() => form.envType, async (type) => {
 // Params helpers
 const paramTypes = ['int', 'float', 'str', 'bool', 'file', 'folder', 'list']
 
-// Common param names to auto-include in compact mode
 const COMMON_PARAMS = new Set([
   'epoch', 'epochs', 'num_epochs', 'n_epochs', 'max_epochs',
   'lr', 'learning_rate', 'learning-rate',
-  'bs', 'batch_size', 'batch-size', 'batch_size',
+  'bs', 'batch_size', 'batch-size',
   'seed', 'num_workers', 'device', 'output', 'output_dir',
 ])
 
-const compactMode = computed(() => form.params.length > 5)
+const includedParams = computed(() => form.params.filter(p => p.include))
 
-const visibleParams = computed(() => {
-  if (!compactMode.value) return form.params
-  return form.params.filter(p => p.include)
-})
-
-const hiddenCount = computed(() => form.params.length - visibleParams.value.length)
-
-/** Auto-select common params when > 5 params discovered.
- *  All others default to deselected — edit in expand dialog. */
+/** Auto-select common params when > 5 params discovered. */
 function autoIncludeCommonParams() {
-  if (form.params.length <= 5) return // small set: keep all included
-  // Deselect all, then select common ones
+  if (form.params.length <= 5) return
   for (const p of form.params) {
     p.include = COMMON_PARAMS.has(p.name.toLowerCase())
   }
-  // If nothing matched, include the first 5
   if (!form.params.some(p => p.include)) {
     for (let i = 0; i < Math.min(5, form.params.length); i++) {
       form.params[i].include = true
     }
   }
 }
-
-const includedCount = computed(() => form.params.filter(p => p.include).length)
-const allParamsIncluded = computed(() => form.params.length > 0 && includedCount.value === form.params.length)
 
 function normalizeType(t: string): string {
   const lower = (t || '').toLowerCase()
@@ -516,40 +652,21 @@ function normalizeType(t: string): string {
   return 'str'
 }
 
-/** Build a ProjectParam from a parsed arg, moving default into values for str/file/folder. */
-function normalizeParam(a: { name: string; type: string; default?: string; choices?: string[]; min?: number; max?: number }): import('@/types/submit').ProjectParam {
+/** Build a ProjectParam from a parsed arg or persisted def, moving default
+ *  into values for str/file/folder. Persisted `include` is the user's
+ *  curation and survives; absent include = never curated. */
+function normalizeParam(a: { name: string; type: string; default?: string; choices?: string[]; min?: number; max?: number; include?: boolean }): import('@/types/submit').ProjectParam {
   const type = normalizeType(a.type)
   const def = a.default || ''
-  // Read choices from backend → values in frontend
   const values = Array.isArray((a as any).choices) ? (a as any).choices.map(String) : []
-  // str/file/folder: ensure default is in values[0]
   if (['str', 'file', 'folder'].includes(type) && def && !values.includes(def)) {
     values.unshift(def)
   }
   return {
-    name: a.name, type, default: def, include: true,
+    name: a.name, type, default: def, include: a.include ?? true,
     values: values.length > 0 ? values : undefined,
     min: a.min, max: a.max,
   }
-}
-
-function validateParam(value: string, type: string): boolean | string {
-  if (!value) return true
-  switch (type) {
-    case 'int':
-      return Number.isInteger(Number(value)) || 'Must be an integer'
-    case 'float':
-      return !isNaN(Number(value)) || 'Must be a number'
-    case 'bool':
-      return ['true', 'false', '0', '1'].includes(value.toLowerCase()) || 'Must be true/false'
-    default:
-      return true
-  }
-}
-
-function toggleAllParams() {
-  const newVal = !allParamsIncluded.value
-  for (const p of form.params) p.include = newVal
 }
 
 function onBrowserSelect(path: string) {
@@ -558,7 +675,6 @@ function onBrowserSelect(path: string) {
     workDirEditMode.value = false
     return
   }
-  // Script selected
   const name = path.split(/[\\/]/).pop() || path
   onScriptPicked({ path, name, is_dir: false, size: 0 })
 }
@@ -566,6 +682,7 @@ function onBrowserSelect(path: string) {
 async function onScriptPicked(entry: FSEntry) {
   workDirEditMode.value = false
   scriptPath.value = entry.path
+  scriptPicked.value = true
   showFileBrowser.value = false
 
   const dir = entry.path.replace(/[\\/][^\\/]+$/, '')
@@ -574,13 +691,11 @@ async function onScriptPicked(entry: FSEntry) {
   form.workDir = dir
   form.cmd = `python ${entry.name} {{args}}`
 
-  // Parse script → env + params
   try {
     const result = await filesApi.parseScript(entry.path)
 
     if (result.suggested_command) form.cmd = result.suggested_command
 
-    // Parse detected env string like "conda:base" or "uv:.venv"
     if (result.detected_env) {
       const [type, detail] = result.detected_env.split(':', 2)
       form.envType = type || ''
@@ -593,26 +708,26 @@ async function onScriptPicked(entry: FSEntry) {
       }
     }
 
-    // Populate discovered params
     form.params = (result.args || []).map(a => normalizeParam(a))
     autoIncludeCommonParams()
+
+    const bits = [`${form.params.length} params`]
+    if (result.detected_env) bits.push(`${result.detected_env} detected`)
+    detectedSummary.value = bits.join(' · ')
   } catch {
     form.params = []
+    detectedSummary.value = ''
   }
 
-  // Save to recent
   prefs.addRecentScript(entry.path, entry.name, form.name)
 }
 
-
 // ── Init ──
 onMounted(async () => {
-  // Refresh project list from backend
   try {
     state.matchedProjects = await projectsApi.list()
   } catch { state.matchedProjects = [] }
 
-  // If form already has data (user came back), preserve state
   const hasFormData = !!form.name
   if (state.matchedProjects.length === 0) {
     mode.value = 'create'
@@ -621,24 +736,24 @@ onMounted(async () => {
     if (state.projectName && !hasFormData) {
       await selectProject(state.projectName)
     } else if (state.projectName) {
-      // Came back — keep form, just restore mode + selectedConfig
       mode.value = 'select'
       try {
         selectedConfig.value = await projectsApi.get(state.projectName)
       } catch { selectedConfig.value = null }
     }
   }
-
 })
 </script>
 
 <style scoped>
+.font-mono { font-family: monospace; }
+.summary-table { width: 100%; border-collapse: collapse; }
+.summary-table td { padding: 4px 0; }
+.summary-label { width: 90px; font-size: 12px; color: rgb(var(--v-theme-on-surface-variant)); vertical-align: middle; }
 .workdir-breadcrumb { background: rgb(var(--v-theme-surface-variant), 0.3); border: 1px solid rgb(var(--v-theme-outline-variant)); }
 .workdir-seg { text-decoration: underline dotted; text-underline-offset: 2px; }
 .workdir-seg:hover { color: rgb(var(--v-theme-primary)); }
-.params-list { background: rgb(var(--v-theme-surface-variant), 0.2); border: 1px solid rgb(var(--v-theme-outline-variant)); overflow: hidden; }
-.param-row:hover { background: rgb(var(--v-theme-surface-variant), 0.3); }
-.param-row + .param-row { border-top: 1px solid rgb(var(--v-theme-outline-variant), 0.3); }
-.compact-hint { border-top: 1px solid rgb(var(--v-theme-outline-variant), 0.3); cursor: pointer; transition: background 0.15s ease; }
-.compact-hint:hover { background: rgb(var(--v-theme-surface-variant), 0.3); }
+.script-drop { border: 1.5px dashed rgb(var(--v-theme-outline-variant)); transition: border-color 0.15s ease, background 0.15s ease; }
+.script-drop:hover { border-color: rgb(var(--v-theme-primary)); background: rgb(var(--v-theme-primary), 0.04); }
+.recent-row:hover { background: rgb(var(--v-theme-surface-variant), 0.4); }
 </style>

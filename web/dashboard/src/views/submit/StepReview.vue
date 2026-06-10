@@ -107,42 +107,20 @@
 <script setup lang="ts">
 import { computed, inject } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { SUBMIT_STATE_KEY, type SweepGroup, type GroupParam } from '@/types/submit'
+import { SUBMIT_STATE_KEY } from '@/types/submit'
+import { sweptParamNames as computeSwept, fixedParamPreview } from './submitFlow'
 
 const { t } = useI18n()
 const state = inject(SUBMIT_STATE_KEY)!
 
-// Swept params: in a sweep group with >1 value
-const sweptParamNames = computed(() => {
-  const names = new Set<string>()
-  for (const g of state.groups as SweepGroup[]) {
-    for (const p of g.params as GroupParam[]) {
-      if (p.values.filter(v => !isBlankValue(v)).length > 0) names.add(p.name)
-    }
-  }
-  return names
-})
-
-// Fixed params: included, have default, not swept
-const fixedParams = computed(() => {
-  const fp: Record<string, any> = {}
-  for (const p of state.newProject.params) {
-    if (!p.include || isBlankValue(p.default) || sweptParamNames.value.has(p.name)) continue
-    fp[p.name] = p.default
-  }
-  return fp
-})
-
+const sweptParamNames = computed(() => computeSwept(state.rows, state.linkSets))
+const fixedParams = computed(() => fixedParamPreview(state.rows, state.linkSets))
 const fixedParamCount = computed(() => Object.keys(fixedParams.value).length)
 
 function columnClass(key: string): string {
   if (sweptParamNames.value.has(key)) return 'swept-col'
   if (key in fixedParams.value) return 'fixed-col'
   return ''
-}
-
-function isBlankValue(v: string): boolean {
-  return String(v ?? '').trim() === ''
 }
 </script>
 

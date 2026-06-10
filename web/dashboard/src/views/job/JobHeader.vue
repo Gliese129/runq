@@ -20,6 +20,9 @@
         </template>
       </div>
       <div class="d-flex ga-1">
+        <v-btn size="x-small" variant="tonal" color="primary" @click="$emit('rerun')">
+          <v-icon start size="14">mdi-restart</v-icon> Re-run
+        </v-btn>
         <v-btn v-if="canPause && isActive" size="x-small" variant="tonal"
           :color="detail.job.status === 'paused' ? 'success' : 'warning'"
           @click="emitPauseResume"
@@ -90,6 +93,7 @@ const emit = defineEmits<{
   resume: []
   kill: []
   refresh: []
+  rerun: []
 }>()
 
 const isActive = computed(() => ['running', 'pending', 'paused'].includes(props.detail.job.status))

@@ -84,8 +84,8 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, provide, reactive, markRaw } from 'vue'
-import { useRouter } from 'vue-router'
+import { ref, computed, provide, reactive, markRaw, onMounted } from 'vue'
+import { useRouter, useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { jobsApi } from '@/apis/jobs'
 import { projectsApi } from '@/apis/projects'
@@ -97,12 +97,12 @@ import PreflightError from '@/components/PreflightError.vue'
 import StepProject from './StepProject.vue'
 import StepConfigure from './StepConfigure.vue'
 import StepReview from './StepReview.vue'
-import { SUBMIT_STATE_KEY, type SweepGroup } from '@/types/submit'
+import { SUBMIT_STATE_KEY } from '@/types/submit'
+import { decompile, type ParamRow, type LinkSet } from './paramTable'
 import {
   buildJobConfig as createJobConfig,
   buildProjectPayload as createProjectPayload,
   dryRunHeaders as createDryRunHeaders,
-  groupTaskCount as countGroupTasks,
   sweepSummary as summarizeSweep,
   totalTaskCount as countTotalTasks,
   validateConfigure,
@@ -112,6 +112,7 @@ const stepComponents = [markRaw(StepProject), markRaw(StepConfigure), markRaw(St
 
 const { t } = useI18n()
 const router = useRouter()
+const route = useRoute()
 const snack = useSnackbar()
 const prefs = usePreferences()
 
@@ -132,11 +133,12 @@ const newProject = reactive({
   creating: false,
   error: '',
   params: [] as import('@/types/submit').ProjectParam[],
+  dirty: false,
 })
 const note = ref('')
 
-const groups = ref<SweepGroup[]>([])
-let groupIdCounter = 0
+const rows = ref<ParamRow[]>([])
+const linkSets = ref<LinkSet[]>([])
 
 const dryRunResult = ref<Record<string, any>[]>([])
 const dryRunLoading = ref(false)
@@ -146,26 +148,14 @@ const preflightEnabled = ref(true)
 
 // ── Computed ──
 
-const usedParamNames = computed(() => {
-  const names = new Set<string>()
-  for (const g of groups.value) {
-    for (const p of g.params) names.add(p.name)
-  }
-  return names
-})
-
-function groupTaskCount(group: SweepGroup): number {
-  return countGroupTasks(group)
-}
-
-const totalTaskCount = computed(() => countTotalTasks(groups.value))
+const totalTaskCount = computed(() => countTotalTasks(rows.value, linkSets.value))
 
 const displayTaskCount = computed(() => {
   if (step.value === 2 && !dryRunLoading.value) return dryRunResult.value.length
   return totalTaskCount.value
 })
 
-const sweepSummary = computed(() => summarizeSweep(groups.value))
+const sweepSummary = computed(() => summarizeSweep(rows.value, linkSets.value))
 
 const dryRunHeaders = computed(() => {
   return createDryRunHeaders(dryRunResult.value, newProject.params)
@@ -179,9 +169,8 @@ provide(SUBMIT_STATE_KEY, reactive({
   matchedProjects,
   newProject,
   note,
-  groups,
-  groupIdCounter,
-  usedParamNames,
+  rows,
+  linkSets,
   totalTaskCount,
   displayTaskCount,
   sweepSummary,
@@ -192,8 +181,6 @@ provide(SUBMIT_STATE_KEY, reactive({
   submitting,
   preflightEnabled,
   prefs,
-  groupTaskCount,
-  getNextGroupId: () => ++groupIdCounter,
 }))
 
 // ── Actions ──
@@ -239,15 +226,18 @@ async function saveProject(): Promise<boolean> {
 
 async function goNext() {
   if (step.value === 0) {
-    // Always save project (create or update) — writes yaml + DB
     if (!projectName.value && !newProject.name.trim()) return
-    const ok = await saveProject()
-    if (!ok) return
+    // Save only when something was actually edited (or when creating a new
+    // project). Selecting an existing project and clicking Next must be
+    // side-effect free — no silent project rewrites.
+    if (!projectName.value || newProject.dirty) {
+      const ok = await saveProject()
+      if (!ok) return
+      newProject.dirty = false
+    }
   }
   if (step.value === 1) {
-    const validation = validateConfigure(groups.value, {
-      listLengthMismatchMessage: t('submit.list_length_mismatch', 'List group 中各参数的值数量必须相等'),
-    })
+    const validation = validateConfigure(rows.value, linkSets.value)
     if (!validation.ok) {
       snack.error(validation.message)
       return
@@ -271,8 +261,32 @@ async function goNext() {
 }
 
 function buildJobConfig() {
-  return createJobConfig(projectName.value, note.value, newProject, groups.value)
+  return createJobConfig(projectName.value, note.value, rows.value, linkSets.value)
 }
+
+// ── Re-run as template (?fromJob=<id>) ──
+// Loads the source job's raw config: note keeps its {{...}} template form
+// (so {{version}} keeps incrementing), sweep blocks decompile into the flat
+// row/link-set model. Lands on the configure step, ready to tweak & submit.
+onMounted(async () => {
+  const fromJob = route.query.fromJob
+  if (typeof fromJob !== 'string' || !fromJob) return
+  try {
+    const detail = await jobsApi.get(fromJob)
+    if (!detail.config) {
+      snack.warn('Source job has no stored config')
+      return
+    }
+    projectName.value = detail.config.project || detail.job.project
+    note.value = detail.config.note || ''
+    const { rows: r, linkSets: ls } = decompile(detail.config)
+    rows.value = r
+    linkSets.value = ls
+    step.value = 1
+  } catch (e: any) {
+    snack.error(e?.message || 'Failed to load source job')
+  }
+})
 
 const submitError = ref('')
 const isPreflightError = computed(() => submitError.value.includes('preflight') || submitError.value.includes('- import:') || submitError.value.includes('- pip_check:'))

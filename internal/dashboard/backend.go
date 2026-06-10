@@ -122,6 +122,9 @@ func BuildJobDetail(job store.JobRow, tasks []store.TaskRow) JobDetail {
 		Job:        BuildJobSummary(job, tasks),
 		Tasks:      views,
 		MetricKeys: collectMetricKeys(tasks),
+		// Raw config (note template, sweep blocks) — powers "re-run as
+		// template" in the GUI without a second endpoint.
+		Config: json.RawMessage(job.ConfigJSON),
 	}
 }
 

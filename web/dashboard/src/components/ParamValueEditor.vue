@@ -1,4 +1,19 @@
 <template>
+  <!-- Resting state: the cell IS the default chip. Click to edit. -->
+  <v-chip
+    v-if="collapsed"
+    size="small" variant="outlined"
+    class="opacity-70 cursor-pointer"
+    style="font-family: monospace"
+    title="default — click to edit"
+    @click="expand"
+  >
+    {{ defaultValue }}
+    <v-icon end size="11" class="opacity-60">mdi-pencil-outline</v-icon>
+  </v-chip>
+
+  <!-- Edit state: collapses back to the default chip when left empty. -->
+  <div v-else ref="rootEl" tabindex="-1" style="outline: none" @focusout="onFocusOut">
   <!-- bool: two toggle chips -->
   <div v-if="type === 'bool'" class="d-flex ga-2">
     <v-chip
@@ -39,43 +54,23 @@
     </div>
   </div>
 
-  <!-- int/float: ChipInput + range generator -->
+  <!-- int/float: ChipInput with ⚡ generator in the field's action area -->
   <div v-else-if="type === 'int' || type === 'float'">
     <ChipInput
       :model-value="modelValue"
       @update:model-value="$emit('update:modelValue', $event)"
-      :placeholder="placeholder"
+      :placeholder="effectivePlaceholder"
       :color="color"
       :param-type="type"
-    />
-    <div class="d-flex align-center ga-2 mt-1">
-      <v-text-field
-        v-model.number="rangeMin" placeholder="min"
-        density="compact" variant="underlined" hide-details
-        type="number" style="max-width: 70px; font-size: 12px"
-      />
-      <v-text-field
-        v-model.number="rangeMax" placeholder="max"
-        density="compact" variant="underlined" hide-details
-        type="number" style="max-width: 70px; font-size: 12px"
-      />
-      <v-text-field
-        v-model.number="rangeStep" placeholder="step"
-        density="compact" variant="underlined" hide-details
-        type="number" style="max-width: 70px; font-size: 12px"
-      />
-      <v-btn
-        size="x-small" variant="tonal" color="primary"
-        :disabled="rangeMin == null || rangeMax == null || rangeStep == null || rangeStep <= 0 || (rangeMin != null && rangeMax != null && rangeMin >= rangeMax)"
-        @click="generateRange"
-      >
-        <v-icon size="12" start>mdi-auto-fix</v-icon>
-        Range
-      </v-btn>
-    </div>
-    <div v-if="rangeTruncated" class="text-caption text-warning mt-1">
-      Capped at {{ MAX_RANGE }} values — adjust step size for finer granularity
-    </div>
+      generator-sugar
+    >
+      <template #actions>
+        <ValueGenerator
+          :type="type" :default-value="defaultValue"
+          @apply="onGenerated" @update:open="generatorOpen = $event"
+        />
+      </template>
+    </ChipInput>
   </div>
 
   <!-- list / fallback: plain ChipInput -->
@@ -83,34 +78,73 @@
     v-else
     :model-value="modelValue"
     @update:model-value="$emit('update:modelValue', $event)"
-    :placeholder="placeholder"
+    :placeholder="effectivePlaceholder"
     :color="color"
     :param-type="type"
   />
+  </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { computed, nextTick, ref } from 'vue'
 import ChipInput from './ChipInput.vue'
+import ValueGenerator from './ValueGenerator.vue'
 
 const props = withDefaults(defineProps<{
   modelValue: string[]
   type: string
   placeholder?: string
   color?: string
-  min?: number
-  max?: number
-  step?: number
+  defaultValue?: string   // param default — feeds the ±default generator
   suggestions?: string[]  // pre-defined values from project param definition
+  /** Whether the cell may rest as the default chip. Linked rows must pass
+   *  false: "fixed at default" and "zipped" are contradictory states. */
+  collapsible?: boolean
 }>(), {
   placeholder: 'Type value + Enter',
   color: 'primary',
+  defaultValue: '',
   suggestions: () => [],
+  collapsible: true,
 })
 
 const emit = defineEmits<{
   'update:modelValue': [values: string[]]
 }>()
+
+// ── Collapsed/edit state ──
+// A cell with no values and a default rests as the default chip. Clicking
+// it opens the editor; leaving the editor empty (focusout to outside)
+// collapses it back. Cells with values never collapse.
+const rootEl = ref<HTMLElement>()
+const editing = ref(false)
+// The ⚡ popover teleports to body; while it's open, focusout must not
+// collapse the cell (the menu's activator would unmount under it).
+const generatorOpen = ref(false)
+
+const collapsed = computed(() =>
+  props.collapsible && !editing.value && props.modelValue.length === 0 && !!props.defaultValue,
+)
+
+const effectivePlaceholder = computed(() =>
+  props.defaultValue ? `default ${props.defaultValue} — type to override/sweep` : props.placeholder,
+)
+
+function expand() {
+  editing.value = true
+  nextTick(() => {
+    const el = rootEl.value
+    if (!el) return
+    ;(el.querySelector('input') as HTMLElement | null ?? el).focus()
+  })
+}
+
+function onFocusOut(e: FocusEvent) {
+  if (generatorOpen.value) return
+  const el = rootEl.value
+  if (el && e.relatedTarget instanceof Node && el.contains(e.relatedTarget)) return
+  if (props.modelValue.length === 0) editing.value = false
+}
 
 function hasValue(v: string) {
   return props.modelValue.includes(v)
@@ -138,26 +172,14 @@ const invalidPaths = computed(() =>
   })
 )
 
-// ── Range generator ──
-const MAX_RANGE = 20
-const rangeMin = ref<number | null>(props.min ?? null)
-const rangeMax = ref<number | null>(props.max ?? null)
-const rangeStep = ref<number | null>(props.step ?? null)
-const rangeTruncated = ref(false)
-
-function generateRange() {
-  if (rangeMin.value == null || rangeMax.value == null || rangeStep.value == null || rangeStep.value <= 0) return
-  if (rangeMin.value >= rangeMax.value) return
-  rangeTruncated.value = false
-  const values: string[] = []
-  const isInt = props.type === 'int'
-  for (let v = rangeMin.value; v <= rangeMax.value + 1e-9; v += rangeStep.value) {
-    values.push(isInt ? String(Math.round(v)) : String(parseFloat(v.toPrecision(10))))
-    if (values.length >= MAX_RANGE) {
-      rangeTruncated.value = true
-      break
-    }
+// ── ⚡ generator ──
+function onGenerated(values: string[], mode: 'replace' | 'append') {
+  if (mode === 'replace') {
+    emit('update:modelValue', values)
+  } else {
+    const merged = [...props.modelValue]
+    for (const v of values) if (!merged.includes(v)) merged.push(v)
+    emit('update:modelValue', merged)
   }
-  emit('update:modelValue', values)
 }
 </script>

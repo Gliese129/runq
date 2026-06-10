@@ -26,9 +26,18 @@
         @keydown.delete="onBackspace"
         @paste="onPaste"
       />
+      <div v-if="$slots.actions" class="ml-auto d-flex align-center flex-shrink-0" @click.stop>
+        <slot name="actions" />
+      </div>
     </div>
     <div class="d-flex align-center justify-space-between mt-1" style="min-height: 16px">
-      <span v-if="coerceWarning" class="text-caption text-warning">{{ coerceWarning }}</span>
+      <!-- syntax sugar live preview: truth before commit -->
+      <span v-if="exprPreview" class="text-caption" :class="exprPreview.values.length ? 'text-primary' : 'text-on-surface-variant'">
+        <v-icon size="10">mdi-auto-fix</v-icon>
+        {{ exprPreview.keyword }} →
+        {{ exprPreview.values.length ? exprPreview.values.join(', ') + ' · Enter to expand' : usageHint(exprPreview.keyword) }}
+      </span>
+      <span v-else-if="coerceWarning" class="text-caption text-warning">{{ coerceWarning }}</span>
       <span v-else />
       <span v-if="modelValue.length > 1" class="text-caption text-on-surface-variant">
         {{ modelValue.length }} values
@@ -39,6 +48,7 @@
 
 <script setup lang="ts">
 import { ref, computed } from 'vue'
+import { parseGeneratorExpr } from '@/views/submit/valueGenerators'
 
 const props = withDefaults(defineProps<{
   modelValue: string[]
@@ -46,11 +56,15 @@ const props = withDefaults(defineProps<{
   placeholder?: string
   color?: string
   paramType?: string
+  /** Enable generator syntax sugar (`log 1 16 5`, `seeds 3`, ...).
+   *  Only safe for numeric cells, where a bare keyword is invalid anyway. */
+  generatorSugar?: boolean
 }>(), {
   label: '',
   placeholder: 'Type and press Enter',
   color: 'primary',
   paramType: '',
+  generatorSugar: false,
 })
 
 const emit = defineEmits<{
@@ -117,9 +131,37 @@ function splitAndClean(raw: string): string[] {
   return raw.split(SPLIT_RE).map(v => v.trim()).filter(Boolean)
 }
 
+// ── Generator syntax sugar ──
+const exprPreview = computed(() => {
+  if (!props.generatorSugar || !draft.value.trim()) return null
+  return parseGeneratorExpr(draft.value, props.paramType === 'int')
+})
+
+const USAGE: Record<string, string> = {
+  log: 'log min max count',
+  linear: 'linear min max step',
+  ratio: 'ratio start ratio count',
+  seeds: 'seeds n',
+}
+function usageHint(keyword: string): string {
+  return USAGE[keyword] ?? ''
+}
+
 function add() {
   const val = draft.value.trim()
   if (!val) return
+  // Sugar expression with a non-empty preview expands on Enter.
+  if (exprPreview.value && exprPreview.value.values.length > 0) {
+    const merged = [...props.modelValue]
+    for (const v of exprPreview.value.values) if (!merged.includes(v)) merged.push(v)
+    emit('update:modelValue', merged)
+    draft.value = ''
+    coerceWarning.value = ''
+    return
+  }
+  // Incomplete sugar (keyword recognized, args wrong): keep typing, don't
+  // split it into bogus chips.
+  if (exprPreview.value) return
   const parts = splitAndClean(val)
   const { values, dropped } = coerceAll(parts, props.paramType)
   if (values.length > 0) {
