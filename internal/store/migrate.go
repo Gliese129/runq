@@ -49,6 +49,12 @@ func (s *Store) addMissingColumns(ctx context.Context) error {
 	if err := addColumnIfMissing(ctx, s.db, "jobs", "note", "TEXT"); err != nil {
 		return fmt.Errorf("add jobs.note: %w", err)
 	}
+	// refreshed_at: last reconcile of job state from external sources.
+	// HPC mode only (hpc.Refresh is the sole writer); always NULL in daemon
+	// mode — the daemon is the source of truth, there is nothing to reconcile.
+	if err := addColumnIfMissing(ctx, s.db, "jobs", "refreshed_at", "INTEGER"); err != nil {
+		return fmt.Errorf("add jobs.refreshed_at: %w", err)
+	}
 	return nil
 }
 

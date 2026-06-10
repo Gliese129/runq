@@ -4,10 +4,13 @@
       :detail="store.detail"
       :top-runs="topRuns"
       :metric-key="topMetricKey"
-      :can-pause="config.features.pause_resume"
+      :can-pause="config.caps.pause_resume"
+      :is-poll="config.isPoll"
+      :refreshing="refreshing"
       @pause="togglePause"
       @resume="togglePause"
       @kill="killJob"
+      @refresh="onRefresh"
     />
 
     <!-- Filter bar -->
@@ -89,6 +92,7 @@ const statusOptions = [
   { value: 'running', label: 'Running', dot: 'running' },
   { value: 'done', label: 'Done', dot: 'success' },
   { value: 'failed', label: 'Failed', dot: 'failed' },
+  { value: 'killed', label: 'Killed', dot: 'killed' },
   { value: 'pending', label: 'Pending', dot: 'pending' },
 ]
 
@@ -129,16 +133,32 @@ watch(() => store.detail?.metric_keys, (keys) => {
 
 const filteredTasks = computed(() => {
   if (!store.detail) return []
-  if (!statusFilter.value) return store.detail.tasks
+  let tasks = store.detail.tasks
   if (statusFilter.value === 'done') {
-    return store.detail.tasks.filter(t => ['success', 'completed', 'done'].includes(t.status))
+    tasks = tasks.filter(t => t.status === 'success')
+  } else if (statusFilter.value) {
+    tasks = tasks.filter(t => t.status === statusFilter.value)
   }
-  return store.detail.tasks.filter(t => t.status === statusFilter.value)
+  // Overlay the frontend-local cancelling state (kill_async backends).
+  if (store.cancelling.size === 0) return tasks
+  return tasks.map(t => ({ ...t, status: store.displayStatus(t) }))
 })
 
 watch(statusFilter, (v) => { prefs.lastStatusFilter.value = v })
 
 function refresh(silent = false) { store.fetchDetail(props.jobId, silent) }
+
+// Manual reconcile (poll-model backends): forces the backend to re-read
+// external sources, then re-fetches. The button's loading state doubles as
+// a double-click guard against hammering the cluster scheduler.
+const refreshing = ref(false)
+function onRefresh() {
+  if (refreshing.value) return
+  refreshing.value = true
+  store.refreshJob(props.jobId)
+    .catch(() => snack.error('Refresh failed'))
+    .finally(() => { refreshing.value = false })
+}
 
 function togglePause() {
   if (!store.detail) return

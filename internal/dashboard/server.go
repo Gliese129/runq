@@ -92,6 +92,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/dashboard/tasks/{id}/kill", s.handleKillTask)
 	s.mux.HandleFunc("POST /api/dashboard/tasks/{id}/retry", s.handleRetryTask)
 	s.mux.HandleFunc("POST /api/dashboard/jobs/{id}/kill", s.handleKillJob)
+	s.mux.HandleFunc("POST /api/dashboard/jobs/{id}/refresh", s.handleRefreshJob)
 	s.mux.HandleFunc("POST /api/dashboard/jobs/{id}/pause", s.handlePauseJob)
 	s.mux.HandleFunc("POST /api/dashboard/jobs/{id}/resume", s.handleResumeJob)
 	s.mux.HandleFunc("GET /api/dashboard/fs/list", s.handleFSList)
@@ -105,16 +106,22 @@ func (s *Server) registerRoutes() {
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
-	isDaemon := s.mode == config.ModeDaemon
+	// Capabilities come from the backend's self-description — the server
+	// does not infer them from mode (design philosophy #2).
 	writeJSON(w, http.StatusOK, ConfigResponse{
-		Mode:       s.mode,
-		DataPath:   s.cfg.DataPath,
-		ConfigPath: config.ConfigPath(),
-		Features: FeatureFlags{
-			GPUMap:      isDaemon,
-			PauseResume: isDaemon,
-		},
+		Mode:         s.mode,
+		DataPath:     s.cfg.DataPath,
+		ConfigPath:   config.ConfigPath(),
+		Capabilities: s.backend.Capabilities(),
 	})
+}
+
+func (s *Server) handleRefreshJob(w http.ResponseWriter, r *http.Request) {
+	if err := s.backend.RefreshJob(r.Context(), r.PathValue("id")); err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, ActionResponse{OK: true})
 }
 
 func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {

@@ -46,6 +46,8 @@
   "job.retry": "重试",
   "job.clone": "基于此创建",
   "job.eta": "预计剩余",
+  "job.data_as_of": "数据截至 {time}",
+  "job.refresh": "立即刷新",
   "job.elapsed": "已用时间",
   "job.params": "参数",
   "job.step": "步骤",

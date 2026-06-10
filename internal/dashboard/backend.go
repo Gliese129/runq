@@ -24,6 +24,14 @@ var ErrNotSupported = errors.New("not supported")
 // Backend is the uniform interface consumed by the dashboard HTTP server
 // and CLI --json. Both daemon and HPC backends implement it.
 type Backend interface {
+	// Capabilities is the backend's self-description (pure data, no I/O).
+	// It is the single source of truth for what this backend can do; the
+	// server and both UIs must consult it instead of inferring from mode.
+	Capabilities() Capabilities
+	// RefreshJob forces a reconcile from external sources. Only meaningful
+	// for poll-model backends; push-model backends return ErrNotSupported.
+	RefreshJob(ctx context.Context, jobID string) error
+
 	ListJobs(ctx context.Context) ([]JobSummary, error)
 	GetJob(ctx context.Context, jobID string) (*JobDetail, error)
 	CompareMetrics(ctx context.Context, jobID, key string, desc bool) ([]CompareRow, error)
@@ -87,14 +95,21 @@ func BuildJobSummary(job store.JobRow, tasks []store.TaskRow) JobSummary {
 		eta = &sec
 	}
 
+	var refreshedAt *int64
+	if job.RefreshedAt != nil {
+		ts := job.RefreshedAt.Unix()
+		refreshedAt = &ts
+	}
+
 	return JobSummary{
-		ID:        job.ID,
-		Project:   job.ProjectName,
-		Note:      job.Note,
-		Status:    job.Status,
-		CreatedAt: job.CreatedAt.Unix(),
-		Tasks:     counts,
-		ETASec:    eta,
+		ID:          job.ID,
+		Project:     job.ProjectName,
+		Note:        job.Note,
+		Status:      job.Status,
+		CreatedAt:   job.CreatedAt.Unix(),
+		Tasks:       counts,
+		ETASec:      eta,
+		RefreshedAt: refreshedAt,
 	}
 }
 

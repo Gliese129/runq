@@ -16,6 +16,17 @@ func NewUnavailableBackend(err error) *UnavailableBackend {
 	return &UnavailableBackend{err: err}
 }
 
+// Capabilities: everything false — an unreachable backend honestly has no
+// capabilities. StateModel "push" keeps the GUI from rendering staleness UI
+// on top of the connection-error state.
+func (b *UnavailableBackend) Capabilities() Capabilities {
+	return Capabilities{StateModel: "push"}
+}
+
+func (b *UnavailableBackend) RefreshJob(ctx context.Context, jobID string) error {
+	return b.wrap()
+}
+
 func (b *UnavailableBackend) ListJobs(ctx context.Context) ([]JobSummary, error) {
 	return nil, b.wrap()
 }

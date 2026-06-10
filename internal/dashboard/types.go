@@ -11,6 +11,9 @@ type JobSummary struct {
 	CreatedAt int64          `json:"created_at"`
 	Tasks     TaskCountGroup `json:"tasks"`
 	ETASec    *int64         `json:"eta_seconds,omitempty"`
+	// RefreshedAt: last reconcile from external sources (poll-model backends
+	// only). Omitted in daemon mode — push state is always current.
+	RefreshedAt *int64 `json:"refreshed_at,omitempty"`
 }
 
 type TaskCountGroup struct {
@@ -79,15 +82,31 @@ type ActionResponse struct {
 }
 
 type ConfigResponse struct {
-	Mode       string       `json:"mode"`
-	DataPath   string       `json:"data_path"`
-	ConfigPath string       `json:"config_path"`
-	Features   FeatureFlags `json:"features"`
+	Mode         string       `json:"mode"`
+	DataPath     string       `json:"data_path"`
+	ConfigPath   string       `json:"config_path"`
+	Capabilities Capabilities `json:"capabilities"`
 }
 
-type FeatureFlags struct {
+// Capabilities is each backend's self-description, in three dimensions
+// (design philosophy #2: capabilities are declared facts, not inferences
+// from mode). The server forwards it verbatim; the GUI consumes all of it
+// (unsupported concepts are not rendered), the CLI mostly ignores it and
+// only relays it under --json.
+type Capabilities struct {
+	// Feature bits — "does this concept exist here at all".
 	GPUMap      bool `json:"gpu_map"`
 	PauseResume bool `json:"pause_resume"`
+	LiveLog     bool `json:"live_log"`
+	Retry       bool `json:"retry"`
+	// State model — "push": a resident process owns the truth, data is
+	// always current. "poll": best-effort projection, only advances on
+	// refresh; consumers must surface staleness (refreshed_at).
+	StateModel string `json:"state_model"`
+	// Action semantics — kill is asynchronous: the request is forwarded
+	// (e.g. qdel) and the status only changes once a later poll confirms
+	// it. UIs should show a transient local "cancelling" state.
+	KillAsync bool `json:"kill_async"`
 }
 
 type ErrorResponse struct {

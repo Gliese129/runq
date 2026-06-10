@@ -18,6 +18,18 @@ type JobRow struct {
 	TotalTasks  int
 	CreatedAt   time.Time
 	FinishedAt  *time.Time
+	// RefreshedAt is the last time this job's state was reconciled from
+	// external sources (HPC mode only — hpc.Refresh is its sole writer).
+	// nil = never refreshed, or not applicable (daemon mode: the daemon IS
+	// the source of truth, there is no reconcile concept).
+	RefreshedAt *time.Time
+}
+
+// TouchJobRefreshedAt records that a reconcile pass completed for this job.
+func (s *Store) TouchJobRefreshedAt(ctx context.Context, jobID string, at time.Time) error {
+	_, err := s.db.ExecContext(ctx,
+		"UPDATE jobs SET refreshed_at = ? WHERE id = ?", at.Unix(), jobID)
+	return err
 }
 
 // InsertJob inserts a single job row.
@@ -94,7 +106,7 @@ func (s *Store) UpdateJobStatus(ctx context.Context, jobID string, status string
 
 // GetJob returns a single job by ID. Returns (nil, nil) if not found.
 func (s *Store) GetJob(ctx context.Context, jobID string) (*JobRow, error) {
-	query := `SELECT id, project_name, description, note, config_json, status, total_tasks, created_at, finished_at
+	query := `SELECT id, project_name, description, note, config_json, status, total_tasks, created_at, finished_at, refreshed_at
 		FROM jobs WHERE id = ?`
 	row := s.db.QueryRowContext(ctx, query, jobID)
 
@@ -110,7 +122,7 @@ func (s *Store) GetJob(ctx context.Context, jobID string) (*JobRow, error) {
 
 // ListJobs lists jobs, optionally filtered by project name. Empty projectName = no filter.
 func (s *Store) ListJobs(ctx context.Context, projectName string) ([]JobRow, error) {
-	query := `SELECT id, project_name, description, note, config_json, status, total_tasks, created_at, finished_at
+	query := `SELECT id, project_name, description, note, config_json, status, total_tasks, created_at, finished_at, refreshed_at
 		FROM jobs`
 	var args []any
 	if projectName != "" {
@@ -163,14 +175,15 @@ func (s *Store) DeleteJob(ctx context.Context, jobID string) error {
 func scanJob(scanner interface{ Scan(dest ...any) error }) (*JobRow, error) {
 	var j JobRow
 	var (
-		note       sql.NullString
-		createdAt  int64
-		finishedAt sql.NullInt64
+		note        sql.NullString
+		createdAt   int64
+		finishedAt  sql.NullInt64
+		refreshedAt sql.NullInt64
 	)
 
 	err := scanner.Scan(
 		&j.ID, &j.ProjectName, &j.Description, &note, &j.ConfigJSON,
-		&j.Status, &j.TotalTasks, &createdAt, &finishedAt,
+		&j.Status, &j.TotalTasks, &createdAt, &finishedAt, &refreshedAt,
 	)
 	if err != nil {
 		return nil, err
@@ -179,5 +192,6 @@ func scanJob(scanner interface{ Scan(dest ...any) error }) (*JobRow, error) {
 	j.Note = note.String
 	j.CreatedAt = time.Unix(createdAt, 0)
 	j.FinishedAt = unixToNullTime(finishedAt)
+	j.RefreshedAt = unixToNullTime(refreshedAt)
 	return &j, nil
 }

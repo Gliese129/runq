@@ -125,7 +125,7 @@
       </v-breadcrumbs>
       <v-spacer />
       <v-chip
-        v-if="config.features.gpu_map && gpu.totalCount > 0"
+        v-if="config.caps.gpu_map && gpu.totalCount > 0"
         size="small" variant="tonal"
         :color="gpu.freeCount > 0 ? 'success' : 'warning'"
         class="mr-2"
@@ -227,7 +227,7 @@ function refreshShellData() {
 onMounted(async () => {
   try {
     if (!config.loaded) await config.fetchConfig()
-    if (config.features.gpu_map) gpu.fetchGPU()
+    if (config.caps.gpu_map) gpu.fetchGPU()
     refreshShellData()
   } catch {}
 })

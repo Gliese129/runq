@@ -38,7 +38,7 @@
     </v-row>
 
     <!-- GPU bars (always visible in daemon mode) -->
-    <v-card v-if="config.features.gpu_map && gpu.gpus.length > 0" class="mb-4 pa-3">
+    <v-card v-if="config.caps.gpu_map && gpu.gpus.length > 0" class="mb-4 pa-3">
       <div class="text-caption text-on-surface-variant mb-2">GPU</div>
       <div class="d-flex flex-column ga-1">
         <GPUBar v-for="g in gpu.gpus" :key="g.index" :slot="g" />
@@ -163,7 +163,7 @@ const totalCompleted = computed(() =>
 
 function retryConnection() {
   jobs.fetchJobs()
-  if (config.features.gpu_map) gpu.fetchGPU()
+  if (config.caps.gpu_map) gpu.fetchGPU()
 }
 
 const filteredJobs = computed(() => {
@@ -195,7 +195,7 @@ function relativeTime(ts: number): string {
 
 usePolling((silent: boolean) => {
   jobs.fetchJobs(silent)
-  if (config.features.gpu_map) gpu.fetchGPU(silent)
+  if (config.caps.gpu_map) gpu.fetchGPU(silent)
 }, 5000)
 </script>
 

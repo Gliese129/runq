@@ -46,6 +46,8 @@
   "job.retry": "Retry",
   "job.clone": "New from this",
   "job.eta": "ETA",
+  "job.data_as_of": "data as of {time}",
+  "job.refresh": "Refresh now",
   "job.elapsed": "Elapsed",
   "job.params": "Params",
   "job.step": "Step",

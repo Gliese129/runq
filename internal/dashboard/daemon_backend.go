@@ -25,6 +25,23 @@ func NewDaemonBackend(socketPath string) *DaemonBackend {
 	return &DaemonBackend{client: api.NewClient(socketPath)}
 }
 
+func (b *DaemonBackend) Capabilities() Capabilities {
+	return Capabilities{
+		GPUMap:      true,
+		PauseResume: true,
+		LiveLog:     true,
+		Retry:       true,
+		StateModel:  "push", // the daemon owns the truth; data is always current
+		KillAsync:   false,
+	}
+}
+
+// RefreshJob: push model — there is nothing to reconcile. Defensive only;
+// the GUI never renders a refresh affordance when state_model is "push".
+func (b *DaemonBackend) RefreshJob(ctx context.Context, jobID string) error {
+	return fmt.Errorf("refresh job in daemon mode: %w", ErrNotSupported)
+}
+
 func (b *DaemonBackend) ListJobs(ctx context.Context) ([]JobSummary, error) {
 	var jobs []service.JobSummary
 	if err := b.do(ctx, "GET", "/api/jobs", nil, &jobs); err != nil {

@@ -16,7 +16,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     status       TEXT NOT NULL DEFAULT 'pending',  -- pending/running/paused/done
     total_tasks  INTEGER NOT NULL DEFAULT 0,
     created_at   INTEGER,             -- Unix timestamp
-    finished_at  INTEGER              -- Unix timestamp, nullable
+    finished_at  INTEGER,             -- Unix timestamp, nullable
+    refreshed_at INTEGER              -- Unix timestamp, nullable. Last reconcile from external sources (HPC mode only; hpc.Refresh is the sole writer)
 );
 
 CREATE TABLE IF NOT EXISTS tasks (

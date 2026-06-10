@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/gliese129/runq/internal/hpccore"
 	"github.com/gliese129/runq/internal/ingest"
@@ -106,6 +107,12 @@ func (b *Backend) Refresh(ctx context.Context, jobID string) error {
 	}
 	if err := b.refreshJobStatus(ctx, jobID); err != nil {
 		return err
+	}
+	// Record that a reconcile pass completed. This is the honesty contract
+	// of poll-based state: consumers (dashboard "data as of ...") can only
+	// be truthful about staleness if the reconcile time is a recorded fact.
+	if err := b.Store.TouchJobRefreshedAt(ctx, jobID, time.Now()); err != nil {
+		return fmt.Errorf("touch refreshed_at for job %s: %w", jobID, err)
 	}
 	if len(ingestErrs) > 0 {
 		return fmt.Errorf("status refreshed but ingest had errors: %w", errors.Join(ingestErrs...))

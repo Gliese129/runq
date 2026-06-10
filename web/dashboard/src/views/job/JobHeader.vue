@@ -5,6 +5,19 @@
         <JobStatusBadge :status="detail.job.status" />
         <span v-if="detail.job.note" class="text-body-2 text-on-surface-variant">{{ detail.job.note }}</span>
         <span class="text-caption text-on-surface-variant">{{ relativeTime(detail.job.created_at) }}</span>
+        <!-- Poll-model honesty: state is a snapshot, say when it was taken -->
+        <template v-if="isPoll">
+          <v-chip size="x-small" variant="text" class="text-on-surface-variant">
+            <v-icon start size="12">mdi-database-clock-outline</v-icon>
+            {{ t('job.data_as_of', { time: detail.job.refreshed_at ? relativeTime(detail.job.refreshed_at) : '—' }) }}
+          </v-chip>
+          <v-btn
+            size="x-small" variant="text" icon
+            :loading="refreshing"
+            :aria-label="t('job.refresh')" :title="t('job.refresh')"
+            @click="$emit('refresh')"
+          ><v-icon size="14">mdi-refresh</v-icon></v-btn>
+        </template>
       </div>
       <div class="d-flex ga-1">
         <v-btn v-if="canPause && isActive" size="x-small" variant="tonal"
@@ -56,20 +69,27 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
+import { useI18n } from 'vue-i18n'
 import type { JobDetail, CompareRow, TaskView } from '@/types/api'
 import JobStatusBadge from '@/components/JobStatusBadge.vue'
+
+const { t } = useI18n()
 
 const props = defineProps<{
   detail: JobDetail
   topRuns: CompareRow[]
   metricKey: string
   canPause: boolean
+  /** poll state model: render freshness + manual refresh */
+  isPoll?: boolean
+  refreshing?: boolean
 }>()
 
 const emit = defineEmits<{
   pause: []
   resume: []
   kill: []
+  refresh: []
 }>()
 
 const isActive = computed(() => ['running', 'pending', 'paused'].includes(props.detail.job.status))

@@ -19,6 +19,22 @@ func NewHPCBackend(backend *hpc.Backend, st *store.Store) *HPCBackend {
 	return &HPCBackend{backend: backend, store: st}
 }
 
+func (b *HPCBackend) Capabilities() Capabilities {
+	return Capabilities{
+		GPUMap:      false, // no node-local GPU visibility from the login node
+		PauseResume: false, // cluster queues have no runq-level pause concept
+		LiveLog:     true,  // deployment assumption: dashboard runs on a login node with the shared FS
+		Retry:       true,
+		StateModel:  "poll", // best-effort projection; staleness must be surfaced
+		KillAsync:   true,   // qdel/scancel is forwarded; killed only after a poll confirms
+	}
+}
+
+// RefreshJob forces a reconcile pass (status.json + optional scheduler probe).
+func (b *HPCBackend) RefreshJob(ctx context.Context, jobID string) error {
+	return b.backend.Refresh(ctx, jobID)
+}
+
 func (b *HPCBackend) ListJobs(ctx context.Context) ([]JobSummary, error) {
 	jobs, err := b.store.ListJobs(ctx, "")
 	if err != nil {

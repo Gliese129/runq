@@ -43,4 +43,8 @@ export const jobsApi = {
 
   resume: (jobId: string) =>
     api.post(`/jobs/${encodeURIComponent(jobId)}/resume`),
+
+  /** Force a reconcile from external sources (poll-model backends only). */
+  refresh: (jobId: string) =>
+    api.post(`/jobs/${encodeURIComponent(jobId)}/refresh`),
 }

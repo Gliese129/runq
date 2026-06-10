@@ -16,6 +16,8 @@ export interface JobSummary {
   created_at: number
   tasks: TaskCountGroup
   eta_seconds?: number
+  /** last reconcile from external sources — poll-model backends only */
+  refreshed_at?: number
 }
 
 export interface TaskView {
@@ -72,16 +74,26 @@ export interface GPUSlot {
   job_id?: string
 }
 
-export interface FeatureFlags {
+/**
+ * Backend self-description in three dimensions (mirrors Go Capabilities).
+ * Feature bits: concept exists here at all → render or remove (never disable).
+ * state_model: "poll" → surface staleness (refreshed_at) + manual refresh.
+ * kill_async: show a local transient "cancelling" state after kill.
+ */
+export interface Capabilities {
   gpu_map: boolean
   pause_resume: boolean
+  live_log: boolean
+  retry: boolean
+  state_model: 'push' | 'poll'
+  kill_async: boolean
 }
 
 export interface ConfigResponse {
   mode: string
   data_path: string
   config_path: string
-  features: FeatureFlags
+  capabilities: Capabilities
 }
 
 export interface ActionResponse {

@@ -5,10 +5,10 @@
       <div class="d-flex align-center justify-space-between mb-3">
         <div class="d-flex align-center ga-2">
           <code class="text-h6">{{ task.id.slice(0, 8) }}</code>
-          <TaskStatusBadge :status="task.status" />
+          <TaskStatusBadge :status="displayStatus" />
         </div>
         <div class="d-flex ga-1">
-          <v-btn v-if="task.status === 'running'" size="x-small" variant="tonal" color="error" @click="killTask">
+          <v-btn v-if="displayStatus === 'running'" size="x-small" variant="tonal" color="error" @click="killTask">
             <v-icon start size="14">mdi-stop</v-icon> Kill
           </v-btn>
           <v-btn v-if="task.status === 'failed'" size="x-small" variant="tonal" color="primary" @click="retryTask">
@@ -106,14 +106,26 @@
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { tasksApi } from '@/apis/tasks'
 import { useSnackbar } from '@/composables/useSnackbar'
+import { useConfigStore } from '@/stores/config'
 import MetricsChart from '@/components/MetricsChart.vue'
 import TaskStatusBadge from '@/components/TaskStatusBadge.vue'
 import type { TaskLogResponse, TaskView } from '@/types/api'
 
 const props = defineProps<{ project: string; jobId: string; taskId: string }>()
 const snack = useSnackbar()
+const config = useConfigStore()
 
 const task = ref<TaskView | null>(null)
+
+// Kill in flight (kill_async backends): frontend-local transient state,
+// cleared as soon as a fetch shows the task left "running".
+const cancelPending = ref(false)
+const displayStatus = computed(() =>
+  cancelPending.value && task.value?.status === 'running' ? 'cancelling' : task.value?.status ?? '',
+)
+watch(() => task.value?.status, (s) => {
+  if (s && s !== 'running') cancelPending.value = false
+})
 const logData = ref<TaskLogResponse>({
   lines: [], total_lines: 0, start: 0, end: 0,
 })
@@ -194,7 +206,14 @@ watch(isActive, (active) => {
 async function killTask() {
   try {
     await tasksApi.kill(props.taskId)
-    snack.success('Task killed')
+    if (config.killAsync) {
+      // The cancel was forwarded to the cluster; honesty: don't claim
+      // "killed" until a poll confirms it.
+      cancelPending.value = true
+      snack.info('Cancel requested')
+    } else {
+      snack.success('Task killed')
+    }
     fetchTask()
   } catch (e: any) { snack.error(e?.message || 'Kill failed') }
 }
