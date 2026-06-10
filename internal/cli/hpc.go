@@ -168,6 +168,24 @@ func runHPCInit(cmd *cobra.Command, args []string) error {
 	} else {
 		fmt.Printf("%s already exists (left unchanged)\n", path)
 	}
+
+	// Someone running `hpc init` almost certainly wants the unified CLI
+	// (dashboard included) in HPC mode. Only flip the DEFAULT — an explicit
+	// `mode: daemon` is user intent and stays. Either way say what happened
+	// (side effects are explicit, philosophy C5).
+	rawMode, explicit := config.RawMode()
+	switch {
+	case !explicit:
+		if serr := config.SetKey("mode", config.ModeHPC); serr != nil {
+			fmt.Printf("note: could not set mode=hpc: %v\n", serr)
+		} else {
+			fmt.Println("mode set to hpc (was unset) — `runq dashboard` and friends now use the HPC backend")
+		}
+	case rawMode == config.ModeHPC:
+		// already hpc — nothing to announce
+	default:
+		fmt.Printf("note: mode is %q — run `runq config set mode=hpc` if this machine should use the HPC backend\n", rawMode)
+	}
 	return nil
 }
 

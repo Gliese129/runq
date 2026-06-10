@@ -27,6 +27,7 @@ func init() {
 	dashboardCmd.Flags().String("host", "127.0.0.1", "host to bind")
 	dashboardCmd.Flags().Int("port", 8077, "port to bind")
 	dashboardCmd.Flags().String("assets-dir", "", "dashboard static assets directory")
+	dashboardCmd.Flags().String("mode", "", "backend mode: daemon | hpc (default: config.yaml `mode:` key)")
 	dashboardCmd.GroupID = groupCore
 	rootCmd.AddCommand(dashboardCmd)
 }
@@ -36,6 +37,20 @@ func runDashboard(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+
+	// Precedence: --mode flag > config.yaml > default(daemon). Always state
+	// the resolved mode AND its source — nobody should have to guess why
+	// the dashboard came up in the wrong mode.
+	modeSource := fmt.Sprintf("from %s", config.ConfigPath())
+	if flagMode, _ := cmd.Flags().GetString("mode"); flagMode != "" {
+		mode, err = config.NormalizeMode(flagMode)
+		if err != nil {
+			return err
+		}
+		modeSource = "from --mode flag"
+	}
+	fmt.Printf("mode: %s (%s; override with --mode)\n", mode, modeSource)
+
 	backend, closeBackend, err := newDashboardBackend(mode)
 	if err != nil {
 		backend = dashboard.NewUnavailableBackend(err)

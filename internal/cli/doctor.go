@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/gliese129/runq/internal/api"
+	"github.com/gliese129/runq/internal/config"
+	"github.com/gliese129/runq/internal/hpcconfig"
 	"github.com/gliese129/runq/internal/utils"
 
 	"github.com/spf13/cobra"
@@ -90,6 +92,23 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		} else {
 			os.Remove(tmpPath)
 			check(true, fmt.Sprintf("%s (%s)", paths.LogDir, logInfo.Mode()), "")
+		}
+	}
+
+	// Mode / HPC config consistency: an hpc: section with mode=daemon almost
+	// always means a forgotten `runq config set mode=hpc` after `hpc init`.
+	fmt.Println("Mode:")
+	if cfg, err := config.Load(); err == nil {
+		mode := config.ConfigMode(cfg)
+		_, hpcErr := hpcconfig.Load()
+		hpcConfigured := hpcErr == nil
+		switch {
+		case hpcConfigured && mode != config.ModeHPC:
+			check(false, "", fmt.Sprintf("hpc: section is configured but mode is %q — run `runq config set mode=hpc` (or use --mode)", mode))
+		case !hpcConfigured && mode == config.ModeHPC:
+			check(false, "", "mode is hpc but the hpc: section is missing — run `runq hpc init`")
+		default:
+			check(true, fmt.Sprintf("mode %s, config consistent", mode), "")
 		}
 	}
 

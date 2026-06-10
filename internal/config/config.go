@@ -98,6 +98,23 @@ func Load() (*GlobalConfig, error) {
 	return &f.GlobalConfig, nil
 }
 
+// RawMode reports the mode value as literally present in config.yaml,
+// and whether it was explicitly set at all. Load() normalizes "" → daemon,
+// which is right for consumers but erases the "never chosen" state that
+// `hpc init` needs (it only flips the default, never an explicit choice).
+func RawMode() (mode string, explicit bool) {
+	buf, err := os.ReadFile(ConfigPath())
+	if err != nil {
+		return "", false
+	}
+	var f configFile
+	if yaml.Unmarshal(buf, &f) != nil {
+		return "", false
+	}
+	raw := strings.TrimSpace(f.GlobalConfig.Mode)
+	return raw, raw != ""
+}
+
 // NormalizeMode returns the canonical mode value accepted by the unified CLI.
 func NormalizeMode(mode string) (string, error) {
 	mode = strings.ToLower(strings.TrimSpace(mode))
