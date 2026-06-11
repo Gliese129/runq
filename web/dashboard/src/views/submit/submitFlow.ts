@@ -16,6 +16,7 @@ export interface SubmitProjectDraft {
   envPath: string
   envName: string
   envText: string
+  jobName: string
   params: ProjectParam[]
 }
 
@@ -119,6 +120,7 @@ export function buildProjectPayload(project: SubmitProjectDraft): ProjectPayload
     working_dir: project.workDir,
     command_template: project.cmd,
     setup_command: project.setupCmd.trim() || undefined,
+    job_name: project.jobName.trim() || undefined,
     environment: parseEnvText(project.envText),
     defaults: { gpus_per_task: project.gpus, max_retry: project.maxRetry },
   }

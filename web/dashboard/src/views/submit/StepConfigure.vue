@@ -14,6 +14,15 @@
           density="compact" variant="outlined" hide-details class="ml-4 font-mono"
         />
       </div>
+      <div class="d-flex align-center ga-2 mt-2">
+        <v-icon size="16" color="on-surface-variant">mdi-tag-outline</v-icon>
+        <span class="text-caption text-on-surface-variant flex-shrink-0">Job name</span>
+        <v-text-field
+          v-model="state.jobName"
+          :placeholder="jobNamePlaceholder"
+          density="compact" variant="outlined" hide-details class="ml-4 font-mono"
+        />
+      </div>
       <div class="d-flex align-center flex-wrap ga-1 mt-2">
         <v-chip
           v-for="ph in notePlaceholders" :key="ph"
@@ -465,6 +474,12 @@ const validation = computed(() => validateTable(state.rows, state.linkSets))
 // Built-ins mirror internal/job/notename.go (stable seven); param names are
 // appended dynamically.
 const NOTE_BUILTINS = ['version', 'date', 'time', 'datetime', 'project', 'user', 'sweep']
+// Scheduler job name (-N / --job-name): empty = project's job_name
+// template, else the rq-{{task_id}} default. Shown as placeholder so the
+// effective default is always visible.
+const jobNamePlaceholder = computed(() =>
+  state.newProject.jobName || 'rq-{{task_id\u007d\u007d (default)')
+
 const notePlaceholders = computed(() => [
   ...NOTE_BUILTINS,
   ...state.rows.map(r => r.name),

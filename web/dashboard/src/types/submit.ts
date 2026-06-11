@@ -39,6 +39,7 @@ export interface SubmitState {
     envPath: string
     envName: string
     envText: string        // KEY=VALUE per line — project environment
+    jobName: string        // job_name template — scheduler job name default
     creating: boolean
     error: string
     params: ProjectParam[]
@@ -48,6 +49,9 @@ export interface SubmitState {
     dirty: boolean
   }
   note: string
+  // Per-submit scheduler job name override; '' = use the project's
+  // job_name template (or the rq-{{task_id}} default).
+  jobName: string
   // Flat param model (see paramTable.ts): one row per param; sweep
   // structure is derived from value counts + link sets, never hand-built.
   rows: ParamRow[]

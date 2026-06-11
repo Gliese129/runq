@@ -15,6 +15,7 @@ package hpcconfig
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -27,7 +28,7 @@ import (
 // only interpolation (via hpccore.Render) and one user-supplied regex.
 type Config struct {
 	// SubmitTemplate is the shell command that queues a job. Available vars:
-	// {{run_sh}} {{gpus}} {{job_id}} {{task_id}} {{task_dir}} + {{param.*}}.
+	// {{run_sh}} {{gpus}} {{job_id}} {{task_id}} {{task_dir}} {{name}} + {{param.*}}.
 	SubmitTemplate string `yaml:"submit_template" json:"submit_template"`
 	// SubmitIDRegex extracts the external job id from the submit command output.
 	// Must contain exactly one capture group.
@@ -86,6 +87,15 @@ func DataDir() string { return config.ConfigDir() }
 
 // DBPath is <DataDir>/runq.db (the HPC store, separate from the daemon DB).
 func DBPath() string { return config.DBPath() }
+
+// LogDir is <DataDir>/logs — runq's own logs in HPC mode (operation log).
+// Task logs are experiment artifacts and stay in the per-task workspace.
+func LogDir() string { return filepath.Join(config.ConfigDir(), "logs") }
+
+// OpLogPath is the append-only HPC operation log: every submit/kill records
+// the rendered scheduler command, its output, and any error — so a rejected
+// qsub is diagnosable after the terminal scrolled away.
+func OpLogPath() string { return filepath.Join(LogDir(), "runq.log") }
 
 // Load reads and validates the `hpc:` section of config.yaml. A missing file
 // is a clear, actionable error pointing the user at `runq hpc init`.
@@ -266,8 +276,8 @@ const hpcHeader = `
 // HPC body constants — used both in full templates and in hpcSnippets.
 const genericHPCBody = `
 hpc:
-  # Queue one task. Vars: {{run_sh}} {{gpus}} {{job_id}} {{task_id}} {{task_dir}}
-  submit_template: "sbatch --gpus={{gpus}} --job-name={{task_id}} {{run_sh}}"
+  # Queue one task. Vars: {{run_sh}} {{gpus}} {{job_id}} {{task_id}} {{task_dir}} {{name}}
+  submit_template: "sbatch --gpus={{gpus}} --job-name={{name}} {{run_sh}}"
   submit_id_regex: "Submitted batch job ([0-9]+)"
 
   # Optional scheduler probe (Var: {{ext_id}}). Empty → status from status.json alone.
@@ -280,7 +290,7 @@ hpc:
 
 const slurmHPCBody = `
 hpc:
-  submit_template: "sbatch --gpus={{gpus}} --job-name={{task_id}} {{run_sh}}"
+  submit_template: "sbatch --gpus={{gpus}} --job-name={{name}} {{run_sh}}"
   submit_id_regex: "Submitted batch job ([0-9]+)"
 
   status_template: "sacct -n -X -j {{ext_id}} -o State"
@@ -292,7 +302,7 @@ hpc:
 
 const pbsHPCBody = `
 hpc:
-  submit_template: "qsub -l ngpus={{gpus}} -N {{task_id}} {{run_sh}}"
+  submit_template: "qsub -l ngpus={{gpus}} -N {{name}} {{run_sh}}"
   submit_id_regex: "([0-9]+)"
 
   status_template: "qstat -f {{ext_id}} 2>/dev/null"
@@ -305,7 +315,7 @@ hpc:
 
 const sgeHPCBody = `
 hpc:
-  submit_template: "qsub -l gpu={{gpus}} -N {{task_id}} {{run_sh}}"
+  submit_template: "qsub -l gpu={{gpus}} -N {{name}} {{run_sh}}"
   submit_id_regex: "Your job ([0-9]+)"
 
   status_template: "qstat"
@@ -321,7 +331,7 @@ hpc:
   # TSUBAME (UGE). Per-task scheduler knobs live in the sweep and are
   # referenced as {{param.*}} — zip node_kind / h_rt columns with your tasks.
   # $TSUBAME_GROUP comes from the login shell (or hardcode it).
-  submit_template: "qsub -g $TSUBAME_GROUP -l {{param.node_kind}}=1 -l h_rt={{param.h_rt}} -N {{task_id}} -o {{task_dir}} -e {{task_dir}} {{run_sh}}"
+  submit_template: "qsub -g $TSUBAME_GROUP -l {{param.node_kind}}=1 -l h_rt={{param.h_rt}} -N {{name}} -o {{task_dir}} -e {{task_dir}} {{run_sh}}"
   submit_id_regex: "Your job ([0-9]+)"
 
   status_template: "qstat"
@@ -336,7 +346,7 @@ const abciHPCBody = `
 hpc:
   # ABCI (PBS Pro). Per-task knobs (queue, walltime) come from the sweep via
   # {{param.*}}. $ABCI_GROUP comes from the login shell (or hardcode it).
-  submit_template: "qsub -P $ABCI_GROUP -q {{param.node_kind}} -l select=1 -l walltime={{param.walltime}} -N {{task_id}} -o {{task_dir}} -e {{task_dir}} -- {{run_sh}}"
+  submit_template: "qsub -P $ABCI_GROUP -q {{param.node_kind}} -l select=1 -l walltime={{param.walltime}} -N {{name}} -o {{task_dir}} -e {{task_dir}} -- {{run_sh}}"
   submit_id_regex: "([0-9]+)"
 
   status_template: "qstat -f {{ext_id}} 2>/dev/null"

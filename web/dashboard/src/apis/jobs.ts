@@ -28,6 +28,10 @@ export const jobsApi = {
   dryRun: (cfg: JobConfigPayload) =>
     api.post<Record<string, any>[]>('/jobs/dry-run', cfg),
 
+  /** GUI face of `--dry-run`: rendered run.sh + submit command, zero side effects. */
+  previewSubmit: (cfg: JobConfigPayload, skipPreflight: boolean) =>
+    api.post<{ preview: string }>('/jobs/preview', { config: cfg, skip_preflight: skipPreflight }, { silent: true }),
+
   submit: (cfg: JobConfigPayload, opts: SubmitJobOptions = {}) =>
     api.post<JobSubmitResponse>(
       submitJobPath(opts.preflightEnabled, opts.forceSkipPreflight),

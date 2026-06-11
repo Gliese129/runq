@@ -165,6 +165,12 @@ func daemonSubmitPath(opts SubmitOptions) string {
 	return "/api/jobs"
 }
 
+// PreviewSubmit: daemon mode has no submit_template to render — the GUI
+// hides the preview block when the capability bit is off.
+func (b *DaemonBackend) PreviewSubmit(_ context.Context, _ job.JobConfig, _ bool) (string, error) {
+	return "", fmt.Errorf("submit preview in daemon mode: %w", ErrNotSupported)
+}
+
 func (b *DaemonBackend) DryRun(_ context.Context, cfg job.JobConfig) ([]job.TaskParams, error) {
 	return job.Expand(&cfg)
 }

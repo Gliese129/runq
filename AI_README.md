@@ -49,7 +49,8 @@ command — that's `command_template`, called **directly**.
 
 **What runq replaces** in a typical lab script: the model loop (→ sweep),
 ENV_* override layers (→ sweep), tmux/nohup for local runs (→ daemon mode),
-job-name sanitizers (→ `note: "{{model}}-{{version}}"`), qstat watch scripts
+job-name sanitizers (→ project `job_name` template; `{{name}}` in
+submit_template is pre-sanitized, never digit-first), qstat watch scripts
 (→ `runq hpc status`), pre-download blocks (→ project `setup_command`,
 runs once per submit on the login node), `.env` sourcing (→ automatic:
 `working_dir/.env` is sourced at task start; explicit env always wins;

@@ -70,6 +70,12 @@ type Config struct {
 	// fixed_params only (it runs once; swept params are ambiguous → error).
 	// Runs synchronously: long setups are CLI-submission territory.
 	SetupCommand string `yaml:"setup_command,omitempty" json:"setup_command,omitempty"`
+	// JobName is a template for the per-task scheduler job name, exposed to
+	// submit_template as {{name}}. Vocabulary: params + {{project}}
+	// {{job_id}} {{task_id}}. job.yaml `name:` overrides per submission.
+	// Always sanitized (scheduler-safe charset, never digit-first).
+	// Empty → "rq-{{task_id}}".
+	JobName string `yaml:"job_name,omitempty" json:"job_name,omitempty"`
 	// EnvFile is an ambient env file sourced by the shell AT TASK START —
 	// runq never parses or stores its values (secrets stay out of the DB,
 	// run.sh exports, and every UI; rotation applies on the next task).

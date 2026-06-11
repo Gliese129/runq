@@ -18,7 +18,7 @@ import (
 // scheduler knobs (walltime, queue, priority) can live in the sweep. Check
 // cannot know param names statically — it synthesizes "<name>" samples.
 var Placeholders = map[string][]string{
-	"submit_template": {"run_sh", "gpus", "job_id", "task_id", "task_dir"},
+	"submit_template": {"run_sh", "gpus", "job_id", "task_id", "task_dir", "name"},
 	"kill_template":   {"ext_id"},
 	"status_template": {"ext_id"},
 	"status_parser":   {"ext_id"},
@@ -35,6 +35,7 @@ func sampleVars(field string) map[string]string {
 		"gpus":     "1",
 		"job_id":   "jb01HQZX",
 		"task_id":  "tk02ABCD",
+		"name":     "rq-tk02ABCD",
 		"task_dir": "/data/runq/jb01HQZX/tk02ABCD",
 		"ext_id":   "1234567",
 	}

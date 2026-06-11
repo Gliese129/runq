@@ -24,6 +24,7 @@ export interface JobSummary {
 export interface RawJobConfig {
   project: string
   note?: string
+  name?: string
   fixed_params?: Record<string, any>
   sweep?: Array<{ method: string; parameters: Record<string, { values: any[] } | any[]> }>
 }
@@ -97,6 +98,8 @@ export interface Capabilities {
   retry: boolean
   state_model: 'push' | 'poll'
   kill_async: boolean
+  /** backend can render exactly what would be submitted (zero side effects) */
+  submit_preview: boolean
 }
 
 export interface ConfigResponse {
@@ -122,6 +125,8 @@ export interface JobSubmitResponse {
 export interface JobConfigPayload {
   project: string
   note: string
+  /** scheduler job name template override ({{name}} in submit_template) */
+  name?: string
   fixed_params?: Record<string, any>
   sweep: Array<{
     method: string
@@ -163,6 +168,8 @@ export interface ProjectConfig {
   command_template: string
   /** optional one-shot command before each submit (fixed params only) */
   setup_command?: string
+  /** scheduler job name template ({{name}} in submit_template) */
+  job_name?: string
   environment?: Record<string, string>
   defaults?: {
     gpus_per_task?: number
@@ -206,6 +213,8 @@ export interface ProjectPayload {
   command_template: string
   /** optional one-shot command before each submit (fixed params only) */
   setup_command?: string
+  /** scheduler job name template ({{name}} in submit_template) */
+  job_name?: string
   environment?: Record<string, string>
   defaults: {
     gpus_per_task: number

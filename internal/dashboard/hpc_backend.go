@@ -27,7 +27,8 @@ func (b *HPCBackend) Capabilities() Capabilities {
 		LiveLog:     true,  // deployment assumption: dashboard runs on a login node with the shared FS
 		Retry:       true,
 		StateModel:  "poll", // best-effort projection; staleness must be surfaced
-		KillAsync:   true,   // qdel/scancel is forwarded; killed only after a poll confirms
+		KillAsync:     true, // qdel/scancel is forwarded; killed only after a poll confirms
+		SubmitPreview: true, // zero-disk dry-run via the submit code path
 	}
 }
 
@@ -171,6 +172,16 @@ func (b *HPCBackend) SubmitJob(ctx context.Context, cfg job.JobConfig, opts Subm
 
 func (b *HPCBackend) DryRun(_ context.Context, cfg job.JobConfig) ([]job.TaskParams, error) {
 	return job.Expand(&cfg)
+}
+
+// PreviewSubmit is the GUI face of `--dry-run`: same code path, same text.
+func (b *HPCBackend) PreviewSubmit(ctx context.Context, cfg job.JobConfig, skipPreflight bool) (string, error) {
+	reg := project.NewRegistry(b.store.DB())
+	proj, err := reg.Get(cfg.Project)
+	if err != nil {
+		return "", fmt.Errorf("project %q not found: %w", cfg.Project, err)
+	}
+	return b.backend.Preview(ctx, cfg, proj, skipPreflight)
 }
 
 func (b *HPCBackend) ResolveNote(ctx context.Context, cfg job.JobConfig) (string, error) {

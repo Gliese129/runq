@@ -235,6 +235,7 @@ More project-level fields:
     ```
 - `setup_command:` — runs once per submit, before anything is persisted (e.g. `hf download {{model}}`). May reference fixed params only; failure aborts cleanly.
 - `environment:` — injected into every task AND prefixed onto the HPC submit command, so `$TSUBAME_GROUP`-style references in `submit_template` resolve from project config.
+- `job_name:` — template for the per-task scheduler job name, exposed to `submit_template` as `{{name}}` (params + `{{project}}` `{{job_id}}` `{{task_id}}`; default `rq-{{task_id}}`). Always sanitized — scheduler-safe charset, never digit-first. job.yaml `name:` overrides per submission.
 - `.env` in `working_dir` is sourced at task start automatically (override with `env_file:`). runq never stores its values — tokens stay out of the DB, logs and UIs. Explicit `environment:` always wins.
 - Job `note` supports placeholders: params, `{{project}}` `{{user}}` `{{date}}` `{{time}}` `{{sweep}}`, and `{{version}}` — re-running the same named config auto-numbers it (`foo`, `foo-v2`, `foo-v3`), with timestamp differences ignored when finding the family.
 

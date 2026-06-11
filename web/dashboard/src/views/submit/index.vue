@@ -145,12 +145,14 @@ const newProject = reactive({
   envPath: '',
   envName: '',
   envText: '',
+  jobName: '',
   creating: false,
   error: '',
   params: [] as import('@/types/submit').ProjectParam[],
   dirty: false,
 })
 const note = ref('')
+const jobName = ref('') // per-submit override; '' = project default
 
 const rows = ref<ParamRow[]>([])
 const linkSets = ref<LinkSet[]>([])
@@ -184,6 +186,7 @@ provide(SUBMIT_STATE_KEY, reactive({
   matchedProjects,
   newProject,
   note,
+  jobName,
   rows,
   linkSets,
   totalTaskCount,
@@ -276,7 +279,10 @@ async function goNext() {
 }
 
 function buildJobConfig() {
-  return createJobConfig(projectName.value, note.value, rows.value, linkSets.value)
+  const cfg = createJobConfig(projectName.value, note.value, rows.value, linkSets.value)
+  const n = jobName.value.trim()
+  if (n) cfg.name = n
+  return cfg
 }
 
 // ── Re-run as template (?fromJob=<id>) ──
@@ -297,6 +303,7 @@ onMounted(async () => {
     }
     projectName.value = detail.config.project || detail.job.project
     note.value = detail.config.note || ''
+    jobName.value = detail.config.name || ''
     const { rows: r, linkSets: ls } = decompile(detail.config)
     rows.value = r
     linkSets.value = ls
@@ -323,6 +330,7 @@ async function onJobYamlSelected(path: string) {
     }
     if (cfg.project) projectName.value = String(cfg.project)
     note.value = cfg.note || ''
+    jobName.value = cfg.name || ''
     const { rows: r, linkSets: ls } = decompile(cfg)
     rows.value = r
     linkSets.value = ls
@@ -346,13 +354,14 @@ watch(step, () => { submitError.value = '' })
 // reloads and crashes. Saved (debounced) to localStorage; restored on
 // mount when meaningful; cleared after a successful submit.
 let draftTimer: ReturnType<typeof setTimeout> | null = null
-watch([projectName, note, rows, linkSets, step], () => {
+watch([projectName, note, jobName, rows, linkSets, step], () => {
   if (draftTimer) clearTimeout(draftTimer)
   draftTimer = setTimeout(() => {
     if (rows.value.length === 0 && !note.value) return
     prefs.submitDraft.value = {
       projectName: projectName.value,
       note: note.value,
+      jobName: jobName.value,
       rows: JSON.parse(JSON.stringify(rows.value)),
       linkSets: JSON.parse(JSON.stringify(linkSets.value)),
       step: step.value,
@@ -366,6 +375,7 @@ function restoreDraft(): boolean {
   if (!d || !Array.isArray(d.rows) || d.rows.length === 0) return false
   projectName.value = d.projectName || projectName.value
   note.value = d.note || ''
+  jobName.value = d.jobName || ''
   rows.value = d.rows
   linkSets.value = Array.isArray(d.linkSets) ? d.linkSets : []
   step.value = Math.min(d.step ?? 1, 1) // never restore into review (dry-run is stale)

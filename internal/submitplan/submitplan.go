@@ -56,6 +56,7 @@ type Plan struct {
 
 type PlannedTask struct {
 	TaskID        string
+	Name          string // scheduler job name ({{name}} in submit_template), pre-sanitized
 	Command       string
 	Params        job.TaskParams
 	Env           map[string]string
@@ -230,6 +231,13 @@ func Build(ctx context.Context, cfg job.JobConfig, proj *project.Config, d Deps)
 		jobID = idGen()
 	}
 	callerUID := os.Getuid()
+	// Scheduler job name template: job.yaml override > project.yaml job_name
+	// > default rq-{{task_id}}. Rendered per task (params differ), always
+	// sanitized — qsub/sbatch must never reject what runq generated.
+	nameTmpl := cfg.Name
+	if strings.TrimSpace(nameTmpl) == "" {
+		nameTmpl = proj.JobName
+	}
 	tasks := make([]PlannedTask, 0, len(taskParams))
 	for _, params := range taskParams {
 		cmd, err := job.RenderExcluding(proj.CmdTemplate, params, schedParams)
@@ -240,8 +248,12 @@ func Build(ctx context.Context, cfg job.JobConfig, proj *project.Config, d Deps)
 
 		taskID := idGen()
 		taskDir := workspace.TaskDir(d.Paths.WorkspaceRoot, taskID)
+		name := job.RenderJobName(nameTmpl, params, map[string]string{
+			"project": cfg.Project, "job_id": jobID, "task_id": taskID,
+		})
 		tasks = append(tasks, PlannedTask{
 			TaskID:        taskID,
+			Name:          name,
 			Command:       cmd,
 			Params:        params,
 			Env:           cloneEnv(env),

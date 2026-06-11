@@ -11,6 +11,9 @@ type JobConfig struct {
 	Project     string         `yaml:"project" json:"project"`
 	Description string         `yaml:"description,omitempty" json:"description,omitempty"`
 	Note        string         `yaml:"note,omitempty" json:"note,omitempty"`
+	// Name overrides the project's job_name template for this submission —
+	// the per-task scheduler job name ({{name}} in submit_template).
+	Name        string         `yaml:"name,omitempty" json:"name,omitempty"`
 	FixedParams map[string]any `yaml:"fixed_params,omitempty" json:"fixed_params,omitempty"` // params with fixed values (not swept)
 	Sweep       []SweepBlock   `yaml:"sweep" json:"sweep"`
 	Overrides   *Overrides     `yaml:"overrides,omitempty" json:"overrides,omitempty"`

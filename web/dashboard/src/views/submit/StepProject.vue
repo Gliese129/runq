@@ -236,6 +236,15 @@
           persistent-hint
         />
 
+        <v-text-field
+          v-model="form.jobName"
+          label="Job name template (optional)"
+          variant="outlined" density="compact" class="mb-3 font-mono"
+          placeholder="rq-{{task_id\}\}"
+          hint="Scheduler job name ({{name\}\} in submit_template) — params + {{project\}\} {{job_id\}\} {{task_id\}\}. Sanitized automatically (never starts with a digit). Each submit can override it."
+          persistent-hint
+        />
+
         <v-row dense class="mb-3">
           <v-col cols="6">
             <v-number-input
@@ -400,8 +409,8 @@ watch(
   { deep: true },
 )
 function form_() {
-  const { name, workDir, cmd, setupCmd, envText, gpus, maxRetry, envType, envPath, envName } = state.newProject
-  return { name, workDir, cmd, setupCmd, envText, gpus, maxRetry, envType, envPath, envName }
+  const { name, workDir, cmd, setupCmd, envText, jobName, gpus, maxRetry, envType, envPath, envName } = state.newProject
+  return { name, workDir, cmd, setupCmd, envText, jobName, gpus, maxRetry, envType, envPath, envName }
 }
 
 function enterEditMode() {
@@ -489,6 +498,7 @@ function applyProjectConfig(cfg: ProjectConfig, resetGroups = true) {
   form.cmd = cfg.command_template
   form.setupCmd = cfg.setup_command || ''
   form.envText = Object.entries(cfg.environment || {}).map(([k, v]) => `${k}=${v}`).join('\n')
+  form.jobName = cfg.job_name || ''
   form.gpus = cfg.defaults?.gpus_per_task || 1
   form.maxRetry = cfg.defaults?.max_retry ?? 0
   form.envType = cfg.python_env?.type || ''
@@ -611,6 +621,7 @@ function resetProjectForm() {
   form.cmd = ''
   form.setupCmd = ''
   form.envText = ''
+  form.jobName = ''
   form.gpus = 1
   form.maxRetry = 0
   form.envType = ''

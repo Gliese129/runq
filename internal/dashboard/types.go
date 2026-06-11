@@ -110,6 +110,9 @@ type Capabilities struct {
 	// (e.g. qdel) and the status only changes once a later poll confirms
 	// it. UIs should show a transient local "cancelling" state.
 	KillAsync bool `json:"kill_async"`
+	// SubmitPreview — the backend can render exactly what WOULD be
+	// submitted (run.sh + submit command) with zero side effects.
+	SubmitPreview bool `json:"submit_preview"`
 }
 
 type ErrorResponse struct {

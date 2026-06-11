@@ -104,6 +104,28 @@
         </v-btn>
       </div>
     </v-card>
+
+    <!-- Rendered submit preview — the GUI face of `--dry-run`: same backend
+         code path, zero side effects. Only rendered when the backend declares
+         the capability (U2: shape from capabilities). -->
+    <v-card v-if="config.caps.submit_preview && state.dryRunResult.length > 0" class="mt-3">
+      <div
+        class="d-flex align-center ga-2 px-4 py-3 cursor-pointer"
+        @click="previewOpen = !previewOpen"
+      >
+        <v-icon size="16" color="primary">mdi-console-line</v-icon>
+        <span class="text-subtitle-2">Rendered commands (task 1 of {{ state.dryRunResult.length }})</span>
+        <span class="text-caption text-on-surface-variant">exactly what will run — nothing written yet</span>
+        <v-spacer />
+        <v-progress-circular v-if="previewLoading" indeterminate size="14" width="2" color="primary" />
+        <v-icon size="16">{{ previewOpen ? 'mdi-chevron-up' : 'mdi-chevron-down' }}</v-icon>
+      </div>
+      <div v-if="previewOpen" class="px-4 pb-4">
+        <div v-if="previewError" class="text-caption text-error">{{ previewError }}</div>
+        <pre v-else-if="previewText" class="preview-pre rounded pa-3 text-body-2">{{ previewText }}</pre>
+        <div v-else-if="!previewLoading" class="text-caption text-on-surface-variant">No preview available.</div>
+      </div>
+    </v-card>
   </div>
 </template>
 
@@ -113,9 +135,31 @@ import { useI18n } from 'vue-i18n'
 import { SUBMIT_STATE_KEY } from '@/types/submit'
 import { sweptParamNames as computeSwept, fixedParamPreview, buildJobConfig } from './submitFlow'
 import { jobsApi } from '@/apis/jobs'
+import { useConfigStore } from '@/stores/config'
 
 const { t } = useI18n()
 const state = inject(SUBMIT_STATE_KEY)!
+const config = useConfigStore()
+
+// Rendered submit preview (run.sh + submit command for the first task) —
+// fetched from the submit code path, never simulated here (U1).
+const previewOpen = ref(true)
+const previewText = ref('')
+const previewLoading = ref(false)
+const previewError = ref('')
+onMounted(async () => {
+  if (!config.caps.submit_preview) return
+  previewLoading.value = true
+  try {
+    const cfg = buildJobConfig(state.projectName, state.note, state.rows, state.linkSets)
+    if (state.jobName.trim()) cfg.name = state.jobName.trim()
+    previewText.value = (await jobsApi.previewSubmit(cfg, !state.preflightEnabled)).preview
+  } catch (e: any) {
+    previewError.value = e?.message || 'Preview failed'
+  } finally {
+    previewLoading.value = false
+  }
+})
 
 // Final job name as it WILL be submitted ({{version}} already scanned) —
 // resolved by the backend, never simulated here (U1).
@@ -140,6 +184,17 @@ function columnClass(key: string): string {
 </script>
 
 <style scoped>
+.preview-pre {
+  background: rgb(var(--v-theme-surface-variant), 0.4);
+  overflow-x: auto;
+  white-space: pre;
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  max-height: 420px;
+  overflow-y: auto;
+}
+
 .swept-col { color: rgb(var(--v-theme-primary)); font-weight: 500; }
 .fixed-col { color: rgb(var(--v-theme-on-surface-variant)); }
 </style>

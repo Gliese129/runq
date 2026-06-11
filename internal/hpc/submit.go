@@ -51,6 +51,7 @@ func renderSubmitCmd(tmpl string, t submitplan.PlannedTask, plan submitplan.Plan
 		"job_id":   plan.JobID,
 		"task_id":  t.TaskID,
 		"task_dir": t.TaskDir,
+		"name":     t.Name,
 	}
 	for name, value := range t.Params {
 		vars["param."+name] = fmt.Sprintf("%v", value)
@@ -228,9 +229,11 @@ func (b *Backend) Submit(ctx context.Context, jobCfg job.JobConfig, proj *projec
 			return plan.JobID, submitted, fmt.Errorf("persist task %s: %w", t.TaskID, err)
 		}
 
-		out, err := b.Run(ctx, submitEnvPrefix(proj.Environment)+cmd)
+		fullCmd := submitEnvPrefix(proj.Environment) + cmd
+		out, err := b.Run(ctx, fullCmd)
 		if err != nil {
 			// sbatch itself errored → no cluster job exists → truly terminal.
+			opLog("SUBMIT FAIL task=%s job=%s\ncmd: %s\nerr: %v\noutput: %s", t.TaskID, plan.JobID, fullCmd, err, out)
 			_ = b.Store.UpdateTaskStatus(ctx, t.TaskID, "failed",
 				map[string]any{"finished_at": nowUnix(), "status_source": hpccore.SourceSubmit})
 			return plan.JobID, submitted, fmt.Errorf("submit %s failed: %w\noutput:\n%s", t.TaskID, err, out)
@@ -238,6 +241,7 @@ func (b *Backend) Submit(ctx context.Context, jobCfg job.JobConfig, proj *projec
 
 		extID, err := hpccore.ExtractSubmitID(out, b.Cfg.SubmitIDRegex)
 		if err != nil {
+			opLog("SUBMIT NOID task=%s job=%s\ncmd: %s\noutput: %s", t.TaskID, plan.JobID, fullCmd, out)
 			// Submit SUCCEEDED but the id is unparseable → a cluster job may be
 			// running untracked. LEAVE the task pending (already inserted): it is
 			// not a failure, and pending is non-terminal so Refresh won't stamp a
@@ -253,6 +257,7 @@ func (b *Backend) Submit(ctx context.Context, jobCfg job.JobConfig, proj *projec
 		if err := b.Store.UpdateTaskStatus(ctx, t.TaskID, "pending", map[string]any{"external_id": extID}); err != nil {
 			return plan.JobID, submitted, fmt.Errorf("record external id for %s: %w", t.TaskID, err)
 		}
+		opLog("SUBMIT OK task=%s job=%s ext=%s\ncmd: %s", t.TaskID, plan.JobID, extID, fullCmd)
 		submitted++
 	}
 

@@ -86,6 +86,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/dashboard/gpu", s.handleGPU)
 	s.mux.HandleFunc("POST /api/dashboard/jobs", s.handleSubmitJob)
 	s.mux.HandleFunc("POST /api/dashboard/jobs/dry-run", s.handleDryRun)
+	s.mux.HandleFunc("POST /api/dashboard/jobs/preview", s.handlePreviewSubmit)
 	s.mux.HandleFunc("POST /api/dashboard/jobs/resolve-note", s.handleResolveNote)
 	s.mux.HandleFunc("GET /api/dashboard/tasks/{id}", s.handleGetTask)
 	s.mux.HandleFunc("GET /api/dashboard/tasks/{id}/log", s.handleTaskLog)
@@ -318,6 +319,23 @@ func (s *Server) handleDryRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, tasks)
+}
+
+func (s *Server) handlePreviewSubmit(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Config        job.JobConfig `json:"config"`
+		SkipPreflight bool          `json:"skip_preflight"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErrorStatus(w, http.StatusBadRequest, err)
+		return
+	}
+	text, err := s.backend.PreviewSubmit(r.Context(), body.Config, body.SkipPreflight)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"preview": text})
 }
 
 func (s *Server) handleGetTask(w http.ResponseWriter, r *http.Request) {

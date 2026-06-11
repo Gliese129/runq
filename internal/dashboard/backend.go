@@ -47,6 +47,9 @@ type Backend interface {
 
 	SubmitJob(ctx context.Context, cfg job.JobConfig, opts SubmitOptions) (jobID string, totalTasks int, err error)
 	DryRun(ctx context.Context, cfg job.JobConfig) ([]job.TaskParams, error)
+	// PreviewSubmit renders what WOULD be submitted (preview is truth, zero
+	// side effects). Backends without the concept return ErrNotSupported.
+	PreviewSubmit(ctx context.Context, cfg job.JobConfig, skipPreflight bool) (string, error)
 	// ResolveNote previews the note template's resolution ({{version}} family
 	// scan needs the backend's store) — submit's code path, never a frontend
 	// simulation.

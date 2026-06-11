@@ -257,3 +257,43 @@ func TestSchedulerScopeDeclaration(t *testing.T) {
 		t.Errorf("scheduler param leaked into command: %q", plan.Tasks[0].Command)
 	}
 }
+
+// Regression: presets used -N {{task_id}} and hex task ids can start with a
+// digit — UGE rejects ("not a valid object name"). Every planned task must
+// carry a scheduler-safe Name; templates resolve from job.name > project
+// job_name > rq-{{task_id}}.
+func TestPlannedTaskName(t *testing.T) {
+	dir := t.TempDir()
+	proj := &project.Config{ProjectName: "p", WorkingDir: dir, CmdTemplate: "echo {{lr}}"}
+	cfg := job.JobConfig{Project: "p",
+		Sweep: []job.SweepBlock{{Method: "grid",
+			Parameters: map[string]job.ParameterSpec{"lr": {Values: []any{0.1}}}}}}
+	deps := Deps{Paths: Paths{WorkspaceRoot: dir, LogRoot: dir}, SkipPreflight: true}
+
+	// default: rq-<task_id> — never digit-first
+	plan, err := Build(context.Background(), cfg, proj, deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "rq-" + plan.Tasks[0].TaskID; plan.Tasks[0].Name != want {
+		t.Errorf("default name: got %q want %q", plan.Tasks[0].Name, want)
+	}
+
+	// project template with params; job.yaml override wins
+	proj.JobName = "eval-{{lr}}"
+	plan, err = Build(context.Background(), cfg, proj, deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Tasks[0].Name != "eval-0.1" {
+		t.Errorf("project template: got %q", plan.Tasks[0].Name)
+	}
+	cfg.Name = "{{project}}-x"
+	plan, err = Build(context.Background(), cfg, proj, deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Tasks[0].Name != "p-x" {
+		t.Errorf("job override: got %q", plan.Tasks[0].Name)
+	}
+}

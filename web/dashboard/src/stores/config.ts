@@ -10,6 +10,7 @@ const NO_CAPS: Capabilities = {
   retry: false,
   state_model: 'push',
   kill_async: false,
+  submit_preview: false,
 }
 
 export const useConfigStore = defineStore('config', () => {

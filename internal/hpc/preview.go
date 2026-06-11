@@ -52,6 +52,7 @@ func (b *Backend) Preview(ctx context.Context, jobCfg job.JobConfig, proj *proje
 	vars := map[string]string{
 		"run_sh": runsh, "gpus": strconv.Itoa(t.GPUsNeeded),
 		"job_id": plan.JobID, "task_id": t.TaskID, "task_dir": t.TaskDir,
+		"name": t.Name,
 	}
 	for name, value := range t.Params {
 		vars["param."+name] = fmt.Sprintf("%v", value)

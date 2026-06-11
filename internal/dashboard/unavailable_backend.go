@@ -79,6 +79,10 @@ func (b *UnavailableBackend) SubmitJob(ctx context.Context, cfg job.JobConfig, o
 	return "", 0, b.wrap()
 }
 
+func (b *UnavailableBackend) PreviewSubmit(context.Context, job.JobConfig, bool) (string, error) {
+	return "", b.wrap()
+}
+
 func (b *UnavailableBackend) DryRun(ctx context.Context, cfg job.JobConfig) ([]job.TaskParams, error) {
 	return nil, b.wrap()
 }
