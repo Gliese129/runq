@@ -63,6 +63,33 @@ func (s *Server) handleFSList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+// handleFSRead returns a text file's content (size-capped). Generic on
+// purpose: the GUI imports project.yaml / job.yaml that live on THIS
+// machine's filesystem (login node), not in the user's browser.
+func (s *Server) handleFSRead(w http.ResponseWriter, r *http.Request) {
+	safePath, err := homeSafePath(r.URL.Query().Get("path"))
+	if err != nil {
+		writeErrorStatus(w, http.StatusForbidden, err)
+		return
+	}
+	info, err := os.Stat(safePath)
+	if err != nil {
+		writeErrorStatus(w, http.StatusBadRequest, err)
+		return
+	}
+	const maxRead = 1 << 20 // 1 MiB — configs, not datasets
+	if info.IsDir() || info.Size() > maxRead {
+		writeErrorStatus(w, http.StatusBadRequest, fmt.Errorf("not a readable text file (dir or >1MiB)"))
+		return
+	}
+	buf, err := os.ReadFile(safePath)
+	if err != nil {
+		writeErrorStatus(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"content": string(buf)})
+}
+
 func (s *Server) handleParseScript(w http.ResponseWriter, r *http.Request) {
 	var req ParseScriptRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -74,6 +101,19 @@ func (s *Server) handleParseScript(w http.ResponseWriter, r *http.Request) {
 		writeErrorStatus(w, http.StatusForbidden, err)
 		return
 	}
+
+	// Non-python entrypoints (.sh etc.): argparse scanning doesn't apply,
+	// but env detection (conda/venv/uv markers in the directory) still does
+	// — don't throw that away with a 400.
+	if !strings.HasSuffix(safePath, ".py") {
+		writeJSON(w, http.StatusOK, ParseResult{
+			Args: []ScriptArg{},
+			Env:  detectedEnv(filepath.Dir(safePath)),
+			Cmd:  fmt.Sprintf("bash %s {{args}}", filepath.Base(safePath)),
+		})
+		return
+	}
+
 	args, err := job.ScanArgparse(safePath)
 	if err != nil {
 		writeErrorStatus(w, http.StatusBadRequest, err)

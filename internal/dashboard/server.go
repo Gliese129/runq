@@ -102,6 +102,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/dashboard/hpc-config/check", s.handleCheckHPCConfig)
 	s.mux.HandleFunc("PUT /api/dashboard/global-config", s.handlePutGlobalConfig)
 	s.mux.HandleFunc("GET /api/dashboard/fs/list", s.handleFSList)
+	s.mux.HandleFunc("GET /api/dashboard/fs/read", s.handleFSRead)
 	s.mux.HandleFunc("POST /api/dashboard/fs/parse-script", s.handleParseScript)
 	s.mux.HandleFunc("GET /api/dashboard/conda/envs", s.handleCondaEnvs)
 	s.mux.HandleFunc("GET /api/{path...}", s.handleAPINotFound)

@@ -8,10 +8,15 @@
           <div class="text-body-2 text-on-surface-variant mt-1">{{ t('submit.subtitle') }}</div>
         </div>
         <div class="d-flex align-center ga-2">
-          <v-btn size="x-small" variant="text" @click="jobYamlInput?.click()">
+          <v-btn size="x-small" variant="text" @click="showJobYamlBrowser = true">
             <v-icon start size="12">mdi-file-import-outline</v-icon> import job.yaml
           </v-btn>
-          <input ref="jobYamlInput" type="file" accept=".yaml,.yml" hidden @change="onJobYamlPicked" />
+          <FileBrowserDialog
+            v-model="showJobYamlBrowser"
+            mode="script"
+            :file-filter="'.yaml,.yml'"
+            @select="onJobYamlSelected"
+          />
           <v-chip v-if="step >= 2 && displayTaskCount > 0" variant="tonal" color="primary">
             {{ displayTaskCount }} {{ displayTaskCount === 1 ? 'task' : 'tasks' }}
           </v-chip>
@@ -95,11 +100,13 @@ import { useRouter, useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { jobsApi } from '@/apis/jobs'
 import { projectsApi } from '@/apis/projects'
+import { filesApi } from '@/apis/files'
 import { useSnackbar } from '@/composables/useSnackbar'
 import { usePreferences } from '@/composables/usePreferences'
 import type { ProjectSummary } from '@/types/api'
 
 import PreflightError from '@/components/PreflightError.vue'
+import FileBrowserDialog from '@/components/FileBrowserDialog.vue'
 import StepProject from './StepProject.vue'
 import StepConfigure from './StepConfigure.vue'
 import StepReview from './StepReview.vue'
@@ -295,17 +302,18 @@ onMounted(async () => {
   }
 })
 
-// ── Import an existing job.yaml: same path as re-run-from-template —
-// note keeps its {{...}} form, sweep blocks decompile into the flat model.
-const jobYamlInput = ref<HTMLInputElement>()
+// ── Import an existing job.yaml from the SERVER's filesystem: same path
+// as re-run-from-template — note keeps its {{...}} form, sweep blocks
+// decompile into the flat model.
+const showJobYamlBrowser = ref(false)
 
-async function onJobYamlPicked(e: Event) {
-  const file = (e.target as HTMLInputElement).files?.[0]
-  ;(e.target as HTMLInputElement).value = ''
-  if (!file) return
+async function onJobYamlSelected(path: string) {
+  showJobYamlBrowser.value = false
+  const name = path.split(/[\\/]/).pop() || path
   try {
     const YAML = await import('js-yaml')
-    const cfg = YAML.load(await file.text()) as any
+    const { content } = await filesApi.read(path)
+    const cfg = YAML.load(content) as any
     if (!cfg || typeof cfg !== 'object' || (!cfg.sweep && !cfg.fixed_params)) {
       throw new Error('not a job.yaml (no sweep/fixed_params)')
     }
@@ -315,7 +323,7 @@ async function onJobYamlPicked(e: Event) {
     rows.value = r
     linkSets.value = ls
     step.value = 1
-    snack.success(`Imported ${file.name} (${r.length} params)`)
+    snack.success(`Imported ${name} (${r.length} params)`)
     if (cfg.project && !matchedProjects.value.some(p => p.name === cfg.project)) {
       snack.warn(`Project "${cfg.project}" is not registered yet — register it in step 1 or import its project.yaml`)
     }

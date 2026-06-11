@@ -118,9 +118,9 @@
           @click="showFileBrowser = true"
         >
           <v-icon size="36" color="primary" class="mb-2">mdi-file-code-outline</v-icon>
-          <div class="text-body-1 font-weight-medium">Select your training script</div>
+          <div class="text-body-1 font-weight-medium">Select a training script (.py / .sh) — or a project.yaml</div>
           <div class="text-caption text-on-surface-variant mt-1">
-            name · workdir · command · params · env will be auto-detected
+            script: name · workdir · command · params · env auto-detected · yaml: loaded as-is for review
           </div>
         </div>
 
@@ -137,15 +137,11 @@
           </div>
         </template>
 
-        <div class="text-center mt-3 d-flex justify-center ga-2">
-          <v-btn size="x-small" variant="text" @click="importInput?.click()">
-            <v-icon start size="12">mdi-file-import-outline</v-icon> import project.yaml
-          </v-btn>
+        <div class="text-center mt-3">
           <v-btn size="x-small" variant="text" @click="skipScript">
             skip — fill in manually
           </v-btn>
         </div>
-        <input ref="importInput" type="file" accept=".yaml,.yml" hidden @change="onProjectYamlPicked" />
       </v-card>
 
       <!-- ═══ Edit form (create after script, or Edit project) ═══ -->
@@ -345,6 +341,7 @@
       <FileBrowserDialog
         v-model="showFileBrowser"
         :mode="workDirEditMode ? 'directory' : 'script'"
+        :file-filter="'.py,.sh,.yaml,.yml'"
         :initial-dir="form.workDir"
         @select="onBrowserSelect"
       />
@@ -567,29 +564,6 @@ function skipScript() {
   scriptPicked.value = true // show the form without a script
 }
 
-// ── Import an existing project.yaml (e.g. hand-written or agent-generated).
-// Reuses applyProjectConfig — the same shape the backend serves — then marks
-// the form dirty so Next actually registers it.
-const importInput = ref<HTMLInputElement>()
-
-async function onProjectYamlPicked(e: Event) {
-  const file = (e.target as HTMLInputElement).files?.[0]
-  ;(e.target as HTMLInputElement).value = ''
-  if (!file) return
-  try {
-    const parsed = YAML.load(await file.text()) as any
-    if (!parsed || typeof parsed !== 'object' || !parsed.project_name) {
-      throw new Error('not a project.yaml (missing project_name)')
-    }
-    applyProjectConfig(parsed, state.rows.length === 0)
-    state.newProject.dirty = true // imported ≠ saved: Next will register it
-    scriptPicked.value = true
-    detectedSummary.value = `imported from ${file.name}`
-  } catch (err: any) {
-    form.error = `Import failed: ${err?.message ?? err}`
-    scriptPicked.value = true
-  }
-}
 
 // Working dir breadcrumb
 const workDirSegments = computed(() =>
@@ -733,7 +707,32 @@ function onBrowserSelect(path: string) {
     return
   }
   const name = path.split(/[\\/]/).pop() || path
+  if (/\.ya?ml$/.test(name)) {
+    importProjectYaml(path, name)
+    return
+  }
   onScriptPicked({ path, name, is_dir: false, size: 0 })
+}
+
+// Import a project.yaml living on the SERVER's filesystem (login node) —
+// read via fs/read, fill the form, mark dirty so Next registers it.
+async function importProjectYaml(path: string, name: string) {
+  showFileBrowser.value = false
+  try {
+    const { content } = await filesApi.read(path)
+    const parsed = YAML.load(content) as any
+    if (!parsed || typeof parsed !== 'object' || !parsed.project_name) {
+      throw new Error('not a project.yaml (missing project_name)')
+    }
+    applyProjectConfig(parsed, state.rows.length === 0)
+    state.newProject.dirty = true // imported ≠ saved: Next will register it
+    scriptPicked.value = true
+    detectedSummary.value = `imported from ${name}`
+    prefs.addRecentScript(path, name, form.name)
+  } catch (err: any) {
+    form.error = `Import failed: ${err?.message ?? err}`
+    scriptPicked.value = true
+  }
 }
 
 async function onScriptPicked(entry: FSEntry) {
@@ -746,7 +745,8 @@ async function onScriptPicked(entry: FSEntry) {
   const parts = dir.split(/[\\/]+/).filter(Boolean)
   if (!form.name) form.name = parts[parts.length - 1] || 'my-project'
   form.workDir = dir
-  form.cmd = `python ${entry.name} {{args}}`
+  const isShell = /\.sh$/.test(entry.name)
+  form.cmd = isShell ? `bash ${entry.name} {{args}}` : `python ${entry.name} {{args}}`
 
   try {
     const result = await filesApi.parseScript(entry.path)

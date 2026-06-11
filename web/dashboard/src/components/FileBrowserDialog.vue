@@ -129,7 +129,7 @@ const props = withDefaults(defineProps<{
 }>(), {
   mode: 'script',
   initialDir: '',
-  fileFilter: '.py',
+  fileFilter: '.py,.sh',
 })
 
 const emit = defineEmits<{
@@ -166,7 +166,10 @@ const filteredEntries = computed(() =>
     if (e.name.startsWith('.')) return false
     if (props.mode === 'directory' || props.mode === 'folder') return e.is_dir
     if (e.is_dir) return true
-    if (props.fileFilter) return e.name.endsWith(props.fileFilter)
+    if (props.fileFilter) {
+      // comma-separated extension list, e.g. ".py,.sh,.yaml,.yml"
+      return props.fileFilter.split(',').some(ext => e.name.endsWith(ext.trim()))
+    }
     return true
   })
 )
