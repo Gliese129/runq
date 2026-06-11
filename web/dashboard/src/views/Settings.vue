@@ -444,11 +444,17 @@ function copyToClipboard(text: string) {
 }
 
 onMounted(async () => {
-  await settings.loadWebhook()
-  webhookUrl.value = settings.webhook.url
-  webhookEvents.value = [...settings.webhook.events]
+  // Every load is independently fault-tolerant: one failing endpoint
+  // (daemon down, version mismatch) must not take the whole page down.
+  try {
+    await settings.loadWebhook()
+    webhookUrl.value = settings.webhook.url
+    webhookEvents.value = [...settings.webhook.events]
+  } catch { /* webhook config unavailable */ }
 
-  if (!config.loaded) await config.fetchConfig()
+  try {
+    if (!config.loaded) await config.fetchConfig()
+  } catch { /* backend unreachable — show defaults */ }
   syncGlobal()
 
   try {

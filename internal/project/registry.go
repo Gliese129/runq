@@ -4,8 +4,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 // Registry manages the set of registered projects, backed by SQLite.
@@ -69,7 +72,45 @@ func (r *Registry) Get(name string) (*Config, error) {
 	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
 		return nil, fmt.Errorf("unmarshal project %q: %w", name, err)
 	}
-	return &cfg, nil
+	return r.syncFromYAML(name, &cfg), nil
+}
+
+// syncFromYAML reconciles the DB copy with <working_dir>/project.yaml on
+// every Get. project.yaml is the source of truth (CLI users hand-edit it);
+// the DB row is a cache for listing/joins. Drift → reload the file and
+// refresh the cache, so CLI and GUI can never disagree about a project.
+// Fault-tolerant: a missing or unparsable file falls back to the DB copy
+// (a botched hand-edit must not make the project vanish).
+func (r *Registry) syncFromYAML(name string, dbCfg *Config) *Config {
+	if dbCfg.WorkingDir == "" {
+		return dbCfg
+	}
+	buf, err := os.ReadFile(filepath.Join(dbCfg.WorkingDir, "project.yaml"))
+	if err != nil {
+		return dbCfg
+	}
+	var fileCfg Config
+	if yaml.Unmarshal(buf, &fileCfg) != nil {
+		return dbCfg
+	}
+	// Sanity: yaml.Unmarshal happily produces a zero struct for garbage
+	// scalars. A real project.yaml always carries these two fields.
+	if fileCfg.WorkingDir == "" || fileCfg.CmdTemplate == "" {
+		return dbCfg
+	}
+	// Identity stays with the DB key — renames go through Rename(), not a
+	// hand-edited project_name (that would orphan the job FKs).
+	fileCfg.ProjectName = name
+
+	fileJSON, err1 := json.Marshal(fileCfg)
+	dbJSON, err2 := json.Marshal(dbCfg)
+	if err1 != nil || err2 != nil || string(fileJSON) == string(dbJSON) {
+		return dbCfg
+	}
+	// File wins: refresh the cache. Best-effort — a read-only DB still
+	// returns the file's truth for this call.
+	_, _ = r.db.Exec(`UPDATE projects SET config_json = ? WHERE name = ?`, string(fileJSON), name)
+	return &fileCfg
 }
 
 // List returns all registered projects, ordered by name.

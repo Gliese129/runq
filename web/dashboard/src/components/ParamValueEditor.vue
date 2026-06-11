@@ -30,25 +30,26 @@
     >false</v-chip>
   </div>
 
-  <!-- str / file / folder: multi-select combobox with custom values -->
+  <!-- str / file / folder: ChipInput (ordered, duplicates allowed — zip
+       sequences like [A, A, B] are legal) + suggestions as append-on-click
+       chips. A combobox's checkbox semantics can't express duplicates. -->
   <div v-else-if="type === 'str' || type === 'file' || type === 'folder'">
-    <v-combobox
+    <ChipInput
       :model-value="modelValue"
-      @update:model-value="onComboUpdate"
-      :items="suggestions"
-      multiple chips closable-chips
-      density="compact" variant="outlined" hide-details
-      :placeholder="modelValue.length === 0 ? (type === 'str' ? 'Type or select values' : 'Type or select paths') : ''"
+      @update:model-value="$emit('update:modelValue', $event)"
+      :placeholder="effectivePlaceholder"
       :color="color"
-      style="font-family: monospace; font-size: 13px"
-    >
-      <template #chip="{ item, props: chipProps }">
-        <v-chip v-bind="chipProps" size="small" variant="tonal" :color="color">
-          {{ type !== 'str' ? (item.title.split('/').pop() || item.title) : item.title }}
-          <v-tooltip v-if="type !== 'str'" activator="parent" location="top">{{ item.title }}</v-tooltip>
-        </v-chip>
-      </template>
-    </v-combobox>
+      :param-type="type"
+    />
+    <div v-if="availableSuggestions.length > 0" class="d-flex flex-wrap ga-1 mt-1">
+      <v-chip
+        v-for="sug in availableSuggestions" :key="sug"
+        size="x-small" variant="outlined" class="cursor-pointer opacity-70"
+        style="font-family: monospace"
+        :title="type !== 'str' ? sug : 'click to append (repeatable)'"
+        @click="$emit('update:modelValue', [...modelValue, sug])"
+      >+ {{ type !== 'str' ? (sug.split('/').pop() || sug) : sug }}</v-chip>
+    </div>
     <div v-if="type !== 'str' && invalidPaths.length > 0" class="text-caption text-warning mt-1">
       {{ invalidPaths.length }} value(s) don't look like paths
     </div>
@@ -158,11 +159,8 @@ function toggleValue(v: string) {
   emit('update:modelValue', vals)
 }
 
-/** v-combobox emits mixed types (string | object) — normalize to string[] */
-function onComboUpdate(val: any) {
-  const cleaned = (val || []).map((v: any) => typeof v === 'string' ? v : String(v?.title ?? v)).filter(Boolean)
-  emit('update:modelValue', cleaned)
-}
+
+const availableSuggestions = computed(() => props.suggestions)
 
 // ── Path validation for file/folder ──
 const invalidPaths = computed(() =>

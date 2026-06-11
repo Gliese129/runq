@@ -287,7 +287,12 @@ func checkWritable(dir, label string) []PreflightFinding {
 //   - Quoted paths containing spaces are not split correctly; tokens
 //     are space-separated. Real-world job configs almost never put
 //     spaces in paths, so this is acceptable.
-var pathArgRegex = regexp.MustCompile(`(?:--[\w-]+[ =])?(/[\w./_-]+)`)
+// The leading boundary group is the load-bearing part: an absolute path
+// must START a shell token (begin of string, whitespace, `=`, or a quote).
+// Without it, relative paths (`scripts/qsub/x.sh` → "/qsub/x.sh") and
+// HuggingFace model ids (`org/model` → "/model") get mangled into bogus
+// absolute paths — exactly the false positives seen on real HPC commands.
+var pathArgRegex = regexp.MustCompile(`(?:^|[\s='"])(/[\w./_-]+)`)
 
 // pathArgIgnore filters out matches that should NOT be treated as
 // file existence assertions. Anything not on this list and matched by

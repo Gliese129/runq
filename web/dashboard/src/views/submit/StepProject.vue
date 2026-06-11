@@ -235,8 +235,11 @@
           <v-col cols="6">
             <v-number-input
               v-model="form.gpus" label="GPUs per task"
-              variant="outlined" density="compact" :min="0" hide-details
+              variant="outlined" density="compact" :min="0"
               control-variant="stacked"
+              :hint="config.isPoll ? 'HPC: only used as {{gpus}} in submit_template — set 0 for whole-node queues' : ''"
+              :persistent-hint="config.isPoll"
+              :hide-details="!config.isPoll"
             />
           </v-col>
           <v-col cols="6">
@@ -363,6 +366,7 @@ import { envApi } from '@/apis/env'
 import { filesApi } from '@/apis/files'
 import { projectsApi } from '@/apis/projects'
 import { usePreferences } from '@/composables/usePreferences'
+import { useConfigStore } from '@/stores/config'
 import type { FSEntry, ParseResult, ProjectConfig } from '@/types/api'
 import { SUBMIT_STATE_KEY } from '@/types/submit'
 import ParamEditorDialog from './ParamEditorDialog.vue'
@@ -372,6 +376,7 @@ import ShellTemplateEditor from '@/components/ShellTemplateEditor.vue'
 // No emits — save handled by parent's goNext (only when dirty; see below)
 const state = inject(SUBMIT_STATE_KEY)!
 const prefs = usePreferences()
+const config = useConfigStore()
 
 // ── Mode ──
 const mode = ref<'select' | 'create'>('select')
