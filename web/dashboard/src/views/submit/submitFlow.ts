@@ -143,6 +143,7 @@ export function buildProjectPayload(project: SubmitProjectDraft): ProjectPayload
         max: p.max ?? undefined,
         include: p.include, // persist curation — heuristic must run only once
         strict: p.strict || undefined,
+        scope: p.scope || undefined,
       }
     })
   }

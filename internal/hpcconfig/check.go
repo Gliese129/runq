@@ -45,6 +45,22 @@ func sampleVars(field string) map[string]string {
 	return vars
 }
 
+// TemplateParamRefs returns the param names referenced as {{param.X}} in a
+// template — these are consumed by the SCHEDULER layer, so the command
+// renderer must not demand they appear in command_template too.
+func TemplateParamRefs(tmpl string) []string {
+	var names []string
+	seen := map[string]bool{}
+	for _, m := range paramRefRe.FindAllStringSubmatch(tmpl, -1) {
+		n := strings.TrimPrefix(m[1], "param.")
+		if !seen[n] {
+			seen[n] = true
+			names = append(names, n)
+		}
+	}
+	return names
+}
+
 // addParamSamples synthesizes a sample for every {{param.x}} reference in
 // the template (only submit_template gets the namespace at render time).
 func addParamSamples(vars map[string]string, tmpl string) {

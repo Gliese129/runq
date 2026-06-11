@@ -15,6 +15,7 @@ export interface ProjectParam {
   max?: number            // int/float: valid range
   values?: string[]       // str: selectable choices; list: items; file/folder: paths
   strict?: boolean        // choices are a contract, not suggestions
+  scope?: string          // 'scheduler' = submit_template-only param
 }
 
 export interface ParamMeta {

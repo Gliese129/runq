@@ -35,6 +35,10 @@ type Deps struct {
 	PreflightDisableLocal bool
 	// PreflightScope labels where local checks ran (e.g. "on login node").
 	PreflightScope string
+	// SchedulerParams are param names consumed by the HPC submit_template
+	// ({{param.*}}): exempt from the command renderer's unconsumed check
+	// and excluded from {{args}} injection.
+	SchedulerParams []string
 }
 
 type Plan struct {
@@ -195,10 +199,24 @@ func Build(ctx context.Context, cfg job.JobConfig, proj *project.Config, d Deps)
 		return Plan{}, err
 	}
 
+	// Scheduler params: DECLARED scope wins (self-describing config);
+	// template-reference inference remains as a fallback for configs that
+	// haven't adopted scope yet.
+	schedParams := make(map[string]bool, len(d.SchedulerParams))
+	for _, n := range d.SchedulerParams {
+		schedParams[n] = true
+	}
+	for _, def := range proj.Params {
+		if def.Scope == "scheduler" {
+			schedParams[def.Name] = true
+		}
+	}
+
 	pf := preflight.DefaultPreflight()
 	pf.Skip = d.SkipPreflight
 	pf.DisableLocal = d.PreflightDisableLocal
 	pf.Scope = d.PreflightScope
+	pf.ExcludeParams = schedParams
 	pfReport, err := pf.Run(ctx, proj, taskParams)
 	if err != nil {
 		return Plan{}, err
@@ -214,7 +232,7 @@ func Build(ctx context.Context, cfg job.JobConfig, proj *project.Config, d Deps)
 	callerUID := os.Getuid()
 	tasks := make([]PlannedTask, 0, len(taskParams))
 	for _, params := range taskParams {
-		cmd, err := job.Render(proj.CmdTemplate, params)
+		cmd, err := job.RenderExcluding(proj.CmdTemplate, params, schedParams)
 		if err != nil {
 			return Plan{}, fmt.Errorf("render command failed: %w", err)
 		}

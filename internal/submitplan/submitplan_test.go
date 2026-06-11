@@ -234,3 +234,26 @@ func TestStrictChoices(t *testing.T) {
 		t.Fatalf("non-strict choices must stay suggestions: %v", err)
 	}
 }
+
+// Declared scope beats inference: a scheduler-scoped param needs no
+// submit_template knowledge to be exempt from command consumption.
+func TestSchedulerScopeDeclaration(t *testing.T) {
+	dir := t.TempDir()
+	proj := &project.Config{
+		ProjectName: "p", WorkingDir: dir, CmdTemplate: "echo {{lr}}",
+		Params: []project.ParamDef{{Name: "h_rt", Type: "str", Scope: "scheduler"}},
+	}
+	cfg := job.JobConfig{Project: "p",
+		FixedParams: map[string]any{"h_rt": "8:00:00"},
+		Sweep: []job.SweepBlock{{Method: "grid",
+			Parameters: map[string]job.ParameterSpec{"lr": {Values: []any{0.1}}}}}}
+	deps := Deps{Paths: Paths{WorkspaceRoot: dir, LogRoot: dir}, SkipPreflight: true}
+
+	plan, err := Build(context.Background(), cfg, proj, deps)
+	if err != nil {
+		t.Fatalf("declared scheduler param must not require command consumption: %v", err)
+	}
+	if strings.Contains(plan.Tasks[0].Command, "h_rt") {
+		t.Errorf("scheduler param leaked into command: %q", plan.Tasks[0].Command)
+	}
+}

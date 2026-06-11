@@ -137,7 +137,7 @@ runq hpc collect <job_id> --key loss # all tasks ranked by metric
 
 After `runq hpc init`, edit `~/.runq/config.yaml` to match your cluster — the `submit_template`, `submit_id_regex`, and `kill_template` fields must be correct for your scheduler (also editable in the dashboard Settings page, with presets, placeholder hints and a built-in checker). Presets for Slurm, PBS, SGE, TSUBAME and ABCI are provided as starting points.
 
-Per-task scheduler knobs (walltime, queue) can live in the sweep and be referenced from `submit_template` as `{{param.h_rt}}`, `{{param.node_kind}}` — one job can carry per-benchmark time limits.
+Per-task scheduler knobs (walltime, queue) can live in the sweep and be referenced from `submit_template` as `{{param.h_rt}}`, `{{param.node_kind}}` — one job can carry per-benchmark time limits. Declare them with `scope: scheduler` in project.yaml so they're consumed by the submit command, not your training command (see Configuration).
 
 ## Usage
 
@@ -225,8 +225,16 @@ Command templates support `{{args}}` (auto-generates `--key=value` for all param
 
 More project-level fields:
 
-- `params:` — the parameter **catalog** (`type` / `default` / `choices` / `include`). The dashboard builds its submit form from this; a job.yaml is just one selection over it (`grid` = cross product, `list` = zip).
+- `params:` — the parameter **catalog** (`type` / `default` / `choices` / `include` / `strict` / `scope`). The dashboard builds its submit form from this; a job.yaml is just one selection over it (`grid` = cross product, `list` = zip).
+  - `strict: true` upgrades `choices` from suggestions to a contract: any submitted value outside the list fails at submit time (CLI and GUI alike).
+  - `scope: scheduler` declares a param consumed by the HPC `submit_template` (`{{param.h_rt}}`) instead of the command — it is exempt from command-template consumption and never injected into `{{args}}`. Recommended pattern for queue-like knobs:
+
+    ```yaml
+    params:
+      - { name: node_kind, type: str, scope: scheduler, default: node_q, choices: [node_q, node_h, node_f], strict: true }
+    ```
 - `setup_command:` — runs once per submit, before anything is persisted (e.g. `hf download {{model}}`). May reference fixed params only; failure aborts cleanly.
+- `environment:` — injected into every task AND prefixed onto the HPC submit command, so `$TSUBAME_GROUP`-style references in `submit_template` resolve from project config.
 - `.env` in `working_dir` is sourced at task start automatically (override with `env_file:`). runq never stores its values — tokens stay out of the DB, logs and UIs. Explicit `environment:` always wins.
 - Job `note` supports placeholders: params, `{{project}}` `{{user}}` `{{date}}` `{{time}}` `{{sweep}}`, and `{{version}}` — re-running the same named config auto-numbers it (`foo`, `foo-v2`, `foo-v3`), with timestamp differences ignored when finding the family.
 
@@ -237,6 +245,8 @@ runq auto-detects uv, venv, and conda environments in your project directory and
 ### Config priority
 
 CLI flag > job.yaml override > project.yaml default > built-in default.
+
+`project.yaml` is the source of truth: hand-edits are picked up automatically the next time the project is selected or submitted (the DB copy is just a cache and re-syncs on read) — CLI and GUI can never disagree about a project.
 
 ## Scheduling
 

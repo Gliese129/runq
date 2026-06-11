@@ -23,6 +23,8 @@ export interface ParamRow {
   default: string
   values: string[]
   meta?: { min?: number; max?: number; step?: number }
+  /** 'scheduler' = consumed by the HPC submit_template, not the command */
+  scope?: string
 }
 
 /** A zip group: member row names. Color = index into LINK_PALETTE. */

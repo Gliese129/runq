@@ -35,6 +35,12 @@ const lastProject = ref(load('last-project', ''))
 
 watch(lastProject, (v) => save('last-project', v))
 
+// --- Submit draft (crash/back-button insurance) ---
+
+const submitDraft = ref<any>(load('submit-draft', null))
+
+watch(submitDraft, (v) => save('submit-draft', v), { deep: true })
+
 // --- One-time hints (dismissed = never show again) ---
 
 const sugarTipDismissed = ref(load('sugar-tip-dismissed', false))
@@ -128,6 +134,7 @@ export function usePreferences() {
     addRecentScript,
     lastProject,
     sugarTipDismissed,
+    submitDraft,
     preferredMetrics,
     setPreferredMetric,
     lastStatusFilter,

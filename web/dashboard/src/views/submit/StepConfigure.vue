@@ -72,6 +72,10 @@
               :title="'Show aligned view'"
               @click="toggleAligned(setIdOf(row.name))"
             >mdi-link</v-icon>
+            <v-icon
+              v-if="row.scope === 'scheduler'" size="12" color="warning"
+              title="scheduler param — consumed by the HPC submit_template, not your command"
+            >mdi-server</v-icon>
             <span class="text-body-2 font-weight-medium text-truncate font-mono">{{ row.name }}</span>
           </div>
           <div class="mt-1">
@@ -238,12 +242,13 @@ watch(
       if (existing) {
         existing.type = p.type || existing.type
         existing.default = p.default || ''
+        existing.scope = p.scope
         next.push(existing)
       } else {
         const meta: ParamRow['meta'] = {}
         if (p.min != null) meta.min = p.min
         if (p.max != null) meta.max = p.max
-        next.push({ name: p.name, type: p.type || 'str', default: p.default || '', values: [], meta })
+        next.push({ name: p.name, type: p.type || 'str', default: p.default || '', values: [], meta, scope: p.scope })
       }
       byName.delete(p.name)
     }

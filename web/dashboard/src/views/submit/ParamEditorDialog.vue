@@ -189,6 +189,14 @@
               <!-- Delete (independent of include — unchecked ≠ to-be-deleted) -->
               <td>
                 <v-btn
+                  icon size="x-small" variant="text"
+                  :color="p.scope === 'scheduler' ? 'warning' : undefined"
+                  :title="p.scope === 'scheduler' ? 'scheduler param (submit_template only) — click to make it a command param' : 'command param — click to make it scheduler-only (h_rt, queue, ...)'"
+                  @click="p.scope = p.scope === 'scheduler' ? undefined : 'scheduler'"
+                >
+                  <v-icon size="14">{{ p.scope === 'scheduler' ? 'mdi-server' : 'mdi-console-line' }}</v-icon>
+                </v-btn>
+                <v-btn
                   icon size="x-small" variant="text" class="row-delete"
                   :aria-label="`Delete ${p.name}`" :title="`Delete ${p.name}`"
                   @click="removeParam(p.name)"

@@ -98,6 +98,12 @@ type ParamDef struct {
 	// curated" (older configs / fresh discovery), which lets the UI apply
 	// its first-time heuristic exactly once and persist the result.
 	Include *bool `yaml:"include,omitempty" json:"include,omitempty"`
+	// Scope declares who consumes this param: "" / "command" (default —
+	// the workload command) or "scheduler" (the HPC submit_template via
+	// {{param.*}}). Scheduler params are invisible to the command renderer
+	// (no unconsumed error, never injected into {{args}}) — declared here
+	// so job.yaml + project.yaml stay self-describing across machines.
+	Scope string `yaml:"scope,omitempty" json:"scope,omitempty"`
 	// Strict upgrades Choices from suggestions to a contract: any submitted
 	// value outside Choices is a submit-time error (enforced in
 	// submitplan.Build — one point, both CLI and GUI).

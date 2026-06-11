@@ -713,6 +713,7 @@ function normalizeParam(a: { name: string; type: string; default?: string; choic
     values: values.length > 0 ? values : undefined,
     min: a.min, max: a.max,
     strict: (a as any).strict || undefined,
+    scope: (a as any).scope || undefined,
   }
 }
 

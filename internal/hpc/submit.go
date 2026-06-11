@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gliese129/runq/internal/config"
+	"github.com/gliese129/runq/internal/hpcconfig"
 	"github.com/gliese129/runq/internal/hpccore"
 	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/preflight"
@@ -158,6 +159,7 @@ func (b *Backend) Submit(ctx context.Context, jobCfg job.JobConfig, proj *projec
 		SkipPreflight:         opts.SkipPreflight,
 		PreflightDisableLocal: disableLocal,
 		PreflightScope:        "on this login node",
+		SchedulerParams:       hpcconfig.TemplateParamRefs(b.Cfg.SubmitTemplate),
 	})
 	if err != nil {
 		return "", 0, err

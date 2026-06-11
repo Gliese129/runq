@@ -193,3 +193,34 @@ func TestSetupCommandFailureAborts(t *testing.T) {
 		t.Errorf("job row persisted despite setup failure: %d rows", len(jobs))
 	}
 }
+
+// Scheduler-only params ({{param.*}} in submit_template) must not be
+// demanded by command_template nor leak into {{args}} — no fake-consumption
+// workarounds needed.
+func TestSchedulerParamsExemptFromCommand(t *testing.T) {
+	skipIfNoHPCCore(t)
+	cfg := &hpcconfig.Config{
+		SubmitTemplate: "qsub -l h_rt={{param.h_rt}} {{run_sh}}",
+		SubmitIDRegex:  `job ([0-9]+)`,
+		KillTemplate:   "cancel {{ext_id}}",
+	}
+	var captured string
+	runner := func(ctx context.Context, command string) (string, error) {
+		if strings.Contains(command, "qsub") {
+			captured = command
+			return "job 7", nil
+		}
+		return "", nil
+	}
+	b, proj, jobCfg := newTestBackend(t, cfg, runner)
+	// command_template does NOT consume h_rt — and has no {{args}} either.
+	proj.CmdTemplate = "python x.py --lr {{lr}}"
+	jobCfg.FixedParams = map[string]any{"h_rt": "8:00:00"}
+
+	if _, _, err := b.Submit(context.Background(), jobCfg, proj, SubmitOpts{SkipPreflight: true}); err != nil {
+		t.Fatalf("scheduler param must not require command consumption: %v", err)
+	}
+	if !strings.Contains(captured, "-l h_rt='8:00:00'") {
+		t.Errorf("h_rt missing from submit command: %q", captured)
+	}
+}

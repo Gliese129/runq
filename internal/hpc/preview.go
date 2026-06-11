@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/gliese129/runq/internal/hpcconfig"
 	"github.com/gliese129/runq/internal/hpccore"
 	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/project"
@@ -30,6 +31,7 @@ func (b *Backend) Preview(ctx context.Context, jobCfg job.JobConfig, proj *proje
 		SkipPreflight:         skipPreflight,
 		PreflightDisableLocal: disableLocal,
 		PreflightScope:        "on this login node",
+		SchedulerParams:       hpcconfig.TemplateParamRefs(b.Cfg.SubmitTemplate),
 	})
 	if err != nil {
 		return "", err

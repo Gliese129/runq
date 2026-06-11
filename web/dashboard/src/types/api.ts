@@ -195,6 +195,8 @@ export interface ProjectConfig {
     include?: boolean
     /** choices become a contract: out-of-list values fail at submit */
     strict?: boolean
+    /** "scheduler" = consumed by submit_template only (never by the command) */
+    scope?: string
   }>
 }
 
@@ -225,6 +227,8 @@ export interface ProjectPayload {
     include?: boolean
     /** choices become a contract: out-of-list values fail at submit */
     strict?: boolean
+    /** "scheduler" = consumed by submit_template only (never by the command) */
+    scope?: string
   }>
 }
 

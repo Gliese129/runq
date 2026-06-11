@@ -21,7 +21,19 @@ var placeholderRe = regexp.MustCompile(`\{\{(\w+)}}`)
 //   - Named placeholder references a key not in params.
 //   - Params left unconsumed and no {{args}} in template.
 func Render(template string, params TaskParams) (string, error) {
+	return RenderExcluding(template, params, nil)
+}
+
+// RenderExcluding is Render with a set of params treated as ALREADY consumed
+// elsewhere (e.g. scheduler knobs like h_rt referenced by the HPC
+// submit_template as {{param.h_rt}}). Excluded params neither trigger the
+// unconsumed-param error nor leak into {{args}} — a walltime is for the
+// scheduler, not the training script.
+func RenderExcluding(template string, params TaskParams, exclude map[string]bool) (string, error) {
 	consumed := make(map[string]bool)
+	for name := range exclude {
+		consumed[name] = true
+	}
 
 	// ── Pass 1: named placeholders ──
 	var errMissing []string

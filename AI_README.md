@@ -26,11 +26,18 @@ command — that's `command_template`, called **directly**.
    for the rest. No shim layer. (Distinct from a *slimmed copy* of a real
    payload script, which is encouraged — see Nested scripts below.)
 3. ❌ Putting metadata-only fields into the sweep → every param must be
-   consumed by the template (named or via `{{args}}`); unconsumed params are
-   a submit-time error by design. A label belongs in `note`, not parameters.
+   consumed (by `command_template` OR by `submit_template`); unconsumed
+   params are a submit-time error by design. A label belongs in `note`.
+   Scheduler knobs (walltime, queue) are params too — declare them with
+   `scope: scheduler` in the project catalog and they are consumed by
+   `{{param.*}}` in submit_template, never by the command and never via
+   `{{args}}`. Do NOT invent fake consumption workarounds.
 4. ❌ Hand-rolling per-task scheduler flags (walltime, queue, priority) in
-   wrappers → put them in the sweep as zip columns and reference them in
+   wrappers → declare them as catalog params with `scope: scheduler`, put
+   values in fixed_params or zip columns, and reference them in
    `submit_template` as `{{param.h_rt}}`, `{{param.node_kind}}`.
+   Add `strict: true` + `choices` for finite vocabularies (queue names,
+   providers) — typos then fail at submit instead of after hours in queue.
 5. ❌ Enumerating every concrete task into job.yaml → wrong division of
    labor. **project.yaml is the parameter CATALOG**: `params:` entries
    define `type` / `default` / `choices` / `include` — the Web GUI builds
@@ -47,6 +54,10 @@ job-name sanitizers (→ `note: "{{model}}-{{version}}"`), qstat watch scripts
 runs once per submit on the login node), `.env` sourcing (→ automatic:
 `working_dir/.env` is sourced at task start; explicit env always wins;
 runq never stores its values).
+
+**Editing configs:** `project.yaml` is the source of truth — hand-edit it
+directly; runq picks the change up on the next selection/submit (the DB is
+a self-healing cache). No re-registration command needed after edits.
 
 **What stays with the user:** the workload script itself, the scheduler
 dialect (templates in `~/.runq/config.yaml`), and the results/aggregation
@@ -141,8 +152,9 @@ Before touching any config, ask the user these questions:
    `runq hpc config check` — renders every template with sample values,
    validates placeholders and the submit_id_regex capture group, zero cost.
 3. Write `project.yaml` and `job.yaml` (same format as daemon).
-   Per-task scheduler knobs (h_rt, queue) = sweep columns + `{{param.*}}`
-   in submit_template.
+   Per-task scheduler knobs (h_rt, queue) = catalog params declared
+   `scope: scheduler` (+ `strict: true` with `choices` when the vocabulary
+   is finite), referenced via `{{param.*}}` in submit_template.
 4. `runq hpc submit job.yaml --project-file project.yaml --dry-run`
    → shows preflight (three-state), the rendered submit command and run.sh,
    writes nothing. Confirm with the user, then drop `--dry-run`.

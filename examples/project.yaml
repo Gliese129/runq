@@ -9,9 +9,23 @@ project_name: resnet50
 working_dir: /home/user/projects/resnet50
 command_template: python train.py {{args}}
 
-# Environment variables injected into every task
+# Environment variables injected into every task.
+# In HPC mode they are ALSO prefixed onto the submit command, so
+# $MY_GROUP-style references in submit_template resolve from here.
 environment:
   WANDB_PROJECT: resnet-experiments
+
+# Parameter catalog (optional). The dashboard builds its submit form from
+# this; a job.yaml is one selection over it.
+#   type:    str | int | float | bool | file | folder
+#   choices: suggestions — add `strict: true` to make them a hard contract
+#   include: false hides the param from the default GUI form
+#   scope: scheduler — consumed by HPC submit_template ({{param.NAME}}),
+#          exempt from command_template and never injected into {{args}}
+params:
+  - { name: lr, type: float, default: 0.001 }
+  - { name: optimizer, type: str, default: adam, choices: [adam, sgd], strict: true }
+  - { name: h_rt, type: str, scope: scheduler, default: "4:00:00" }
 
 # Defaults (can be overridden per-job in job.yaml → overrides)
 defaults:

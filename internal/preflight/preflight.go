@@ -60,6 +60,10 @@ type Preflight struct {
 	// Scope labels where local checks ran (e.g. "on login node") so HPC
 	// users see the verification boundary in passed results.
 	Scope string
+
+	// ExcludeParams are scheduler-consumed params (submit_template's
+	// {{param.*}}) — the sample command renders without demanding them.
+	ExcludeParams map[string]bool
 }
 
 // DefaultPreflight returns a preflight runner with sane defaults.
@@ -74,7 +78,7 @@ func DefaultPreflight() Preflight {
 // rendering the sample command internally ("first task is representative").
 // Returns the three-state report; report.Err() is the blocking error.
 func (p Preflight) Run(ctx context.Context, proj *project.Config, taskParams []job.TaskParams) (Report, error) {
-	sampleCmd, err := renderSampleCommand(proj, taskParams)
+	sampleCmd, err := renderSampleCommand(proj, taskParams, p.ExcludeParams)
 	if err != nil {
 		return Report{}, err
 	}
@@ -549,9 +553,9 @@ func checkPipCheck(ctx context.Context, proj *project.Config, timeout time.Durat
 // freshly-expanded sweep. Preflight checks (path-arg, imports) only
 // need one sample because all tasks in a sweep share the same script
 // + same env; only the arg values differ.
-func renderSampleCommand(proj *project.Config, taskParams []job.TaskParams) (string, error) {
+func renderSampleCommand(proj *project.Config, taskParams []job.TaskParams, exclude map[string]bool) (string, error) {
 	if len(taskParams) == 0 {
 		return "", nil
 	}
-	return job.Render(proj.CmdTemplate, taskParams[0])
+	return job.RenderExcluding(proj.CmdTemplate, taskParams[0], exclude)
 }

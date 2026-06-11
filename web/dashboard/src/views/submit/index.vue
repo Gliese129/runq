@@ -95,7 +95,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, provide, reactive, markRaw, onMounted } from 'vue'
+import { ref, computed, provide, reactive, markRaw, onMounted, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { jobsApi } from '@/apis/jobs'
@@ -285,7 +285,10 @@ function buildJobConfig() {
 // row/link-set model. Lands on the configure step, ready to tweak & submit.
 onMounted(async () => {
   const fromJob = route.query.fromJob
-  if (typeof fromJob !== 'string' || !fromJob) return
+  if (typeof fromJob !== 'string' || !fromJob) {
+    restoreDraft()
+    return
+  }
   try {
     const detail = await jobsApi.get(fromJob)
     if (!detail.config) {
@@ -334,6 +337,42 @@ async function onJobYamlSelected(path: string) {
 }
 
 const submitError = ref('')
+
+// Stale errors are misinformation: leaving the review step (Back, edits)
+// clears the previous submit/preflight error immediately.
+watch(step, () => { submitError.value = '' })
+
+// ── Draft insurance: the wizard state survives accidental navigation,
+// reloads and crashes. Saved (debounced) to localStorage; restored on
+// mount when meaningful; cleared after a successful submit.
+let draftTimer: ReturnType<typeof setTimeout> | null = null
+watch([projectName, note, rows, linkSets, step], () => {
+  if (draftTimer) clearTimeout(draftTimer)
+  draftTimer = setTimeout(() => {
+    if (rows.value.length === 0 && !note.value) return
+    prefs.submitDraft.value = {
+      projectName: projectName.value,
+      note: note.value,
+      rows: JSON.parse(JSON.stringify(rows.value)),
+      linkSets: JSON.parse(JSON.stringify(linkSets.value)),
+      step: step.value,
+      ts: Date.now(),
+    }
+  }, 800)
+}, { deep: true })
+
+function restoreDraft(): boolean {
+  const d = prefs.submitDraft.value
+  if (!d || !Array.isArray(d.rows) || d.rows.length === 0) return false
+  projectName.value = d.projectName || projectName.value
+  note.value = d.note || ''
+  rows.value = d.rows
+  linkSets.value = Array.isArray(d.linkSets) ? d.linkSets : []
+  step.value = Math.min(d.step ?? 1, 1) // never restore into review (dry-run is stale)
+  snack.info('Restored unsubmitted draft — values and links are back')
+  return true
+}
+
 const isPreflightError = computed(() => submitError.value.includes('preflight') || submitError.value.includes('- import:') || submitError.value.includes('- pip_check:'))
 
 async function submit(forceSkipPreflight = false) {
@@ -346,6 +385,7 @@ async function submit(forceSkipPreflight = false) {
       timeoutMs: 50000,
     })
     snack.success(t('submit.success'))
+    prefs.submitDraft.value = null // submitted — the draft has served its purpose
     router.push({ name: 'job-detail', params: { project: projectName.value, jobId: res.job_id } })
   } catch (e: any) {
     submitError.value = e?.message || 'Submit failed'
