@@ -276,6 +276,16 @@ func removeMappingValue(root *yaml.Node, key string) {
 // but the returned (and persisted) path is always the physical location, not
 // the symlink. This way, if data_path changes later, old task rows still
 // point to their real directory.
+// ProspectiveRoot returns where ResolveRoot WOULD place the workspace,
+// creating NOTHING — previews must stay zero-disk. Mirrors ResolveRoot's
+// path logic only (no mkdir, no symlink, no validation side effects).
+func ProspectiveRoot(cfg *GlobalConfig, workingDir, project string) string {
+	if cfg == nil || cfg.DataPath == "" {
+		return filepath.Join(workingDir, ".runq")
+	}
+	return filepath.Join(cfg.DataPath, project)
+}
+
 func ResolveRoot(cfg *GlobalConfig, workingDir, project string) (string, error) {
 	if err := validateProjectName(project); err != nil {
 		return "", err

@@ -12,22 +12,28 @@
           :placeholder="t('submit.note_placeholder')"
           prepend-inner-icon="mdi-text-short"
           density="compact" variant="outlined" hide-details class="ml-4 font-mono"
+          :class="{ 'chip-target': chipTarget === 'note' }"
+          @focus="chipTarget = 'note'"
         />
       </div>
       <div class="d-flex align-center ga-2 mt-2">
         <v-icon size="16" color="on-surface-variant">mdi-tag-outline</v-icon>
         <span class="text-caption text-on-surface-variant flex-shrink-0">Job name</span>
         <v-text-field
+          ref="jobNameField"
           v-model="state.jobName"
           :placeholder="jobNamePlaceholder"
           density="compact" variant="outlined" hide-details class="ml-4 font-mono"
+          :class="{ 'chip-target': chipTarget === 'name' }"
+          @focus="chipTarget = 'name'"
         />
       </div>
       <div class="d-flex align-center flex-wrap ga-1 mt-2">
+        <span class="text-caption text-on-surface-variant mr-1">→ {{ chipTarget === 'name' ? 'job name' : 'note' }}:</span>
         <v-chip
-          v-for="ph in notePlaceholders" :key="ph"
+          v-for="ph in activeChips" :key="ph"
           size="x-small" variant="outlined" class="cursor-pointer font-mono opacity-70"
-          @click="insertNotePlaceholder(ph)"
+          @click="insertPlaceholder(ph)"
         >{{ '{{' + ph + '\}\}' }}</v-chip>
         <v-spacer />
         <span v-if="resolvedNote" class="text-caption text-on-surface-variant font-mono">
@@ -485,13 +491,30 @@ const notePlaceholders = computed(() => [
   ...state.rows.map(r => r.name),
 ])
 
+// Chips insert into the LAST FOCUSED of the two template fields (note /
+// job name). The vocabularies differ: note knows the volatile builtins
+// (version/date/...); the scheduler name only knows params + identity ids
+// (mirrors internal/job/jobname.go) — offering {{version}} there would
+// render empty, so it is not offered.
+const NAME_BUILTINS = ['project', 'job_id', 'task_id']
+const chipTarget = ref<'note' | 'name'>('note')
+const activeChips = computed(() =>
+  chipTarget.value === 'name'
+    ? [...NAME_BUILTINS, ...state.rows.map(r => r.name)]
+    : notePlaceholders.value)
+
 const noteField = ref()
-function insertNotePlaceholder(ph: string) {
-  const input: HTMLInputElement | undefined = noteField.value?.$el?.querySelector('input')
+const jobNameField = ref()
+function insertPlaceholder(ph: string) {
+  const isName = chipTarget.value === 'name'
+  const field = isName ? jobNameField.value : noteField.value
+  const get = () => (isName ? state.jobName : state.note)
+  const set = (v: string) => { if (isName) state.jobName = v; else state.note = v }
+  const input: HTMLInputElement | undefined = field?.$el?.querySelector('input')
   const text = '{{' + ph + '}}'
-  if (!input) { state.note += text; return }
-  const pos = input.selectionStart ?? state.note.length
-  state.note = state.note.slice(0, pos) + text + state.note.slice(pos)
+  if (!input) { set(get() + text); return }
+  const pos = input.selectionStart ?? get().length
+  set(get().slice(0, pos) + text + get().slice(pos))
 }
 
 const resolvedNote = ref('')
@@ -520,6 +543,11 @@ const formula = computed(() => {
 </script>
 
 <style scoped>
+.chip-target :deep(.v-field__outline) {
+  --v-field-border-opacity: 0.6;
+  color: rgb(var(--v-theme-primary));
+}
+
 .border-b { border-bottom: 0.5px solid rgb(var(--v-theme-outline-variant)); }
 .font-mono { font-family: monospace; }
 .min-w-0 { min-width: 0; }

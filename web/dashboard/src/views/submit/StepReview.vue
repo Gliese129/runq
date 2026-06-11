@@ -20,6 +20,9 @@
           <div v-if="resolvedNote" class="text-caption text-on-surface-variant text-truncate" style="font-family: monospace" :title="resolvedNote">
             {{ resolvedNote }}
           </div>
+          <div class="text-caption text-on-surface-variant text-truncate" style="font-family: monospace" :title="'scheduler job name template (rendered per task — see Rendered commands below)'">
+            <v-icon size="10">mdi-tag-outline</v-icon> {{ effectiveJobName }}
+          </div>
         </v-card>
       </v-col>
       <v-col cols="12" sm="3">
@@ -171,6 +174,12 @@ onMounted(async () => {
     resolvedNote.value = (await jobsApi.resolveNote(cfg)).resolved
   } catch { resolvedNote.value = '' }
 })
+
+// Effective scheduler job name TEMPLATE (override > project > default).
+// The rendered per-task value is backend truth — visible in the Rendered
+// commands block below, never simulated here (U1).
+const effectiveJobName = computed(() =>
+  state.jobName.trim() || state.newProject.jobName || 'rq-{{task_id\u007d\u007d')
 
 const sweptParamNames = computed(() => computeSwept(state.rows, state.linkSets))
 const fixedParams = computed(() => fixedParamPreview(state.rows, state.linkSets))

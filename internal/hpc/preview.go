@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/gliese129/runq/internal/config"
 	"github.com/gliese129/runq/internal/hpcconfig"
 	"github.com/gliese129/runq/internal/hpccore"
 	"github.com/gliese129/runq/internal/job"
@@ -38,7 +39,11 @@ func (b *Backend) Preview(ctx context.Context, jobCfg job.JobConfig, proj *proje
 	}
 
 	var s strings.Builder
-	fmt.Fprintf(&s, "dry-run: %d task(s) would be submitted\n\n", len(plan.Tasks))
+	fmt.Fprintf(&s, "dry-run: %d task(s) would be submitted\n", len(plan.Tasks))
+	// Where <workspace> will actually live — shown read-only (nothing is
+	// created here); ids are regenerated at real submit.
+	root := config.ProspectiveRoot(b.StorageCfg, proj.WorkingDir, proj.ProjectName)
+	fmt.Fprintf(&s, "workspace root: %s/<job_id> — <workspace> below means that job dir (ids regenerate at submit)\n\n", root)
 	for _, c := range plan.Preflight.Results {
 		mark := map[string]string{"passed": "✓", "failed": "✗"}[c.Status]
 		if mark == "" {

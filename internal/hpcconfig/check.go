@@ -108,6 +108,13 @@ func (c *Config) Check() []CheckResult {
 	}
 
 	results = append(results, renderCheck("submit_template", "submit_template", c.SubmitTemplate, true))
+	// Advisory: configs predating {{name}} pass raw ids to -N/--job-name —
+	// SGE rejects digit-first object names. Not a failure (the dialect is
+	// the user's), but worth a nudge toward the sanitized name.
+	if strings.Contains(c.SubmitTemplate, "{{task_id}}") && !strings.Contains(c.SubmitTemplate, "{{name}}") {
+		results = append(results, CheckResult{"job name", "skip",
+			"submit_template uses {{task_id}} but not {{name}} — raw ids can start with a digit (SGE rejects them); prefer -N {{name}} (sanitized, supports project job_name templates)"})
+	}
 
 	results = append(results, checkRegex(c.SubmitIDRegex))
 
