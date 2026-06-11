@@ -2,23 +2,25 @@
   <div style="max-width: 640px; margin: 0 auto">
     <div class="text-h5 font-weight-bold mb-6">{{ t('settings.title') }}</div>
 
-    <!-- System info -->
+    <!-- System (editable) -->
     <v-card class="mb-4 pa-5">
       <div class="text-subtitle-2 mb-3">{{ t('settings.system') }}</div>
-      <div class="d-flex flex-column ga-2">
+      <div class="d-flex flex-column ga-3">
         <div class="d-flex align-center justify-space-between">
           <span class="text-on-surface-variant">{{ t('settings.mode') }}</span>
-          <v-chip size="small" variant="tonal" color="primary">
-            {{ config.mode === 'daemon' ? t('settings.mode_local') : t('settings.mode_hpc') }}
-          </v-chip>
+          <v-btn-toggle v-model="globalMode" mandatory density="compact" variant="outlined" divided>
+            <v-btn value="daemon" size="small">{{ t('settings.mode_local') }}</v-btn>
+            <v-btn value="hpc" size="small">{{ t('settings.mode_hpc') }}</v-btn>
+          </v-btn-toggle>
         </div>
-        <div class="d-flex align-center justify-space-between">
-          <span class="text-on-surface-variant">{{ t('settings.data_path') }}</span>
-          <code v-if="config.dataPath" class="text-body-2 cursor-pointer" @click="copyToClipboard(config.dataPath)">
-            {{ config.dataPath }}
-            <v-icon size="12" class="ml-1" color="on-surface-variant">mdi-content-copy</v-icon>
-          </code>
-          <span v-else class="text-body-2 text-on-surface-variant font-italic">{{ t('settings.data_path_default') }}</span>
+        <div class="d-flex align-center justify-space-between ga-4">
+          <span class="text-on-surface-variant flex-shrink-0">{{ t('settings.data_path') }}</span>
+          <v-text-field
+            v-model="globalDataPath"
+            :placeholder="t('settings.data_path_default')"
+            density="compact" variant="outlined" hide-details
+            class="font-mono" style="max-width: 360px"
+          />
         </div>
         <div class="d-flex align-center justify-space-between">
           <span class="text-on-surface-variant">{{ t('settings.config_path') }}</span>
@@ -26,6 +28,104 @@
             {{ config.configPath }}
             <v-icon size="12" class="ml-1" color="on-surface-variant">mdi-content-copy</v-icon>
           </code>
+        </div>
+        <div v-if="globalDirty" class="d-flex align-center ga-2">
+          <v-btn size="small" variant="tonal" color="primary" :loading="savingGlobal" @click="saveGlobal">{{ t('common.save') }}</v-btn>
+          <span class="text-caption text-on-surface-variant">{{ t('settings.restart_hint') }}</span>
+        </div>
+      </div>
+    </v-card>
+
+    <!-- HPC cluster templates: every field is always rendered (schema-driven),
+         whether or not it exists in the file yet -->
+    <v-card class="mb-4 pa-5">
+      <div class="d-flex align-center justify-space-between mb-1">
+        <div class="text-subtitle-2">{{ t('settings.hpc_title') }}</div>
+        <div class="d-flex ga-2">
+          <v-btn size="x-small" variant="tonal" @click="checkHPC">
+            <v-icon start size="12">mdi-stethoscope</v-icon> {{ t('settings.hpc_check') }}
+          </v-btn>
+          <v-btn size="x-small" variant="tonal" color="primary" :loading="savingHPC" @click="saveHPC">{{ t('common.save') }}</v-btn>
+        </div>
+      </div>
+      <div class="text-caption text-on-surface-variant mb-3">
+        {{ t('settings.hpc_rewrite_note') }}
+      </div>
+
+      <!-- Presets: same starter templates as `hpc init --scheduler` -->
+      <div v-if="presetNames.length > 0" class="d-flex align-center flex-wrap ga-1 mb-4">
+        <span class="text-caption text-on-surface-variant mr-1">{{ t('settings.hpc_preset_label') }}</span>
+        <v-chip
+          v-for="name in presetNames" :key="name"
+          size="x-small" variant="outlined" class="cursor-pointer font-mono"
+          @click="loadPreset(name)"
+        >{{ name }}</v-chip>
+      </div>
+
+      <!-- Natural-language label + literal yaml key (Check results and CLI
+           users reference the key — it must stay visible) -->
+      <template v-for="f in hpcFields" :key="f.key">
+        <div class="d-flex align-baseline ga-2 mb-1">
+          <span class="text-body-2 font-weight-medium">{{ t(f.labelKey) }}</span>
+          <code class="text-caption text-on-surface-variant">{{ f.key }}</code>
+        </div>
+        <v-text-field
+          v-if="f.key === 'submit_id_regex'"
+          v-model="hpcForm[f.key] as string"
+          :placeholder="f.placeholder"
+          density="compact" variant="outlined"
+          class="font-mono mb-3"
+          :hint="t('settings.hpc_regex_hint')"
+          persistent-hint
+        />
+        <template v-else>
+          <div class="tmpl-display rounded pa-2 mb-1 cursor-pointer d-flex align-center ga-2" @click="openEditor(f.key)">
+            <span class="font-mono flex-grow-1 text-body-2" :class="{ 'opacity-50': !hpcForm[f.key] }" style="word-break: break-all">
+              {{ hpcForm[f.key] || f.placeholder }}
+            </span>
+            <v-icon size="14" color="on-surface-variant" class="flex-shrink-0">mdi-pencil-outline</v-icon>
+          </div>
+          <div class="text-caption text-on-surface-variant mb-3">{{ t(f.hintKey) }}</div>
+        </template>
+      </template>
+
+      <!-- status_parser: list of pipeline stages -->
+      <div class="d-flex align-baseline ga-2 mb-1">
+        <span class="text-body-2 font-weight-medium">{{ t('settings.hpc_f_parser') }}</span>
+        <code class="text-caption text-on-surface-variant">status_parser</code>
+      </div>
+      <div class="text-caption text-on-surface-variant mb-2">{{ t('settings.hpc_f_parser_hint') }}</div>
+      <div v-for="(stage, i) in hpcParser" :key="i" class="d-flex ga-2 mb-1 align-center">
+        <div class="tmpl-display rounded pa-2 cursor-pointer d-flex align-center ga-2 flex-grow-1" @click="openStageEditor(i)">
+          <span class="font-mono flex-grow-1 text-body-2" :class="{ 'opacity-50': !stage }" style="word-break: break-all">
+            {{ stage || `stage ${i + 1}` }}
+          </span>
+          <v-icon size="14" color="on-surface-variant" class="flex-shrink-0">mdi-pencil-outline</v-icon>
+        </div>
+        <v-btn icon size="x-small" variant="text" @click="hpcParser.splice(i, 1)">
+          <v-icon size="14">mdi-close</v-icon>
+        </v-btn>
+      </div>
+      <v-btn size="x-small" variant="text" color="primary" class="mb-3" @click="hpcParser.push(''); openStageEditor(hpcParser.length - 1)">
+        <v-icon start size="12">mdi-plus</v-icon> {{ t('settings.hpc_add_stage') }}
+      </v-btn>
+
+      <ShellTemplateEditor
+        v-model="editorOpen"
+        :value="editorValue"
+        :title="editorTitle"
+        :placeholders="editorPlaceholders"
+        @apply="onEditorApply"
+      />
+
+      <!-- Check results: same three-state grammar as preflight -->
+      <div v-if="hpcResults.length > 0" class="mt-2">
+        <div v-for="r in hpcResults" :key="r.Name" class="d-flex align-start ga-2 py-1" style="font-size: 12px">
+          <v-icon size="14" :color="r.Status === 'ok' ? 'success' : r.Status === 'fail' ? 'error' : 'grey'">
+            {{ r.Status === 'ok' ? 'mdi-check' : r.Status === 'fail' ? 'mdi-alert-circle' : 'mdi-minus' }}
+          </v-icon>
+          <code class="flex-shrink-0" style="width: 140px">{{ r.Name }}</code>
+          <span class="text-on-surface-variant font-mono" style="word-break: break-all">{{ r.Detail }}</span>
         </div>
       </div>
     </v-card>
@@ -138,12 +238,142 @@ import { useTheme } from 'vuetify'
 import { useConfigStore } from '@/stores/config'
 import { useSettingsStore } from '@/stores/settings'
 import { useSnackbar } from '@/composables/useSnackbar'
+import { configApi, type HPCConfig, type HPCCheckResult } from '@/apis/config'
+import ShellTemplateEditor from '@/components/ShellTemplateEditor.vue'
 
 const { t, locale } = useI18n()
 const theme = useTheme()
 const config = useConfigStore()
 const settings = useSettingsStore()
 const snack = useSnackbar()
+
+// ── Global config (mode / data_path) ──
+const globalMode = ref('')
+const globalDataPath = ref('')
+const savingGlobal = ref(false)
+const globalDirty = computed(() =>
+  config.loaded && (globalMode.value !== config.mode || globalDataPath.value !== config.dataPath),
+)
+
+async function saveGlobal() {
+  savingGlobal.value = true
+  try {
+    await configApi.putGlobal(globalMode.value, globalDataPath.value)
+    snack.success(t('settings.global_saved'))
+    await config.fetchConfig()
+    syncGlobal()
+  } catch (e: any) {
+    snack.error(e?.message || 'Save failed')
+  } finally {
+    savingGlobal.value = false
+  }
+}
+
+function syncGlobal() {
+  globalMode.value = config.mode
+  globalDataPath.value = config.dataPath
+}
+
+// ── HPC templates (schema-driven: all fields always rendered) ──
+type HPCFieldKey = 'submit_template' | 'submit_id_regex' | 'status_template' | 'kill_template'
+const hpcFields: { key: HPCFieldKey; labelKey: string; hintKey: string; placeholder: string }[] = [
+  { key: 'submit_template', labelKey: 'settings.hpc_f_submit', hintKey: 'settings.hpc_f_submit_hint', placeholder: 'sbatch --gpus={{gpus}} {{run_sh}}' },
+  { key: 'submit_id_regex', labelKey: 'settings.hpc_f_regex', hintKey: 'settings.hpc_regex_hint', placeholder: 'Submitted batch job ([0-9]+)' },
+  { key: 'status_template', labelKey: 'settings.hpc_f_status', hintKey: 'settings.hpc_f_status_hint', placeholder: 'sacct -n -X -j {{ext_id}} -o State' },
+  { key: 'kill_template', labelKey: 'settings.hpc_f_kill', hintKey: 'settings.hpc_f_kill_hint', placeholder: 'scancel {{ext_id}}' },
+]
+const hpcForm = ref<Record<HPCFieldKey, string>>({
+  submit_template: '', submit_id_regex: '', status_template: '', kill_template: '',
+})
+const hpcParser = ref<string[]>([])
+const hpcPlaceholders = ref<Record<string, string[]>>({})
+const hpcResults = ref<HPCCheckResult[]>([])
+const savingHPC = ref(false)
+
+function placeholdersFor(key: string): string[] {
+  const base = hpcPlaceholders.value[key] ?? []
+  return key === 'submit_template' ? [...base, 'param.*'] : base
+}
+
+// ── Shell editor dialog (one instance, retargeted per field/stage) ──
+const editorOpen = ref(false)
+const editorTitle = ref('')
+const editorValue = ref('')
+const editorPlaceholders = ref<string[]>([])
+let editorTarget: { kind: 'field'; key: HPCFieldKey } | { kind: 'stage'; index: number } | null = null
+
+function openEditor(key: HPCFieldKey) {
+  editorTarget = { kind: 'field', key }
+  editorTitle.value = key
+  editorValue.value = hpcForm.value[key]
+  editorPlaceholders.value = placeholdersFor(key)
+  editorOpen.value = true
+}
+
+function openStageEditor(index: number) {
+  editorTarget = { kind: 'stage', index }
+  editorTitle.value = `status_parser[${index}]`
+  editorValue.value = hpcParser.value[index] ?? ''
+  editorPlaceholders.value = placeholdersFor('status_parser')
+  editorOpen.value = true
+}
+
+function onEditorApply(value: string) {
+  if (!editorTarget) return
+  if (editorTarget.kind === 'field') hpcForm.value[editorTarget.key] = value
+  else hpcParser.value[editorTarget.index] = value
+  editorTarget = null
+}
+
+// ── Presets (same source as `hpc init --scheduler`) ──
+const presetNames = ref<string[]>([])
+const presetMap = ref<Record<string, HPCConfig>>({})
+
+function loadPreset(name: string) {
+  const p = presetMap.value[name]
+  if (!p) return
+  hpcForm.value = {
+    submit_template: p.submit_template || '',
+    submit_id_regex: p.submit_id_regex || '',
+    status_template: p.status_template || '',
+    kill_template: p.kill_template || '',
+  }
+  hpcParser.value = [...(p.status_parser || [])]
+  hpcResults.value = []
+  snack.info(t('settings.hpc_preset_loaded', { name }))
+}
+
+function collectHPC(): HPCConfig {
+  return {
+    submit_template: hpcForm.value.submit_template,
+    submit_id_regex: hpcForm.value.submit_id_regex,
+    status_template: hpcForm.value.status_template || undefined,
+    status_parser: hpcParser.value.filter(s => s.trim()),
+    kill_template: hpcForm.value.kill_template,
+  }
+}
+
+async function checkHPC() {
+  try {
+    const res = await configApi.checkHPC(collectHPC())
+    hpcResults.value = res.results
+  } catch (e: any) {
+    snack.error(e?.message || 'Check failed')
+  }
+}
+
+async function saveHPC() {
+  savingHPC.value = true
+  try {
+    await configApi.putHPC(collectHPC())
+    await checkHPC()
+    snack.success(t('settings.hpc_saved'))
+  } catch (e: any) {
+    snack.error(e?.message || 'Save failed')
+  } finally {
+    savingHPC.value = false
+  }
+}
 
 const webhookUrl = ref('')
 const webhookEvents = ref<string[]>([])
@@ -217,5 +447,42 @@ onMounted(async () => {
   await settings.loadWebhook()
   webhookUrl.value = settings.webhook.url
   webhookEvents.value = [...settings.webhook.events]
+
+  if (!config.loaded) await config.fetchConfig()
+  syncGlobal()
+
+  try {
+    const presets = await configApi.getHPCPresets()
+    presetNames.value = presets.names
+    presetMap.value = presets.presets
+  } catch { /* presets unavailable */ }
+
+  try {
+    const res = await configApi.getHPC()
+    hpcPlaceholders.value = res.placeholders
+    if (res.exists) {
+      hpcForm.value = {
+        submit_template: res.config.submit_template || '',
+        submit_id_regex: res.config.submit_id_regex || '',
+        status_template: res.config.status_template || '',
+        kill_template: res.config.kill_template || '',
+      }
+      hpcParser.value = [...(res.config.status_parser || [])]
+    }
+  } catch { /* endpoint unavailable — leave schema-rendered empty fields */ }
 })
 </script>
+
+<style scoped>
+.font-mono, .font-mono :deep(input), .font-mono :deep(textarea) { font-family: monospace; font-size: 13px; }
+.tmpl-display {
+  border: 1px solid rgb(var(--v-theme-outline-variant));
+  background: rgb(var(--v-theme-surface-variant), 0.2);
+  transition: border-color 0.15s ease, background 0.15s ease;
+  min-height: 38px;
+}
+.tmpl-display:hover {
+  border-color: rgb(var(--v-theme-primary));
+  background: rgb(var(--v-theme-surface-variant), 0.35);
+}
+</style>

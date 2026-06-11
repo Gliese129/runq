@@ -6,12 +6,24 @@
         <v-icon size="16" color="primary">mdi-folder-outline</v-icon>
         <span class="text-body-2 font-weight-medium flex-shrink-0">{{ state.projectName }}</span>
         <v-text-field
+          ref="noteField"
           v-model="state.note"
           :label="t('submit.note')"
           :placeholder="t('submit.note_placeholder')"
           prepend-inner-icon="mdi-text-short"
-          density="compact" variant="outlined" hide-details class="ml-4"
+          density="compact" variant="outlined" hide-details class="ml-4 font-mono"
         />
+      </div>
+      <div class="d-flex align-center flex-wrap ga-1 mt-2">
+        <v-chip
+          v-for="ph in notePlaceholders" :key="ph"
+          size="x-small" variant="outlined" class="cursor-pointer font-mono opacity-70"
+          @click="insertNotePlaceholder(ph)"
+        >{{ '{{' + ph + '\}\}' }}</v-chip>
+        <v-spacer />
+        <span v-if="resolvedNote" class="text-caption text-on-surface-variant font-mono">
+          → {{ resolvedNote }}
+        </span>
       </div>
     </v-card>
 
@@ -202,7 +214,8 @@ import {
   activeValues, linkColor, rowEffect, validateTable, taskCount,
   type LinkSet, type ParamRow,
 } from './paramTable'
-import { sweepSummary } from './submitFlow'
+import { sweepSummary, buildJobConfig } from './submitFlow'
+import { jobsApi } from '@/apis/jobs'
 
 const { t } = useI18n()
 const state = inject(SUBMIT_STATE_KEY)!
@@ -442,6 +455,42 @@ function effectStyle(row: ParamRow) {
 }
 
 const validation = computed(() => validateTable(state.rows, state.linkSets))
+
+// ── Note placeholders + live resolution preview ──
+// Built-ins mirror internal/job/notename.go (stable seven); param names are
+// appended dynamically.
+const NOTE_BUILTINS = ['version', 'date', 'time', 'datetime', 'project', 'user', 'sweep']
+const notePlaceholders = computed(() => [
+  ...NOTE_BUILTINS,
+  ...state.rows.map(r => r.name),
+])
+
+const noteField = ref()
+function insertNotePlaceholder(ph: string) {
+  const input: HTMLInputElement | undefined = noteField.value?.$el?.querySelector('input')
+  const text = '{{' + ph + '}}'
+  if (!input) { state.note += text; return }
+  const pos = input.selectionStart ?? state.note.length
+  state.note = state.note.slice(0, pos) + text + state.note.slice(pos)
+}
+
+const resolvedNote = ref('')
+let noteTimer: ReturnType<typeof setTimeout> | null = null
+watch(
+  () => [state.note, state.rows, state.linkSets],
+  () => {
+    if (noteTimer) clearTimeout(noteTimer)
+    if (!state.note.includes('{{')) { resolvedNote.value = ''; return }
+    noteTimer = setTimeout(async () => {
+      try {
+        const cfg = buildJobConfig(state.projectName, state.note, state.rows, state.linkSets)
+        const res = await jobsApi.resolveNote(cfg)
+        resolvedNote.value = res.resolved
+      } catch { resolvedNote.value = '' }
+    }, 500)
+  },
+  { deep: true },
+)
 
 const formula = computed(() => {
   const summary = sweepSummary(state.rows, state.linkSets)

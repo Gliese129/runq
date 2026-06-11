@@ -9,6 +9,7 @@ export interface SubmitProjectDraft {
   name: string
   workDir: string
   cmd: string
+  setupCmd: string
   gpus: number
   maxRetry: number
   envType: string
@@ -103,6 +104,7 @@ export function buildProjectPayload(project: SubmitProjectDraft): ProjectPayload
     project_name: project.name.trim(),
     working_dir: project.workDir,
     command_template: project.cmd,
+    setup_command: project.setupCmd.trim() || undefined,
     defaults: { gpus_per_task: project.gpus, max_retry: project.maxRetry },
   }
   if (project.envType) {

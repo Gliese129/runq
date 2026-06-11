@@ -3,6 +3,7 @@ package dashboard
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/gliese129/runq/internal/hpc"
 	"github.com/gliese129/runq/internal/job"
@@ -170,6 +171,20 @@ func (b *HPCBackend) SubmitJob(ctx context.Context, cfg job.JobConfig, opts Subm
 
 func (b *HPCBackend) DryRun(_ context.Context, cfg job.JobConfig) ([]job.TaskParams, error) {
 	return job.Expand(&cfg)
+}
+
+func (b *HPCBackend) ResolveNote(ctx context.Context, cfg job.JobConfig) (string, error) {
+	rows, err := b.store.ListJobs(ctx, cfg.Project)
+	if err != nil {
+		return "", err
+	}
+	notes := make([]string, 0, len(rows))
+	for _, r := range rows {
+		notes = append(notes, r.Note)
+	}
+	return job.RenderNote(&cfg, job.NoteContext{
+		Project: cfg.Project, Now: time.Now(), ExistingNotes: notes,
+	})
 }
 
 func (b *HPCBackend) CreateProject(_ context.Context, cfg project.Config) error {

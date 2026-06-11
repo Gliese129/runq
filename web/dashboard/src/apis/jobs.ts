@@ -47,4 +47,8 @@ export const jobsApi = {
   /** Force a reconcile from external sources (poll-model backends only). */
   refresh: (jobId: string) =>
     api.post(`/jobs/${encodeURIComponent(jobId)}/refresh`),
+
+  /** Preview note resolution ({{version}} scan etc.) — submit's code path. */
+  resolveNote: (cfg: JobConfigPayload) =>
+    api.post<{ resolved: string }>('/jobs/resolve-note', cfg, { silent: true }),
 }

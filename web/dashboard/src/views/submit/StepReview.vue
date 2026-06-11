@@ -17,6 +17,9 @@
         <v-card class="pa-3 text-center">
           <div class="text-caption text-on-surface-variant mb-1">{{ t('submit.project') }}</div>
           <div class="text-body-2 font-weight-medium text-truncate">{{ state.projectName }}</div>
+          <div v-if="resolvedNote" class="text-caption text-on-surface-variant text-truncate" style="font-family: monospace" :title="resolvedNote">
+            {{ resolvedNote }}
+          </div>
         </v-card>
       </v-col>
       <v-col cols="12" sm="3">
@@ -105,13 +108,25 @@
 </template>
 
 <script setup lang="ts">
-import { computed, inject } from 'vue'
+import { computed, inject, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { SUBMIT_STATE_KEY } from '@/types/submit'
-import { sweptParamNames as computeSwept, fixedParamPreview } from './submitFlow'
+import { sweptParamNames as computeSwept, fixedParamPreview, buildJobConfig } from './submitFlow'
+import { jobsApi } from '@/apis/jobs'
 
 const { t } = useI18n()
 const state = inject(SUBMIT_STATE_KEY)!
+
+// Final job name as it WILL be submitted ({{version}} already scanned) —
+// resolved by the backend, never simulated here (U1).
+const resolvedNote = ref('')
+onMounted(async () => {
+  if (!state.note.includes('{{')) { resolvedNote.value = state.note; return }
+  try {
+    const cfg = buildJobConfig(state.projectName, state.note, state.rows, state.linkSets)
+    resolvedNote.value = (await jobsApi.resolveNote(cfg)).resolved
+  } catch { resolvedNote.value = '' }
+})
 
 const sweptParamNames = computed(() => computeSwept(state.rows, state.linkSets))
 const fixedParams = computed(() => fixedParamPreview(state.rows, state.linkSets))

@@ -169,6 +169,18 @@ func (b *DaemonBackend) DryRun(_ context.Context, cfg job.JobConfig) ([]job.Task
 	return job.Expand(&cfg)
 }
 
+// ResolveNote goes over the socket — the daemon owns the store, and the
+// {{version}} family scan must run against it (same path as submit).
+func (b *DaemonBackend) ResolveNote(ctx context.Context, cfg job.JobConfig) (string, error) {
+	var resp struct {
+		Resolved string `json:"resolved"`
+	}
+	if err := b.do(ctx, "POST", "/api/jobs/resolve-note", cfg, &resp); err != nil {
+		return "", err
+	}
+	return resp.Resolved, nil
+}
+
 func (b *DaemonBackend) CreateProject(ctx context.Context, cfg project.Config) error {
 	return b.do(ctx, "POST", "/api/projects", cfg, nil)
 }

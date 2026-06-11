@@ -63,6 +63,20 @@ type Config struct {
 	WorkingDir  string            `yaml:"working_dir" json:"working_dir"`
 	CmdTemplate string            `yaml:"command_template" json:"command_template"`
 	Environment map[string]string `yaml:"environment,omitempty" json:"environment,omitempty"`
+	// SetupCommand optionally runs ONCE per job submission, on the node where
+	// runq runs (login node in HPC mode), after the plan compiles and before
+	// anything is persisted or submitted — a failure aborts with zero residue.
+	// Typical use: model pre-download. {{placeholder}}s may reference
+	// fixed_params only (it runs once; swept params are ambiguous → error).
+	// Runs synchronously: long setups are CLI-submission territory.
+	SetupCommand string `yaml:"setup_command,omitempty" json:"setup_command,omitempty"`
+	// EnvFile is an ambient env file sourced by the shell AT TASK START —
+	// runq never parses or stores its values (secrets stay out of the DB,
+	// run.sh exports, and every UI; rotation applies on the next task).
+	// Precedence: .env < explicit env (environment / overrides.env).
+	// nil → auto: use <working_dir>/.env when present. "" → disabled.
+	// other → path (relative to working_dir), missing file = submit error.
+	EnvFile *string `yaml:"env_file,omitempty" json:"env_file,omitempty"`
 	Defaults    Defaults          `yaml:"defaults,omitempty" json:"defaults,omitempty"`
 	Resume      ResumeConfig      `yaml:"resume,omitempty" json:"resume,omitempty"`
 	PythonEnv   PythonEnvConfig   `yaml:"python_env,omitempty" json:"python_env,omitempty"`

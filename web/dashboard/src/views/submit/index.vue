@@ -125,6 +125,7 @@ const newProject = reactive({
   name: '',
   workDir: '',
   cmd: '',
+  setupCmd: '',
   gpus: 1,
   maxRetry: 0,
   envType: '',

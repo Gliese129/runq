@@ -2,6 +2,7 @@ package submitplan
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -155,5 +156,50 @@ func TestBuildUsesInjectedJobID(t *testing.T) {
 	}
 	if plan.Tasks[0].TaskDir != filepath.Join(jobRoot, "task1") {
 		t.Fatalf("TaskDir = %q", plan.Tasks[0].TaskDir)
+	}
+}
+
+// P4: env_file semantics — nil auto-detects working_dir/.env; the reserved
+// RUNQ_ENV_FILE key carries it; explicit-missing errors; "" disables.
+func TestEnvFileResolution(t *testing.T) {
+	dir := t.TempDir()
+	proj := &project.Config{ProjectName: "p", WorkingDir: dir, CmdTemplate: "echo {{lr}}"}
+	cfg := job.JobConfig{Project: "p", Sweep: []job.SweepBlock{{Method: "grid",
+		Parameters: map[string]job.ParameterSpec{"lr": {Values: []any{0.1}}}}}}
+	deps := Deps{Paths: Paths{WorkspaceRoot: dir, LogRoot: dir}, SkipPreflight: true}
+
+	// auto, no .env present → key absent
+	plan, err := Build(context.Background(), cfg, proj, deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := plan.Tasks[0].Env["RUNQ_ENV_FILE"]; v != "" {
+		t.Errorf("no .env: key should be absent, got %q", v)
+	}
+
+	// auto, .env present → picked up
+	envPath := filepath.Join(dir, ".env")
+	os.WriteFile(envPath, []byte("A=1\n"), 0o600)
+	plan, err = Build(context.Background(), cfg, proj, deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := plan.Tasks[0].Env["RUNQ_ENV_FILE"]; v != envPath {
+		t.Errorf("auto .env: got %q want %q", v, envPath)
+	}
+
+	// explicitly disabled
+	empty := ""
+	proj.EnvFile = &empty
+	plan, _ = Build(context.Background(), cfg, proj, deps)
+	if v := plan.Tasks[0].Env["RUNQ_ENV_FILE"]; v != "" {
+		t.Errorf("disabled: key should be absent, got %q", v)
+	}
+
+	// explicit missing path → error
+	missing := "nope.env"
+	proj.EnvFile = &missing
+	if _, err := Build(context.Background(), cfg, proj, deps); err == nil {
+		t.Error("explicit missing env_file must error")
 	}
 }

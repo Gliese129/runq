@@ -174,3 +174,32 @@ func TestCUDAVisibleInProcess(t *testing.T) {
 		t.Errorf("expected CUDA_VISIBLE_DEVICES=1,3 in output, got %q", string(data))
 	}
 }
+
+// P4: RUNQ_ENV_FILE is sourced at task start; explicit env wins over it.
+func TestEnvFileSourcedWithExplicitPrecedence(t *testing.T) {
+	dir := t.TempDir()
+	envFile := filepath.Join(dir, ".env")
+	if err := os.WriteFile(envFile, []byte("FROM_FILE=file_value\nSHARED=file_value\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(dir, "out.log")
+
+	e := New()
+	_, err := e.Start(context.Background(), RunSpec{
+		TaskID:     "t1",
+		Command:    `printf '%s|%s' "$FROM_FILE" "$SHARED"`,
+		WorkingDir: dir,
+		Env: map[string]string{
+			"RUNQ_ENV_FILE": envFile,
+			"SHARED":        "explicit_value",
+		},
+		LogPath: logPath,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	out, _ := os.ReadFile(logPath)
+	if string(out) != "file_value|explicit_value" {
+		t.Errorf("precedence wrong: got %q, want file value for FROM_FILE and explicit for SHARED", out)
+	}
+}

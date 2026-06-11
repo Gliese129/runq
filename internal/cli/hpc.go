@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gliese129/runq/internal/config"
+	"github.com/gliese129/runq/internal/dashboard"
 	"github.com/gliese129/runq/internal/hpc"
 	"github.com/gliese129/runq/internal/hpcconfig"
 	"github.com/gliese129/runq/internal/job"
@@ -111,10 +112,11 @@ Examples:
 }
 
 func init() {
-	hpcInitCmd.Flags().String("scheduler", "", "preset to generate: slurm | pbs | sge (omit for generic)")
+	hpcInitCmd.Flags().String("scheduler", "", "preset to generate: slurm | pbs | sge | tsubame | abci (omit for generic)")
 	hpcSubmitCmd.Flags().String("project-file", "", "load project config from a YAML file instead of the HPC registry")
 	hpcSubmitCmd.Flags().StringP("note", "n", "", "Experiment note (overrides YAML note: field)")
 	hpcSubmitCmd.Flags().Bool("no-preflight", false, "skip fail-before-submit checks (pip/import/path)")
+	hpcSubmitCmd.Flags().Bool("dry-run", false, "compile and render only: print preflight, submit command and run.sh — nothing written or queued")
 	hpcStatusCmd.Flags().Bool("json", false, "output raw JSON")
 	hpcLsCmd.Flags().Bool("json", false, "output raw JSON")
 	for _, c := range []*cobra.Command{hpcBestCmd, hpcCollectCmd} {
@@ -204,6 +206,25 @@ func runHPCSubmit(cmd *cobra.Command, args []string) error {
 	}
 
 	skip, _ := cmd.Flags().GetBool("no-preflight")
+
+	if dry, _ := cmd.Flags().GetBool("dry-run"); dry {
+		b, st, err := newHPCBackend()
+		if err != nil {
+			return err
+		}
+		defer st.Close()
+		proj, err := resolveHPCProject(cmd, st, jobCfg.Project)
+		if err != nil {
+			return err
+		}
+		out, err := b.Preview(context.Background(), jobCfg, proj, skip)
+		if err != nil {
+			return err
+		}
+		fmt.Print(out)
+		return nil
+	}
+
 	jobID, n, err := submitHPCJobConfig(cmd, jobCfg, skip)
 	if err != nil {
 		return err
@@ -266,7 +287,13 @@ func runHPCStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	if jsonOut, _ := cmd.Flags().GetBool("json"); jsonOut {
-		printJSON(view)
+		// Machine output carries the backend self-description so scripts/AI
+		// can branch on state_model/kill_async without parsing prose (X1).
+		printJSON(map[string]any{
+			"capabilities": dashboard.NewHPCBackend(b, st).Capabilities(),
+			"job":          view.Job,
+			"tasks":        view.Tasks,
+		})
 		return nil
 	}
 

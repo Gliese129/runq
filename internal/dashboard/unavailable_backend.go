@@ -27,6 +27,10 @@ func (b *UnavailableBackend) RefreshJob(ctx context.Context, jobID string) error
 	return b.wrap()
 }
 
+func (b *UnavailableBackend) ResolveNote(ctx context.Context, cfg job.JobConfig) (string, error) {
+	return "", b.wrap()
+}
+
 func (b *UnavailableBackend) ListJobs(ctx context.Context) ([]JobSummary, error) {
 	return nil, b.wrap()
 }

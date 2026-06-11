@@ -161,6 +161,8 @@ export interface ProjectConfig {
   project_name: string
   working_dir: string
   command_template: string
+  /** optional one-shot command before each submit (fixed params only) */
+  setup_command?: string
   environment?: Record<string, string>
   defaults?: {
     gpus_per_task?: number
@@ -198,6 +200,8 @@ export interface ProjectPayload {
   project_name: string
   working_dir: string
   command_template: string
+  /** optional one-shot command before each submit (fixed params only) */
+  setup_command?: string
   defaults: {
     gpus_per_task: number
     max_retry: number

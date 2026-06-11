@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/preflight"
@@ -29,6 +30,11 @@ type Deps struct {
 	IDGen         func() string // used for task ids (and job id only when JobID is empty)
 	Paths         Paths
 	SkipPreflight bool
+	// PreflightDisableLocal skips the local-subprocess checks (imports,
+	// pip) — wired from hpc `preflight_local: false` for strict login nodes.
+	PreflightDisableLocal bool
+	// PreflightScope labels where local checks ran (e.g. "on login node").
+	PreflightScope string
 }
 
 type Plan struct {
@@ -39,6 +45,9 @@ type Plan struct {
 	GPUsPerTask int
 	Wandb       *project.WandbConfig
 	Tasks       []PlannedTask
+	// Preflight is the full three-state report (failed entries already
+	// aborted Build) — callers print it so skips stay visible.
+	Preflight preflight.Report
 }
 
 type PlannedTask struct {
@@ -56,6 +65,29 @@ type PlannedTask struct {
 	UID           int
 	TaskDir       string
 	CheckpointDir string
+}
+
+// resolveEnvFile applies the project's env_file semantics: nil = auto-use
+// <working_dir>/.env when present; "" = disabled; other = required path.
+func resolveEnvFile(proj *project.Config) (string, error) {
+	if proj.EnvFile == nil {
+		auto := filepath.Join(proj.WorkingDir, ".env")
+		if _, err := os.Stat(auto); err == nil {
+			return auto, nil
+		}
+		return "", nil
+	}
+	path := strings.TrimSpace(*proj.EnvFile)
+	if path == "" {
+		return "", nil // explicitly disabled
+	}
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(proj.WorkingDir, path)
+	}
+	if _, err := os.Stat(path); err != nil {
+		return "", fmt.Errorf("env_file %q: %w", path, err)
+	}
+	return path, nil
 }
 
 // Build compiles a JobConfig plus an already-resolved Project into a
@@ -119,7 +151,27 @@ func Build(ctx context.Context, cfg job.JobConfig, proj *project.Config, d Deps)
 		return Plan{}, fmt.Errorf("stat working_dir %q: %w", proj.WorkingDir, err)
 	}
 
-	if err := preflight.Run(ctx, proj, taskParams, d.SkipPreflight); err != nil {
+	// Ambient env file: carried as the reserved RUNQ_ENV_FILE env key so it
+	// flows through EnvJSON persistence / daemon recovery untouched. The
+	// shell sources it AT TASK START (executor prologue / run.sh header) —
+	// runq never reads its values. Precedence: .env < explicit env.
+	envFile, err := resolveEnvFile(proj)
+	if err != nil {
+		return Plan{}, err
+	}
+	if envFile != "" {
+		env["RUNQ_ENV_FILE"] = envFile
+	}
+
+	pf := preflight.DefaultPreflight()
+	pf.Skip = d.SkipPreflight
+	pf.DisableLocal = d.PreflightDisableLocal
+	pf.Scope = d.PreflightScope
+	pfReport, err := pf.Run(ctx, proj, taskParams)
+	if err != nil {
+		return Plan{}, err
+	}
+	if err := pfReport.Err(); err != nil {
 		return Plan{}, err
 	}
 
@@ -164,6 +216,7 @@ func Build(ctx context.Context, cfg job.JobConfig, proj *project.Config, d Deps)
 		GPUsPerTask: gpusPerTask,
 		Wandb:       proj.Wandb,
 		Tasks:       tasks,
+		Preflight:   pfReport,
 	}, nil
 }
 

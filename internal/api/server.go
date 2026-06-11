@@ -54,6 +54,7 @@ type Deps struct {
 	JobService interface {
 		SubmitJob(ctx context.Context, jobCfg job.JobConfig) (string, int, error)
 		SubmitJobWithOpts(ctx context.Context, jobCfg job.JobConfig, opts service.SubmitJobOpts) (string, int, error)
+		ResolveNote(ctx context.Context, jobCfg job.JobConfig) (string, error)
 		ListJobs(ctx context.Context, project string) ([]service.JobSummary, error)
 		ShowJob(ctx context.Context, jobID string) (*service.JobDetail, error)
 		KillJob(ctx context.Context, jobID string) (int, error)

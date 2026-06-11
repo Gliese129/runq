@@ -38,6 +38,13 @@ type SubmitJobOpts struct {
 	SkipPreflight bool
 }
 
+// ResolveNote renders note placeholders for preview — same code path the
+// submit uses, so the GUI's "will be submitted as ..." is truth, not a
+// frontend simulation (U1).
+func (s *JobService) ResolveNote(ctx context.Context, cfg job.JobConfig) (string, error) {
+	return resolveNote(ctx, s.Store, cfg)
+}
+
 // resolveNote renders note placeholders against this project's existing
 // job notes ({{version}} family scan needs them).
 func resolveNote(ctx context.Context, st *store.Store, cfg job.JobConfig) (string, error) {
@@ -120,6 +127,12 @@ func (s *JobService) SubmitJobWithOpts(ctx context.Context, jobCfg job.JobConfig
 		SkipPreflight: opts.SkipPreflight,
 	})
 	if err != nil {
+		return "", 0, err
+	}
+
+	// One-shot job setup (e.g. dataset/model pre-download). Runs before any
+	// DB row exists — failure leaves nothing behind.
+	if err := submitplan.RunSetup(ctx, proj, jobCfg); err != nil {
 		return "", 0, err
 	}
 

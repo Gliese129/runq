@@ -13,6 +13,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gliese129/runq/internal/hpccore"
+
 	"github.com/gliese129/runq/internal/utils"
 )
 
@@ -63,7 +65,22 @@ func (e *Executor) Start(parentCtx context.Context, spec RunSpec) (Result, error
 		e.mu.Unlock()
 	}()
 
-	cmd := exec.CommandContext(ctx, "sh", "-c", spec.Command)
+	command := spec.Command
+	// Ambient env file (RUNQ_ENV_FILE): sourced at task start, then the
+	// explicit env is re-exported ON TOP so explicit config always wins
+	// (precedence: .env < project/override env). runq never reads the
+	// file's values — secrets stay out of the DB, logs, and UIs.
+	if envFile := spec.Env["RUNQ_ENV_FILE"]; envFile != "" {
+		var b strings.Builder
+		fmt.Fprintf(&b, "if [ -f %s ]; then set -a; . %s; set +a; fi\n", hpccore.ShellQuote(envFile), hpccore.ShellQuote(envFile))
+		for k, v := range spec.Env {
+			fmt.Fprintf(&b, "export %s=%s\n", k, hpccore.ShellQuote(v))
+		}
+		b.WriteString(command)
+		command = b.String()
+	}
+
+	cmd := exec.CommandContext(ctx, "sh", "-c", command)
 	cmd.Dir = spec.WorkingDir
 	cmd.Env = buildEnv(spec.GPUs, spec.Env)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}

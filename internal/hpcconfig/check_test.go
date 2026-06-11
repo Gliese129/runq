@@ -1,6 +1,7 @@
 package hpcconfig
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -46,6 +47,25 @@ func TestCheckValidConfig(t *testing.T) {
 	}
 }
 
+func TestCheckParamNamespace(t *testing.T) {
+	cfg := validConfig()
+	cfg.SubmitTemplate = `qsub -l {{param.node_kind}}=1 -l h_rt={{param.h_rt}} -N {{param.lang}}_{{param.task}} {{run_sh}}`
+	r := findResult(t, cfg.Check(), "submit_template")
+	if r.Status != "ok" {
+		t.Fatalf("param.* refs should check ok, got %s (%s)", r.Status, r.Detail)
+	}
+	if !strings.Contains(r.Detail, "<h_rt>") {
+		t.Errorf("preview should show synthesized param sample, got %q", r.Detail)
+	}
+
+	// param.* is submit-only: kill_template referencing it must fail.
+	cfg2 := validConfig()
+	cfg2.KillTemplate = "scancel {{param.h_rt}}"
+	if r := findResult(t, cfg2.Check(), "kill_template"); r.Status != "fail" {
+		t.Errorf("param.* in kill_template should fail, got %s", r.Status)
+	}
+}
+
 func TestCheckUnknownPlaceholder(t *testing.T) {
 	cfg := validConfig()
 	cfg.SubmitTemplate = "sbatch {{run_sh}} --id={{taskid}}" // typo: taskid
@@ -77,5 +97,40 @@ func TestCheckParserStages(t *testing.T) {
 	}
 	if r := findResult(t, results, "status_parser[1]"); r.Status != "ok" {
 		t.Errorf("parser stage: want ok, got %s (%s)", r.Status, r.Detail)
+	}
+}
+
+// Every shipped preset must parse and pass its own check (presets are the
+// first thing a new cluster user sees — they must never be born broken).
+func TestPresetsParseAndCheck(t *testing.T) {
+	for _, name := range Presets() {
+		cfg, err := Preset(name)
+		if err != nil {
+			t.Fatalf("preset %q: %v", name, err)
+		}
+		for _, r := range cfg.Check() {
+			if r.Status == "fail" {
+				t.Errorf("preset %q: %s fails check: %s", name, r.Name, r.Detail)
+			}
+		}
+	}
+}
+
+// Regression: the GUI reads/writes this struct as JSON — keys must be
+// snake_case (missing json tags once made presets fill empty forms).
+func TestConfigJSONUsesSnakeCase(t *testing.T) {
+	cfg, err := Preset("tsubame")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(b)
+	for _, key := range []string{"submit_template", "submit_id_regex", "status_template", "status_parser", "kill_template"} {
+		if !strings.Contains(s, `"`+key+`"`) {
+			t.Errorf("JSON missing snake_case key %q: %s", key, s)
+		}
 	}
 }

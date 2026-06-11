@@ -47,6 +47,10 @@ type Backend interface {
 
 	SubmitJob(ctx context.Context, cfg job.JobConfig, opts SubmitOptions) (jobID string, totalTasks int, err error)
 	DryRun(ctx context.Context, cfg job.JobConfig) ([]job.TaskParams, error)
+	// ResolveNote previews the note template's resolution ({{version}} family
+	// scan needs the backend's store) — submit's code path, never a frontend
+	// simulation.
+	ResolveNote(ctx context.Context, cfg job.JobConfig) (string, error)
 	GetProject(ctx context.Context, name string) (*project.Config, error)
 	ListProjects(ctx context.Context) ([]ProjectSummary, error)
 	MatchProjects(ctx context.Context, dir string) ([]ProjectSummary, error)

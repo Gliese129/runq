@@ -14,10 +14,13 @@ package preflight
 // bodies.
 
 import (
+	"context"
 	"os"
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/gliese129/runq/internal/project"
 )
 
 // ----------------------------------------------------------------------
@@ -187,4 +190,41 @@ func TestRunPreflight_Skip(t *testing.T) {
 
 func TestRunPreflight_AggregatesFindings(t *testing.T) {
 	t.Skip("TODO(codex)")
+}
+
+// Three-state report: skips are honest non-failures, never blockers.
+func TestThreeStateReport(t *testing.T) {
+	dir := t.TempDir()
+	proj := &project.Config{ProjectName: "p", WorkingDir: dir, CmdTemplate: "echo hi"}
+
+	// Skip flag → single skipped entry, OK.
+	pf := DefaultPreflight()
+	pf.Skip = true
+	rep := pf.RunPreflight(context.Background(), proj, "echo hi")
+	if !rep.OK() || len(rep.Results) != 1 || rep.Results[0].Status != "skipped" {
+		t.Fatalf("skip: %+v", rep.Results)
+	}
+
+	// DisableLocal → imports/pip skipped with config reason; still OK.
+	pf = DefaultPreflight()
+	pf.DisableLocal = true
+	pf.Scope = "on this login node"
+	rep = pf.RunPreflight(context.Background(), proj, "echo hi")
+	statuses := map[string]string{}
+	for _, c := range rep.Results {
+		statuses[c.Name] = c.Status
+	}
+	if statuses["imports"] != "skipped" || statuses["pip_check"] != "skipped" {
+		t.Errorf("disable_local: %+v", rep.Results)
+	}
+	if statuses["writable"] != "passed" || statuses["paths"] != "passed" {
+		t.Errorf("free tier should still run: %+v", rep.Results)
+	}
+	// gpus_per_task=0 → gpu skipped with its reason.
+	if statuses["gpu"] != "skipped" {
+		t.Errorf("gpu should skip when none requested: %+v", rep.Results)
+	}
+	if !rep.OK() {
+		t.Error("skips must never block")
+	}
 }

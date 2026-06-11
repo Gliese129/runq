@@ -206,11 +206,28 @@
           <div v-else class="text-caption text-on-surface-variant pa-2">Select a script first</div>
         </div>
 
+        <div class="text-caption text-on-surface-variant mb-1">Command template</div>
+        <div class="tmpl-display rounded pa-2 mb-1 cursor-pointer d-flex align-center ga-2" @click="cmdEditorOpen = true">
+          <span class="font-mono flex-grow-1 text-body-2" :class="{ 'opacity-50': !form.cmd }" style="word-break: break-all">
+            {{ form.cmd || 'python train.py {{args\}\}' }}
+          </span>
+          <v-icon size="14" color="on-surface-variant" class="flex-shrink-0">mdi-pencil-outline</v-icon>
+        </div>
+        <div class="text-caption text-on-surface-variant mb-3">{{ '\{\{args\}\}' }} will be replaced with parameters</div>
+        <ShellTemplateEditor
+          v-model="cmdEditorOpen"
+          :value="form.cmd"
+          title="command_template"
+          :placeholders="cmdPlaceholders"
+          @apply="form.cmd = $event"
+        />
+
         <v-text-field
-          v-model="form.cmd"
-          label="Command template"
+          v-model="form.setupCmd"
+          label="Setup command (optional)"
           variant="outlined" density="compact" class="mb-3"
-          hint="{{args}} will be replaced with parameters"
+          placeholder="e.g. hf download {{model}}"
+          hint="Runs once per submit, before any task — fixed params only. Failure aborts the submit."
           persistent-hint
         />
 
@@ -348,6 +365,7 @@ import type { FSEntry, ParseResult, ProjectConfig } from '@/types/api'
 import { SUBMIT_STATE_KEY } from '@/types/submit'
 import ParamEditorDialog from './ParamEditorDialog.vue'
 import FileBrowserDialog from '@/components/FileBrowserDialog.vue'
+import ShellTemplateEditor from '@/components/ShellTemplateEditor.vue'
 
 // No emits — save handled by parent's goNext (only when dirty; see below)
 const state = inject(SUBMIT_STATE_KEY)!
@@ -369,8 +387,8 @@ watch(
   { deep: true },
 )
 function form_() {
-  const { name, workDir, cmd, gpus, maxRetry, envType, envPath, envName } = state.newProject
-  return { name, workDir, cmd, gpus, maxRetry, envType, envPath, envName }
+  const { name, workDir, cmd, setupCmd, gpus, maxRetry, envType, envPath, envName } = state.newProject
+  return { name, workDir, cmd, setupCmd, gpus, maxRetry, envType, envPath, envName }
 }
 
 function enterEditMode() {
@@ -422,6 +440,13 @@ async function doRename() {
 // ── Param editor dialog ──
 const showParamEditor = ref(false)
 
+// ── Command template editor: args + every defined param name ──
+const cmdEditorOpen = ref(false)
+const cmdPlaceholders = computed(() => [
+  'args',
+  ...form.params.map(p => p.name).filter(Boolean),
+])
+
 function onParamsEdited(params: import('@/types/submit').ProjectParam[]) {
   form.params = params
   state.newProject.dirty = true
@@ -449,6 +474,7 @@ function applyProjectConfig(cfg: ProjectConfig, resetGroups = true) {
   form.name = cfg.project_name
   form.workDir = cfg.working_dir
   form.cmd = cfg.command_template
+  form.setupCmd = cfg.setup_command || ''
   form.gpus = cfg.defaults?.gpus_per_task || 1
   form.maxRetry = cfg.defaults?.max_retry ?? 0
   form.envType = cfg.python_env?.type || ''
@@ -568,6 +594,7 @@ function resetProjectForm() {
   form.name = ''
   form.workDir = ''
   form.cmd = ''
+  form.setupCmd = ''
   form.gpus = 1
   form.maxRetry = 0
   form.envType = ''
@@ -756,4 +783,14 @@ onMounted(async () => {
 .script-drop { border: 1.5px dashed rgb(var(--v-theme-outline-variant)); transition: border-color 0.15s ease, background 0.15s ease; }
 .script-drop:hover { border-color: rgb(var(--v-theme-primary)); background: rgb(var(--v-theme-primary), 0.04); }
 .recent-row:hover { background: rgb(var(--v-theme-surface-variant), 0.4); }
+.tmpl-display {
+  border: 1px solid rgb(var(--v-theme-outline-variant));
+  background: rgb(var(--v-theme-surface-variant), 0.2);
+  transition: border-color 0.15s ease, background 0.15s ease;
+  min-height: 38px;
+}
+.tmpl-display:hover {
+  border-color: rgb(var(--v-theme-primary));
+  background: rgb(var(--v-theme-surface-variant), 0.35);
+}
 </style>

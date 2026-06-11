@@ -136,3 +136,60 @@ func TestKillNoExternalIDRefuses(t *testing.T) {
 		t.Errorf("task marked killed despite no cancel performed")
 	}
 }
+
+// F1: task params are exposed to submit_template as {{param.*}}, so per-task
+// scheduler knobs (walltime, queue, job name) can live in the sweep.
+func TestSubmitTemplateParamNamespace(t *testing.T) {
+	skipIfNoHPCCore(t)
+	cfg := &hpcconfig.Config{
+		SubmitTemplate: "qsub -l h_rt={{param.h_rt}} -N {{param.lr}} {{run_sh}}",
+		SubmitIDRegex:  `job ([0-9]+)`,
+		KillTemplate:   "cancel {{ext_id}}",
+	}
+	var captured string
+	runner := func(ctx context.Context, command string) (string, error) {
+		if strings.HasPrefix(command, "qsub") {
+			captured = command
+			return "job 42", nil
+		}
+		return "", nil
+	}
+	b, proj, jobCfg := newTestBackend(t, cfg, runner)
+	proj.CmdTemplate = "python x.py --lr {{lr}} --h-rt {{h_rt}}"
+	jobCfg.FixedParams = map[string]any{"h_rt": "4:00:00"}
+
+	if _, _, err := b.Submit(context.Background(), jobCfg, proj, SubmitOpts{SkipPreflight: true}); err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	if !strings.Contains(captured, "-l h_rt='4:00:00'") {
+		t.Errorf("fixed param not rendered into submit command: %q", captured)
+	}
+	if !strings.Contains(captured, "-N '0.1'") {
+		t.Errorf("swept param not rendered into submit command: %q", captured)
+	}
+}
+
+// F2: a failing setup_command aborts before anything is persisted/submitted.
+func TestSetupCommandFailureAborts(t *testing.T) {
+	skipIfNoHPCCore(t)
+	cfg := &hpcconfig.Config{SubmitTemplate: "submit {{run_sh}}", SubmitIDRegex: `job ([0-9]+)`, KillTemplate: "cancel {{ext_id}}"}
+	submitCalls := 0
+	runner := func(ctx context.Context, command string) (string, error) {
+		submitCalls++
+		return "job 1", nil
+	}
+	b, proj, jobCfg := newTestBackend(t, cfg, runner)
+	proj.SetupCommand = "exit 7"
+
+	_, _, err := b.Submit(context.Background(), jobCfg, proj, SubmitOpts{SkipPreflight: true})
+	if err == nil {
+		t.Fatal("failing setup must abort the submit")
+	}
+	if submitCalls != 0 {
+		t.Errorf("cluster submit ran despite setup failure (%d calls)", submitCalls)
+	}
+	jobs, _ := b.Store.ListJobs(context.Background(), "")
+	if len(jobs) != 0 {
+		t.Errorf("job row persisted despite setup failure: %d rows", len(jobs))
+	}
+}

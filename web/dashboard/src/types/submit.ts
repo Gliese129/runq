@@ -30,6 +30,7 @@ export interface SubmitState {
     name: string
     workDir: string
     cmd: string
+    setupCmd: string
     gpus: number
     maxRetry: number
     envType: string

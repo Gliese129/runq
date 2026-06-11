@@ -40,6 +40,7 @@ func (s *Server) registerRoutes() {
 	jobs := api.Group("/jobs")
 	{
 		jobs.POST("", s.handleJobSubmit)
+		jobs.POST("/resolve-note", s.handleResolveNote)
 		jobs.GET("", s.handleJobList)
 		jobs.GET("/:id", s.handleJobShow)
 		jobs.DELETE("/:id", s.handleJobKill)
@@ -177,6 +178,22 @@ func (s *Server) handleProjectDelete(c *gin.Context) {
 }
 
 // ── Job handlers (delegate to JobService) ──
+
+// handleResolveNote previews a note template's resolution ({{version}} scan
+// included) without submitting — same code path as submit (U1).
+func (s *Server) handleResolveNote(c *gin.Context) {
+	var jobCfg job.JobConfig
+	if err := c.ShouldBindJSON(&jobCfg); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	resolved, err := s.deps.JobService.ResolveNote(context.Background(), jobCfg)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"resolved": resolved})
+}
 
 func (s *Server) handleJobSubmit(c *gin.Context) {
 	// Parse job config — support both YAML and JSON.
