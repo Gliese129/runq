@@ -17,7 +17,7 @@ const light = {
     error: '#DC2626',           // Red 600
     warning: '#D97706',         // Amber 600
     success: '#16A34A',         // Green 600
-    info: '#2563EB',            // Blue 600
+    info: '#0891B2',            // Cyan 600 — must stay distinct from primary (pending vs done)
     surface: '#FFFFFF',
     'surface-variant': '#F1F5F9', // Slate 100
     background: '#F8FAFC',       // Slate 50
@@ -37,7 +37,7 @@ const dark = {
     error: '#F87171',           // Red 400
     warning: '#FBBF24',         // Amber 400
     success: '#4ADE80',         // Green 400
-    info: '#60A5FA',            // Blue 400
+    info: '#22D3EE',            // Cyan 400 — must stay distinct from primary (pending vs done)
     surface: '#0F172A',         // Slate 900
     'surface-variant': '#1E293B', // Slate 800
     background: '#020617',       // Slate 950

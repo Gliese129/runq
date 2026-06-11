@@ -8,6 +8,14 @@
           <div class="text-body-2 text-on-surface-variant mt-1">{{ t('submit.subtitle') }}</div>
         </div>
         <div class="d-flex align-center ga-2">
+          <v-btn
+            v-if="hasSubmitState"
+            size="x-small" variant="text"
+            title="Clear everything — note, params, links and the saved draft"
+            @click="resetSubmitState"
+          >
+            <v-icon start size="12">mdi-restore</v-icon> reset
+          </v-btn>
           <v-btn size="x-small" variant="text" @click="showJobYamlBrowser = true">
             <v-icon start size="12">mdi-file-import-outline</v-icon> import job.yaml
           </v-btn>
@@ -370,6 +378,27 @@ watch([projectName, note, jobName, rows, linkSets, step], () => {
   }, 800)
 }, { deep: true })
 
+// Anything worth resetting? (also gates the header button)
+const hasSubmitState = computed(() =>
+  step.value > 0 || rows.value.length > 0 || !!note.value || !!jobName.value.trim())
+
+// Full reset: wizard back to a blank step 0 AND the draft cache cleared —
+// restore-on-mount must not resurrect what the user just discarded. The
+// project SELECTION survives (it's a pointer, not unsaved work).
+function resetSubmitState() {
+  if (draftTimer) clearTimeout(draftTimer) // a queued save would re-create the draft
+  prefs.submitDraft.value = null
+  note.value = ''
+  jobName.value = ''
+  rows.value = []
+  linkSets.value = []
+  dryRunResult.value = []
+  dryRunError.value = ''
+  submitError.value = ''
+  step.value = 0
+  snack.info('Submit state cleared')
+}
+
 function restoreDraft(): boolean {
   const d = prefs.submitDraft.value
   if (!d || !Array.isArray(d.rows) || d.rows.length === 0) return false
@@ -379,7 +408,7 @@ function restoreDraft(): boolean {
   rows.value = d.rows
   linkSets.value = Array.isArray(d.linkSets) ? d.linkSets : []
   step.value = Math.min(d.step ?? 1, 1) // never restore into review (dry-run is stale)
-  snack.info('Restored unsubmitted draft — values and links are back')
+  snack.info('Restored unsubmitted draft — values and links are back', 'Discard', resetSubmitState)
   return true
 }
 

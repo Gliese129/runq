@@ -76,3 +76,17 @@ func TestWriteOmitsWandbWhenNil(t *testing.T) {
 		t.Fatalf("wandb config should be absent, err=%v", err)
 	}
 }
+
+func TestJobDirName(t *testing.T) {
+	cases := []struct{ note, id, want string }{
+		{"eval-v3", "jb1a2b3c4d", "eval-v3-jb1a2b3c4d"},
+		{"", "jb1a2b3c4d", "jb1a2b3c4d"},
+		{"模型 eval/8B", "jb1a2b3c4d", "eval-8B-jb1a2b3c4d"},
+		{"---", "jb1a2b3c4d", "jb1a2b3c4d"}, // all-separator note → bare id
+	}
+	for _, c := range cases {
+		if got := JobDirName(c.note, c.id); got != c.want {
+			t.Errorf("JobDirName(%q,%q) = %q, want %q", c.note, c.id, got, c.want)
+		}
+	}
+}

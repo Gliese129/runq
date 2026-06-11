@@ -18,7 +18,7 @@
       </div>
       <div class="d-flex align-center ga-2 mt-2">
         <v-icon size="16" color="on-surface-variant">mdi-tag-outline</v-icon>
-        <span class="text-caption text-on-surface-variant flex-shrink-0">Job name</span>
+        <span class="text-caption text-on-surface-variant flex-shrink-0" title="this submit only — empty uses the project's job_name template">Job name (this submit)</span>
         <v-text-field
           ref="jobNameField"
           v-model="state.jobName"

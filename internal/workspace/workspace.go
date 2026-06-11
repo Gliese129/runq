@@ -1,6 +1,7 @@
 package workspace
 
 import (
+	"strings"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -70,4 +71,44 @@ func Write(dir string, params job.TaskParams, wandb *project.WandbConfig, note s
 		}
 	}
 	return nil
+}
+
+// JobDirName names a job's workspace directory: "<sanitized-note>-<jobID>"
+// so an `ls` of .runq/ reads like an experiment log, falling back to the
+// bare id when there is no note. The DB always stores full paths — this
+// name is decoration for humans, never re-derived from the id.
+func JobDirName(note, jobID string) string {
+	s := sanitizeDirComponent(note)
+	if s == "" {
+		return jobID
+	}
+	return s + "-" + jobID
+}
+
+// sanitizeDirComponent keeps [A-Za-z0-9._-], maps the rest to '-',
+// collapses runs, trims separators, caps at 40 chars (paths must stay
+// pleasant to type and safe on every shared FS).
+func sanitizeDirComponent(s string) string {
+	var b []rune
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9',
+			r == '_', r == '-', r == '.':
+			b = append(b, r)
+		default:
+			b = append(b, '-')
+		}
+	}
+	out := string(b)
+	for len(out) > 0 && (out[0] == '-' || out[0] == '.') {
+		out = out[1:]
+	}
+	for strings.Contains(out, "--") {
+		out = strings.ReplaceAll(out, "--", "-")
+	}
+	out = strings.Trim(out, "-.")
+	if len(out) > 40 {
+		out = strings.Trim(out[:40], "-.")
+	}
+	return out
 }

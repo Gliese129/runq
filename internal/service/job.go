@@ -103,8 +103,7 @@ func (s *JobService) SubmitJobWithOpts(ctx context.Context, jobCfg job.JobConfig
 		return "", 0, fmt.Errorf("resolve workspace root: %w", err)
 	}
 
-	jobID := utils.GenerateID()
-	jobRoot := filepath.Join(wsRoot, jobID)
+	jobID := utils.GenerateJobID()
 
 	// Resolve note placeholders ({{version}}, {{date}}, params, ...) for
 	// display: the plan carries the RESOLVED note (job row, workspace files),
@@ -116,10 +115,13 @@ func (s *JobService) SubmitJobWithOpts(ctx context.Context, jobCfg job.JobConfig
 	} else {
 		planCfg.Note = resolved
 	}
+	// Job dir carries the resolved note so `ls .runq/` reads like an
+	// experiment log; the DB stores full paths (never re-derived from id).
+	jobRoot := filepath.Join(wsRoot, workspace.JobDirName(planCfg.Note, jobID))
 
 	plan, err := submitplan.Build(ctx, planCfg, proj, submitplan.Deps{
 		JobID: jobID,
-		IDGen: utils.GenerateID,
+		IDGen: utils.GenerateTaskID,
 		Paths: submitplan.Paths{
 			WorkspaceRoot: jobRoot,
 			LogRoot:       jobRoot,

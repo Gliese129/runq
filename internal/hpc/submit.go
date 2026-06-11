@@ -140,12 +140,11 @@ func (b *Backend) Submit(ctx context.Context, jobCfg job.JobConfig, proj *projec
 		}
 	}
 
-	jobID = utils.GenerateID()
+	jobID = utils.GenerateJobID()
 	wsRoot, err := config.ResolveRoot(b.StorageCfg, proj.WorkingDir, proj.ProjectName)
 	if err != nil {
 		return "", 0, fmt.Errorf("resolve workspace root: %w", err)
 	}
-	jobRoot := filepath.Join(wsRoot, jobID)
 
 	// Resolved note for display (job row, workspace files); ConfigJSON keeps
 	// the template so re-submission keeps incrementing {{version}}.
@@ -155,11 +154,14 @@ func (b *Backend) Submit(ctx context.Context, jobCfg job.JobConfig, proj *projec
 	} else {
 		planCfg.Note = resolved
 	}
+	// Job dir carries the resolved note so `ls .runq/` reads like an
+	// experiment log; the DB stores full paths (never re-derived from id).
+	jobRoot := filepath.Join(wsRoot, workspace.JobDirName(planCfg.Note, jobID))
 
 	disableLocal := b.Cfg.PreflightLocal != nil && !*b.Cfg.PreflightLocal
 	plan, err := submitplan.Build(ctx, planCfg, proj, submitplan.Deps{
 		JobID: jobID,
-		IDGen: utils.GenerateID,
+		IDGen: utils.GenerateTaskID,
 		Paths: submitplan.Paths{
 			WorkspaceRoot: jobRoot,
 			LogRoot:       jobRoot,
@@ -289,6 +291,10 @@ func (b *Backend) buildRunScript(t submitplan.PlannedTask, plan submitplan.Plan)
 	// Ambient env file: sourced FIRST, so the explicit exports below win
 	// (precedence: .env < project/override env). Values are resolved on the
 	// compute node at start time — never copied into this script.
+	// runq owns log placement: all task output goes to the DB's log_path,
+	// so `runq logs` / the dashboard work regardless of how the user's
+	// submit_template routes -o/-e (those keep only scheduler-level noise).
+	fmt.Fprintf(&s, "exec >> %s 2>&1\n", hpccore.ShellQuote(t.LogPath))
 	if envFile := env["RUNQ_ENV_FILE"]; envFile != "" {
 		q := hpccore.ShellQuote(envFile)
 		fmt.Fprintf(&s, "if [ -f %s ]; then set -a; . %s; set +a; fi\n", q, q)
@@ -299,8 +305,13 @@ func (b *Backend) buildRunScript(t submitplan.PlannedTask, plan submitplan.Plan)
 	fmt.Fprintf(&s, "STATUS_FILE=%s\n", hpccore.ShellQuote(filepath.Join(t.TaskDir, statusFileName)))
 	s.WriteString(`_runq_status() { printf '%s\n' "$1" > "$STATUS_FILE.tmp" && mv "$STATUS_FILE.tmp" "$STATUS_FILE"; }` + "\n")
 	s.WriteString(`_runq_status "$(printf '{"status":"running","started_at":%s}' "$(date +%s)")"` + "\n")
+	// Tasks run from the project's working_dir (daemon/HPC parity) —
+	// schedulers start jobs in $HOME, where relative script paths break.
+	wd := hpccore.ShellQuote(t.WorkingDir)
+	fmt.Fprintf(&s, "if cd %s; then\n", wd)
 	s.WriteString(t.Command + "\n")
 	s.WriteString("code=$?\n")
+	fmt.Fprintf(&s, "else\n  echo \"runq: cannot cd into working_dir %s\"\n  code=1\nfi\n", wd)
 	s.WriteString(`if [ "$code" -eq 0 ]; then _st=success; else _st=failed; fi` + "\n")
 	s.WriteString(`_runq_status "$(printf '{"status":"%s","exit_code":%s,"finished_at":%s}' "$_st" "$code" "$(date +%s)")"` + "\n")
 	s.WriteString("exit $code\n")

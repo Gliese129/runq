@@ -13,6 +13,7 @@ import (
 	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/project"
 	"github.com/gliese129/runq/internal/store"
+	"github.com/gliese129/runq/internal/submitplan"
 )
 
 func skipIfNoHPCCore(t *testing.T) {
@@ -237,5 +238,79 @@ func TestSubmitEnvPrefixResolvesSameLineReferences(t *testing.T) {
 	}
 	if string(out) != "tga-demo/2" {
 		t.Fatalf("same-line $VAR did not resolve from prefix: got %q", out)
+	}
+}
+
+// End-to-end pin for the {{name}} chain: project.job_name (default template)
+// → job.Name (per-submit override) → render+sanitize → {{name}} in the
+// ACTUAL submit command the scheduler receives. Plan-level coverage exists
+// (TestPlannedTaskName); this asserts the last hop — renderSubmitCmd's vars
+// table actually carries the name, and the override beats the project
+// template.
+func TestSubmitCommandReceivesRenderedJobName(t *testing.T) {
+	skipIfNoHPCCore(t)
+	cfg := &hpcconfig.Config{
+		SubmitTemplate: "qsub -N {{name}} {{run_sh}}",
+		SubmitIDRegex:  `job ([0-9]+)`,
+		KillTemplate:   "cancel {{ext_id}}",
+	}
+	var captured []string
+	runner := func(ctx context.Context, command string) (string, error) {
+		if strings.Contains(command, "qsub") {
+			captured = append(captured, command)
+			return "job 42", nil
+		}
+		return "", nil
+	}
+
+	// 1. project.job_name template (params + sanitization: "/" → "-")
+	b, proj, jobCfg := newTestBackend(t, cfg, runner)
+	proj.JobName = "eval/{{lr}}"
+	if _, _, err := b.Submit(context.Background(), jobCfg, proj, SubmitOpts{SkipPreflight: true}); err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	if !strings.Contains(captured[0], "-N 'eval-0.1'") {
+		t.Errorf("project job_name not rendered into -N: %q", captured[0])
+	}
+
+	// 2. job.yaml name: override wins over the project template
+	captured = nil
+	jobCfg.Name = "override-{{lr}}"
+	if _, _, err := b.Submit(context.Background(), jobCfg, proj, SubmitOpts{SkipPreflight: true}); err != nil {
+		t.Fatalf("submit with override: %v", err)
+	}
+	if !strings.Contains(captured[0], "-N 'override-0.1'") {
+		t.Errorf("job name override not rendered into -N: %q", captured[0])
+	}
+}
+
+// run.sh contract (from a real TSUBAME failure): schedulers start jobs in
+// $HOME, so without a cd the command's relative paths break (exit 127); and
+// without the exec redirect the DB's log_path never receives a byte (output
+// only went wherever -o/-e pointed).
+func TestRunScriptCdsAndRedirects(t *testing.T) {
+	b := &Backend{Cfg: &hpcconfig.Config{}}
+	script := b.buildRunScript(submitplan.PlannedTask{
+		TaskID: "tk1", TaskDir: "/ws/jb1/tk1", LogPath: "/ws/jb1/tk1.log",
+		WorkingDir: "/home/u/proj", Command: "bash scripts/run.sh",
+	}, submitplan.Plan{JobID: "jb1", Project: "p"})
+
+	if !strings.Contains(script, "exec >> '/ws/jb1/tk1.log' 2>&1") {
+		t.Errorf("missing log redirect:\n%s", script)
+	}
+	if !strings.Contains(script, "if cd '/home/u/proj'; then") {
+		t.Errorf("missing cd into working_dir:\n%s", script)
+	}
+	// cd must come BEFORE the command, redirect before everything that prints
+	cdPos := strings.Index(script, "if cd ")
+	cmdPos := strings.Index(script, "bash scripts/run.sh")
+	execPos := strings.Index(script, "exec >>")
+	statusPos := strings.Index(script, "_runq_status \"$(printf '{\"status\":\"running\"")
+	if !(execPos < statusPos && cdPos < cmdPos) {
+		t.Errorf("order wrong (exec=%d status=%d cd=%d cmd=%d):\n%s", execPos, statusPos, cdPos, cmdPos, script)
+	}
+	// failed cd must yield a failed status, not a silent half-run
+	if !strings.Contains(script, "code=1") {
+		t.Errorf("cd failure must set a nonzero exit code:\n%s", script)
 	}
 }

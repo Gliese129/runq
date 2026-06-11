@@ -228,7 +228,7 @@ func Build(ctx context.Context, cfg job.JobConfig, proj *project.Config, d Deps)
 
 	jobID := d.JobID
 	if jobID == "" {
-		jobID = idGen()
+		jobID = utils.GenerateJobID()
 	}
 	callerUID := os.Getuid()
 	// Scheduler job name template: job.yaml override > project.yaml job_name

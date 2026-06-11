@@ -40,7 +40,8 @@ export function useSnackbar() {
     success: (text: string) => show({ text, color: 'success' }),
     error: (text: string, onRetry?: () => void) =>
       show({ text, color: 'error', action: onRetry ? 'Retry' : undefined, onAction: onRetry }),
-    info: (text: string) => show({ text, color: 'info' }),
+    info: (text: string, action?: string, onAction?: () => void) =>
+      show({ text, color: 'info', action, onAction }),
     warn: (text: string) => show({ text, color: 'warning' }),
   }
 }

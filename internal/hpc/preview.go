@@ -23,8 +23,8 @@ import (
 func (b *Backend) Preview(ctx context.Context, jobCfg job.JobConfig, proj *project.Config, skipPreflight bool) (string, error) {
 	disableLocal := b.Cfg.PreflightLocal != nil && !*b.Cfg.PreflightLocal
 	plan, err := submitplan.Build(ctx, jobCfg, proj, submitplan.Deps{
-		JobID: utils.GenerateID(),
-		IDGen: utils.GenerateID,
+		JobID: utils.GenerateJobID(),
+		IDGen: utils.GenerateTaskID,
 		Paths: submitplan.Paths{
 			WorkspaceRoot: "<workspace>", // placeholder roots: nothing is written
 			LogRoot:       "<workspace>",
@@ -43,7 +43,7 @@ func (b *Backend) Preview(ctx context.Context, jobCfg job.JobConfig, proj *proje
 	// Where <workspace> will actually live — shown read-only (nothing is
 	// created here); ids are regenerated at real submit.
 	root := config.ProspectiveRoot(b.StorageCfg, proj.WorkingDir, proj.ProjectName)
-	fmt.Fprintf(&s, "workspace root: %s/<job_id> — <workspace> below means that job dir (ids regenerate at submit)\n\n", root)
+	fmt.Fprintf(&s, "workspace root: %s/<note>-<job_id> — <workspace> below means that job dir (ids regenerate at submit)\n\n", root)
 	for _, c := range plan.Preflight.Results {
 		mark := map[string]string{"passed": "✓", "failed": "✗"}[c.Status]
 		if mark == "" {
