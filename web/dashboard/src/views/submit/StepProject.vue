@@ -137,11 +137,15 @@
           </div>
         </template>
 
-        <div class="text-center mt-3">
+        <div class="text-center mt-3 d-flex justify-center ga-2">
+          <v-btn size="x-small" variant="text" @click="importInput?.click()">
+            <v-icon start size="12">mdi-file-import-outline</v-icon> import project.yaml
+          </v-btn>
           <v-btn size="x-small" variant="text" @click="skipScript">
             skip — fill in manually
           </v-btn>
         </div>
+        <input ref="importInput" type="file" accept=".yaml,.yml" hidden @change="onProjectYamlPicked" />
       </v-card>
 
       <!-- ═══ Edit form (create after script, or Edit project) ═══ -->
@@ -357,6 +361,7 @@
 
 <script setup lang="ts">
 import { ref, computed, inject, watch, onMounted } from 'vue'
+import * as YAML from 'js-yaml'
 import { envApi } from '@/apis/env'
 import { filesApi } from '@/apis/files'
 import { projectsApi } from '@/apis/projects'
@@ -560,6 +565,30 @@ const scriptSummary = computed(() => {
 
 function skipScript() {
   scriptPicked.value = true // show the form without a script
+}
+
+// ── Import an existing project.yaml (e.g. hand-written or agent-generated).
+// Reuses applyProjectConfig — the same shape the backend serves — then marks
+// the form dirty so Next actually registers it.
+const importInput = ref<HTMLInputElement>()
+
+async function onProjectYamlPicked(e: Event) {
+  const file = (e.target as HTMLInputElement).files?.[0]
+  ;(e.target as HTMLInputElement).value = ''
+  if (!file) return
+  try {
+    const parsed = YAML.load(await file.text()) as any
+    if (!parsed || typeof parsed !== 'object' || !parsed.project_name) {
+      throw new Error('not a project.yaml (missing project_name)')
+    }
+    applyProjectConfig(parsed, state.rows.length === 0)
+    state.newProject.dirty = true // imported ≠ saved: Next will register it
+    scriptPicked.value = true
+    detectedSummary.value = `imported from ${file.name}`
+  } catch (err: any) {
+    form.error = `Import failed: ${err?.message ?? err}`
+    scriptPicked.value = true
+  }
 }
 
 // Working dir breadcrumb

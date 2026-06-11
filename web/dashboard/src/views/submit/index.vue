@@ -7,9 +7,15 @@
           <div class="text-h5 font-weight-bold">{{ t('submit.title') }}</div>
           <div class="text-body-2 text-on-surface-variant mt-1">{{ t('submit.subtitle') }}</div>
         </div>
-        <v-chip v-if="step >= 2 && displayTaskCount > 0" variant="tonal" color="primary">
-          {{ displayTaskCount }} {{ displayTaskCount === 1 ? 'task' : 'tasks' }}
-        </v-chip>
+        <div class="d-flex align-center ga-2">
+          <v-btn size="x-small" variant="text" @click="jobYamlInput?.click()">
+            <v-icon start size="12">mdi-file-import-outline</v-icon> import job.yaml
+          </v-btn>
+          <input ref="jobYamlInput" type="file" accept=".yaml,.yml" hidden @change="onJobYamlPicked" />
+          <v-chip v-if="step >= 2 && displayTaskCount > 0" variant="tonal" color="primary">
+            {{ displayTaskCount }} {{ displayTaskCount === 1 ? 'task' : 'tasks' }}
+          </v-chip>
+        </div>
       </div>
 
       <div class="d-flex ga-2 mb-5">
@@ -288,6 +294,35 @@ onMounted(async () => {
     snack.error(e?.message || 'Failed to load source job')
   }
 })
+
+// ── Import an existing job.yaml: same path as re-run-from-template —
+// note keeps its {{...}} form, sweep blocks decompile into the flat model.
+const jobYamlInput = ref<HTMLInputElement>()
+
+async function onJobYamlPicked(e: Event) {
+  const file = (e.target as HTMLInputElement).files?.[0]
+  ;(e.target as HTMLInputElement).value = ''
+  if (!file) return
+  try {
+    const YAML = await import('js-yaml')
+    const cfg = YAML.load(await file.text()) as any
+    if (!cfg || typeof cfg !== 'object' || (!cfg.sweep && !cfg.fixed_params)) {
+      throw new Error('not a job.yaml (no sweep/fixed_params)')
+    }
+    if (cfg.project) projectName.value = String(cfg.project)
+    note.value = cfg.note || ''
+    const { rows: r, linkSets: ls } = decompile(cfg)
+    rows.value = r
+    linkSets.value = ls
+    step.value = 1
+    snack.success(`Imported ${file.name} (${r.length} params)`)
+    if (cfg.project && !matchedProjects.value.some(p => p.name === cfg.project)) {
+      snack.warn(`Project "${cfg.project}" is not registered yet — register it in step 1 or import its project.yaml`)
+    }
+  } catch (err: any) {
+    snack.error(`Import failed: ${err?.message ?? err}`)
+  }
+}
 
 const submitError = ref('')
 const isPreflightError = computed(() => submitError.value.includes('preflight') || submitError.value.includes('- import:') || submitError.value.includes('- pip_check:'))
