@@ -693,6 +693,7 @@ function normalizeParam(a: { name: string; type: string; default?: string; choic
     name: a.name, type, default: def, include: a.include ?? true,
     values: values.length > 0 ? values : undefined,
     min: a.min, max: a.max,
+    strict: (a as any).strict || undefined,
   }
 }
 

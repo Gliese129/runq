@@ -117,13 +117,15 @@ That's it. runq expands the parameter sweep, queues the tasks, assigns GPUs, and
 On a shared cluster, runq compiles your sweep, writes per-task workspaces, and delegates scheduling to the cluster's native job manager. No resident daemon needed.
 
 ```bash
-# 1. Generate config (edit it for your cluster)
-runq hpc init --scheduler slurm
+# 1. Generate config (edit it for your cluster, then validate)
+runq hpc init --scheduler slurm     # also: pbs | sge | tsubame | abci
+runq hpc config check               # renders every template with sample values
 
 # 2. Write project.yaml + job.yaml (same format as daemon mode)
 #    See examples/ for templates
 
-# 3. Submit
+# 3. Preview, then submit
+runq hpc submit job.yaml --project-file project.yaml --dry-run
 runq hpc submit job.yaml --project-file project.yaml
 
 # 4. Monitor
@@ -133,7 +135,9 @@ runq hpc best <job_id> --key loss    # best task by metric
 runq hpc collect <job_id> --key loss # all tasks ranked by metric
 ```
 
-After `runq hpc init`, edit `~/.runq/config.yaml` to match your cluster — the `submit_template`, `submit_id_regex`, and `kill_template` fields must be correct for your scheduler. Presets for Slurm, PBS, and SGE are provided as starting points.
+After `runq hpc init`, edit `~/.runq/config.yaml` to match your cluster — the `submit_template`, `submit_id_regex`, and `kill_template` fields must be correct for your scheduler (also editable in the dashboard Settings page, with presets, placeholder hints and a built-in checker). Presets for Slurm, PBS, SGE, TSUBAME and ABCI are provided as starting points.
+
+Per-task scheduler knobs (walltime, queue) can live in the sweep and be referenced from `submit_template` as `{{param.h_rt}}`, `{{param.node_kind}}` — one job can carry per-benchmark time limits.
 
 ## Usage
 
@@ -218,6 +222,13 @@ resume:
 ```
 
 Command templates support `{{args}}` (auto-generates `--key=value` for all parameters) and `{{param_name}}` (inserts a specific parameter). You can mix both: `python train.py --lr {{lr}} {{args}}`.
+
+More project-level fields:
+
+- `params:` — the parameter **catalog** (`type` / `default` / `choices` / `include`). The dashboard builds its submit form from this; a job.yaml is just one selection over it (`grid` = cross product, `list` = zip).
+- `setup_command:` — runs once per submit, before anything is persisted (e.g. `hf download {{model}}`). May reference fixed params only; failure aborts cleanly.
+- `.env` in `working_dir` is sourced at task start automatically (override with `env_file:`). runq never stores its values — tokens stay out of the DB, logs and UIs. Explicit `environment:` always wins.
+- Job `note` supports placeholders: params, `{{project}}` `{{user}}` `{{date}}` `{{time}}` `{{sweep}}`, and `{{version}}` — re-running the same named config auto-numbers it (`foo`, `foo-v2`, `foo-v3`), with timestamp differences ignored when finding the family.
 
 ### Python environments
 

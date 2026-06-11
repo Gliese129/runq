@@ -67,6 +67,34 @@ type PlannedTask struct {
 	CheckpointDir string
 }
 
+// validateStrictChoices enforces strict params: a value outside the
+// project's Choices list is a submit-time error. Comparison is on the
+// string form (choices are stored as strings; params may be typed).
+func validateStrictChoices(proj *project.Config, tasks []job.TaskParams) error {
+	for _, def := range proj.Params {
+		if !def.Strict || len(def.Choices) == 0 {
+			continue
+		}
+		allowed := make(map[string]bool, len(def.Choices))
+		for _, c := range def.Choices {
+			allowed[c] = true
+		}
+		for _, params := range tasks {
+			v, present := params[def.Name]
+			if !present {
+				continue
+			}
+			s := fmt.Sprintf("%v", v)
+			if !allowed[s] {
+				return fmt.Errorf(
+					"param %q is strict: value %q is not among its choices (%s)",
+					def.Name, s, strings.Join(def.Choices, ", "))
+			}
+		}
+	}
+	return nil
+}
+
 // resolveEnvFile applies the project's env_file semantics: nil = auto-use
 // <working_dir>/.env when present; "" = disabled; other = required path.
 func resolveEnvFile(proj *project.Config) (string, error) {
@@ -161,6 +189,10 @@ func Build(ctx context.Context, cfg job.JobConfig, proj *project.Config, d Deps)
 	}
 	if envFile != "" {
 		env["RUNQ_ENV_FILE"] = envFile
+	}
+
+	if err := validateStrictChoices(proj, taskParams); err != nil {
+		return Plan{}, err
 	}
 
 	pf := preflight.DefaultPreflight()

@@ -3,6 +3,7 @@ package submitplan
 import (
 	"context"
 	"os"
+	"strings"
 	"path/filepath"
 	"testing"
 
@@ -201,5 +202,35 @@ func TestEnvFileResolution(t *testing.T) {
 	proj.EnvFile = &missing
 	if _, err := Build(context.Background(), cfg, proj, deps); err == nil {
 		t.Error("explicit missing env_file must error")
+	}
+}
+
+// Strict choices: values outside the catalog are a submit-time error;
+// non-strict choices stay suggestions.
+func TestStrictChoices(t *testing.T) {
+	dir := t.TempDir()
+	proj := &project.Config{
+		ProjectName: "p", WorkingDir: dir, CmdTemplate: "echo {{provider}}",
+		Params: []project.ParamDef{
+			{Name: "provider", Type: "str", Choices: []string{"vllm", "openai"}, Strict: true},
+		},
+	}
+	deps := Deps{Paths: Paths{WorkspaceRoot: dir, LogRoot: dir}, SkipPreflight: true}
+	cfgFor := func(v string) job.JobConfig {
+		return job.JobConfig{Project: "p", Sweep: []job.SweepBlock{{Method: "grid",
+			Parameters: map[string]job.ParameterSpec{"provider": {Values: []any{v}}}}}}
+	}
+
+	if _, err := Build(context.Background(), cfgFor("vllm"), proj, deps); err != nil {
+		t.Fatalf("allowed value rejected: %v", err)
+	}
+	_, err := Build(context.Background(), cfgFor("deepinfra"), proj, deps)
+	if err == nil || !strings.Contains(err.Error(), "strict") {
+		t.Fatalf("strict violation should error with explanation, got %v", err)
+	}
+
+	proj.Params[0].Strict = false
+	if _, err := Build(context.Background(), cfgFor("deepinfra"), proj, deps); err != nil {
+		t.Fatalf("non-strict choices must stay suggestions: %v", err)
 	}
 }

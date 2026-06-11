@@ -114,7 +114,17 @@
                     </v-btn>
                   </template>
                   <v-card class="pa-3" style="min-width: 280px; max-width: 400px">
-                    <div class="text-caption text-on-surface-variant mb-2">Selectable values — first is the default</div>
+                    <div class="d-flex align-center justify-space-between mb-2">
+                      <span class="text-caption text-on-surface-variant">Selectable values — first is the default</span>
+                      <v-checkbox-btn
+                        v-model="p.strict"
+                        density="compact" color="warning"
+                        :title="'strict: values outside this list fail at submit'"
+                        style="flex: none"
+                      >
+                        <template #label><span class="text-caption">strict</span></template>
+                      </v-checkbox-btn>
+                    </div>
                     <div class="d-flex flex-wrap ga-1 mb-2">
                       <v-chip
                         v-for="(val, i) in (p.values || [])" :key="i"

@@ -14,6 +14,7 @@ export interface ProjectParam {
   min?: number            // int/float: valid range
   max?: number            // int/float: valid range
   values?: string[]       // str: selectable choices; list: items; file/folder: paths
+  strict?: boolean        // choices are a contract, not suggestions
 }
 
 export interface ParamMeta {

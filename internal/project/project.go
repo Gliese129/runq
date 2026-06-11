@@ -98,6 +98,10 @@ type ParamDef struct {
 	// curated" (older configs / fresh discovery), which lets the UI apply
 	// its first-time heuristic exactly once and persist the result.
 	Include *bool `yaml:"include,omitempty" json:"include,omitempty"`
+	// Strict upgrades Choices from suggestions to a contract: any submitted
+	// value outside Choices is a submit-time error (enforced in
+	// submitplan.Build — one point, both CLI and GUI).
+	Strict bool `yaml:"strict,omitempty" json:"strict,omitempty"`
 }
 
 type WandbConfig struct {

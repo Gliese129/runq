@@ -193,6 +193,8 @@ export interface ProjectConfig {
     max?: number
     /** user curation: appears in submit param table. absent = never curated */
     include?: boolean
+    /** choices become a contract: out-of-list values fail at submit */
+    strict?: boolean
   }>
 }
 
@@ -220,6 +222,8 @@ export interface ProjectPayload {
     max?: number
     /** user curation: appears in submit param table. absent = never curated */
     include?: boolean
+    /** choices become a contract: out-of-list values fail at submit */
+    strict?: boolean
   }>
 }
 
