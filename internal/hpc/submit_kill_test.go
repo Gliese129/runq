@@ -1,6 +1,7 @@
 package hpc
 
 import (
+	"os/exec"
 	"context"
 	"errors"
 	"fmt"
@@ -222,5 +223,19 @@ func TestSchedulerParamsExemptFromCommand(t *testing.T) {
 	}
 	if !strings.Contains(captured, "-l h_rt='8:00:00'") {
 		t.Errorf("h_rt missing from submit command: %q", captured)
+	}
+}
+
+// Regression: the env prefix must use `export K=v; cmd` — the `K=v cmd $K`
+// form expands $K BEFORE the assignment takes effect (POSIX), so a
+// submit_template referencing $TSUBAME_GROUP would see the old/empty value.
+func TestSubmitEnvPrefixResolvesSameLineReferences(t *testing.T) {
+	prefix := submitEnvPrefix(map[string]string{"TSUBAME_GROUP": "tga-demo", "B": "2"})
+	out, err := exec.Command("sh", "-c", prefix+`printf '%s/%s' "$TSUBAME_GROUP" "$B"`).CombinedOutput()
+	if err != nil {
+		t.Fatalf("sh: %v (%s)", err, out)
+	}
+	if string(out) != "tga-demo/2" {
+		t.Fatalf("same-line $VAR did not resolve from prefix: got %q", out)
 	}
 }

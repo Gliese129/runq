@@ -58,10 +58,16 @@ func renderSubmitCmd(tmpl string, t submitplan.PlannedTask, plan submitplan.Plan
 	return hpccore.Render(tmpl, vars)
 }
 
-// submitEnvPrefix turns the project's environment into shell env
-// assignments prefixed onto the submit command, so $TSUBAME_GROUP-style
+// submitEnvPrefix turns the project's environment into `export K='v'; `
+// statements prefixed onto the submit command, so $TSUBAME_GROUP-style
 // references in submit_template resolve from project config — not from
 // whatever the login shell happens to export.
+//
+// NOT the `K='v' cmd $K` form: POSIX expands $K on the same command line
+// BEFORE the assignment takes effect, so the reference would see the old
+// (usually empty) value. `export K='v'; cmd $K` runs the assignment as its
+// own command first; the whole string goes through `sh -c`, so nothing
+// leaks into the calling shell.
 func submitEnvPrefix(env map[string]string) string {
 	if len(env) == 0 {
 		return ""
@@ -73,10 +79,11 @@ func submitEnvPrefix(env map[string]string) string {
 	sortStrings(keys)
 	var b strings.Builder
 	for _, k := range keys {
+		b.WriteString("export ")
 		b.WriteString(k)
 		b.WriteString("=")
 		b.WriteString(hpccore.ShellQuote(env[k]))
-		b.WriteString(" ")
+		b.WriteString("; ")
 	}
 	return b.String()
 }

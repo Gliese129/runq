@@ -222,13 +222,9 @@
           @apply="form.cmd = $event"
         />
 
-        <v-textarea
+        <EnvKVEditor
           v-model="form.envText"
-          label="Environment (optional)"
-          variant="outlined" density="compact" class="mb-3 font-mono" rows="2" auto-grow
-          placeholder="TSUBAME_GROUP=tga-xxx&#10;HF_HUB_OFFLINE=1"
-          hint="KEY=VALUE per line. Injected into tasks AND the HPC submit command ($VAR in submit_template resolves from here). Secrets belong in .env instead."
-          persistent-hint
+          hint="Injected into tasks AND the HPC submit command ($VAR in submit_template resolves from here). Secrets belong in .env instead."
         />
 
         <v-text-field
@@ -381,6 +377,7 @@ import { SUBMIT_STATE_KEY } from '@/types/submit'
 import ParamEditorDialog from './ParamEditorDialog.vue'
 import FileBrowserDialog from '@/components/FileBrowserDialog.vue'
 import ShellTemplateEditor from '@/components/ShellTemplateEditor.vue'
+import EnvKVEditor from '@/components/EnvKVEditor.vue'
 
 // No emits — save handled by parent's goNext (only when dirty; see below)
 const state = inject(SUBMIT_STATE_KEY)!
