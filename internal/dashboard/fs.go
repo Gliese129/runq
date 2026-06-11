@@ -38,10 +38,19 @@ func (s *Server) handleFSList(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			continue
 		}
+		isDir := entry.IsDir()
+		// Symlinks: DirEntry reports the LINK's type, so a symlinked
+		// directory (~/fast -> /scratch/...) would show as a file and become
+		// unenterable. Stat the target instead. Broken links stay files.
+		if !isDir && info.Mode()&os.ModeSymlink != 0 {
+			if target, terr := os.Stat(filepath.Join(safePath, entry.Name())); terr == nil {
+				isDir = target.IsDir()
+			}
+		}
 		out = append(out, FSEntry{
 			Name:  entry.Name(),
 			Path:  filepath.Join(safePath, entry.Name()),
-			IsDir: entry.IsDir(),
+			IsDir: isDir,
 			Size:  info.Size(),
 		})
 	}
@@ -90,6 +99,12 @@ func (s *Server) handleParseScript(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+// homeSafePath confines browsing to $HOME — LEXICALLY, on purpose. The
+// fence judges the path as typed/navigated, not the physical target, so a
+// symlink under home (~/fast -> /scratch/...) is traversable. This is a
+// guardrail against mistakes, not a security boundary: runq runs with the
+// user's own permissions and the OS is the real boundary (philosophy C4);
+// an attacker who can plant symlinks in your home has already won.
 func homeSafePath(path string) (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
