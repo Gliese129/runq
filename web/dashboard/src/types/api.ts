@@ -204,6 +204,7 @@ export interface ProjectPayload {
   command_template: string
   /** optional one-shot command before each submit (fixed params only) */
   setup_command?: string
+  environment?: Record<string, string>
   defaults: {
     gpus_per_task: number
     max_retry: number

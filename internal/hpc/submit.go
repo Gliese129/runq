@@ -40,6 +40,54 @@ type SubmitOpts struct {
 // submit. Unlike the daemon there is no atomic all-or-nothing — sbatch is an
 // external side effect, so a mid-batch failure leaves the already-submitted
 // tasks recorded and returns how many made it.
+// renderSubmitCmd renders the submit template for one task. Task params are
+// facts of the task — exposed as {{param.*}} so per-task scheduler knobs
+// (walltime, queue, job name) can live in the sweep.
+func renderSubmitCmd(tmpl string, t submitplan.PlannedTask, plan submitplan.Plan, runsh string) (string, error) {
+	vars := map[string]string{
+		"run_sh":   runsh,
+		"gpus":     strconv.Itoa(t.GPUsNeeded),
+		"job_id":   plan.JobID,
+		"task_id":  t.TaskID,
+		"task_dir": t.TaskDir,
+	}
+	for name, value := range t.Params {
+		vars["param."+name] = fmt.Sprintf("%v", value)
+	}
+	return hpccore.Render(tmpl, vars)
+}
+
+// submitEnvPrefix turns the project's environment into shell env
+// assignments prefixed onto the submit command, so $TSUBAME_GROUP-style
+// references in submit_template resolve from project config — not from
+// whatever the login shell happens to export.
+func submitEnvPrefix(env map[string]string) string {
+	if len(env) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(env))
+	for k := range env {
+		keys = append(keys, k)
+	}
+	sortStrings(keys)
+	var b strings.Builder
+	for _, k := range keys {
+		b.WriteString(k)
+		b.WriteString("=")
+		b.WriteString(hpccore.ShellQuote(env[k]))
+		b.WriteString(" ")
+	}
+	return b.String()
+}
+
+func sortStrings(s []string) {
+	for i := 1; i < len(s); i++ {
+		for j := i; j > 0 && s[j] < s[j-1]; j-- {
+			s[j], s[j-1] = s[j-1], s[j]
+		}
+	}
+}
+
 // printPreflight prints the three-state report (one line per check) so
 // skipped checks stay visible — "didn't check" must look different from
 // "checked and passed".
@@ -116,6 +164,18 @@ func (b *Backend) Submit(ctx context.Context, jobCfg job.JobConfig, proj *projec
 	}
 	printPreflight(plan.Preflight)
 
+	// Fail-fast template validation: render the submit command for the
+	// first task BEFORE anything is persisted or submitted. A missing
+	// {{param.*}} must abort with zero residue and a fix-it hint, not die
+	// mid-loop with the job row already inserted.
+	if len(plan.Tasks) > 0 {
+		if _, err := renderSubmitCmd(b.Cfg.SubmitTemplate, plan.Tasks[0], plan, "<run_sh>"); err != nil {
+			return "", 0, fmt.Errorf(
+				"%w\nHint: every {{param.NAME}} in submit_template must exist as a task param — add it to fixed_params (same value for all tasks) or as a sweep column (per-task values). Try `runq hpc submit --dry-run` to preview.",
+				err)
+		}
+	}
+
 	// One-shot job setup (e.g. model pre-download on the login node).
 	// Runs before any DB row or cluster submission — failure leaves nothing.
 	if err := submitplan.RunSetup(ctx, proj, jobCfg); err != nil {
@@ -145,21 +205,7 @@ func (b *Backend) Submit(ctx context.Context, jobCfg job.JobConfig, proj *projec
 		if err := os.WriteFile(runsh, []byte(b.buildRunScript(t, plan)), 0o755); err != nil {
 			return plan.JobID, submitted, fmt.Errorf("write run.sh for %s: %w", t.TaskID, err)
 		}
-		vars := map[string]string{
-			"run_sh":   runsh,
-			"gpus":     strconv.Itoa(t.GPUsNeeded),
-			"job_id":   plan.JobID,
-			"task_id":  t.TaskID,
-			"task_dir": t.TaskDir,
-		}
-		// Task params are facts of the task — expose them to the submit
-		// template under the param.* namespace, so per-task scheduler knobs
-		// (walltime, queue, job name) can live in the sweep:
-		//   qsub -l h_rt={{param.h_rt}} -N {{param.lang}}_{{param.task}} ...
-		for name, value := range t.Params {
-			vars["param."+name] = fmt.Sprintf("%v", value)
-		}
-		cmd, err := hpccore.Render(b.Cfg.SubmitTemplate, vars)
+		cmd, err := renderSubmitCmd(b.Cfg.SubmitTemplate, t, plan, runsh)
 		if err != nil {
 			return plan.JobID, submitted, fmt.Errorf("render submit_template for %s: %w", t.TaskID, err)
 		}
@@ -173,7 +219,7 @@ func (b *Backend) Submit(ctx context.Context, jobCfg job.JobConfig, proj *projec
 			return plan.JobID, submitted, fmt.Errorf("persist task %s: %w", t.TaskID, err)
 		}
 
-		out, err := b.Run(ctx, cmd)
+		out, err := b.Run(ctx, submitEnvPrefix(proj.Environment)+cmd)
 		if err != nil {
 			// sbatch itself errored → no cluster job exists → truly terminal.
 			_ = b.Store.UpdateTaskStatus(ctx, t.TaskID, "failed",

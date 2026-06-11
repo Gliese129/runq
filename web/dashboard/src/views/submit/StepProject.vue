@@ -222,6 +222,15 @@
           @apply="form.cmd = $event"
         />
 
+        <v-textarea
+          v-model="form.envText"
+          label="Environment (optional)"
+          variant="outlined" density="compact" class="mb-3 font-mono" rows="2" auto-grow
+          placeholder="TSUBAME_GROUP=tga-xxx&#10;HF_HUB_OFFLINE=1"
+          hint="KEY=VALUE per line. Injected into tasks AND the HPC submit command ($VAR in submit_template resolves from here). Secrets belong in .env instead."
+          persistent-hint
+        />
+
         <v-text-field
           v-model="form.setupCmd"
           label="Setup command (optional)"
@@ -394,8 +403,8 @@ watch(
   { deep: true },
 )
 function form_() {
-  const { name, workDir, cmd, setupCmd, gpus, maxRetry, envType, envPath, envName } = state.newProject
-  return { name, workDir, cmd, setupCmd, gpus, maxRetry, envType, envPath, envName }
+  const { name, workDir, cmd, setupCmd, envText, gpus, maxRetry, envType, envPath, envName } = state.newProject
+  return { name, workDir, cmd, setupCmd, envText, gpus, maxRetry, envType, envPath, envName }
 }
 
 function enterEditMode() {
@@ -482,6 +491,7 @@ function applyProjectConfig(cfg: ProjectConfig, resetGroups = true) {
   form.workDir = cfg.working_dir
   form.cmd = cfg.command_template
   form.setupCmd = cfg.setup_command || ''
+  form.envText = Object.entries(cfg.environment || {}).map(([k, v]) => `${k}=${v}`).join('\n')
   form.gpus = cfg.defaults?.gpus_per_task || 1
   form.maxRetry = cfg.defaults?.max_retry ?? 0
   form.envType = cfg.python_env?.type || ''
@@ -603,6 +613,7 @@ function resetProjectForm() {
   form.workDir = ''
   form.cmd = ''
   form.setupCmd = ''
+  form.envText = ''
   form.gpus = 1
   form.maxRetry = 0
   form.envType = ''

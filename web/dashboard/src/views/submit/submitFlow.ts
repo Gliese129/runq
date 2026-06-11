@@ -15,6 +15,7 @@ export interface SubmitProjectDraft {
   envType: string
   envPath: string
   envName: string
+  envText: string
   params: ProjectParam[]
 }
 
@@ -99,12 +100,26 @@ export function dryRunHeaders(
   return ordered.map(k => ({ title: k, key: k }))
 }
 
+/** "KEY=VALUE per line" → map (comments and blanks ignored). */
+export function parseEnvText(text: string): Record<string, string> | undefined {
+  const out: Record<string, string> = {}
+  for (const line of (text || '').split('\n')) {
+    const l = line.trim()
+    if (!l || l.startsWith('#')) continue
+    const i = l.indexOf('=')
+    if (i <= 0) continue
+    out[l.slice(0, i).trim()] = l.slice(i + 1).trim()
+  }
+  return Object.keys(out).length > 0 ? out : undefined
+}
+
 export function buildProjectPayload(project: SubmitProjectDraft): ProjectPayload {
   const payload: ProjectPayload = {
     project_name: project.name.trim(),
     working_dir: project.workDir,
     command_template: project.cmd,
     setup_command: project.setupCmd.trim() || undefined,
+    environment: parseEnvText(project.envText),
     defaults: { gpus_per_task: project.gpus, max_retry: project.maxRetry },
   }
   if (project.envType) {

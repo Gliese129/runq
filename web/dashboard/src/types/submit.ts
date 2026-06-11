@@ -37,6 +37,7 @@ export interface SubmitState {
     envType: string
     envPath: string
     envName: string
+    envText: string        // KEY=VALUE per line — project environment
     creating: boolean
     error: string
     params: ProjectParam[]

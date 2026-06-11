@@ -144,6 +144,7 @@ const newProject = reactive({
   envType: '',
   envPath: '',
   envName: '',
+  envText: '',
   creating: false,
   error: '',
   params: [] as import('@/types/submit').ProjectParam[],

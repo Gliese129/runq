@@ -17,9 +17,14 @@
         <v-chip
           v-for="ph in placeholders" :key="ph"
           size="x-small" variant="outlined" class="cursor-pointer"
+          :color="ph.startsWith('param.') ? 'success' : undefined"
           style="font-family: monospace"
+          :title="ph.startsWith('param.') ? 'task param (from your sweep / fixed_params)' : 'runq built-in'"
           @click="insertPlaceholder(ph)"
-        >{{ '{{' + ph + '\}\}' }}</v-chip>
+        >
+          <v-icon start size="10">{{ ph.startsWith('param.') ? 'mdi-variable' : 'mdi-cog-outline' }}</v-icon>
+          {{ '{{' + ph + '\}\}' }}
+        </v-chip>
         <span class="text-caption text-on-surface-variant ml-2"><code>{{ '{{' }}</code> {{ t('editor.completion_hint') }}</span>
       </div>
 
@@ -69,7 +74,8 @@ function completions(ctx: CompletionContext) {
     from: word.from + 2,
     options: props.placeholders.map(ph => ({
       label: ph,
-      type: 'variable',
+      type: ph.startsWith('param.') ? 'variable' : 'keyword',
+      detail: ph.startsWith('param.') ? 'task param' : 'built-in',
       // param.* leaves the cursor after the dot for the user's own name
       apply: ph.endsWith('.*') ? ph.slice(0, -1) : ph + '}}',
     })),
