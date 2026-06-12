@@ -1,12 +1,16 @@
 package hpc
 
 import (
-	"os/exec"
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/gliese129/runq/internal/hpcconfig"
 	"github.com/gliese129/runq/internal/hpccore"
@@ -312,5 +316,195 @@ func TestRunScriptCdsAndRedirects(t *testing.T) {
 	// failed cd must yield a failed status, not a silent half-run
 	if !strings.Contains(script, "code=1") {
 		t.Errorf("cd failure must set a nonzero exit code:\n%s", script)
+	}
+	// last-words trap: TERM (qdel/walltime grace) must be caught; USR1/USR2
+	// must NOT be (frameworks use them for checkpoint signaling)
+	if !strings.Contains(script, "TERM INT HUP") {
+		t.Errorf("missing kill trap:\n%s", script)
+	}
+	if strings.Contains(script, "USR1") || strings.Contains(script, "USR2") {
+		t.Errorf("run.sh must not intercept USR1/USR2:\n%s", script)
+	}
+	// the whole script must be valid POSIX shell (quoting in the trap line
+	// is easy to get wrong) — sh -n parses without executing
+	f := filepath.Join(t.TempDir(), "run.sh")
+	if err := os.WriteFile(f, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("sh", "-n", f).CombinedOutput(); err != nil {
+		t.Errorf("generated run.sh is not valid shell: %v\n%s\n--- script ---\n%s", err, out, script)
+	}
+}
+
+// End-to-end trap behavior: run a real (non-scheduler) shell, TERM the
+// process group mid-run, and assert the wrapper wrote the killed status.
+func TestRunScriptTrapWritesKilledOnTerm(t *testing.T) {
+	dir := t.TempDir()
+	b := &Backend{Cfg: &hpcconfig.Config{}}
+	script := b.buildRunScript(submitplan.PlannedTask{
+		TaskID: "tk1", TaskDir: dir, LogPath: filepath.Join(dir, "tk1.log"),
+		WorkingDir: dir, Command: "sleep 30",
+	}, submitplan.Plan{JobID: "jb1", Project: "p"})
+	f := filepath.Join(dir, "run.sh")
+	if err := os.WriteFile(f, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("sh", f)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	// wait until the wrapper reported running (trap installed before that)
+	statusPath := filepath.Join(dir, "status.json")
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if buf, err := os.ReadFile(statusPath); err == nil && strings.Contains(string(buf), "running") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("wrapper never reported running")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	// scheduler-style kill: signal the process GROUP (sh + sleep)
+	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+	_ = cmd.Wait()
+	buf, err := os.ReadFile(statusPath)
+	if err != nil {
+		t.Fatalf("status.json unreadable after TERM: %v", err)
+	}
+	if !strings.Contains(string(buf), `"status":"killed"`) {
+		t.Errorf("trap did not write killed status, got: %s", buf)
+	}
+}
+
+// Login-node citizenship: the dashboard calls Status() in a poll loop, so
+// the scheduler probe must ride a per-job floor — repeated Status() within
+// the window reconciles from local files but runs NO qstat. An explicit
+// Refresh() is the user's command and always probes.
+func TestStatusThrottlesSchedulerProbe(t *testing.T) {
+	skipIfNoHPCCore(t)
+	cfg := &hpcconfig.Config{
+		SubmitTemplate: "qsub {{run_sh}}",
+		SubmitIDRegex:  `job ([0-9]+)`,
+		KillTemplate:   "cancel {{ext_id}}",
+		StatusTemplate: "checkstat {{ext_id}}",
+	}
+	probes := 0
+	runner := func(ctx context.Context, command string) (string, error) {
+		if strings.Contains(command, "qsub") {
+			return "job 42", nil
+		}
+		if strings.Contains(command, "checkstat") {
+			probes++
+			return "RUNNING", nil
+		}
+		return "", nil
+	}
+	b, proj, jobCfg := newTestBackend(t, cfg, runner)
+	jobID, _, err := b.Submit(context.Background(), jobCfg, proj, SubmitOpts{SkipPreflight: true})
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+
+	for i := 0; i < 3; i++ {
+		if _, err := b.Status(context.Background(), jobID); err != nil {
+			t.Fatalf("status #%d: %v", i, err)
+		}
+	}
+	if probes != 1 {
+		t.Errorf("3 Status() calls within the floor should probe exactly once, got %d", probes)
+	}
+
+	// Explicit Refresh = user command → always probes.
+	if err := b.Refresh(context.Background(), jobID); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	if probes != 2 {
+		t.Errorf("explicit Refresh must bypass the throttle, got %d probes", probes)
+	}
+}
+
+// Listing-style status templates (no {{ext_id}} — SGE/UGE presets run a full
+// `qstat` and row-select in the parser) must cost ONE scheduler query per
+// refresh pass regardless of task count.
+func TestListingStatusTemplateBatchesPerPass(t *testing.T) {
+	skipIfNoHPCCore(t)
+	cfg := &hpcconfig.Config{
+		SubmitTemplate: "qsub {{run_sh}}",
+		SubmitIDRegex:  `job ([0-9]+)`,
+		KillTemplate:   "cancel {{ext_id}}",
+		StatusTemplate: "qstat-all", // listing-style: identical for every task
+		StatusParser:   []string{`awk -v id={{ext_id}} '$1==id{print $2; f=1} END{if(!f) print "gone"}'`},
+	}
+	statCalls, submits := 0, 0
+	runner := func(ctx context.Context, command string) (string, error) {
+		switch {
+		case strings.HasPrefix(command, "qsub"):
+			submits++
+			return fmt.Sprintf("job %d", 100+submits), nil
+		case command == "qstat-all":
+			statCalls++
+			return "101 RUNNING\n102 RUNNING", nil
+		default: // parser pipelines etc. — local shell, run for real
+			out, err := exec.Command("sh", "-c", command).CombinedOutput()
+			return string(out), err
+		}
+	}
+	b, proj, jobCfg := newTestBackend(t, cfg, runner)
+	proj.CmdTemplate = "python x.py --lr {{lr}}"
+	jobCfg.Sweep = []job.SweepBlock{{Method: "grid",
+		Parameters: map[string]job.ParameterSpec{"lr": {Values: []any{0.1, 0.2}}}}}
+
+	jobID, n, err := b.Submit(context.Background(), jobCfg, proj, SubmitOpts{SkipPreflight: true})
+	if err != nil || n != 2 {
+		t.Fatalf("submit: n=%d err=%v", n, err)
+	}
+	if err := b.Refresh(context.Background(), jobID); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	if statCalls != 1 {
+		t.Errorf("2 tasks with a listing-style template should run the status command ONCE per pass, got %d", statCalls)
+	}
+	// and the per-task row selection still works: both tasks now running
+	tasks, _ := b.Store.ListTasks(context.Background(), store.TaskFilter{JobID: jobID})
+	for _, tk := range tasks {
+		if tk.Status != "running" {
+			t.Errorf("task %s (ext %s): want running, got %s", tk.ID, tk.ExternalID, tk.Status)
+		}
+	}
+}
+
+// New work must not land in an archived project — the cascade hides its
+// jobs from the default lists, so the run would be invisible. The guard
+// lives in Submit (one backend point: GUI rerun/draft/import, CLI,
+// --project-file all pass through here).
+func TestSubmitRefusesArchivedProject(t *testing.T) {
+	skipIfNoHPCCore(t)
+	cfg := &hpcconfig.Config{
+		SubmitTemplate: "qsub {{run_sh}}",
+		SubmitIDRegex:  `job ([0-9]+)`,
+		KillTemplate:   "cancel {{ext_id}}",
+	}
+	runner := func(ctx context.Context, command string) (string, error) { return "job 1", nil }
+	b, proj, jobCfg := newTestBackend(t, cfg, runner)
+
+	// First submit registers the project; archive it, then try again.
+	if _, _, err := b.Submit(context.Background(), jobCfg, proj, SubmitOpts{SkipPreflight: true}); err != nil {
+		t.Fatalf("first submit: %v", err)
+	}
+	reg := project.NewRegistry(b.Store.DB())
+	// jobs from the first submit are pending — flip them terminal so the
+	// project archive guard lets us archive.
+	if _, err := b.Store.DB().Exec(`UPDATE jobs SET status = 'done'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.Archive(proj.ProjectName); err != nil {
+		t.Fatalf("archive project: %v", err)
+	}
+	if _, _, err := b.Submit(context.Background(), jobCfg, proj, SubmitOpts{SkipPreflight: true}); err == nil {
+		t.Fatal("submit into an archived project must be refused")
+	} else if !strings.Contains(err.Error(), "archived") {
+		t.Fatalf("error should explain the archive state, got: %v", err)
 	}
 }

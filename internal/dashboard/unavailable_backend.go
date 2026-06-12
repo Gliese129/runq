@@ -31,7 +31,7 @@ func (b *UnavailableBackend) ResolveNote(ctx context.Context, cfg job.JobConfig)
 	return "", b.wrap()
 }
 
-func (b *UnavailableBackend) ListJobs(ctx context.Context) ([]JobSummary, error) {
+func (b *UnavailableBackend) ListJobs(ctx context.Context, project string) ([]JobSummary, error) {
 	return nil, b.wrap()
 }
 
@@ -78,6 +78,18 @@ func (b *UnavailableBackend) ResumeJob(ctx context.Context, jobID string) error 
 func (b *UnavailableBackend) SubmitJob(ctx context.Context, cfg job.JobConfig, opts SubmitOptions) (string, int, error) {
 	return "", 0, b.wrap()
 }
+
+func (b *UnavailableBackend) ListArchivedJobs(context.Context) ([]JobSummary, error) {
+	return nil, b.wrap()
+}
+
+func (b *UnavailableBackend) ArchiveJob(context.Context, string) error { return b.wrap() }
+
+func (b *UnavailableBackend) UnarchiveJob(context.Context, string) error { return b.wrap() }
+
+func (b *UnavailableBackend) ArchiveProject(context.Context, string) error { return b.wrap() }
+
+func (b *UnavailableBackend) UnarchiveProject(context.Context, string) error { return b.wrap() }
 
 func (b *UnavailableBackend) PreviewSubmit(context.Context, job.JobConfig, bool) (string, error) {
 	return "", b.wrap()

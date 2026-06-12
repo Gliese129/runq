@@ -52,10 +52,61 @@ func readStatus(taskDir string) statusFile {
 // The DB is the (lazily-updated) source of truth and this is its only writer;
 // there is no user-visible sync — status/best/collect call Refresh internally.
 func (b *Backend) Refresh(ctx context.Context, jobID string) error {
+	return b.refresh(ctx, jobID, true)
+}
+
+// RefreshLazy is the read-path variant: local reconcile every time, the
+// scheduler probe only when the per-job floor allows. For callers that are
+// polled by UIs (Status, compare tables) rather than commanded by a human.
+func (b *Backend) RefreshLazy(ctx context.Context, jobID string) error {
+	return b.refresh(ctx, jobID, false)
+}
+
+// schedProbeMinInterval is the login-node citizenship guard: the dashboard
+// polls Status() continuously, and without a floor every poll would fan out
+// one qstat per active task. Within this window Status() still reconciles
+// from status.json + ingests metrics (cheap local reads) — only the
+// scheduler probe is skipped. Explicit Refresh (GUI button, CLI commands —
+// always a fresh process anyway) is never throttled.
+const schedProbeMinInterval = 20 * time.Second
+
+// probeAllowed records a probe pass for jobID, returning false while the
+// previous one is younger than the floor. In-memory by design: the throttle
+// exists for the long-running dashboard process, not for one-shot CLIs.
+func (b *Backend) probeAllowed(jobID string) bool {
+	b.probeMu.Lock()
+	defer b.probeMu.Unlock()
+	if b.lastProbe == nil {
+		b.lastProbe = make(map[string]time.Time)
+	}
+	if time.Since(b.lastProbe[jobID]) < schedProbeMinInterval {
+		return false
+	}
+	b.lastProbe[jobID] = time.Now()
+	return true
+}
+
+func (b *Backend) refresh(ctx context.Context, jobID string, forceProbe bool) error {
+	probe := forceProbe || b.probeAllowed(jobID)
+	if forceProbe {
+		// An explicit refresh resets the clock for the throttled path too.
+		b.probeMu.Lock()
+		if b.lastProbe == nil {
+			b.lastProbe = make(map[string]time.Time)
+		}
+		b.lastProbe[jobID] = time.Now()
+		b.probeMu.Unlock()
+	}
 	tasks, err := b.Store.ListTasks(ctx, store.TaskFilter{JobID: jobID})
 	if err != nil {
 		return err
 	}
+	// Batch effect for listing-style status templates: presets like SGE/UGE
+	// run a FULL `qstat` and select the task's row in the parser (awk). The
+	// rendered status command is then identical for every task — memoize it
+	// for this pass, so N tasks cost ONE scheduler query. Templates that
+	// embed {{ext_id}} render uniquely per task and behave as before.
+	probeRun := memoRunner(b.Run)
 	var ingestErrs []error
 	for _, tk := range tasks {
 		// Metrics/checkpoints: idempotent (INSERT OR IGNORE), run for every task
@@ -77,7 +128,7 @@ func (b *Backend) Refresh(ctx context.Context, jobID string) error {
 		d := hpccore.Reconcile(tk.Status, tk.StatusSource, hpccore.Observed{
 			WrapperStatus: sf.Status,
 			ExitCode:      sf.ExitCode,
-			Scheduler:     b.probeScheduler(ctx, tk.ExternalID),
+			Scheduler:     b.maybeProbeScheduler(ctx, probeRun, tk.ExternalID, probe),
 			KillRequested: false, // hpc kill writes killed/runq directly; never infer intent from status
 		})
 
@@ -127,7 +178,41 @@ func (b *Backend) Refresh(ctx context.Context, jobID string) error {
 //   - with a status_parser hook → its normalized token via hpccore.ParseSignal
 //   - without a hook → empty output = SchedGone, recognized token = that signal,
 //     present-but-unrecognized = SchedActive (alive)
+//
+// maybeProbeScheduler is probeScheduler behind the throttle gate: a skipped
+// probe yields SchedUnknown — "no new fact", which Reconcile treats as
+// keep-current-state (never an invented terminal).
+func (b *Backend) maybeProbeScheduler(ctx context.Context, run Runner, extID string, allowed bool) hpccore.SchedulerSignal {
+	if !allowed {
+		return hpccore.SchedUnknown
+	}
+	return b.probeSchedulerWith(ctx, run, extID)
+}
+
+// memoRunner caches command → result for the lifetime of one refresh pass.
+// Status queries are idempotent reads, so within a pass the same rendered
+// command need not hit the scheduler twice. Sequential use only (no lock).
+func memoRunner(run Runner) Runner {
+	type result struct {
+		out string
+		err error
+	}
+	cache := map[string]result{}
+	return func(ctx context.Context, command string) (string, error) {
+		if r, ok := cache[command]; ok {
+			return r.out, r.err
+		}
+		out, err := run(ctx, command)
+		cache[command] = result{out, err}
+		return out, err
+	}
+}
+
 func (b *Backend) probeScheduler(ctx context.Context, extID string) hpccore.SchedulerSignal {
+	return b.probeSchedulerWith(ctx, b.Run, extID)
+}
+
+func (b *Backend) probeSchedulerWith(ctx context.Context, run Runner, extID string) hpccore.SchedulerSignal {
 	if b.Cfg.StatusTemplate == "" || extID == "" {
 		return hpccore.SchedUnknown
 	}
@@ -137,7 +222,7 @@ func (b *Backend) probeScheduler(ctx context.Context, extID string) hpccore.Sche
 	}
 	// Note: status command exit code handling differs by mode (below). Capture
 	// the output regardless of error so a parser can still interpret it.
-	out, runErr := b.Run(ctx, cmd)
+	out, runErr := run(ctx, cmd)
 
 	// Optional parser pipeline: feed the status output to stage 1 on stdin and
 	// pipe each stage into the next. runq assembles the pipe so each stage stays
@@ -160,7 +245,7 @@ func (b *Backend) probeScheduler(ctx context.Context, extID string) hpccore.Sche
 			stages = append(stages, rs)
 		}
 		pipeline := "printf '%s\\n' " + hpccore.ShellQuote(out) + " | " + strings.Join(stages, " | ")
-		pout, perr := b.Run(ctx, pipeline)
+		pout, perr := run(ctx, pipeline)
 		if perr != nil {
 			return hpccore.SchedUnknown
 		}
@@ -192,7 +277,9 @@ type JobView struct {
 
 // Status refreshes the job, then returns its current DB state.
 func (b *Backend) Status(ctx context.Context, jobID string) (*JobView, error) {
-	if err := b.Refresh(ctx, jobID); err != nil {
+	// Read path: reconcile from local files every time, but let the
+	// scheduler probe ride the throttle — the dashboard calls this in a loop.
+	if err := b.RefreshLazy(ctx, jobID); err != nil {
 		return nil, err
 	}
 	job, err := b.Store.GetJob(ctx, jobID)

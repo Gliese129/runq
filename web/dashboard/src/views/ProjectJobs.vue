@@ -3,9 +3,18 @@
     <!-- Header -->
     <div class="d-flex align-center justify-space-between mb-4">
       <div class="text-h5 font-weight-bold">{{ project }}</div>
-      <v-btn variant="tonal" color="primary" size="small" :to="{ name: 'submit' }">
-        <v-icon start size="16">mdi-plus</v-icon> {{ t('submit.new_job') }}
-      </v-btn>
+      <div class="d-flex ga-2">
+        <v-btn variant="text" size="small"
+          :title="projectArchived ? undefined : 'Hide this project and its jobs from default lists — reversible'"
+          @click="toggleProjectArchive"
+        >
+          <v-icon start size="16">{{ projectArchived ? 'mdi-archive-arrow-up-outline' : 'mdi-archive-arrow-down-outline' }}</v-icon>
+          {{ projectArchived ? t('archive.unarchive') : t('archive.archive') }}
+        </v-btn>
+        <v-btn variant="tonal" color="primary" size="small" :to="{ name: 'submit' }">
+          <v-icon start size="16">mdi-plus</v-icon> {{ t('submit.new_job') }}
+        </v-btn>
+      </div>
     </div>
 
     <!-- Filters -->
@@ -91,20 +100,89 @@
       <div class="text-body-2 text-on-surface-variant mb-4">{{ t('project.no_jobs_hint') }}</div>
       <v-btn color="primary" variant="tonal" :to="{ name: 'submit' }">{{ t('nav.submit') }}</v-btn>
     </v-card>
+
+    <!-- Archived jobs of this project (collapsed by default) -->
+    <v-card v-if="archivedJobs.length > 0" class="mt-3">
+      <div class="d-flex align-center ga-2 px-4 py-3 cursor-pointer text-on-surface-variant" @click="archivedOpen = !archivedOpen">
+        <v-icon size="16">mdi-archive-outline</v-icon>
+        <span class="text-subtitle-2">{{ t('archive.section', { n: archivedJobs.length }) }}</span>
+        <v-spacer />
+        <v-icon size="16">{{ archivedOpen ? 'mdi-chevron-up' : 'mdi-chevron-down' }}</v-icon>
+      </div>
+      <div v-if="archivedOpen" class="px-2 pb-2">
+        <div
+          v-for="j in archivedJobs" :key="j.id"
+          class="d-flex align-center ga-2 px-2 py-1 rounded recent-row cursor-pointer"
+          @click="router.push({ name: 'job-detail', params: { project: j.project, jobId: j.id } })"
+        >
+          <code class="text-body-2">{{ j.id.slice(0, 10) }}</code>
+          <span class="text-caption text-on-surface-variant text-truncate flex-grow-1">{{ j.note || '—' }}</span>
+          <v-btn size="x-small" variant="text" @click.stop="unarchiveJob(j.id)">
+            <v-icon start size="12">mdi-archive-arrow-up-outline</v-icon> {{ t('archive.unarchive') }}
+          </v-btn>
+        </div>
+      </div>
+    </v-card>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { useJobsStore } from '@/stores/jobs'
+import { useProjectStore } from '@/stores/projects'
+import { useSnackbar } from '@/composables/useSnackbar'
 import StatusDot from '@/components/StatusDot.vue'
+import type { JobSummary } from '@/types/api'
 
 const props = defineProps<{ project: string }>()
 const { t } = useI18n()
 const jobs = useJobsStore()
+const projectStore = useProjectStore()
 const router = useRouter()
+const snack = useSnackbar()
+
+// ── Archive — ALL state derives from the pinia stores (single source).
+// No local copies: route-param switches and post-mutation refreshes can't
+// go stale, because there is nothing here to go stale.
+const archivedOpen = ref(false)
+const projectArchived = computed(() =>
+  !!projectStore.list.find(p => p.name === props.project)?.archived)
+const archivedJobs = computed(() =>
+  jobs.archived.filter(j => j.project === props.project))
+// Inside an archived project the global list is empty BY DESIGN (cascade);
+// the scoped query skips it.
+const scopedJobs = computed(() => jobs.scoped[props.project] ?? [])
+
+// Vue Router REUSES this component when only :project changes — refetch;
+// the computeds above re-point automatically. immediate covers mount.
+watch(() => props.project, () => {
+  archivedOpen.value = false
+  projectStore.fetch()
+  jobs.fetchArchived()
+  jobs.fetchScoped(props.project)
+}, { immediate: true })
+
+async function toggleProjectArchive() {
+  try {
+    if (projectArchived.value) {
+      await projectStore.unarchive(props.project)
+      snack.success(t('archive.project_back'))
+    } else {
+      await projectStore.archive(props.project)
+      snack.success(t('archive.project_done'))
+    }
+  } catch (e: any) { snack.error(e?.message || 'Archive failed') }
+}
+
+async function unarchiveJob(id: string) {
+  try {
+    await jobs.unarchiveJob(id)
+    snack.success(t('archive.job_back'))
+    jobs.fetchScoped(props.project)
+  } catch (e: any) { snack.error(e?.message || 'Unarchive failed') }
+}
 
 const statusFilter = ref('')
 const searchQuery = ref('')
@@ -121,7 +199,8 @@ const statusFilters: { value: string; label: string; dot: string; kind: 'task' |
   { value: 'pending', label: 'Pending', dot: 'pending', kind: 'task' },
 ]
 
-const projectJobs = computed(() => jobs.jobsByProject.get(props.project) ?? [])
+const projectJobs = computed(() =>
+  projectArchived.value ? scopedJobs.value : (jobs.jobsByProject.get(props.project) ?? []))
 
 const displayedJobs = computed(() => {
   let list = [...projectJobs.value]

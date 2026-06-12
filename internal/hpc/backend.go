@@ -43,6 +43,7 @@ import (
 	"context"
 	"os/exec"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/gliese129/runq/internal/config"
@@ -66,6 +67,11 @@ type Backend struct {
 	Store      *store.Store
 	Run        Runner
 	StorageCfg *config.GlobalConfig // nil-safe: nil = project_path mode
+
+	// Scheduler-probe throttle (see refresh.go): per-job floor so the
+	// dashboard's poll loop can't hammer qstat on a shared login node.
+	probeMu   sync.Mutex
+	lastProbe map[string]time.Time
 }
 
 // New builds a Backend with the real shell runner.

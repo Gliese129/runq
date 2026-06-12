@@ -16,8 +16,9 @@
 //   pending      = info
 //   killed       = warning   — a human decision, distinct from failure red
 //
-// Non-color channels still matter: running stays hollow+spinning vs the
-// solid terminal states (colorblind / reduced-motion users).
+// Running is a solid dot like everything else — since running (green) and
+// done (primary) no longer share a hue, the spin alone separates live from
+// terminal; hollow is reserved (unused) should two states share color again.
 
 export interface StatusStyle {
   /** color for vuetify components (theme name or css color) */
@@ -30,7 +31,7 @@ export interface StatusStyle {
   variant: 'outlined' | 'tonal'
   /** spinning icon / pulsing dot (auto-disabled by prefers-reduced-motion) */
   animated?: boolean
-  /** hollow dot (ring) — running vs success beyond color */
+  /** hollow dot (ring) — extra channel if two states ever share a color */
   hollow?: boolean
 }
 
@@ -45,7 +46,7 @@ const UNKNOWN: StatusStyle = { color: GREY, css: GREY, icon: 'mdi-help-circle-ou
 
 export const taskStatusStyles: Record<string, StatusStyle> = {
   pending: { color: 'info', css: INFO, icon: 'mdi-clock-outline', variant: 'outlined' },
-  running: { color: 'success', css: GREEN, icon: 'mdi-loading', variant: 'outlined', animated: true, hollow: true },
+  running: { color: 'success', css: GREEN, icon: 'mdi-loading', variant: 'outlined', animated: true },
   success: { color: 'primary', css: PRIMARY, icon: 'mdi-check', variant: 'tonal' },
   failed: { color: 'error', css: RED, icon: 'mdi-alert-circle', variant: 'tonal' },
   killed: { color: 'warning', css: AMBER, icon: 'mdi-stop', variant: 'tonal' },
@@ -56,7 +57,7 @@ export const taskStatusStyles: Record<string, StatusStyle> = {
 
 export const jobStatusStyles: Record<string, StatusStyle> = {
   pending: { color: 'info', css: INFO, icon: 'mdi-clock-outline', variant: 'outlined' },
-  running: { color: 'success', css: GREEN, icon: 'mdi-loading', variant: 'outlined', animated: true, hollow: true },
+  running: { color: 'success', css: GREEN, icon: 'mdi-loading', variant: 'outlined', animated: true },
   done: { color: 'primary', css: PRIMARY, icon: 'mdi-flag-checkered', variant: 'tonal' },
   paused: { color: 'warning', css: AMBER, icon: 'mdi-pause', variant: 'tonal' },
 }

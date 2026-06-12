@@ -18,7 +18,7 @@
       </div>
       <div class="d-flex align-center ga-2 mt-2">
         <v-icon size="16" color="on-surface-variant">mdi-tag-outline</v-icon>
-        <span class="text-caption text-on-surface-variant flex-shrink-0" title="this submit only — empty uses the project's job_name template">Job name (this submit)</span>
+        <span class="text-caption text-on-surface-variant flex-shrink-0" :title="t('submit.job_name_this_title')">{{ t('submit.job_name_this') }}</span>
         <v-text-field
           ref="jobNameField"
           v-model="state.jobName"
@@ -45,7 +45,7 @@
     <!-- Flat param table -->
     <v-card class="pa-0">
       <div class="d-flex align-center justify-space-between px-4 py-3 border-b">
-        <span class="text-subtitle-2">Parameters</span>
+        <span class="text-subtitle-2">{{ t('submit.parameters') }}</span>
         <code class="text-body-2" :class="validation.ok ? 'text-on-surface-variant' : 'text-error'">
           {{ formula }}
         </code>
@@ -59,7 +59,7 @@
           directly in a numeric cell — preview appears, Enter expands.
         </span>
         <v-spacer />
-        <v-btn size="x-small" variant="text" @click="prefs.sugarTipDismissed.value = true">Got it</v-btn>
+        <v-btn size="x-small" variant="text" @click="prefs.sugarTipDismissed.value = true">{{ t('submit.got_it') }}</v-btn>
       </div>
 
       <div
@@ -103,7 +103,7 @@
           <ParamValueEditor
             v-model="row.values"
             :type="row.type || 'str'"
-            placeholder="Type value + Enter"
+            :placeholder="t('submit.type_value_enter')"
             color="primary"
             :default-value="row.default"
             :suggestions="suggestionsFor(row.name)"
@@ -129,9 +129,9 @@
       <div v-if="alignedSet" class="px-4 py-3 border-b" :style="{ background: tint(alignedColor, '12') }">
         <div class="d-flex align-center ga-2 mb-2">
           <v-icon size="13" :style="{ color: alignedColor }">mdi-link</v-icon>
-          <span class="text-caption" :style="{ color: alignedColor }">Aligned view — values pair up row by row</span>
+          <span class="text-caption" :style="{ color: alignedColor }">{{ t('submit.aligned_view') }}</span>
           <v-spacer />
-          <v-btn size="x-small" variant="text" @click="alignedSetId = null">Close</v-btn>
+          <v-btn size="x-small" variant="text" @click="alignedSetId = null">{{ t('common.close') }}</v-btn>
         </div>
         <table class="w-100 data-mono" style="font-size: 12px">
           <thead>
@@ -210,14 +210,14 @@
           {{ linkPreview.text }}
         </span>
         <v-spacer />
-        <v-btn size="x-small" variant="text" @click="selected.clear()">Clear</v-btn>
+        <v-btn size="x-small" variant="text" @click="selected.clear()">{{ t('common.clear') }}</v-btn>
       </v-card>
     </v-slide-y-reverse-transition>
 
     <p v-if="state.rows.length > 1 && state.linkSets.length === 0 && !hintDismissed" class="text-caption text-on-surface-variant mt-2 px-1">
       <v-icon size="12">mdi-lightbulb-outline</v-icon>
       Want some params to vary together (zip)? Select their rows, then Link.
-      <v-btn size="x-small" variant="text" @click="hintDismissed = true">Got it</v-btn>
+      <v-btn size="x-small" variant="text" @click="hintDismissed = true">{{ t('submit.got_it') }}</v-btn>
     </p>
   </div>
 </template>

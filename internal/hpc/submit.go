@@ -139,6 +139,11 @@ func (b *Backend) Submit(ctx context.Context, jobCfg job.JobConfig, proj *projec
 			return "", 0, fmt.Errorf("register project %q: %w", proj.ProjectName, aerr)
 		}
 	}
+	// THE submit precondition (exists + not archived, fail-closed) lives in
+	// one place — see Registry.RequireSubmittable.
+	if err := reg.RequireSubmittable(proj.ProjectName); err != nil {
+		return "", 0, err
+	}
 
 	jobID = utils.GenerateJobID()
 	wsRoot, err := config.ResolveRoot(b.StorageCfg, proj.WorkingDir, proj.ProjectName)
@@ -304,6 +309,12 @@ func (b *Backend) buildRunScript(t submitplan.PlannedTask, plan submitplan.Plan)
 	}
 	fmt.Fprintf(&s, "STATUS_FILE=%s\n", hpccore.ShellQuote(filepath.Join(t.TaskDir, statusFileName)))
 	s.WriteString(`_runq_status() { printf '%s\n' "$1" > "$STATUS_FILE.tmp" && mv "$STATUS_FILE.tmp" "$STATUS_FILE"; }` + "\n")
+	// Last words: schedulers send TERM (qdel/scancel/walltime) with a grace
+	// period before KILL — write a terminal status while we still can, so
+	// the kill becomes a wrapper FACT instead of a qstat inference.
+	// Deliberately NOT trapping USR1/USR2: training frameworks use those
+	// for checkpoint signaling and runq must not intercept them.
+	s.WriteString(`trap '_runq_status "$(printf '\''{"status":"killed","exit_code":143,"finished_at":%s}'\'' "$(date +%s)")"; exit 143' TERM INT HUP` + "\n")
 	s.WriteString(`_runq_status "$(printf '{"status":"running","started_at":%s}' "$(date +%s)")"` + "\n")
 	// Tasks run from the project's working_dir (daemon/HPC parity) —
 	// schedulers start jobs in $HOME, where relative script paths break.

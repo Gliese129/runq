@@ -10,10 +10,10 @@ import { onMounted, onUnmounted, ref, type Ref, watch } from 'vue'
  */
 export function usePolling(
   fn: (silent: boolean) => void | Promise<void>,
-  interval: number,
+  interval: number | (() => number),
   active?: Ref<boolean>,
 ) {
-  let timer: ReturnType<typeof setInterval> | null = null
+  let timer: ReturnType<typeof setTimeout> | null = null
   const inflight = ref(false)
 
   async function tick(silent: boolean) {
@@ -26,19 +26,28 @@ export function usePolling(
     }
   }
 
+  // setTimeout chain (not setInterval): the interval is re-evaluated every
+  // cycle, so a lazy `() => number` that depends on async-loaded state
+  // (e.g. capabilities arriving after mount) takes effect on the next tick
+  // instead of being frozen at start().
+  function schedule() {
+    timer = setTimeout(() => {
+      if (!document.hidden && (!active || active.value)) {
+        tick(true) // subsequent calls are silent
+      }
+      schedule()
+    }, typeof interval === 'function' ? interval() : interval)
+  }
+
   function start() {
     stop()
     tick(false) // first call is non-silent
-    timer = setInterval(() => {
-      if (document.hidden) return
-      if (active && !active.value) return
-      tick(true) // subsequent calls are silent
-    }, interval)
+    schedule()
   }
 
   function stop() {
     if (timer) {
-      clearInterval(timer)
+      clearTimeout(timer)
       timer = null
     }
   }

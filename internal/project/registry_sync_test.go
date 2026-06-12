@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/gliese129/runq/internal/store"
 	_ "modernc.org/sqlite"
 )
 
@@ -65,5 +66,42 @@ func TestGetSyncsFromYAML(t *testing.T) {
 	got, _ = r.Get("p")
 	if got.ProjectName != "p" || got.CmdTemplate != "python c.py {{args}}" {
 		t.Fatalf("identity must stay with DB key: %+v", got)
+	}
+}
+
+// Archive guard: a project with live work must not be hidden — its jobs
+// would cascade out of the global lists while still holding queue slots.
+// paused counts as active (resumable = forgettable).
+func TestProjectArchiveRefusesActiveJobs(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	reg := NewRegistry(st.DB())
+	cfg := Config{ProjectName: "p", WorkingDir: dir, CmdTemplate: "echo {{x}}"}
+	if err := reg.Add(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.DB().Exec(
+		`INSERT INTO jobs (id, project_name, description, config_json, status, created_at) VALUES ('jb1','p','','{}','paused',1)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.Archive("p"); err == nil {
+		t.Fatal("archiving a project with a paused job must be refused")
+	}
+	if _, err := st.DB().Exec(`UPDATE jobs SET status = 'done' WHERE id = 'jb1'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.Archive("p"); err != nil {
+		t.Fatalf("archive with only terminal jobs: %v", err)
+	}
+	names, _ := reg.ArchivedNames()
+	if !names["p"] {
+		t.Fatal("ArchivedNames must report p")
+	}
+	if err := reg.Unarchive("p"); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -38,63 +38,76 @@
       </v-row>
     </v-card>
 
-    <!-- Params -->
-    <v-card class="mb-4 pa-4">
-      <div class="text-subtitle-2 mb-2">Parameters</div>
-      <div class="overflow-x-auto">
-        <table class="data-mono" style="width: 100%">
-          <thead><tr><th>Name</th><th>Value</th></tr></thead>
-          <tbody>
-            <tr v-for="(val, key) in task.params" :key="key">
-              <td class="font-weight-medium">{{ key }}</td>
-              <td>{{ val }}</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </v-card>
+    <!-- Parameters / Metrics / Log — collapsible sections, all open by default -->
+    <v-expansion-panels v-model="openPanels" multiple>
+      <v-expansion-panel value="params">
+        <v-expansion-panel-title>
+          <span class="text-subtitle-2">Parameters</span>
+          <v-chip size="x-small" variant="tonal" class="ml-2">{{ Object.keys(task.params || {}).length }}</v-chip>
+        </v-expansion-panel-title>
+        <v-expansion-panel-text>
+          <div class="overflow-x-auto">
+            <table class="data-mono" style="width: 100%">
+              <thead><tr><th>Name</th><th>Value</th></tr></thead>
+              <tbody>
+                <tr v-for="(val, key) in task.params" :key="key">
+                  <td class="font-weight-medium">{{ key }}</td>
+                  <td>{{ val }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </v-expansion-panel-text>
+      </v-expansion-panel>
 
-    <!-- Metrics chart -->
-    <v-card v-if="task.status !== 'pending'" class="mb-4 pa-4">
-      <div class="d-flex align-center justify-space-between mb-2">
-        <div class="text-subtitle-2 d-flex align-center ga-1">
-          <v-icon size="16">mdi-chart-line</v-icon> Metrics
-        </div>
-        <v-btn v-if="task.wandb_run_id" size="x-small" variant="text" :href="`https://wandb.ai/runs/${task.wandb_run_id}`" target="_blank">
-          <v-icon start size="14">mdi-open-in-new</v-icon> W&B
-        </v-btn>
-      </div>
-      <MetricsChart :points="metricPoints" />
-    </v-card>
-
-    <!-- Log viewer -->
-    <v-card class="pa-0">
-      <div class="d-flex align-center justify-space-between pa-3" style="border-bottom: 0.5px solid rgb(var(--v-theme-outline-variant))">
-        <div class="d-flex align-center ga-2">
-          <div class="text-subtitle-2">Log</div>
-          <v-chip size="x-small" variant="tonal">{{ logData.total_lines }} lines</v-chip>
-        </div>
-        <div class="d-flex align-center ga-1">
-          <v-btn v-if="logData.start > 0" size="x-small" variant="text" :loading="loadingMore" @click="loadEarlier">
-            <v-icon start size="12">mdi-arrow-up</v-icon> Load earlier
+      <v-expansion-panel v-if="task.status !== 'pending'" value="metrics">
+        <v-expansion-panel-title>
+          <span class="text-subtitle-2 d-flex align-center ga-1">
+            <v-icon size="16">mdi-chart-line</v-icon> Metrics
+          </span>
+          <v-spacer />
+          <v-btn
+            v-if="task.wandb_run_id"
+            size="x-small" variant="text" class="mr-2"
+            :href="`https://wandb.ai/runs/${task.wandb_run_id}`" target="_blank"
+            @click.stop
+          >
+            <v-icon start size="14">mdi-open-in-new</v-icon> W&B
           </v-btn>
-          <v-switch
-            v-model="autoScroll"
-            density="compact" hide-details color="primary" inline
-            label="Follow"
-          />
-        </div>
-      </div>
+        </v-expansion-panel-title>
+        <v-expansion-panel-text>
+          <MetricsChart :points="metricPoints" />
+        </v-expansion-panel-text>
+      </v-expansion-panel>
 
-      <div ref="logContainer" class="terminal-block" style="max-height: 600px; overflow-y: auto">
-        <div v-if="logData.lines.length === 0 && !logLoading" class="text-center pa-4" style="color: #64748B">
-          {{ task.status === 'pending' ? 'Waiting to start...' : 'No log output yet' }}
-        </div>
-        <div v-for="(line, i) in logData.lines" :key="logData.start + i" class="log-line">
-          <span class="log-lineno">{{ logData.start + i + 1 }}</span>{{ line }}
-        </div>
-      </div>
-    </v-card>
+      <v-expansion-panel value="log" class="log-panel">
+        <v-expansion-panel-title>
+          <span class="text-subtitle-2">Log</span>
+          <v-chip size="x-small" variant="tonal" class="ml-2">{{ logData.total_lines }} lines</v-chip>
+          <v-spacer />
+          <div class="d-flex align-center ga-1 mr-2" @click.stop>
+            <v-btn v-if="logData.start > 0" size="x-small" variant="text" :loading="loadingMore" @click="loadEarlier">
+              <v-icon start size="12">mdi-arrow-up</v-icon> Load earlier
+            </v-btn>
+            <v-switch
+              v-model="autoScroll"
+              density="compact" hide-details color="primary" inline
+              label="Follow"
+            />
+          </div>
+        </v-expansion-panel-title>
+        <v-expansion-panel-text>
+          <div ref="logContainer" class="terminal-block" style="max-height: 600px; overflow-y: auto">
+            <div v-if="logData.lines.length === 0 && !logLoading" class="text-center pa-4" style="color: #64748B">
+              {{ task.status === 'pending' ? 'Waiting to start...' : 'No log output yet' }}
+            </div>
+            <div v-for="(line, i) in logData.lines" :key="logData.start + i" class="log-line">
+              <span class="log-lineno">{{ logData.start + i + 1 }}</span>{{ line }}
+            </div>
+          </div>
+        </v-expansion-panel-text>
+      </v-expansion-panel>
+    </v-expansion-panels>
   </div>
 
   <div v-else class="d-flex justify-center pa-12">
@@ -131,6 +144,9 @@ const logData = ref<TaskLogResponse>({
 })
 const metricPoints = ref<any[]>([])
 const logLoading = ref(false)
+// All sections start open — panels exist for folding away what you're not
+// reading (e.g. a long param table above the log), not for hiding by default.
+const openPanels = ref(['params', 'metrics', 'log'])
 const loadingMore = ref(false)
 const autoScroll = ref(true)
 const logContainer = ref<HTMLElement>()
@@ -247,6 +263,10 @@ onUnmounted(() => stopPolling())
 </script>
 
 <style scoped>
+/* Log wants a full-bleed terminal block — strip the panel-text padding. */
+.log-panel :deep(.v-expansion-panel-text__wrapper) {
+  padding: 0;
+}
 .log-line {
   white-space: pre-wrap;
   word-break: break-all;

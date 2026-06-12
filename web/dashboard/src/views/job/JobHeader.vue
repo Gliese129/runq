@@ -33,6 +33,13 @@
         <v-btn v-if="isActive" size="x-small" variant="tonal" color="error" @click="$emit('kill')">
           <v-icon start size="14">mdi-stop</v-icon> Kill
         </v-btn>
+        <v-btn v-if="!isActive" size="x-small" variant="text"
+          :title="detail.job.archived ? undefined : 'Hide from default lists — data and workspace untouched, reversible'"
+          @click="toggleArchive"
+        >
+          <v-icon start size="14">{{ detail.job.archived ? 'mdi-archive-arrow-up-outline' : 'mdi-archive-arrow-down-outline' }}</v-icon>
+          {{ detail.job.archived ? t('archive.unarchive') : t('archive.archive') }}
+        </v-btn>
       </div>
     </div>
 
@@ -94,7 +101,14 @@ const emit = defineEmits<{
   kill: []
   refresh: []
   rerun: []
+  archive: []
+  unarchive: []
 }>()
+
+function toggleArchive() {
+  if (props.detail.job.archived) emit('unarchive')
+  else emit('archive')
+}
 
 const isActive = computed(() => ['running', 'pending', 'paused'].includes(props.detail.job.status))
 

@@ -10,6 +10,7 @@ type JobSummary struct {
 	Project   string         `json:"project"`
 	Note      string         `json:"note"`
 	Status    string         `json:"status"`
+	Archived  bool           `json:"archived"`
 	CreatedAt int64          `json:"created_at"`
 	Tasks     TaskCountGroup `json:"tasks"`
 	ETASec    *int64         `json:"eta_seconds,omitempty"`
@@ -126,6 +127,7 @@ type ProjectSummary struct {
 	Name     string `json:"name"`
 	WorkDir  string `json:"work_dir,omitempty"`
 	JobCount int    `json:"job_count"`
+	Archived bool   `json:"archived"`
 }
 
 // Filesystem types for init GUI.

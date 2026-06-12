@@ -87,6 +87,11 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/dashboard/jobs", s.handleSubmitJob)
 	s.mux.HandleFunc("POST /api/dashboard/jobs/dry-run", s.handleDryRun)
 	s.mux.HandleFunc("POST /api/dashboard/jobs/preview", s.handlePreviewSubmit)
+	s.mux.HandleFunc("GET /api/dashboard/jobs/archived", s.handleListArchivedJobs)
+	s.mux.HandleFunc("POST /api/dashboard/jobs/{id}/archive", s.handleArchiveJob)
+	s.mux.HandleFunc("POST /api/dashboard/jobs/{id}/unarchive", s.handleUnarchiveJob)
+	s.mux.HandleFunc("POST /api/dashboard/projects/{name}/archive", s.handleArchiveProject)
+	s.mux.HandleFunc("POST /api/dashboard/projects/{name}/unarchive", s.handleUnarchiveProject)
 	s.mux.HandleFunc("POST /api/dashboard/jobs/resolve-note", s.handleResolveNote)
 	s.mux.HandleFunc("GET /api/dashboard/tasks/{id}", s.handleGetTask)
 	s.mux.HandleFunc("GET /api/dashboard/tasks/{id}/log", s.handleTaskLog)
@@ -241,7 +246,7 @@ func (s *Server) handleRenameProject(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
-	jobs, err := s.backend.ListJobs(r.Context())
+	jobs, err := s.backend.ListJobs(r.Context(), r.URL.Query().Get("project"))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -319,6 +324,50 @@ func (s *Server) handleDryRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, tasks)
+}
+
+func (s *Server) handleListArchivedJobs(w http.ResponseWriter, r *http.Request) {
+	jobs, err := s.backend.ListArchivedJobs(r.Context())
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if jobs == nil {
+		jobs = []JobSummary{}
+	}
+	writeJSON(w, http.StatusOK, jobs)
+}
+
+func (s *Server) handleArchiveJob(w http.ResponseWriter, r *http.Request) {
+	if err := s.backend.ArchiveJob(r.Context(), r.PathValue("id")); err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"message": "archived"})
+}
+
+func (s *Server) handleUnarchiveJob(w http.ResponseWriter, r *http.Request) {
+	if err := s.backend.UnarchiveJob(r.Context(), r.PathValue("id")); err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"message": "unarchived"})
+}
+
+func (s *Server) handleArchiveProject(w http.ResponseWriter, r *http.Request) {
+	if err := s.backend.ArchiveProject(r.Context(), r.PathValue("name")); err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"message": "archived"})
+}
+
+func (s *Server) handleUnarchiveProject(w http.ResponseWriter, r *http.Request) {
+	if err := s.backend.UnarchiveProject(r.Context(), r.PathValue("name")); err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"message": "unarchived"})
 }
 
 func (s *Server) handlePreviewSubmit(w http.ResponseWriter, r *http.Request) {

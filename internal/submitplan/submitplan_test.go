@@ -3,8 +3,8 @@ package submitplan
 import (
 	"context"
 	"os"
-	"strings"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gliese129/runq/internal/job"

@@ -5,13 +5,13 @@
       <v-card class="pa-3">
         <div class="text-caption text-on-surface-variant mb-2 d-flex align-center ga-1">
           <v-icon size="12">mdi-folder-multiple-outline</v-icon>
-          Projects
+          {{ t('submit.projects') }}
         </div>
 
         <v-text-field
           v-if="state.matchedProjects.length > 8"
           v-model="projectFilter"
-          placeholder="Filter..."
+          :placeholder="t('submit.filter')"
           prepend-inner-icon="mdi-magnify"
           density="compact" variant="outlined" hide-details clearable
           class="mb-2"
@@ -41,7 +41,7 @@
             class="text-center text-on-surface-variant pa-4"
             disabled
           >
-            <div class="text-caption">No projects yet — create one below</div>
+            <div class="text-caption">{{ t('submit.no_projects') }}</div>
           </v-list-item>
         </v-list>
 
@@ -53,7 +53,7 @@
           @click="enterCreateMode"
         >
           <v-icon start size="14">mdi-plus</v-icon>
-          New Project
+          {{ t('submit.new_project') }}
         </v-btn>
       </v-card>
     </v-col>
@@ -63,7 +63,7 @@
       <!-- Empty state: nothing selected -->
       <v-card v-if="mode === 'select' && !state.projectName" class="pa-5 d-flex flex-column align-center justify-center" style="min-height: 300px">
         <v-icon size="48" color="on-surface-variant" class="mb-3">mdi-folder-open-outline</v-icon>
-        <div class="text-body-1 text-on-surface-variant">Select a project or create a new one</div>
+        <div class="text-body-1 text-on-surface-variant">{{ t('submit.select_or_create') }}</div>
       </v-card>
 
       <!-- ═══ Path A: read-only summary card (the frequent path) ═══ -->
@@ -105,9 +105,9 @@
 
         <div class="d-flex align-center justify-space-between mt-4 pt-3" style="border-top: 0.5px solid rgb(var(--v-theme-outline-variant))">
           <v-btn size="small" variant="text" color="primary" @click="enterEditMode">
-            <v-icon start size="14">mdi-pencil-outline</v-icon> Edit project
+            <v-icon start size="14">mdi-pencil-outline</v-icon> {{ t('submit.edit_project') }}
           </v-btn>
-          <span class="text-caption text-on-surface-variant">Read-only — Next won't modify the project</span>
+          <span class="text-caption text-on-surface-variant">{{ t('submit.read_only') }}</span>
         </div>
       </v-card>
 
@@ -118,14 +118,14 @@
           @click="showFileBrowser = true"
         >
           <v-icon size="36" color="primary" class="mb-2">mdi-file-code-outline</v-icon>
-          <div class="text-body-1 font-weight-medium">Select a training script (.py / .sh) — or a project.yaml</div>
+          <div class="text-body-1 font-weight-medium">{{ t('submit.pick_script') }}</div>
           <div class="text-caption text-on-surface-variant mt-1">
-            script: name · workdir · command · params · env auto-detected · yaml: loaded as-is for review
+            {{ t('submit.script_autodetect') }}
           </div>
         </div>
 
         <template v-if="prefs.recentScripts.value.length > 0">
-          <div class="text-caption text-on-surface-variant mb-1">RECENT</div>
+          <div class="text-caption text-on-surface-variant mb-1">{{ t('submit.recent_caps') }}</div>
           <div
             v-for="s in prefs.recentScripts.value.slice(0, 5)" :key="s.path"
             class="d-flex align-center ga-2 px-2 py-1 rounded recent-row cursor-pointer"
@@ -139,7 +139,7 @@
 
         <div class="text-center mt-3">
           <v-btn size="x-small" variant="text" @click="skipScript">
-            skip — fill in manually
+            {{ t('submit.skip_manual') }}
           </v-btn>
         </div>
       </v-card>
@@ -148,10 +148,10 @@
       <v-card v-else class="pa-5">
         <div class="d-flex align-center justify-space-between mb-4">
           <div class="text-subtitle-1 font-weight-medium">
-            {{ isCreating ? 'New Project' : form.name }}
+            {{ isCreating ? t('submit.new_project') : form.name }}
           </div>
           <v-btn v-if="!isCreating" size="x-small" variant="text" @click="editingProject = false">
-            <v-icon start size="12">mdi-chevron-up</v-icon> Collapse
+            <v-icon start size="12">mdi-chevron-up</v-icon> {{ t('submit.collapse') }}
           </v-btn>
         </div>
 
@@ -159,12 +159,12 @@
         <v-text-field
           v-if="isCreating"
           :model-value="scriptSummary"
-          label="Script file"
+          :label="t('submit.script_file')"
           variant="outlined" density="compact" class="mb-3"
           prepend-inner-icon="mdi-file-code-outline"
           append-inner-icon="mdi-folder-search-outline"
           readonly
-          placeholder="Select a script to auto-fill..."
+          :placeholder="t('submit.script_autofill')"
           @click="showFileBrowser = true"
           @click:append-inner="showFileBrowser = true"
         />
@@ -172,7 +172,7 @@
         <div class="d-flex align-center ga-2 mb-3">
           <v-text-field
             v-model="form.name"
-            label="Project name"
+            :label="t('submit.project_name')"
             variant="outlined" density="compact"
             hide-details="auto"
             :error-messages="form.error"
@@ -182,12 +182,12 @@
             v-if="!isCreating"
             size="small" variant="text"
             @click="renameDialog = true"
-          >Rename</v-btn>
+          >{{ t('submit.rename') }}</v-btn>
         </div>
 
         <!-- Working directory: clickable breadcrumb -->
         <div class="mb-3">
-          <div class="text-caption text-on-surface-variant mb-1">Working directory</div>
+          <div class="text-caption text-on-surface-variant mb-1">{{ t('submit.workdir') }}</div>
           <div v-if="form.workDir" class="d-flex align-center pa-2 rounded workdir-breadcrumb">
             <div class="d-flex align-center flex-wrap ga-1 flex-grow-1">
               <template v-for="(seg, i) in workDirSegments" :key="i">
@@ -203,10 +203,10 @@
               <v-icon size="14" color="on-surface-variant">mdi-pencil-outline</v-icon>
             </v-btn>
           </div>
-          <div v-else class="text-caption text-on-surface-variant pa-2">Select a script first</div>
+          <div v-else class="text-caption text-on-surface-variant pa-2">{{ t('submit.select_script_first') }}</div>
         </div>
 
-        <div class="text-caption text-on-surface-variant mb-1">Command template</div>
+        <div class="text-caption text-on-surface-variant mb-1">{{ t('submit.cmd_template') }}</div>
         <div class="tmpl-display rounded pa-2 mb-1 cursor-pointer d-flex align-center ga-2" @click="cmdEditorOpen = true">
           <span class="font-mono flex-grow-1 text-body-2" :class="{ 'opacity-50': !form.cmd }" style="word-break: break-all">
             {{ form.cmd || 'python train.py {{args\}\}' }}
@@ -224,21 +224,21 @@
 
         <EnvKVEditor
           v-model="form.envText"
-          hint="Injected into tasks AND the HPC submit command ($VAR in submit_template resolves from here). Secrets belong in .env instead."
+          :hint="t('submit.env_hint')"
         />
 
         <v-text-field
           v-model="form.setupCmd"
-          label="Setup command (optional)"
+          :label="t('submit.setup_cmd')"
           variant="outlined" density="compact" class="mb-3"
           placeholder="e.g. hf download {{model}}"
-          hint="Runs once per submit, before any task — fixed params only. Failure aborts the submit."
+          :hint="t('submit.setup_cmd_hint')"
           persistent-hint
         />
 
         <v-text-field
           v-model="form.jobName"
-          label="Job name template (optional)"
+          :label="t('submit.job_name_tmpl')"
           variant="outlined" density="compact" class="mb-3 font-mono"
           placeholder="rq-{{task_id\}\}"
           hint="Scheduler job name ({{name\}\} in submit_template) — params + {{project\}\} {{job_id\}\} {{task_id\}\}. Sanitized automatically (never starts with a digit). Each submit can override it."
@@ -248,7 +248,7 @@
         <v-row dense class="mb-3">
           <v-col cols="6">
             <v-number-input
-              v-model="form.gpus" label="GPUs per task"
+              v-model="form.gpus" :label="t('submit.gpus_per_task')"
               variant="outlined" density="compact" :min="0"
               control-variant="stacked"
               :hint="config.isPoll ? 'HPC: only used as {{gpus}} in submit_template — set 0 for whole-node queues' : ''"
@@ -258,7 +258,7 @@
           </v-col>
           <v-col cols="6">
             <v-number-input
-              v-model="form.maxRetry" label="Max retry"
+              v-model="form.maxRetry" :label="t('submit.max_retry')"
               variant="outlined" density="compact" :min="0" hide-details
               control-variant="stacked"
             />
@@ -267,7 +267,7 @@
 
         <!-- Python environment -->
         <div class="mb-3">
-          <div class="text-caption text-on-surface-variant mb-1">Python environment</div>
+          <div class="text-caption text-on-surface-variant mb-1">{{ t('submit.python_env') }}</div>
           <v-row dense>
             <v-col cols="4">
               <v-select
@@ -342,14 +342,14 @@
       <!-- Rename confirm dialog -->
       <v-dialog v-model="renameDialog" max-width="380">
         <v-card class="pa-4">
-          <div class="text-subtitle-2 mb-3">Rename project</div>
+          <div class="text-subtitle-2 mb-3">{{ t('submit.rename_project') }}</div>
           <v-text-field
-            v-model="renameTo" label="New name"
+            v-model="renameTo" :label="t('submit.new_name')"
             variant="outlined" density="compact" hide-details autofocus
           />
           <div class="d-flex justify-end ga-2 mt-4">
-            <v-btn size="small" variant="text" @click="renameDialog = false">Cancel</v-btn>
-            <v-btn size="small" variant="tonal" color="primary" :loading="renaming" :disabled="!renameTo.trim() || renameTo.trim() === state.projectName" @click="doRename">Rename</v-btn>
+            <v-btn size="small" variant="text" @click="renameDialog = false">{{ t('common.cancel') }}</v-btn>
+            <v-btn size="small" variant="tonal" color="primary" :loading="renaming" :disabled="!renameTo.trim() || renameTo.trim() === state.projectName" @click="doRename">{{ t('submit.rename') }}</v-btn>
           </div>
         </v-card>
       </v-dialog>
@@ -379,6 +379,7 @@ import * as YAML from 'js-yaml'
 import { envApi } from '@/apis/env'
 import { filesApi } from '@/apis/files'
 import { projectsApi } from '@/apis/projects'
+import { useI18n } from 'vue-i18n'
 import { usePreferences } from '@/composables/usePreferences'
 import { useConfigStore } from '@/stores/config'
 import type { FSEntry, ParseResult, ProjectConfig } from '@/types/api'
@@ -389,6 +390,7 @@ import ShellTemplateEditor from '@/components/ShellTemplateEditor.vue'
 import EnvKVEditor from '@/components/EnvKVEditor.vue'
 
 // No emits — save handled by parent's goNext (only when dirty; see below)
+const { t } = useI18n()
 const state = inject(SUBMIT_STATE_KEY)!
 const prefs = usePreferences()
 const config = useConfigStore()
@@ -421,7 +423,8 @@ function enterEditMode() {
 const projectFilter = ref('')
 const sortedProjects = computed(() => {
   const q = projectFilter.value.trim().toLowerCase()
-  let list = state.matchedProjects
+  // Archived projects don't belong in the submit picker — unarchive first.
+  let list = state.matchedProjects.filter(p => !p.archived)
   if (q) list = list.filter(p => p.name.toLowerCase().includes(q))
   // Recent project pinned first, rest by job count desc
   return [...list].sort((a, b) => {

@@ -11,13 +11,13 @@
           <v-btn
             v-if="hasSubmitState"
             size="x-small" variant="text"
-            title="Clear everything — note, params, links and the saved draft"
+            :title="t('submit.reset_title')"
             @click="resetSubmitState"
           >
-            <v-icon start size="12">mdi-restore</v-icon> reset
+            <v-icon start size="12">mdi-restore</v-icon> {{ t('submit.reset') }}
           </v-btn>
           <v-btn size="x-small" variant="text" @click="showJobYamlBrowser = true">
-            <v-icon start size="12">mdi-file-import-outline</v-icon> import job.yaml
+            <v-icon start size="12">mdi-file-import-outline</v-icon> {{ t('submit.import_yaml') }}
           </v-btn>
           <FileBrowserDialog
             v-model="showJobYamlBrowser"
@@ -306,7 +306,7 @@ onMounted(async () => {
   try {
     const detail = await jobsApi.get(fromJob)
     if (!detail.config) {
-      snack.warn('Source job has no stored config')
+      snack.warn(t('submit.no_source_config'))
       return
     }
     projectName.value = detail.config.project || detail.job.project
@@ -396,7 +396,7 @@ function resetSubmitState() {
   dryRunError.value = ''
   submitError.value = ''
   step.value = 0
-  snack.info('Submit state cleared')
+  snack.info(t('submit.state_cleared'))
 }
 
 function restoreDraft(): boolean {
@@ -408,7 +408,7 @@ function restoreDraft(): boolean {
   rows.value = d.rows
   linkSets.value = Array.isArray(d.linkSets) ? d.linkSets : []
   step.value = Math.min(d.step ?? 1, 1) // never restore into review (dry-run is stale)
-  snack.info('Restored unsubmitted draft — values and links are back', 'Discard', resetSubmitState)
+  snack.info(t('submit.draft_restored'), t('submit.discard'), resetSubmitState)
   return true
 }
 

@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"context"
 	"fmt"
+	"github.com/gliese129/runq/internal/config"
 	"time"
 
 	"github.com/gliese129/runq/internal/utils"
@@ -149,6 +151,57 @@ func init() {
 	jobCmd.AddCommand(jobPauseCmd)
 	jobCmd.AddCommand(jobResumeCmd)
 	jobCmd.AddCommand(jobRmCmd)
+	jobCmd.AddCommand(jobArchiveCmd)
+	jobCmd.AddCommand(jobUnarchiveCmd)
 	jobCmd.GroupID = groupManagement
 	rootCmd.AddCommand(jobCmd)
+}
+
+// ── archive / unarchive (mode-aware: daemon API or HPC store) ──
+
+var jobArchiveCmd = &cobra.Command{
+	Use:   "archive <job_id>",
+	Short: "Hide a job from default lists (data and workspace untouched; reversible)",
+	Args:  cobra.ExactArgs(1),
+	RunE:  func(cmd *cobra.Command, args []string) error { return runJobArchive(args[0], true) },
+}
+
+var jobUnarchiveCmd = &cobra.Command{
+	Use:   "unarchive <job_id>",
+	Short: "Bring an archived job back to the default lists",
+	Args:  cobra.ExactArgs(1),
+	RunE:  func(cmd *cobra.Command, args []string) error { return runJobArchive(args[0], false) },
+}
+
+func runJobArchive(jobID string, archive bool) error {
+	verb := "archived"
+	if !archive {
+		verb = "unarchived"
+	}
+	if _, mode, err := loadModeConfig(); err == nil && mode == config.ModeHPC {
+		_, st, err := newHPCBackend()
+		if err != nil {
+			return err
+		}
+		defer st.Close()
+		op := st.UnarchiveJob
+		if archive {
+			op = st.ArchiveJob
+		}
+		if err := op(context.Background(), jobID); err != nil {
+			return err
+		}
+		fmt.Printf("job %s %s\n", utils.IDColor(jobID), verb)
+		return nil
+	}
+	path := "/api/jobs/" + jobID + "/unarchive"
+	if archive {
+		path = "/api/jobs/" + jobID + "/archive"
+	}
+	var resp map[string]any
+	if err := doAndDecode("POST", path, nil, &resp); err != nil {
+		return err
+	}
+	fmt.Printf("job %s %s\n", utils.IDColor(jobID), verb)
+	return nil
 }

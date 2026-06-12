@@ -33,6 +33,12 @@ func (s *Server) registerRoutes() {
 		projects.GET("/:name", s.handleProjectGet)
 		projects.PUT("/:name", s.handleProjectUpdate)
 		projects.POST("/:name/rename", s.handleProjectRename)
+		// Static segment alongside /:name — gin's radix tree gives static
+		// routes precedence over params regardless of registration order
+		// (same coexistence as /match above).
+		projects.GET("/summaries", s.handleProjectSummaries)
+		projects.POST("/:name/archive", s.handleProjectArchive)
+		projects.POST("/:name/unarchive", s.handleProjectUnarchive)
 		projects.DELETE("/:name", s.handleProjectDelete)
 	}
 
@@ -45,6 +51,8 @@ func (s *Server) registerRoutes() {
 		jobs.GET("/:id", s.handleJobShow)
 		jobs.DELETE("/:id", s.handleJobKill)
 		jobs.POST("/:id/pause", s.handleJobPause)
+		jobs.POST("/:id/archive", s.handleJobArchive)
+		jobs.POST("/:id/unarchive", s.handleJobUnarchive)
 		jobs.POST("/:id/resume", s.handleJobResume)
 		jobs.POST("/:id/rm", s.handleJobRm)
 	}
@@ -252,12 +260,62 @@ func (s *Server) handleJobSubmit(c *gin.Context) {
 }
 
 func (s *Server) handleJobList(c *gin.Context) {
-	results, err := s.deps.JobService.ListJobs(context.Background(), c.Query("project"))
+	var results []service.JobSummary
+	var err error
+	if c.Query("archived") == "1" {
+		results, err = s.deps.JobService.ListArchivedJobs(context.Background(), c.Query("project"))
+	} else {
+		results, err = s.deps.JobService.ListJobs(context.Background(), c.Query("project"))
+	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 	c.JSON(http.StatusOK, results)
+}
+
+func (s *Server) handleJobArchive(c *gin.Context) {
+	if err := s.deps.JobService.ArchiveJob(context.Background(), c.Param("id")); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "archived"})
+}
+
+func (s *Server) handleJobUnarchive(c *gin.Context) {
+	if err := s.deps.JobService.UnarchiveJob(context.Background(), c.Param("id")); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "unarchived"})
+}
+
+// handleProjectSummaries returns server-assembled project summaries
+// (job_count + archived). /api/projects stays plain []project.Config
+// (yaml-truth material) for the CLI; this is the dashboard's listing.
+func (s *Server) handleProjectSummaries(c *gin.Context) {
+	out, err := s.deps.JobService.ProjectSummaries(context.Background())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, out)
+}
+
+func (s *Server) handleProjectArchive(c *gin.Context) {
+	if err := s.deps.Registry.Archive(c.Param("name")); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "archived"})
+}
+
+func (s *Server) handleProjectUnarchive(c *gin.Context) {
+	if err := s.deps.Registry.Unarchive(c.Param("name")); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "unarchived"})
 }
 
 func (s *Server) handleJobShow(c *gin.Context) {

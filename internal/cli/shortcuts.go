@@ -19,6 +19,7 @@ import (
 	"github.com/gliese129/runq/internal/api"
 	"github.com/gliese129/runq/internal/config"
 	job2 "github.com/gliese129/runq/internal/job"
+	"github.com/gliese129/runq/internal/project"
 	"github.com/gliese129/runq/internal/utils"
 	"github.com/gosuri/uilive"
 	"github.com/olekukonko/tablewriter"
@@ -104,33 +105,59 @@ job.yaml in the current directory.`,
 		if noteOverride != "" {
 			job.Note = noteOverride
 		}
-		// dry-run
+		// dry-run: param table + (parity with `runq hpc submit --dry-run`)
+		// the prospective workspace root and the first task's rendered
+		// command — the daemon has no submit_template/scheduler preflight,
+		// so those sections simply don't exist here (shape from capability).
 		if dryRun || dryRunAlias {
+			// HPC mode gets the FULL preview (preflight + run.sh + submit
+			// command) — same code path as `runq hpc submit --dry-run`.
+			if _, mode, merr := loadModeConfig(); merr == nil && mode == config.ModeHPC {
+				return previewHPCJobConfig(cmd, job, noPreflight)
+			}
 			tasks, err := job2.Expand(&job)
 			if err != nil {
 				return err
 			}
 			if len(tasks) == 0 {
-				fmt.Println("No sweep job")
-			} else {
-				keys := slices.Sorted(maps.Keys(tasks[0]))
-
-				table := tablewriter.NewTable(os.Stdout)
-				table.Header(keys)
-				data := make([][]string, 0, len(tasks))
-				for _, task := range tasks {
-					row := make([]string, 0, len(keys))
-					for _, key := range keys {
-						row = append(row, fmt.Sprintf("%v", task[key]))
-					}
-					data = append(data, row)
-				}
-				err := table.Bulk(data)
-				if err != nil {
-					return err
-				}
-				return table.Render()
+				fmt.Println("No tasks would be generated.")
+				return nil // bug fix: this used to FALL THROUGH into a real submit
 			}
+			fmt.Printf("dry-run: %d task(s) would be submitted\n", len(tasks))
+
+			keys := slices.Sorted(maps.Keys(tasks[0]))
+			table := tablewriter.NewTable(os.Stdout)
+			table.Header(keys)
+			data := make([][]string, 0, len(tasks))
+			for _, task := range tasks {
+				row := make([]string, 0, len(keys))
+				for _, key := range keys {
+					row = append(row, fmt.Sprintf("%v", task[key]))
+				}
+				data = append(data, row)
+			}
+			if err := table.Bulk(data); err != nil {
+				return err
+			}
+			if err := table.Render(); err != nil {
+				return err
+			}
+
+			// Best-effort preview details — needs the registered project
+			// (command_template, working_dir). A missing daemon/project
+			// degrades to the table alone, never to an error.
+			var proj project.Config
+			if perr := doAndDecode("GET", "/api/projects/"+job.Project, nil, &proj); perr == nil && proj.CmdTemplate != "" {
+				storageCfg, _ := config.Load()
+				root := config.ProspectiveRoot(storageCfg, proj.WorkingDir, proj.ProjectName)
+				fmt.Printf("\nworkspace root: %s/<note>-<job_id> (ids regenerate at submit)\n", root)
+				if cmdStr, rerr := job2.Render(proj.CmdTemplate, tasks[0]); rerr == nil {
+					fmt.Printf("\n── command (task 1 of %d) ──\n%s\n", len(tasks), cmdStr)
+				} else {
+					fmt.Printf("\ncommand render error (would also fail at submit): %v\n", rerr)
+				}
+			}
+			return nil
 		}
 		_, mode, err := loadModeConfig()
 		if err != nil {
@@ -325,7 +352,7 @@ func runPs(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	defer closeBackend()
-	jobs, err := backend.ListJobs(context.Background())
+	jobs, err := backend.ListJobs(context.Background(), "")
 	if err != nil {
 		return err
 	}

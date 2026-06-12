@@ -127,6 +127,33 @@
         {{ t('overview.hint_cli') }} <code>runq init train.py</code> → <code>runq submit .</code>
       </div>
     </v-card>
+
+    <!-- Archived projects: the recovery entry point — once a project is
+         archived its jobs cascade-hide, so without this row it would have
+         no discoverable way back. -->
+    <v-card v-if="archivedProjects.length > 0" class="mt-3">
+      <div class="d-flex align-center ga-2 px-4 py-3 cursor-pointer text-on-surface-variant" @click="archivedOpen = !archivedOpen">
+        <v-icon size="16">mdi-archive-outline</v-icon>
+        <span class="text-subtitle-2">{{ t('archive.projects_section', { n: archivedProjects.length }) }}</span>
+        <v-spacer />
+        <v-icon size="16">{{ archivedOpen ? 'mdi-chevron-up' : 'mdi-chevron-down' }}</v-icon>
+      </div>
+      <div v-if="archivedOpen" class="px-2 pb-2">
+        <div
+          v-for="p in archivedProjects" :key="p.name"
+          class="d-flex align-center ga-2 px-2 py-1 rounded cursor-pointer"
+          @click="router.push({ name: 'project', params: { project: p.name } })"
+        >
+          <v-icon size="14" color="on-surface-variant">mdi-folder-outline</v-icon>
+          <span class="text-body-2">{{ p.name }}</span>
+          <span class="text-caption text-on-surface-variant">{{ p.job_count }} jobs</span>
+          <v-spacer />
+          <v-btn size="x-small" variant="text" @click.stop="unarchiveProject(p.name)">
+            <v-icon start size="12">mdi-archive-arrow-up-outline</v-icon> {{ t('archive.unarchive') }}
+          </v-btn>
+        </div>
+      </div>
+    </v-card>
   </div>
 </template>
 
@@ -135,19 +162,34 @@ import { ref, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { useJobsStore } from '@/stores/jobs'
+import { useProjectStore } from '@/stores/projects'
 import { useGPUStore } from '@/stores/gpu'
 import { useConfigStore } from '@/stores/config'
 import { usePolling } from '@/composables/usePolling'
 import { useConnection } from '@/composables/useConnection'
 import GPUBar from '@/components/GPUBar.vue'
 import StatusDot from '@/components/StatusDot.vue'
+import { useSnackbar } from '@/composables/useSnackbar'
 
 const { t } = useI18n()
 const router = useRouter()
 const jobs = useJobsStore()
+const projectStore = useProjectStore()
 const gpu = useGPUStore()
 const config = useConfigStore()
 const conn = useConnection()
+const snack = useSnackbar()
+
+// ── Archived projects (recovery entry) — derived from the store ──
+const archivedOpen = ref(false)
+const archivedProjects = computed(() => projectStore.archived)
+
+async function unarchiveProject(name: string) {
+  try {
+    await projectStore.unarchive(name) // store action owns ALL refreshes
+    snack.success(t('archive.project_back'))
+  } catch (e: any) { snack.error(e?.message || 'Unarchive failed') }
+}
 const activeFilter = ref('')
 
 const metrics = computed(() => [
@@ -195,6 +237,7 @@ function relativeTime(ts: number): string {
 
 usePolling((silent: boolean) => {
   jobs.fetchJobs(silent)
+  projectStore.fetch()
   if (config.caps.gpu_map) gpu.fetchGPU(silent)
 }, 5000)
 </script>

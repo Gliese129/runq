@@ -175,6 +175,7 @@ user-facing surfaces below, and source-diving wastes time.
 | Understand HPC config fields | comments in the generated `~/.runq/config.yaml`, then `runq hpc config check` |
 | See all CLI commands and flags | `runq --help`, `runq hpc --help`, `runq <cmd> --help` |
 | Validate anything | `runq hpc config check`, `runq hpc submit --dry-run`, `runq doctor` |
+| Debug a failed/rejected submit | `~/.runq/logs/runq.log` — every submit/kill logs the rendered command + scheduler output |
 | Inspect machine-readable state | `runq hpc status <id> --json`, `runq hpc ls --json` |
 
 ## Python SDK (`sdk/python/runq/`)
@@ -227,6 +228,12 @@ Same rule as above: don't read SDK source. Use:
   three-state (passed/failed/skipped) and label local checks with their
   scope; set `hpc: preflight_local: false` for strict login nodes instead
   of `--no-preflight`.
+- Task output goes to the task's own log (`runq logs <task_id>`), NOT to
+  the scheduler's `-o`/`-e` files — those only catch scheduler-level noise.
+  Tasks run from the project's `working_dir`; relative script paths work.
+- Job/task ids are typed (`jb…`/`tk…`); job workspace dirs are
+  `<note>-<job_id>` under `.runq/` — never parse paths, read them from
+  `--json` output.
 - Secrets: never put tokens in `command_template`/`environment` — put them
   in `working_dir/.env` (sourced at task start, never stored by runq).
 - `working_dir` in project.yaml must exist at submit time.

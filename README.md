@@ -139,6 +139,12 @@ After `runq hpc init`, edit `~/.runq/config.yaml` to match your cluster — the 
 
 Per-task scheduler knobs (walltime, queue) can live in the sweep and be referenced from `submit_template` as `{{param.h_rt}}`, `{{param.node_kind}}` — one job can carry per-benchmark time limits. Declare them with `scope: scheduler` in project.yaml so they're consumed by the submit command, not your training command (see Configuration).
 
+### How runq behaves on the login node
+
+runq is a polite login-node citizen. Task state comes primarily from each task's `status.json`, written by the generated run.sh at start, at exit, and — via a signal trap — when the scheduler kills the task (walltime, `qdel`): those are local file reads, not scheduler queries. The `status_template` probe only covers tasks that died without last words, is rate-limited per job (20s floor for the dashboard's automatic polling; explicit `runq hpc status` / the Refresh button always probe), and listing-style templates like the presets' full `qstat` cost ONE scheduler call per pass regardless of task count. When nothing asks, nothing polls.
+
+Each task runs **from the project's `working_dir`** (relative paths in your command just work), with all output redirected to its own log (`runq logs <task_id>` and the dashboard read it; `-o/-e` in your submit_template only catches scheduler-level noise). Workspaces live under `.runq/<note>-<job id>/<task id>/` — ids carry `jb`/`tk` prefixes, and the job dir starts with your note so `ls .runq/` reads like an experiment log. runq's own operation log (every submit/kill with the rendered command and scheduler output) is at `~/.runq/logs/runq.log`; `runq doctor` checks the right paths per mode.
+
 ## Usage
 
 ### Quick one-off run
@@ -182,6 +188,8 @@ runq submit --dry-run .      # preview tasks without submitting
 ### Job control
 
 ```bash
+runq job archive <job_id>    # hide from default lists (reversible; data untouched)
+runq project archive <name>  # hide a project and (in global lists) its jobs
 runq job pause <job_id>      # pause scheduling (running tasks continue)
 runq job resume <job_id>
 runq job kill <job_id>       # kill all tasks in a job

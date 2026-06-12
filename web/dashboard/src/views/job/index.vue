@@ -11,6 +11,8 @@
       @resume="togglePause"
       @kill="killJob"
       @refresh="onRefresh"
+      @archive="archiveJob"
+      @unarchive="unarchiveJob"
       @rerun="router.push({ name: 'submit', query: { fromJob: props.jobId } })"
     />
 
@@ -68,7 +70,9 @@
 <script setup lang="ts">
 import { ref, computed, watch, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
+import { useI18n } from 'vue-i18n'
 import { useJobDetailStore } from '@/stores/jobDetail'
+import { useJobsStore } from '@/stores/jobs'
 import { useConfigStore } from '@/stores/config'
 import { usePreferences } from '@/composables/usePreferences'
 import { usePolling } from '@/composables/usePolling'
@@ -83,6 +87,8 @@ const store = useJobDetailStore()
 const config = useConfigStore()
 const prefs = usePreferences()
 const snack = useSnackbar()
+const jobsStore = useJobsStore()
+const { t } = useI18n()
 
 const statusFilter = ref(prefs.lastStatusFilter.value)
 
@@ -149,6 +155,22 @@ watch(statusFilter, (v) => { prefs.lastStatusFilter.value = v })
 
 function refresh(silent = false) { store.fetchDetail(props.jobId, silent) }
 
+async function archiveJob() {
+  try {
+    await jobsStore.archiveJob(props.jobId) // store action refreshes lists
+    snack.success(t('archive.job_done'))
+    refresh(true)
+  } catch (e: any) { snack.error(e?.message || 'Archive failed') }
+}
+
+async function unarchiveJob() {
+  try {
+    await jobsStore.unarchiveJob(props.jobId)
+    snack.success(t('archive.job_back'))
+    refresh(true)
+  } catch (e: any) { snack.error(e?.message || 'Unarchive failed') }
+}
+
 // Manual reconcile (poll-model backends): forces the backend to re-read
 // external sources, then re-fetches. The button's loading state doubles as
 // a double-click guard against hammering the cluster scheduler.
@@ -185,6 +207,8 @@ function onClickTask(id: string) {
   router.push({ name: 'task-detail', params: { project: props.project, jobId: props.jobId, taskId: id } })
 }
 
-usePolling(refresh, 3000, isActive)
+// Poll-model backends reconcile via the scheduler (qstat) — be a polite
+// login-node citizen: 30s. Push-model (daemon) data is free: keep 3s live.
+usePolling(refresh, () => (config.isPoll ? 30000 : 3000), isActive)
 onUnmounted(() => { store.$reset() })
 </script>

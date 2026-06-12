@@ -82,12 +82,12 @@ type Config struct {
 	// Precedence: .env < explicit env (environment / overrides.env).
 	// nil → auto: use <working_dir>/.env when present. "" → disabled.
 	// other → path (relative to working_dir), missing file = submit error.
-	EnvFile *string `yaml:"env_file,omitempty" json:"env_file,omitempty"`
-	Defaults    Defaults          `yaml:"defaults,omitempty" json:"defaults,omitempty"`
-	Resume      ResumeConfig      `yaml:"resume,omitempty" json:"resume,omitempty"`
-	PythonEnv   PythonEnvConfig   `yaml:"python_env,omitempty" json:"python_env,omitempty"`
-	Wandb       *WandbConfig      `yaml:"wandb,omitempty" json:"wandb,omitempty"`
-	Params      []ParamDef        `yaml:"params,omitempty" json:"params,omitempty"`
+	EnvFile   *string         `yaml:"env_file,omitempty" json:"env_file,omitempty"`
+	Defaults  Defaults        `yaml:"defaults,omitempty" json:"defaults,omitempty"`
+	Resume    ResumeConfig    `yaml:"resume,omitempty" json:"resume,omitempty"`
+	PythonEnv PythonEnvConfig `yaml:"python_env,omitempty" json:"python_env,omitempty"`
+	Wandb     *WandbConfig    `yaml:"wandb,omitempty" json:"wandb,omitempty"`
+	Params    []ParamDef      `yaml:"params,omitempty" json:"params,omitempty"`
 }
 
 // ParamDef defines a parameter's metadata for the web UI.

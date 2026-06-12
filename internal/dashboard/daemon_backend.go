@@ -42,9 +42,13 @@ func (b *DaemonBackend) RefreshJob(ctx context.Context, jobID string) error {
 	return fmt.Errorf("refresh job in daemon mode: %w", ErrNotSupported)
 }
 
-func (b *DaemonBackend) ListJobs(ctx context.Context) ([]JobSummary, error) {
+func (b *DaemonBackend) ListJobs(ctx context.Context, projectScope string) ([]JobSummary, error) {
+	path := "/api/jobs"
+	if projectScope != "" {
+		path += "?project=" + url.QueryEscape(projectScope)
+	}
 	var jobs []service.JobSummary
-	if err := b.do(ctx, "GET", "/api/jobs", nil, &jobs); err != nil {
+	if err := b.do(ctx, "GET", path, nil, &jobs); err != nil {
 		return nil, err
 	}
 	out := make([]JobSummary, 0, len(jobs))
@@ -52,6 +56,34 @@ func (b *DaemonBackend) ListJobs(ctx context.Context) ([]JobSummary, error) {
 		out = append(out, summaryFromDaemonList(job))
 	}
 	return out, nil
+}
+
+func (b *DaemonBackend) ListArchivedJobs(ctx context.Context) ([]JobSummary, error) {
+	var jobs []service.JobSummary
+	if err := b.do(ctx, "GET", "/api/jobs?archived=1", nil, &jobs); err != nil {
+		return nil, err
+	}
+	out := make([]JobSummary, 0, len(jobs))
+	for _, job := range jobs {
+		out = append(out, summaryFromDaemonList(job))
+	}
+	return out, nil
+}
+
+func (b *DaemonBackend) ArchiveJob(ctx context.Context, jobID string) error {
+	return b.do(ctx, "POST", "/api/jobs/"+url.PathEscape(jobID)+"/archive", nil, nil)
+}
+
+func (b *DaemonBackend) UnarchiveJob(ctx context.Context, jobID string) error {
+	return b.do(ctx, "POST", "/api/jobs/"+url.PathEscape(jobID)+"/unarchive", nil, nil)
+}
+
+func (b *DaemonBackend) ArchiveProject(ctx context.Context, name string) error {
+	return b.do(ctx, "POST", "/api/projects/"+url.PathEscape(name)+"/archive", nil, nil)
+}
+
+func (b *DaemonBackend) UnarchiveProject(ctx context.Context, name string) error {
+	return b.do(ctx, "POST", "/api/projects/"+url.PathEscape(name)+"/unarchive", nil, nil)
 }
 
 func (b *DaemonBackend) GetJob(ctx context.Context, jobID string) (*JobDetail, error) {
@@ -209,49 +241,39 @@ func (b *DaemonBackend) GetProject(ctx context.Context, name string) (*project.C
 	return &cfg, nil
 }
 
+// ListProjects forwards the daemon's server-assembled summaries verbatim.
+// No client-side re-derivation: assembling job_count/archived here from
+// partial lists is exactly what produced the lost-flag and zero-count bugs.
 func (b *DaemonBackend) ListProjects(ctx context.Context) ([]ProjectSummary, error) {
-	// Fetch projects from daemon API (registry lives in daemon process)
-	var configs []project.Config
-	if err := b.do(ctx, "GET", "/api/projects", nil, &configs); err != nil {
+	var out []ProjectSummary
+	if err := b.do(ctx, "GET", "/api/projects/summaries", nil, &out); err != nil {
 		return nil, err
-	}
-	// Get job counts
-	var jobs []service.JobSummary
-	_ = b.do(ctx, "GET", "/api/jobs", nil, &jobs)
-	jobCounts := make(map[string]int)
-	for _, j := range jobs {
-		jobCounts[j.Project]++
-	}
-	out := make([]ProjectSummary, 0, len(configs))
-	for _, c := range configs {
-		out = append(out, ProjectSummary{
-			Name:     c.ProjectName,
-			WorkDir:  c.WorkingDir,
-			JobCount: jobCounts[c.ProjectName],
-		})
 	}
 	return out, nil
 }
 
+// MatchProjects: the daemon matches by dir; summary data comes from the
+// same server-assembled source as ListProjects (no re-derivation).
 func (b *DaemonBackend) MatchProjects(ctx context.Context, dir string) ([]ProjectSummary, error) {
 	var configs []project.Config
 	if err := b.do(ctx, "GET", "/api/projects/match?dir="+url.QueryEscape(dir), nil, &configs); err != nil {
 		return nil, err
 	}
-	// Get job counts
-	var jobs []service.JobSummary
-	_ = b.do(ctx, "GET", "/api/jobs", nil, &jobs)
-	jobCounts := make(map[string]int)
-	for _, j := range jobs {
-		jobCounts[j.Project]++
+	summaries, err := b.ListProjects(ctx)
+	if err != nil {
+		return nil, err
+	}
+	byName := make(map[string]ProjectSummary, len(summaries))
+	for _, p := range summaries {
+		byName[p.Name] = p
 	}
 	out := make([]ProjectSummary, 0, len(configs))
 	for _, c := range configs {
-		out = append(out, ProjectSummary{
-			Name:     c.ProjectName,
-			WorkDir:  c.WorkingDir,
-			JobCount: jobCounts[c.ProjectName],
-		})
+		if p, ok := byName[c.ProjectName]; ok {
+			out = append(out, p)
+		} else {
+			out = append(out, ProjectSummary{Name: c.ProjectName, WorkDir: c.WorkingDir})
+		}
 	}
 	return out, nil
 }
@@ -316,6 +338,7 @@ func summaryFromDaemonList(job service.JobSummary) JobSummary {
 		ID:        job.JobID,
 		Project:   job.Project,
 		Status:    job.Status,
+		Archived:  job.Archived,
 		CreatedAt: job.CreatedAt.Unix(),
 		Tasks:     counts,
 	}

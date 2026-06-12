@@ -56,6 +56,10 @@ type Deps struct {
 		SubmitJobWithOpts(ctx context.Context, jobCfg job.JobConfig, opts service.SubmitJobOpts) (string, int, error)
 		ResolveNote(ctx context.Context, jobCfg job.JobConfig) (string, error)
 		ListJobs(ctx context.Context, project string) ([]service.JobSummary, error)
+		ListArchivedJobs(ctx context.Context, project string) ([]service.JobSummary, error)
+		ProjectSummaries(ctx context.Context) ([]service.ProjectSummary, error)
+		ArchiveJob(ctx context.Context, jobID string) error
+		UnarchiveJob(ctx context.Context, jobID string) error
 		ShowJob(ctx context.Context, jobID string) (*service.JobDetail, error)
 		KillJob(ctx context.Context, jobID string) (int, error)
 		PauseJob(ctx context.Context, jobID string) error

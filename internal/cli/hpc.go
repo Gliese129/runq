@@ -233,6 +233,26 @@ func runHPCSubmit(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// previewHPCJobConfig is `runq submit --dry` in hpc mode: the same Preview
+// text as `runq hpc submit --dry-run` (preflight, run.sh, submit command).
+func previewHPCJobConfig(cmd *cobra.Command, jobCfg job.JobConfig, skipPreflight bool) error {
+	b, st, err := newHPCBackend()
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	proj, err := resolveHPCProject(cmd, st, jobCfg.Project)
+	if err != nil {
+		return err
+	}
+	out, err := b.Preview(context.Background(), jobCfg, proj, skipPreflight)
+	if err != nil {
+		return err
+	}
+	fmt.Println(out)
+	return nil
+}
+
 func submitHPCJobConfig(cmd *cobra.Command, jobCfg job.JobConfig, skipPreflight bool) (string, int, error) {
 	b, st, err := newHPCBackend()
 	if err != nil {

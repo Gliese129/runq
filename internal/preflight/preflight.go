@@ -291,6 +291,7 @@ func checkWritable(dir, label string) []PreflightFinding {
 //   - Quoted paths containing spaces are not split correctly; tokens
 //     are space-separated. Real-world job configs almost never put
 //     spaces in paths, so this is acceptable.
+//
 // The leading boundary group is the load-bearing part: an absolute path
 // must START a shell token (begin of string, whitespace, `=`, or a quote).
 // Without it, relative paths (`scripts/qsub/x.sh` → "/qsub/x.sh") and

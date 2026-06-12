@@ -55,7 +55,7 @@
         </v-tooltip>
 
         <v-list-item
-          v-for="proj in projects.list"
+          v-for="proj in projects.visible"
           :key="proj.name"
           :to="{ name: 'project', params: { project: proj.name } }"
           :active="projects.selected === proj.name"
@@ -74,7 +74,7 @@
           </template>
         </v-list-item>
 
-        <div v-if="projects.list.length === 0 && !projects.loading && !collapsed" class="text-caption text-on-surface-variant text-center pa-3">
+        <div v-if="projects.visible.length === 0 && !projects.loading && !collapsed" class="text-caption text-on-surface-variant text-center pa-3">
           No projects yet
         </div>
       </div>

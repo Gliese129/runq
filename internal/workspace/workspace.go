@@ -1,11 +1,11 @@
 package workspace
 
 import (
-	"strings"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/project"

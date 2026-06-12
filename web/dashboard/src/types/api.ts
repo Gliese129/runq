@@ -9,6 +9,7 @@ export interface TaskCountGroup {
 }
 
 export interface JobSummary {
+  archived: boolean
   id: string
   project: string
   note: string
@@ -157,6 +158,7 @@ export interface ScriptArg {
 }
 
 export interface ProjectSummary {
+  archived?: boolean
   name: string
   work_dir?: string
   job_count: number

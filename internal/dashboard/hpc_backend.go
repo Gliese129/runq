@@ -22,13 +22,13 @@ func NewHPCBackend(backend *hpc.Backend, st *store.Store) *HPCBackend {
 
 func (b *HPCBackend) Capabilities() Capabilities {
 	return Capabilities{
-		GPUMap:      false, // no node-local GPU visibility from the login node
-		PauseResume: false, // cluster queues have no runq-level pause concept
-		LiveLog:     true,  // deployment assumption: dashboard runs on a login node with the shared FS
-		Retry:       true,
-		StateModel:  "poll", // best-effort projection; staleness must be surfaced
-		KillAsync:     true, // qdel/scancel is forwarded; killed only after a poll confirms
-		SubmitPreview: true, // zero-disk dry-run via the submit code path
+		GPUMap:        false, // no node-local GPU visibility from the login node
+		PauseResume:   false, // cluster queues have no runq-level pause concept
+		LiveLog:       true,  // deployment assumption: dashboard runs on a login node with the shared FS
+		Retry:         true,
+		StateModel:    "poll", // best-effort projection; staleness must be surfaced
+		KillAsync:     true,   // qdel/scancel is forwarded; killed only after a poll confirms
+		SubmitPreview: true,   // zero-disk dry-run via the submit code path
 	}
 }
 
@@ -37,8 +37,8 @@ func (b *HPCBackend) RefreshJob(ctx context.Context, jobID string) error {
 	return b.backend.Refresh(ctx, jobID)
 }
 
-func (b *HPCBackend) ListJobs(ctx context.Context) ([]JobSummary, error) {
-	jobs, err := b.store.ListJobs(ctx, "")
+func (b *HPCBackend) ListJobs(ctx context.Context, projectScope string) ([]JobSummary, error) {
+	jobs, err := b.store.ListJobsVisible(ctx, projectScope)
 	if err != nil {
 		return nil, err
 	}
@@ -56,6 +56,35 @@ func (b *HPCBackend) ListJobs(ctx context.Context) ([]JobSummary, error) {
 		out = append(out, BuildJobSummary(job, byJob[job.ID]))
 	}
 	return out, nil
+}
+
+func (b *HPCBackend) ListArchivedJobs(ctx context.Context) ([]JobSummary, error) {
+	jobs, err := b.store.ListJobsArchived(ctx, "")
+	if err != nil {
+		return nil, err
+	}
+	out := make([]JobSummary, 0, len(jobs))
+	for _, j := range jobs {
+		tasks, _ := b.store.ListTasks(ctx, store.TaskFilter{JobID: j.ID})
+		out = append(out, BuildJobSummary(j, tasks))
+	}
+	return out, nil
+}
+
+func (b *HPCBackend) ArchiveJob(ctx context.Context, jobID string) error {
+	return b.store.ArchiveJob(ctx, jobID)
+}
+
+func (b *HPCBackend) UnarchiveJob(ctx context.Context, jobID string) error {
+	return b.store.UnarchiveJob(ctx, jobID)
+}
+
+func (b *HPCBackend) ArchiveProject(_ context.Context, name string) error {
+	return project.NewRegistry(b.store.DB()).Archive(name)
+}
+
+func (b *HPCBackend) UnarchiveProject(_ context.Context, name string) error {
+	return project.NewRegistry(b.store.DB()).Unarchive(name)
 }
 
 func (b *HPCBackend) GetJob(ctx context.Context, jobID string) (*JobDetail, error) {
@@ -76,7 +105,8 @@ func (b *HPCBackend) GetJob(ctx context.Context, jobID string) (*JobDetail, erro
 }
 
 func (b *HPCBackend) CompareMetrics(ctx context.Context, jobID, key string, desc bool) ([]CompareRow, error) {
-	if err := b.backend.Refresh(ctx, jobID); err != nil {
+	// Read path (UI-polled): throttled probe, same as GetJob.
+	if err := b.backend.RefreshLazy(ctx, jobID); err != nil {
 		return nil, err
 	}
 	tasks, err := b.store.ListTasks(ctx, store.TaskFilter{JobID: jobID})
@@ -243,12 +273,14 @@ func (b *HPCBackend) configsToSummaries(ctx context.Context, configs []project.C
 	for _, j := range jobs {
 		jobCounts[j.ProjectName]++
 	}
+	archived, _ := project.NewRegistry(b.store.DB()).ArchivedNames()
 	out := make([]ProjectSummary, 0, len(configs))
 	for _, c := range configs {
 		out = append(out, ProjectSummary{
 			Name:     c.ProjectName,
 			WorkDir:  c.WorkingDir,
 			JobCount: jobCounts[c.ProjectName],
+			Archived: archived[c.ProjectName],
 		})
 	}
 	return out, nil

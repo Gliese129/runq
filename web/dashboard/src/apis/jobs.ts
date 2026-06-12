@@ -1,5 +1,5 @@
 import { api, type RequestOptions } from './client'
-import type { CompareRow, JobConfigPayload, JobDetail, JobSubmitResponse, JobSummary } from '@/types/api'
+import type { CompareRow, JobConfigPayload, JobDetail, JobSubmitResponse, JobSummary, MessageResponse } from '@/types/api'
 
 export interface SubmitJobOptions extends RequestOptions {
   preflightEnabled?: boolean
@@ -13,6 +13,11 @@ export function submitJobPath(preflightEnabled = true, forceSkipPreflight: unkno
 
 export const jobsApi = {
   list: (opts?: RequestOptions) => api.get<JobSummary[]>('/jobs', opts),
+
+  /** Project-scoped list — unlike the global list, it skips the archived-
+   *  project cascade, so an archived project's page still shows its jobs. */
+  listByProject: (project: string, opts?: RequestOptions) =>
+    api.get<JobSummary[]>(`/jobs?project=${encodeURIComponent(project)}`, opts),
 
   get: (jobId: string, opts?: RequestOptions) =>
     api.get<JobDetail>(`/jobs/${encodeURIComponent(jobId)}`, opts),
@@ -38,6 +43,14 @@ export const jobsApi = {
       cfg,
       { silent: opts.silent, timeoutMs: opts.timeoutMs },
     ),
+
+  listArchived: () => api.get<JobSummary[]>('/jobs/archived'),
+
+  archive: (jobId: string) =>
+    api.post<MessageResponse>(`/jobs/${encodeURIComponent(jobId)}/archive`, {}),
+
+  unarchive: (jobId: string) =>
+    api.post<MessageResponse>(`/jobs/${encodeURIComponent(jobId)}/unarchive`, {}),
 
   kill: (jobId: string) =>
     api.post(`/jobs/${encodeURIComponent(jobId)}/kill`),

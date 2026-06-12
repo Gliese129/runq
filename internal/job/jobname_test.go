@@ -4,13 +4,13 @@ import "testing"
 
 func TestSanitizeJobName(t *testing.T) {
 	cases := []struct{ in, want string }{
-		{"3385434e", "rq-3385434e"},          // SGE: cannot start with a digit
+		{"3385434e", "rq-3385434e"},            // SGE: cannot start with a digit
 		{"eval llama 3/8B", "eval-llama-3-8B"}, // spaces, slash → '-'
-		{"--weird--", "weird"},               // trim + collapse separators
-		{"", "rq"},                           // empty stays valid
-		{"模型eval", "eval"},                   // non-ASCII → '-' then trimmed
-		{"42", "rq-42"},                      // all-digit → prefixed
-		{"ok_name.v2", "ok_name.v2"},         // already valid: untouched
+		{"--weird--", "weird"},                 // trim + collapse separators
+		{"", "rq"},                             // empty stays valid
+		{"模型eval", "eval"},                     // non-ASCII → '-' then trimmed
+		{"42", "rq-42"},                        // all-digit → prefixed
+		{"ok_name.v2", "ok_name.v2"},           // already valid: untouched
 	}
 	for _, c := range cases {
 		if got := SanitizeJobName(c.in); got != c.want {

@@ -38,5 +38,38 @@ export const useJobsStore = defineStore('jobs', () => {
     }
   }
 
-  return { jobs, loading, projects, jobsByProject, totalRunning, totalPending, totalFailed, fetchJobs }
+  // ── Archive (single frontend source of truth) ──
+  // Explicitly-archived jobs, globally; and per-project SCOPED lists (the
+  // scoped query skips the archived-project cascade — used by the page of
+  // an archived project, whose jobs are absent from the global list).
+  const archived = ref<JobSummary[]>([])
+  const scoped = ref<Record<string, JobSummary[]>>({})
+
+  async function fetchArchived() {
+    try {
+      archived.value = await jobsApi.listArchived()
+    } catch { /* decoration — connection state tracked globally */ }
+  }
+
+  async function fetchScoped(project: string) {
+    try {
+      scoped.value[project] = await jobsApi.listByProject(project, { silent: true })
+    } catch { /* decoration */ }
+  }
+
+  // Mutations own their refresh (see stores/projects.ts for the rationale).
+  async function archiveJob(id: string) {
+    await jobsApi.archive(id)
+    await Promise.all([fetchJobs(true), fetchArchived()])
+  }
+
+  async function unarchiveJob(id: string) {
+    await jobsApi.unarchive(id)
+    await Promise.all([fetchJobs(true), fetchArchived()])
+  }
+
+  return {
+    jobs, loading, projects, jobsByProject, totalRunning, totalPending, totalFailed, fetchJobs,
+    archived, scoped, fetchArchived, fetchScoped, archiveJob, unarchiveJob,
+  }
 })

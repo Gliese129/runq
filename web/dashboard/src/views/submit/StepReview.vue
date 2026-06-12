@@ -67,7 +67,7 @@
           </div>
         </div>
         <v-btn v-if="state.dryRunResult.length > 0" size="x-small" variant="text" color="primary" @click="state.step--">
-          <v-icon start size="14">mdi-pencil-outline</v-icon> Edit
+          <v-icon start size="14">mdi-pencil-outline</v-icon> {{ t('common.edit') }}
         </v-btn>
       </div>
 
@@ -103,7 +103,7 @@
         <div class="text-body-2">{{ state.dryRunError || t('submit.no_tasks') }}</div>
         <div v-if="!state.dryRunError" class="text-caption mt-1">{{ t('submit.no_tasks_hint') }}</div>
         <v-btn size="small" variant="tonal" color="primary" class="mt-3" @click="state.step--">
-          <v-icon start size="14">mdi-arrow-left</v-icon> Back to configure
+          <v-icon start size="14">mdi-arrow-left</v-icon> {{ t('submit.back_to_configure') }}
         </v-btn>
       </div>
     </v-card>
@@ -117,8 +117,8 @@
         @click="previewOpen = !previewOpen"
       >
         <v-icon size="16" color="primary">mdi-console-line</v-icon>
-        <span class="text-subtitle-2">Rendered commands (task 1 of {{ state.dryRunResult.length }})</span>
-        <span class="text-caption text-on-surface-variant">exactly what will run — nothing written yet</span>
+        <span class="text-subtitle-2">{{ t('submit.rendered_cmds', { n: state.dryRunResult.length }) }}</span>
+        <span class="text-caption text-on-surface-variant">{{ t('submit.rendered_sub') }}</span>
         <v-spacer />
         <v-progress-circular v-if="previewLoading" indeterminate size="14" width="2" color="primary" />
         <v-icon size="16">{{ previewOpen ? 'mdi-chevron-up' : 'mdi-chevron-down' }}</v-icon>
@@ -126,7 +126,7 @@
       <div v-if="previewOpen" class="px-4 pb-4">
         <div v-if="previewError" class="text-caption text-error">{{ previewError }}</div>
         <pre v-else-if="previewText" class="preview-pre rounded pa-3 text-body-2">{{ previewText }}</pre>
-        <div v-else-if="!previewLoading" class="text-caption text-on-surface-variant">No preview available.</div>
+        <div v-else-if="!previewLoading" class="text-caption text-on-surface-variant">{{ t('submit.no_preview') }}</div>
       </div>
     </v-card>
   </div>

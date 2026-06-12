@@ -32,12 +32,15 @@ type Backend interface {
 	// for poll-model backends; push-model backends return ErrNotSupported.
 	RefreshJob(ctx context.Context, jobID string) error
 
-	ListJobs(ctx context.Context) ([]JobSummary, error)
+	// ListJobs returns visible jobs. An empty project lists globally (jobs
+	// of archived projects cascade-hidden); a project scope skips the
+	// cascade — navigating into an archived project shows its jobs.
+	ListJobs(ctx context.Context, project string) ([]JobSummary, error)
 	GetJob(ctx context.Context, jobID string) (*JobDetail, error)
 	CompareMetrics(ctx context.Context, jobID, key string, desc bool) ([]CompareRow, error)
 	GPUStatus(ctx context.Context) ([]GPUSlot, error)
 
-	GetTask(ctx context.Context, taskID string) (*TaskView, string, error)    // returns task view + log_path
+	GetTask(ctx context.Context, taskID string) (*TaskView, string, error) // returns task view + log_path
 	TaskMetrics(ctx context.Context, taskID string) ([]MetricPoint, error) // returns all metric points
 	KillTask(ctx context.Context, taskID string) error
 	RetryTask(ctx context.Context, taskID string) error
@@ -50,6 +53,13 @@ type Backend interface {
 	// PreviewSubmit renders what WOULD be submitted (preview is truth, zero
 	// side effects). Backends without the concept return ErrNotSupported.
 	PreviewSubmit(ctx context.Context, cfg job.JobConfig, skipPreflight bool) (string, error)
+	// Archive = hide from default lists, keep everything; reversible.
+	// ListJobs returns visible jobs only; ListArchivedJobs the rest.
+	ListArchivedJobs(ctx context.Context) ([]JobSummary, error)
+	ArchiveJob(ctx context.Context, jobID string) error
+	UnarchiveJob(ctx context.Context, jobID string) error
+	ArchiveProject(ctx context.Context, name string) error
+	UnarchiveProject(ctx context.Context, name string) error
 	// ResolveNote previews the note template's resolution ({{version}} family
 	// scan needs the backend's store) — submit's code path, never a frontend
 	// simulation.
@@ -113,6 +123,7 @@ func BuildJobSummary(job store.JobRow, tasks []store.TaskRow) JobSummary {
 		Project:     job.ProjectName,
 		Note:        job.Note,
 		Status:      job.Status,
+		Archived:    job.ArchivedAt != nil,
 		CreatedAt:   job.CreatedAt.Unix(),
 		Tasks:       counts,
 		ETASec:      eta,

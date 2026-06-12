@@ -7,7 +7,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
+	"github.com/gliese129/runq/internal/store"
 	"gopkg.in/yaml.v3"
 )
 
@@ -268,4 +270,96 @@ func (r *Registry) Remove(name string) error {
 		return fmt.Errorf("project %q not found", name)
 	}
 	return nil
+}
+
+// ── Archive ──
+//
+// Archive hides a project (and, in global listings, its jobs — the cascade
+// is applied by the job queries) from default lists. The flag lives in its
+// own column, NEVER in config_json: project.yaml is the truth for the
+// experiment config, but "archived" is runq bookkeeping — a yaml re-sync
+// must not resurrect or clobber it.
+
+func (r *Registry) Archive(name string) error {
+	// Guard: archiving cascades the project's jobs out of the global lists,
+	// so live work must not be hidden — same rule as the per-job guard
+	// (paused counts: it is resumable, hence forgettable).
+	var active int
+	err := r.db.QueryRow(
+		`SELECT COUNT(*) FROM jobs WHERE project_name = ? AND status IN `+store.ActiveStatusesSQL(),
+		name).Scan(&active)
+	if err != nil {
+		return err
+	}
+	if active > 0 {
+		return fmt.Errorf("project %q has %d active job(s) — kill them (or let them finish) before archiving", name, active)
+	}
+	res, err := r.db.Exec(`UPDATE projects SET archived_at = ? WHERE name = ?`, time.Now().Unix(), name)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("project %q not found", name)
+	}
+	return nil
+}
+
+func (r *Registry) Unarchive(name string) error {
+	res, err := r.db.Exec(`UPDATE projects SET archived_at = NULL WHERE name = ?`, name)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("project %q not found", name)
+	}
+	return nil
+}
+
+// IsArchived reports whether a project is archived.
+func (r *Registry) IsArchived(name string) (bool, error) {
+	var n int
+	err := r.db.QueryRow(
+		`SELECT COUNT(*) FROM projects WHERE name = ? AND archived_at IS NOT NULL`, name).Scan(&n)
+	return n > 0, err
+}
+
+// RequireSubmittable is THE precondition for landing new work in a project:
+// it must exist and must not be archived (archived jobs cascade out of the
+// default lists — a submit would run invisibly). FAIL-CLOSED throughout:
+// an unreadable state is a refusal, never a pass. Every submit path
+// (daemon service, HPC backend, and any future writer) calls this single
+// gate so a new entry point can't forget the rule.
+func (r *Registry) RequireSubmittable(name string) error {
+	var archived sql.NullInt64
+	err := r.db.QueryRow(`SELECT archived_at FROM projects WHERE name = ?`, name).Scan(&archived)
+	if err == sql.ErrNoRows {
+		return fmt.Errorf("project %q not found", name)
+	}
+	if err != nil {
+		return fmt.Errorf("check project %q: %w", name, err)
+	}
+	if archived.Valid {
+		return fmt.Errorf("project %q is archived — `runq project unarchive %s` before submitting", name, name)
+	}
+	return nil
+}
+
+// ArchivedNames returns the set of archived project names. Kept separate
+// from List() (which returns Configs — yaml-truth material) so archived
+// state rides alongside, not inside, the config.
+func (r *Registry) ArchivedNames() (map[string]bool, error) {
+	rows, err := r.db.Query(`SELECT name FROM projects WHERE archived_at IS NOT NULL`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			return nil, err
+		}
+		out[n] = true
+	}
+	return out, rows.Err()
 }

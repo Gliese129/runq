@@ -20,4 +20,10 @@ export const projectsApi = {
 
   rename: (name: string, newName: string) =>
     api.post<MessageResponse>(`/projects/${encodeURIComponent(name)}/rename`, { new_name: newName }),
+
+  archive: (name: string) =>
+    api.post<MessageResponse>(`/projects/${encodeURIComponent(name)}/archive`, {}),
+
+  unarchive: (name: string) =>
+    api.post<MessageResponse>(`/projects/${encodeURIComponent(name)}/unarchive`, {}),
 }

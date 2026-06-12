@@ -69,6 +69,7 @@ type JobSummary struct {
 	TotalTasks  int            `json:"total_tasks"`
 	StatusCount map[string]int `json:"status_count"`
 	CreatedAt   time.Time      `json:"created_at"`
+	Archived    bool           `json:"archived"`
 }
 
 // JobDetail is the API response for job show.
@@ -96,6 +97,11 @@ func (s *JobService) SubmitJobWithOpts(ctx context.Context, jobCfg job.JobConfig
 	proj, err := s.Registry.Get(jobCfg.Project)
 	if err != nil {
 		return "", 0, fmt.Errorf("project %q not found", jobCfg.Project)
+	}
+	// THE submit precondition (exists + not archived, fail-closed) lives in
+	// one place — see Registry.RequireSubmittable.
+	if err := s.Registry.RequireSubmittable(jobCfg.Project); err != nil {
+		return "", 0, err
 	}
 
 	wsRoot, err := config.ResolveRoot(s.StorageCfg, proj.WorkingDir, proj.ProjectName)
@@ -210,9 +216,76 @@ func (s *JobService) SubmitJobWithOpts(ctx context.Context, jobCfg job.JobConfig
 	return plan.JobID, len(tasks), nil
 }
 
-// ListJobs returns a summary of all jobs with task status breakdown.
+// ProjectSummary is the server-assembled project listing item. Built HERE
+// (one place, same semantics as the HPC dashboard backend) so clients never
+// re-derive job_count/archived from partial lists — that client-side
+// assembly is exactly what produced the "archived flag silently lost" and
+// "job_count reads 0" bugs.
+type ProjectSummary struct {
+	Name     string `json:"name"`
+	WorkDir  string `json:"work_dir,omitempty"`
+	JobCount int    `json:"job_count"`
+	Archived bool   `json:"archived"`
+}
+
+// ProjectSummaries lists every project with its TOTAL job count (all rows —
+// a count is an inventory, not a view) and archive state.
+func (s *JobService) ProjectSummaries(ctx context.Context) ([]ProjectSummary, error) {
+	configs, err := s.Registry.List()
+	if err != nil {
+		return nil, err
+	}
+	jobs, err := s.Store.ListJobs(ctx, "")
+	if err != nil {
+		return nil, err
+	}
+	counts := make(map[string]int, len(configs))
+	for _, j := range jobs {
+		counts[j.ProjectName]++
+	}
+	archived, err := s.Registry.ArchivedNames()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]ProjectSummary, 0, len(configs))
+	for _, c := range configs {
+		out = append(out, ProjectSummary{
+			Name:     c.ProjectName,
+			WorkDir:  c.WorkingDir,
+			JobCount: counts[c.ProjectName],
+			Archived: archived[c.ProjectName],
+		})
+	}
+	return out, nil
+}
+
+// ListJobs returns a summary of all VISIBLE jobs with task status breakdown.
+// Archived jobs (and, globally, jobs of archived projects) are hidden by
+// default; pass archived=true to list the explicitly archived ones instead.
 func (s *JobService) ListJobs(ctx context.Context, projectFilter string) ([]JobSummary, error) {
-	jobs, err := s.Store.ListJobs(ctx, projectFilter)
+	return s.listJobs(ctx, projectFilter, false)
+}
+
+func (s *JobService) ListArchivedJobs(ctx context.Context, projectFilter string) ([]JobSummary, error) {
+	return s.listJobs(ctx, projectFilter, true)
+}
+
+func (s *JobService) ArchiveJob(ctx context.Context, jobID string) error {
+	return s.Store.ArchiveJob(ctx, jobID)
+}
+
+func (s *JobService) UnarchiveJob(ctx context.Context, jobID string) error {
+	return s.Store.UnarchiveJob(ctx, jobID)
+}
+
+func (s *JobService) listJobs(ctx context.Context, projectFilter string, archived bool) ([]JobSummary, error) {
+	var jobs []store.JobRow
+	var err error
+	if archived {
+		jobs, err = s.Store.ListJobsArchived(ctx, projectFilter)
+	} else {
+		jobs, err = s.Store.ListJobsVisible(ctx, projectFilter)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -227,6 +300,7 @@ func (s *JobService) ListJobs(ctx context.Context, projectFilter string) ([]JobS
 		results = append(results, JobSummary{
 			JobID: j.ID, Project: j.ProjectName, Status: j.Status,
 			TotalTasks: j.TotalTasks, StatusCount: counts, CreatedAt: j.CreatedAt,
+			Archived: j.ArchivedAt != nil,
 		})
 	}
 	return results, nil
