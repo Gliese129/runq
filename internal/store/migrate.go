@@ -49,6 +49,21 @@ func (s *Store) addMissingColumns(ctx context.Context) error {
 	if err := addColumnIfMissing(ctx, s.db, "jobs", "note", "TEXT"); err != nil {
 		return fmt.Errorf("add jobs.note: %w", err)
 	}
+	// refreshed_at: last reconcile of job state from external sources.
+	// HPC mode only (hpc.Refresh is the sole writer); always NULL in daemon
+	// mode — the daemon is the source of truth, there is nothing to reconcile.
+	if err := addColumnIfMissing(ctx, s.db, "jobs", "refreshed_at", "INTEGER"); err != nil {
+		return fmt.Errorf("add jobs.refreshed_at: %w", err)
+	}
+	// archived_at: archive = hide from default lists, keep everything.
+	// Lives in its own column (NOT config_json) so project.yaml sync and
+	// job config rewrites can never clobber it.
+	if err := addColumnIfMissing(ctx, s.db, "jobs", "archived_at", "INTEGER"); err != nil {
+		return fmt.Errorf("add jobs.archived_at: %w", err)
+	}
+	if err := addColumnIfMissing(ctx, s.db, "projects", "archived_at", "INTEGER"); err != nil {
+		return fmt.Errorf("add projects.archived_at: %w", err)
+	}
 	return nil
 }
 

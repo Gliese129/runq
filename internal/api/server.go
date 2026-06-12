@@ -54,7 +54,12 @@ type Deps struct {
 	JobService interface {
 		SubmitJob(ctx context.Context, jobCfg job.JobConfig) (string, int, error)
 		SubmitJobWithOpts(ctx context.Context, jobCfg job.JobConfig, opts service.SubmitJobOpts) (string, int, error)
+		ResolveNote(ctx context.Context, jobCfg job.JobConfig) (string, error)
 		ListJobs(ctx context.Context, project string) ([]service.JobSummary, error)
+		ListArchivedJobs(ctx context.Context, project string) ([]service.JobSummary, error)
+		ProjectSummaries(ctx context.Context) ([]service.ProjectSummary, error)
+		ArchiveJob(ctx context.Context, jobID string) error
+		UnarchiveJob(ctx context.Context, jobID string) error
 		ShowJob(ctx context.Context, jobID string) (*service.JobDetail, error)
 		KillJob(ctx context.Context, jobID string) (int, error)
 		PauseJob(ctx context.Context, jobID string) error
@@ -246,10 +251,19 @@ type Client struct {
 	httpc *http.Client
 }
 
+const (
+	DefaultClientTimeout = 10 * time.Second
+	SubmitClientTimeout  = 50 * time.Second
+)
+
 func NewClient(socketPath string) *Client {
+	return NewClientWithTimeout(socketPath, DefaultClientTimeout)
+}
+
+func NewClientWithTimeout(socketPath string, timeout time.Duration) *Client {
 	return &Client{
 		httpc: &http.Client{
-			Timeout: 10 * time.Second,
+			Timeout: timeout,
 			Transport: &http.Transport{
 				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 					return net.Dial("unix", socketPath)
@@ -261,6 +275,16 @@ func NewClient(socketPath string) *Client {
 
 // Do sends an HTTP request to the daemon. Body is JSON-encoded if non-nil.
 func (c *Client) Do(method, path string, body interface{}) (*http.Response, error) {
+	return c.do(c.httpc, method, path, body)
+}
+
+func (c *Client) DoWithTimeout(method, path string, body interface{}, timeout time.Duration) (*http.Response, error) {
+	httpc := *c.httpc
+	httpc.Timeout = timeout
+	return c.do(&httpc, method, path, body)
+}
+
+func (c *Client) do(httpc *http.Client, method, path string, body interface{}) (*http.Response, error) {
 	url := fmt.Sprintf("http://runq%s", path)
 	var bodyReader io.Reader
 	if body != nil {
@@ -277,5 +301,5 @@ func (c *Client) Do(method, path string, body interface{}) (*http.Response, erro
 	if body != nil {
 		httpReq.Header.Set("Content-Type", "application/json")
 	}
-	return c.httpc.Do(httpReq)
+	return httpc.Do(httpReq)
 }

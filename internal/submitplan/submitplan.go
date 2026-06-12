@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/preflight"
@@ -29,6 +30,15 @@ type Deps struct {
 	IDGen         func() string // used for task ids (and job id only when JobID is empty)
 	Paths         Paths
 	SkipPreflight bool
+	// PreflightDisableLocal skips the local-subprocess checks (imports,
+	// pip) — wired from hpc `preflight_local: false` for strict login nodes.
+	PreflightDisableLocal bool
+	// PreflightScope labels where local checks ran (e.g. "on login node").
+	PreflightScope string
+	// SchedulerParams are param names consumed by the HPC submit_template
+	// ({{param.*}}): exempt from the command renderer's unconsumed check
+	// and excluded from {{args}} injection.
+	SchedulerParams []string
 }
 
 type Plan struct {
@@ -39,10 +49,14 @@ type Plan struct {
 	GPUsPerTask int
 	Wandb       *project.WandbConfig
 	Tasks       []PlannedTask
+	// Preflight is the full three-state report (failed entries already
+	// aborted Build) — callers print it so skips stay visible.
+	Preflight preflight.Report
 }
 
 type PlannedTask struct {
 	TaskID        string
+	Name          string // scheduler job name ({{name}} in submit_template), pre-sanitized
 	Command       string
 	Params        job.TaskParams
 	Env           map[string]string
@@ -56,6 +70,57 @@ type PlannedTask struct {
 	UID           int
 	TaskDir       string
 	CheckpointDir string
+}
+
+// validateStrictChoices enforces strict params: a value outside the
+// project's Choices list is a submit-time error. Comparison is on the
+// string form (choices are stored as strings; params may be typed).
+func validateStrictChoices(proj *project.Config, tasks []job.TaskParams) error {
+	for _, def := range proj.Params {
+		if !def.Strict || len(def.Choices) == 0 {
+			continue
+		}
+		allowed := make(map[string]bool, len(def.Choices))
+		for _, c := range def.Choices {
+			allowed[c] = true
+		}
+		for _, params := range tasks {
+			v, present := params[def.Name]
+			if !present {
+				continue
+			}
+			s := fmt.Sprintf("%v", v)
+			if !allowed[s] {
+				return fmt.Errorf(
+					"param %q is strict: value %q is not among its choices (%s)",
+					def.Name, s, strings.Join(def.Choices, ", "))
+			}
+		}
+	}
+	return nil
+}
+
+// resolveEnvFile applies the project's env_file semantics: nil = auto-use
+// <working_dir>/.env when present; "" = disabled; other = required path.
+func resolveEnvFile(proj *project.Config) (string, error) {
+	if proj.EnvFile == nil {
+		auto := filepath.Join(proj.WorkingDir, ".env")
+		if _, err := os.Stat(auto); err == nil {
+			return auto, nil
+		}
+		return "", nil
+	}
+	path := strings.TrimSpace(*proj.EnvFile)
+	if path == "" {
+		return "", nil // explicitly disabled
+	}
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(proj.WorkingDir, path)
+	}
+	if _, err := os.Stat(path); err != nil {
+		return "", fmt.Errorf("env_file %q: %w", path, err)
+	}
+	return path, nil
 }
 
 // Build compiles a JobConfig plus an already-resolved Project into a
@@ -85,8 +150,8 @@ func Build(ctx context.Context, cfg job.JobConfig, proj *project.Config, d Deps)
 			maxRetry = *cfg.Overrides.MaxRetry
 		}
 	}
-	if gpusPerTask <= 0 {
-		gpusPerTask = 1
+	if gpusPerTask < 0 {
+		gpusPerTask = 0
 	}
 
 	var timeoutSec int
@@ -119,18 +184,63 @@ func Build(ctx context.Context, cfg job.JobConfig, proj *project.Config, d Deps)
 		return Plan{}, fmt.Errorf("stat working_dir %q: %w", proj.WorkingDir, err)
 	}
 
-	if err := preflight.Run(ctx, proj, taskParams, d.SkipPreflight); err != nil {
+	// Ambient env file: carried as the reserved RUNQ_ENV_FILE env key so it
+	// flows through EnvJSON persistence / daemon recovery untouched. The
+	// shell sources it AT TASK START (executor prologue / run.sh header) —
+	// runq never reads its values. Precedence: .env < explicit env.
+	envFile, err := resolveEnvFile(proj)
+	if err != nil {
+		return Plan{}, err
+	}
+	if envFile != "" {
+		env["RUNQ_ENV_FILE"] = envFile
+	}
+
+	if err := validateStrictChoices(proj, taskParams); err != nil {
+		return Plan{}, err
+	}
+
+	// Scheduler params: DECLARED scope wins (self-describing config);
+	// template-reference inference remains as a fallback for configs that
+	// haven't adopted scope yet.
+	schedParams := make(map[string]bool, len(d.SchedulerParams))
+	for _, n := range d.SchedulerParams {
+		schedParams[n] = true
+	}
+	for _, def := range proj.Params {
+		if def.Scope == "scheduler" {
+			schedParams[def.Name] = true
+		}
+	}
+
+	pf := preflight.DefaultPreflight()
+	pf.Skip = d.SkipPreflight
+	pf.DisableLocal = d.PreflightDisableLocal
+	pf.Scope = d.PreflightScope
+	pf.ExcludeParams = schedParams
+	pfReport, err := pf.Run(ctx, proj, taskParams)
+	if err != nil {
+		return Plan{}, err
+	}
+	if err := pfReport.Err(); err != nil {
 		return Plan{}, err
 	}
 
 	jobID := d.JobID
 	if jobID == "" {
-		jobID = idGen()
+		jobID = utils.GenerateJobID()
 	}
 	callerUID := os.Getuid()
+	// Scheduler job name template: job.yaml override > project.yaml job_name
+	// > default rq-{{task_id}}. Rendered per task (params differ), always
+	// sanitized — qsub/sbatch must never reject what runq generated.
+	nameTmpl := cfg.Name
+	if strings.TrimSpace(nameTmpl) == "" {
+		nameTmpl = proj.JobName
+	}
 	tasks := make([]PlannedTask, 0, len(taskParams))
 	for _, params := range taskParams {
-		cmd, err := job.Render(proj.CmdTemplate, params)
+		cmd, err := job.RenderExcluding(proj.CmdTemplate, params, schedParams)
 		if err != nil {
 			return Plan{}, fmt.Errorf("render command failed: %w", err)
 		}
@@ -138,8 +248,12 @@ func Build(ctx context.Context, cfg job.JobConfig, proj *project.Config, d Deps)
 
 		taskID := idGen()
 		taskDir := workspace.TaskDir(d.Paths.WorkspaceRoot, taskID)
+		name := job.RenderJobName(nameTmpl, params, map[string]string{
+			"project": cfg.Project, "job_id": jobID, "task_id": taskID,
+		})
 		tasks = append(tasks, PlannedTask{
 			TaskID:        taskID,
+			Name:          name,
 			Command:       cmd,
 			Params:        params,
 			Env:           cloneEnv(env),
@@ -164,6 +278,7 @@ func Build(ctx context.Context, cfg job.JobConfig, proj *project.Config, d Deps)
 		GPUsPerTask: gpusPerTask,
 		Wandb:       proj.Wandb,
 		Tasks:       tasks,
+		Preflight:   pfReport,
 	}, nil
 }
 

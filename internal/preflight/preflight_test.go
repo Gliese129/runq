@@ -13,7 +13,15 @@ package preflight
 // ./internal/preflight/...` discovers it. Codex: please flesh out the
 // bodies.
 
-import "testing"
+import (
+	"context"
+	"os"
+	"reflect"
+	"strings"
+	"testing"
+
+	"github.com/gliese129/runq/internal/project"
+)
 
 // ----------------------------------------------------------------------
 // (1) checkWritable
@@ -103,7 +111,36 @@ func TestCheckPathArgs_DuplicatesDeduped(t *testing.T) {
 //	- topLevelModule("a.b.c") → "a"; topLevelModule("a") → "a".
 
 func TestExtractImports_TopLevelOnly(t *testing.T) {
-	t.Skip("TODO(codex)")
+	dir := t.TempDir()
+	script := `import argparse
+import json
+import math
+import os
+from pathlib import Path
+from typing import Any
+
+Row = dict[str, Any]
+`
+	if err := os.WriteFile(dir+"/train.py", []byte(script), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	path, modules, err := extractImports("python train.py", dir)
+	if err != nil {
+		t.Fatalf("extractImports: %v", err)
+	}
+	if !strings.HasSuffix(path, "/train.py") {
+		t.Fatalf("path = %q, want train.py", path)
+	}
+	want := []string{"argparse", "json", "math", "os", "pathlib", "typing"}
+	if !reflect.DeepEqual(modules, want) {
+		t.Fatalf("modules = %#v, want %#v", modules, want)
+	}
+	for _, mod := range modules {
+		if strings.Contains(mod, "\n") {
+			t.Fatalf("module name crossed line boundary: %q", mod)
+		}
+	}
 }
 
 func TestExtractImports_DottedToHead(t *testing.T) {
@@ -153,4 +190,57 @@ func TestRunPreflight_Skip(t *testing.T) {
 
 func TestRunPreflight_AggregatesFindings(t *testing.T) {
 	t.Skip("TODO(codex)")
+}
+
+// Three-state report: skips are honest non-failures, never blockers.
+func TestThreeStateReport(t *testing.T) {
+	dir := t.TempDir()
+	proj := &project.Config{ProjectName: "p", WorkingDir: dir, CmdTemplate: "echo hi"}
+
+	// Skip flag → single skipped entry, OK.
+	pf := DefaultPreflight()
+	pf.Skip = true
+	rep := pf.RunPreflight(context.Background(), proj, "echo hi")
+	if !rep.OK() || len(rep.Results) != 1 || rep.Results[0].Status != "skipped" {
+		t.Fatalf("skip: %+v", rep.Results)
+	}
+
+	// DisableLocal → imports/pip skipped with config reason; still OK.
+	pf = DefaultPreflight()
+	pf.DisableLocal = true
+	pf.Scope = "on this login node"
+	rep = pf.RunPreflight(context.Background(), proj, "echo hi")
+	statuses := map[string]string{}
+	for _, c := range rep.Results {
+		statuses[c.Name] = c.Status
+	}
+	if statuses["imports"] != "skipped" || statuses["pip_check"] != "skipped" {
+		t.Errorf("disable_local: %+v", rep.Results)
+	}
+	if statuses["writable"] != "passed" || statuses["paths"] != "passed" {
+		t.Errorf("free tier should still run: %+v", rep.Results)
+	}
+	// gpus_per_task=0 → gpu skipped with its reason.
+	if statuses["gpu"] != "skipped" {
+		t.Errorf("gpu should skip when none requested: %+v", rep.Results)
+	}
+	if !rep.OK() {
+		t.Error("skips must never block")
+	}
+}
+
+// Regression: absolute-path extraction must respect token boundaries —
+// relative paths and HF model ids must never be mangled into bogus
+// absolute paths (real false positives from an HPC eval command).
+func TestCheckPathArgsTokenBoundaries(t *testing.T) {
+	cmd := `bash scripts/qsub/evaluate_lighteval.sh --model-name tokyotech-llm/Qwen3-Swallow-8B-RL-v0.2 --repo-path .`
+	if f := checkPathArgs(cmd); len(f) != 0 {
+		t.Fatalf("relative paths / model ids flagged: %+v", f)
+	}
+
+	// Genuine absolute paths are still checked: token-initial, after = and quotes.
+	bad := checkPathArgs(`run --out=/definitely-missing-zz/x '/also-missing-zz/y' /missing-zz/z`)
+	if len(bad) != 3 {
+		t.Fatalf("want 3 findings, got %+v", bad)
+	}
 }

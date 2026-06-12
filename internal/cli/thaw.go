@@ -141,7 +141,7 @@ func humanBytes(n int64) string {
 		return "unknown"
 	}
 	const (
-		_ = iota
+		_  = iota
 		KB = 1 << (iota * 10)
 		MB
 		GB

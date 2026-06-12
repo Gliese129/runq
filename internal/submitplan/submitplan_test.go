@@ -2,7 +2,9 @@ package submitplan
 
 import (
 	"context"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gliese129/runq/internal/job"
@@ -155,5 +157,143 @@ func TestBuildUsesInjectedJobID(t *testing.T) {
 	}
 	if plan.Tasks[0].TaskDir != filepath.Join(jobRoot, "task1") {
 		t.Fatalf("TaskDir = %q", plan.Tasks[0].TaskDir)
+	}
+}
+
+// P4: env_file semantics — nil auto-detects working_dir/.env; the reserved
+// RUNQ_ENV_FILE key carries it; explicit-missing errors; "" disables.
+func TestEnvFileResolution(t *testing.T) {
+	dir := t.TempDir()
+	proj := &project.Config{ProjectName: "p", WorkingDir: dir, CmdTemplate: "echo {{lr}}"}
+	cfg := job.JobConfig{Project: "p", Sweep: []job.SweepBlock{{Method: "grid",
+		Parameters: map[string]job.ParameterSpec{"lr": {Values: []any{0.1}}}}}}
+	deps := Deps{Paths: Paths{WorkspaceRoot: dir, LogRoot: dir}, SkipPreflight: true}
+
+	// auto, no .env present → key absent
+	plan, err := Build(context.Background(), cfg, proj, deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := plan.Tasks[0].Env["RUNQ_ENV_FILE"]; v != "" {
+		t.Errorf("no .env: key should be absent, got %q", v)
+	}
+
+	// auto, .env present → picked up
+	envPath := filepath.Join(dir, ".env")
+	os.WriteFile(envPath, []byte("A=1\n"), 0o600)
+	plan, err = Build(context.Background(), cfg, proj, deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := plan.Tasks[0].Env["RUNQ_ENV_FILE"]; v != envPath {
+		t.Errorf("auto .env: got %q want %q", v, envPath)
+	}
+
+	// explicitly disabled
+	empty := ""
+	proj.EnvFile = &empty
+	plan, _ = Build(context.Background(), cfg, proj, deps)
+	if v := plan.Tasks[0].Env["RUNQ_ENV_FILE"]; v != "" {
+		t.Errorf("disabled: key should be absent, got %q", v)
+	}
+
+	// explicit missing path → error
+	missing := "nope.env"
+	proj.EnvFile = &missing
+	if _, err := Build(context.Background(), cfg, proj, deps); err == nil {
+		t.Error("explicit missing env_file must error")
+	}
+}
+
+// Strict choices: values outside the catalog are a submit-time error;
+// non-strict choices stay suggestions.
+func TestStrictChoices(t *testing.T) {
+	dir := t.TempDir()
+	proj := &project.Config{
+		ProjectName: "p", WorkingDir: dir, CmdTemplate: "echo {{provider}}",
+		Params: []project.ParamDef{
+			{Name: "provider", Type: "str", Choices: []string{"vllm", "openai"}, Strict: true},
+		},
+	}
+	deps := Deps{Paths: Paths{WorkspaceRoot: dir, LogRoot: dir}, SkipPreflight: true}
+	cfgFor := func(v string) job.JobConfig {
+		return job.JobConfig{Project: "p", Sweep: []job.SweepBlock{{Method: "grid",
+			Parameters: map[string]job.ParameterSpec{"provider": {Values: []any{v}}}}}}
+	}
+
+	if _, err := Build(context.Background(), cfgFor("vllm"), proj, deps); err != nil {
+		t.Fatalf("allowed value rejected: %v", err)
+	}
+	_, err := Build(context.Background(), cfgFor("deepinfra"), proj, deps)
+	if err == nil || !strings.Contains(err.Error(), "strict") {
+		t.Fatalf("strict violation should error with explanation, got %v", err)
+	}
+
+	proj.Params[0].Strict = false
+	if _, err := Build(context.Background(), cfgFor("deepinfra"), proj, deps); err != nil {
+		t.Fatalf("non-strict choices must stay suggestions: %v", err)
+	}
+}
+
+// Declared scope beats inference: a scheduler-scoped param needs no
+// submit_template knowledge to be exempt from command consumption.
+func TestSchedulerScopeDeclaration(t *testing.T) {
+	dir := t.TempDir()
+	proj := &project.Config{
+		ProjectName: "p", WorkingDir: dir, CmdTemplate: "echo {{lr}}",
+		Params: []project.ParamDef{{Name: "h_rt", Type: "str", Scope: "scheduler"}},
+	}
+	cfg := job.JobConfig{Project: "p",
+		FixedParams: map[string]any{"h_rt": "8:00:00"},
+		Sweep: []job.SweepBlock{{Method: "grid",
+			Parameters: map[string]job.ParameterSpec{"lr": {Values: []any{0.1}}}}}}
+	deps := Deps{Paths: Paths{WorkspaceRoot: dir, LogRoot: dir}, SkipPreflight: true}
+
+	plan, err := Build(context.Background(), cfg, proj, deps)
+	if err != nil {
+		t.Fatalf("declared scheduler param must not require command consumption: %v", err)
+	}
+	if strings.Contains(plan.Tasks[0].Command, "h_rt") {
+		t.Errorf("scheduler param leaked into command: %q", plan.Tasks[0].Command)
+	}
+}
+
+// Regression: presets used -N {{task_id}} and hex task ids can start with a
+// digit — UGE rejects ("not a valid object name"). Every planned task must
+// carry a scheduler-safe Name; templates resolve from job.name > project
+// job_name > rq-{{task_id}}.
+func TestPlannedTaskName(t *testing.T) {
+	dir := t.TempDir()
+	proj := &project.Config{ProjectName: "p", WorkingDir: dir, CmdTemplate: "echo {{lr}}"}
+	cfg := job.JobConfig{Project: "p",
+		Sweep: []job.SweepBlock{{Method: "grid",
+			Parameters: map[string]job.ParameterSpec{"lr": {Values: []any{0.1}}}}}}
+	deps := Deps{Paths: Paths{WorkspaceRoot: dir, LogRoot: dir}, SkipPreflight: true}
+
+	// default: rq-<task_id> — never digit-first
+	plan, err := Build(context.Background(), cfg, proj, deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "rq-" + plan.Tasks[0].TaskID; plan.Tasks[0].Name != want {
+		t.Errorf("default name: got %q want %q", plan.Tasks[0].Name, want)
+	}
+
+	// project template with params; job.yaml override wins
+	proj.JobName = "eval-{{lr}}"
+	plan, err = Build(context.Background(), cfg, proj, deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Tasks[0].Name != "eval-0.1" {
+		t.Errorf("project template: got %q", plan.Tasks[0].Name)
+	}
+	cfg.Name = "{{project}}-x"
+	plan, err = Build(context.Background(), cfg, proj, deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Tasks[0].Name != "p-x" {
+		t.Errorf("job override: got %q", plan.Tasks[0].Name)
 	}
 }

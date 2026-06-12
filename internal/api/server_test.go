@@ -75,16 +75,22 @@ func doRequest(s *Server, method, path string, body any) *httptest.ResponseRecor
 
 func TestProjectCRUD(t *testing.T) {
 	s := setupTestServer(t)
+	workDir := t.TempDir()
 
 	// Add
 	cfg := project.Config{
 		ProjectName: "resnet50",
-		WorkingDir:  "/tmp/resnet",
+		WorkingDir:  workDir,
 		CmdTemplate: "python train.py {{args}}",
 	}
 	w := doRequest(s, "POST", "/api/projects", cfg)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("Add: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// project.yaml must exist on disk
+	if _, err := os.Stat(workDir + "/project.yaml"); err != nil {
+		t.Fatalf("project.yaml not written: %v", err)
 	}
 
 	// List
@@ -108,6 +114,17 @@ func TestProjectCRUD(t *testing.T) {
 	w = doRequest(s, "GET", "/api/projects/nonexistent", nil)
 	if w.Code != http.StatusNotFound {
 		t.Errorf("Get missing: expected 404, got %d", w.Code)
+	}
+
+	// Add with bad dir must fail
+	badCfg := project.Config{
+		ProjectName: "bad",
+		WorkingDir:  "/this/does/not/exist",
+		CmdTemplate: "echo",
+	}
+	w = doRequest(s, "POST", "/api/projects", badCfg)
+	if w.Code == http.StatusCreated {
+		t.Error("Add with non-existent dir should fail")
 	}
 
 	// Delete

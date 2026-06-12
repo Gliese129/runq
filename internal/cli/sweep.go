@@ -3,12 +3,14 @@ package cli
 import (
 	"fmt"
 	"maps"
+	"net/url"
 	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 
+	"github.com/gliese129/runq/internal/api"
 	job2 "github.com/gliese129/runq/internal/job"
+	"github.com/gliese129/runq/internal/project"
 	"github.com/olekukonko/tablewriter"
 	"github.com/spf13/cobra"
 )
@@ -100,13 +102,17 @@ func runSweep(cmd *cobra.Command, args []string) error {
 	listMode, _ := cmd.Flags().GetBool("list")
 	dryRun, _ := cmd.Flags().GetBool("dry")
 
-	// Default project name from current directory name.
+	// Auto-detect project from current directory via match API.
 	if projectName == "" {
 		wd, err := os.Getwd()
 		if err != nil {
-			return fmt.Errorf("cannot detect project name: %w (use --project)", err)
+			return fmt.Errorf("cannot detect project: %w (use --project)", err)
 		}
-		projectName = filepath.Base(wd)
+		detected, err := detectProject(wd, "runq sweep --project <name>")
+		if err != nil {
+			return err
+		}
+		projectName = detected
 	}
 
 	method := "grid"
@@ -162,7 +168,7 @@ func runSweep(cmd *cobra.Command, args []string) error {
 		TotalGPUs  int    `json:"total_gpus"`
 	}
 	var resp JobResp
-	if err := doAndDecode("POST", "/api/jobs", jobCfg, &resp); err != nil {
+	if err := doAndDecodeWithTimeout("POST", "/api/jobs", jobCfg, &resp, api.SubmitClientTimeout); err != nil {
 		return err
 	}
 	fmt.Printf("Job submitted: id=%s tasks=%d (method=%s)\n", resp.JobId, resp.TotalTasks, method)
@@ -172,4 +178,30 @@ func runSweep(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  %d/%d GPUs free — some tasks may queue\n", resp.FreeGPUs, resp.TotalGPUs)
 	}
 	return nil
+}
+
+// detectProject calls the match API to find projects for a directory.
+// Returns the project name if exactly one match, or a descriptive error
+// listing candidates (with copyable commands) if zero or multiple.
+func detectProject(dir string, usagePrefix string) (string, error) {
+	var configs []project.Config
+	query := "/api/projects/match?dir=" + url.QueryEscape(dir)
+	if err := doAndDecode("GET", query, nil, &configs); err != nil {
+		return "", fmt.Errorf("cannot detect project for %s: %w\n  use --project to specify", dir, err)
+	}
+
+	switch len(configs) {
+	case 0:
+		return "", fmt.Errorf("no project registered for directory %s\n\n  Register one first:\n    runq project add . --dir %s\n\n  Or specify explicitly:\n    %s", dir, dir, usagePrefix)
+	case 1:
+		return configs[0].ProjectName, nil
+	default:
+		var sb strings.Builder
+		fmt.Fprintf(&sb, "multiple projects found for %s:\n\n", dir)
+		for _, c := range configs {
+			fmt.Fprintf(&sb, "  %s  --project %s\n", usagePrefix, c.ProjectName)
+		}
+		fmt.Fprintf(&sb, "\nSpecify one with --project")
+		return "", fmt.Errorf("%s", sb.String())
+	}
 }

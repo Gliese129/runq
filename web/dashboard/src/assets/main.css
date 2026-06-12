@@ -1,0 +1,160 @@
+@import "tailwindcss";
+
+/* ═══════════════════════════════════════════
+   runq Design System
+   Style A (Flat Professional) + B (Terminal Data)
+   ═══════════════════════════════════════════ */
+
+/* ── Global card radius: 6px (between Vuetify sm=4 and default=8) ── */
+.v-card {
+  border-radius: 6px !important;
+}
+.v-card--border {
+  border-width: 0.5px !important;
+}
+
+/* ── Kill Material Design elevation everywhere ── */
+.v-card,
+.v-sheet,
+.v-expansion-panel,
+.v-navigation-drawer,
+.v-app-bar {
+  box-shadow: none !important;
+}
+
+/* ── Compact button sizing ── */
+.v-btn {
+  text-transform: none !important;
+  letter-spacing: 0 !important;
+  font-weight: 500 !important;
+}
+
+/* ── Transitions: fast, consistent ── */
+.v-btn, .v-chip, .v-card, .v-list-item {
+  transition: all 0.15s ease !important;
+}
+
+/* ═══════ Style B: Terminal / Data elements ═══════ */
+
+/* Monospace data table — use on any table with class "data-mono" */
+.data-mono {
+  font-family: 'JetBrains Mono', 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  font-size: 12px;
+}
+.data-mono th {
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: rgb(var(--v-theme-on-surface-variant));
+  border-bottom: 1px solid rgb(var(--v-theme-outline-variant));
+  padding: 6px 10px;
+}
+.data-mono td {
+  padding: 5px 10px;
+  border-bottom: 0.5px solid rgb(var(--v-theme-outline-variant), 0.5);
+  white-space: nowrap;
+}
+.data-mono tbody tr:hover {
+  background: rgb(var(--v-theme-surface-variant), 0.4);
+}
+
+/* Status dots — colors come EXCLUSIVELY from statusGrammar.ts via
+   <StatusDot>. Do not add per-status color rules here (philosophy U3). */
+.status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+/* Pulsing animation for active states (running / cancelling) */
+@keyframes status-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+.status-dot--pulse {
+  animation: status-pulse 2s ease-in-out infinite;
+}
+
+/* Spinning icon for active states inside status badges */
+@keyframes icon-spin {
+  to { transform: rotate(360deg); }
+}
+.icon-spin {
+  animation: icon-spin 1.6s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .status-dot--pulse,
+  .icon-spin {
+    animation: none;
+  }
+}
+
+/* Terminal block — dark bg even in light mode */
+.terminal-block {
+  background: #0F172A;
+  color: #E2E8F0;
+  font-family: 'JetBrains Mono', 'SF Mono', monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  padding: 12px 16px;
+  border-radius: 6px;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.terminal-block .t-green  { color: #4ADE80; }
+.terminal-block .t-red    { color: #F87171; }
+.terminal-block .t-yellow { color: #FBBF24; }
+.terminal-block .t-blue   { color: #60A5FA; }
+.terminal-block .t-dim    { color: #64748B; }
+
+/* ═══════ Monospace for values/paths/IDs globally ═══════ */
+code {
+  font-family: 'JetBrains Mono', 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  font-size: 0.85em;
+}
+
+/* ═══════ Route transitions ═══════ */
+.fade-slide-enter-active,
+.fade-slide-leave-active {
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+.fade-slide-enter-from {
+  opacity: 0;
+  transform: translateY(8px);
+}
+.fade-slide-leave-to {
+  opacity: 0;
+  transform: translateY(-4px);
+}
+
+/* ═══════ Utility ═══════ */
+.cursor-pointer { cursor: pointer; }
+.cursor-grab { cursor: grab; }
+.cursor-grab:active { cursor: grabbing; }
+
+/* Nav rail active indicator */
+.v-navigation-drawer .v-btn--active {
+  background: rgba(var(--v-theme-primary), 0.1);
+}
+
+/* ═══════ Skeleton loading ═══════ */
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    rgb(var(--v-theme-surface-variant)) 25%,
+    rgb(var(--v-theme-surface)) 50%,
+    rgb(var(--v-theme-surface-variant)) 75%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.5s ease-in-out infinite;
+  border-radius: 4px;
+}

@@ -1,17 +1,21 @@
 # Binary
 /runq
-/runqd
 # cmd/<name>/<name> — go build outputs the binary alongside main.go by default
 cmd/*/runq
 cmd/*/runqd
 
+.claude
+.codex
+
 demo/
+docs/
 
 # Go
 *.exe
 *.test
 *.out
 vendor/
+internal/dashboard/dist/
 
 # IDE
 .idea/

@@ -51,6 +51,19 @@ type Preflight struct {
 	// Default 5s — most imports finish in <100ms, but heavy native
 	// modules (torch, jax) can take 1-2s on cold cache.
 	ImportTimeout time.Duration
+
+	// DisableLocal turns the local-subprocess checks (imports, pip) into
+	// skipped results — for clusters whose login-node policy forbids them
+	// (hpc: preflight_local: false).
+	DisableLocal bool
+
+	// Scope labels where local checks ran (e.g. "on login node") so HPC
+	// users see the verification boundary in passed results.
+	Scope string
+
+	// ExcludeParams are scheduler-consumed params (submit_template's
+	// {{param.*}}) — the sample command renders without demanding them.
+	ExcludeParams map[string]bool
 }
 
 // DefaultPreflight returns a preflight runner with sane defaults.
@@ -61,23 +74,15 @@ func DefaultPreflight() Preflight {
 	}
 }
 
-// Run executes the default preflight checks against a project and expanded
-// task params. It renders the sample command internally so callers do not need
-// to duplicate the "first task is representative" convention.
-func Run(ctx context.Context, proj *project.Config, taskParams []job.TaskParams, skip bool) error {
-	pf := DefaultPreflight()
-	pf.Skip = skip
-	return pf.Run(ctx, proj, taskParams)
-}
-
-// Run executes this Preflight configuration after rendering a representative
-// sample command from the expanded task params.
-func (p Preflight) Run(ctx context.Context, proj *project.Config, taskParams []job.TaskParams) error {
-	sampleCmd, err := renderSampleCommand(proj, taskParams)
+// Run executes preflight against a project and expanded task params,
+// rendering the sample command internally ("first task is representative").
+// Returns the three-state report; report.Err() is the blocking error.
+func (p Preflight) Run(ctx context.Context, proj *project.Config, taskParams []job.TaskParams) (Report, error) {
+	sampleCmd, err := renderSampleCommand(proj, taskParams, p.ExcludeParams)
 	if err != nil {
-		return err
+		return Report{}, err
 	}
-	return p.RunPreflight(ctx, proj, sampleCmd)
+	return p.RunPreflight(ctx, proj, sampleCmd), nil
 }
 
 // PreflightFinding is one failed check.
@@ -90,27 +95,62 @@ func (f PreflightFinding) String() string {
 	return fmt.Sprintf("  - %s: %s", f.Kind, f.Detail)
 }
 
-// PreflightReport aggregates findings across all checks. Empty findings
-// means the submission passed.
-type PreflightReport struct {
-	Findings []PreflightFinding
+// CheckResult is one check in the three-state grammar shared with
+// hpcconfig.Check: passed / failed / skipped. skipped means "could not be
+// checked HERE" (missing prerequisite, disabled by config) — it never
+// blocks a submit and must never be presented as a failure.
+type CheckResult struct {
+	Name   string `json:"name"`   // writable | paths | imports | pip_check | gpu
+	Status string `json:"status"` // passed | failed | skipped
+	Detail string `json:"detail,omitempty"`
 }
 
-// OK reports whether the report is empty (i.e. all checks passed).
-func (r PreflightReport) OK() bool { return len(r.Findings) == 0 }
+// Report aggregates all check results. Only failed entries block.
+type Report struct {
+	Results []CheckResult `json:"results"`
+}
 
-// Err converts a non-empty report to an error for SubmitJob to return.
-// Returns nil on OK reports.
-func (r PreflightReport) Err() error {
+func (r Report) OK() bool {
+	for _, c := range r.Results {
+		if c.Status == "failed" {
+			return false
+		}
+	}
+	return true
+}
+
+// Err converts failed results to an error for SubmitJob to return.
+func (r Report) Err() error {
 	if r.OK() {
 		return nil
 	}
 	lines := []string{"preflight failed:"}
-	for _, f := range r.Findings {
-		lines = append(lines, f.String())
+	for _, c := range r.Results {
+		if c.Status == "failed" {
+			lines = append(lines, fmt.Sprintf("  - %s: %s", c.Name, c.Detail))
+		}
 	}
 	lines = append(lines, "", "Run with --no-preflight to skip this check (not recommended).")
 	return errors.New(strings.Join(lines, "\n"))
+}
+
+// fold collapses a category's findings into one three-state result. scope
+// ("on login node") is appended to passed local checks — login-node imports
+// passing does not guarantee the compute-node environment, and the report
+// should say so rather than imply more than was verified.
+func fold(name string, findings []PreflightFinding, scope string) CheckResult {
+	if len(findings) > 0 {
+		details := make([]string, 0, len(findings))
+		for _, f := range findings {
+			details = append(details, f.Detail)
+		}
+		return CheckResult{name, "failed", strings.Join(details, "; ")}
+	}
+	detail := "ok"
+	if scope != "" {
+		detail = "ok (verified " + scope + ")"
+	}
+	return CheckResult{name, "passed", detail}
 }
 
 // RunPreflight executes all four checks against the project config + a
@@ -126,35 +166,65 @@ func (r PreflightReport) Err() error {
 //	if err := pf.RunPreflight(ctx, proj, sampleCmd); err != nil { return err }
 //
 // before persisting the job.
-func (p Preflight) RunPreflight(ctx context.Context, proj *project.Config, sampleCmd string) error {
+func (p Preflight) RunPreflight(ctx context.Context, proj *project.Config, sampleCmd string) Report {
 	if p.Skip {
-		return nil
+		return Report{Results: []CheckResult{{"preflight", "skipped", "disabled by --no-preflight"}}}
 	}
-	report := PreflightReport{}
+	var results []CheckResult
 
-	// 1. Writable dirs first — cheap, no subprocess, and if working_dir
-	//    isn't writable the rest can't run anyway.
-	report.Findings = append(report.Findings, checkWritable(proj.WorkingDir, "working_dir")...)
+	// Tier free: pure filesystem — runs anywhere, no scope caveat.
+	results = append(results, fold("writable", checkWritable(proj.WorkingDir, "working_dir"), ""))
+	results = append(results, fold("paths", checkPathArgs(sampleCmd), ""))
 
-	// 2. Path arguments referenced in the rendered command.
-	report.Findings = append(report.Findings, checkPathArgs(sampleCmd)...)
-
-	// 3. Imports — relies on the python env, slow but high-signal.
-	scriptPath, importNames, _ := extractImports(sampleCmd, proj.WorkingDir)
-	if scriptPath != "" {
-		report.Findings = append(
-			report.Findings,
-			checkImports(ctx, proj, importNames, p.ImportTimeout)...,
-		)
+	// Tier cheap: local subprocesses (python imports, pip). Skippable by
+	// cluster policy; scope-labelled because "here" may not be the
+	// execution node.
+	if p.DisableLocal {
+		results = append(results,
+			CheckResult{"imports", "skipped", "disabled by hpc preflight_local"},
+			CheckResult{"pip_check", "skipped", "disabled by hpc preflight_local"})
+	} else {
+		scriptPath, importNames, _ := extractImports(sampleCmd, proj.WorkingDir)
+		if scriptPath == "" {
+			results = append(results, CheckResult{"imports", "skipped", "no python script in command"})
+		} else {
+			results = append(results, fold("imports", checkImports(ctx, proj, importNames, p.ImportTimeout), p.Scope))
+		}
+		results = append(results, fold("pip_check", checkPipCheck(ctx, proj, p.PipCheckTimeout), p.Scope))
 	}
 
-	// 4. pip check — last because it's the slowest single call.
-	report.Findings = append(
-		report.Findings,
-		checkPipCheck(ctx, proj, p.PipCheckTimeout)...,
-	)
+	// GPU smoke test: probe-don't-enumerate (C2). No driver here ≠ failure.
+	results = append(results, checkGPU(ctx, proj, p.Scope))
 
-	return report.Err()
+	return Report{Results: results}
+}
+
+// checkGPU verifies GPU visibility when the project requests GPUs. The
+// prerequisite (nvidia-smi on PATH) is probed first — absence is an honest
+// "skipped", never a failure: on an HPC login node GPUs live elsewhere.
+func checkGPU(ctx context.Context, proj *project.Config, scope string) CheckResult {
+	if proj.Defaults.GPUsPerTask <= 0 {
+		return CheckResult{"gpu", "skipped", "no GPUs requested (gpus_per_task: 0)"}
+	}
+	smi, err := exec.LookPath("nvidia-smi")
+	if err != nil {
+		return CheckResult{"gpu", "skipped", "nvidia-smi not found on this node"}
+	}
+	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(cctx, smi, "-L").Output()
+	if err != nil {
+		return CheckResult{"gpu", "failed", fmt.Sprintf("nvidia-smi -L: %v", err)}
+	}
+	n := strings.Count(strings.TrimSpace(string(out)), "GPU ")
+	detail := fmt.Sprintf("%d GPU(s) visible", n)
+	if scope != "" {
+		detail += " (verified " + scope + ")"
+	}
+	if n < proj.Defaults.GPUsPerTask {
+		detail += fmt.Sprintf(" — fewer than gpus_per_task=%d", proj.Defaults.GPUsPerTask)
+	}
+	return CheckResult{"gpu", "passed", detail}
 }
 
 // ---- (1) writability ----------------------------------------------
@@ -221,7 +291,13 @@ func checkWritable(dir, label string) []PreflightFinding {
 //   - Quoted paths containing spaces are not split correctly; tokens
 //     are space-separated. Real-world job configs almost never put
 //     spaces in paths, so this is acceptable.
-var pathArgRegex = regexp.MustCompile(`(?:--[\w-]+[ =])?(/[\w./_-]+)`)
+//
+// The leading boundary group is the load-bearing part: an absolute path
+// must START a shell token (begin of string, whitespace, `=`, or a quote).
+// Without it, relative paths (`scripts/qsub/x.sh` → "/qsub/x.sh") and
+// HuggingFace model ids (`org/model` → "/model") get mangled into bogus
+// absolute paths — exactly the false positives seen on real HPC commands.
+var pathArgRegex = regexp.MustCompile(`(?:^|[\s='"])(/[\w./_-]+)`)
 
 // pathArgIgnore filters out matches that should NOT be treated as
 // file existence assertions. Anything not on this list and matched by
@@ -282,7 +358,7 @@ var scriptRegex = regexp.MustCompile(`(?:python\d*\s+(?:-\w+\s+)*)([^\s]+\.py)\b
 // supported — only the module name on the first line is captured,
 // which is what we care about for the resolution check.
 var topLevelImportRegex = regexp.MustCompile(
-	`(?m)^[ \t]*(?:from\s+([\w.]+)\s+import\b|import\s+([\w.,\s]+))`,
+	`(?m)^[ \t]*(?:from[ \t]+([\w.]+)[ \t]+import\b|import[ \t]+([^\n#]+))`,
 )
 
 // extractImports reads the python script referenced by `sampleCmd`
@@ -478,9 +554,9 @@ func checkPipCheck(ctx context.Context, proj *project.Config, timeout time.Durat
 // freshly-expanded sweep. Preflight checks (path-arg, imports) only
 // need one sample because all tasks in a sweep share the same script
 // + same env; only the arg values differ.
-func renderSampleCommand(proj *project.Config, taskParams []job.TaskParams) (string, error) {
+func renderSampleCommand(proj *project.Config, taskParams []job.TaskParams, exclude map[string]bool) (string, error) {
 	if len(taskParams) == 0 {
 		return "", nil
 	}
-	return job.Render(proj.CmdTemplate, taskParams[0])
+	return job.RenderExcluding(proj.CmdTemplate, taskParams[0], exclude)
 }

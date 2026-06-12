@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"testing"
 )
 
@@ -70,5 +71,67 @@ func TestForeignKeysEnabled(t *testing.T) {
 	}
 	if fk != 1 {
 		t.Errorf("expected foreign_keys=1, got %d", fk)
+	}
+}
+
+func TestArchiveJobGuardAndVisibility(t *testing.T) {
+	s, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	mustExec := func(q string) {
+		t.Helper()
+		if _, err := s.db.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mustExec(`INSERT INTO projects (name, config_json) VALUES ('p', '{}'), ('q', '{}')`)
+	mustExec(`INSERT INTO jobs (id, project_name, description, config_json, status, created_at) VALUES
+		('jb1', 'p', '', '{}', 'running', 1),
+		('jb2', 'p', '', '{}', 'done', 2),
+		('jb3', 'q', '', '{}', 'done', 3)`)
+
+	// guard: active job refuses
+	if err := s.ArchiveJob(ctx, "jb1"); err == nil {
+		t.Fatal("archiving a running job must be refused")
+	}
+	if err := s.ArchiveJob(ctx, "jb2"); err != nil {
+		t.Fatalf("archive done job: %v", err)
+	}
+
+	vis, err := s.ListJobsVisible(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(vis) != 2 { // jb1 (active) + jb3; jb2 hidden
+		t.Fatalf("visible: want 2, got %d", len(vis))
+	}
+
+	// cascade: archive project q → jb3 vanishes from the GLOBAL list...
+	mustExec(`UPDATE projects SET archived_at = 1 WHERE name = 'q'`)
+	vis, _ = s.ListJobsVisible(ctx, "")
+	if len(vis) != 1 || vis[0].ID != "jb1" {
+		t.Fatalf("cascade: want only jb1, got %v", vis)
+	}
+	// ...but stays visible inside its explicit project scope
+	scoped, _ := s.ListJobsVisible(ctx, "q")
+	if len(scoped) != 1 || scoped[0].ID != "jb3" {
+		t.Fatalf("scoped: want jb3, got %v", scoped)
+	}
+	// archived listing shows only the explicitly archived job
+	arch, _ := s.ListJobsArchived(ctx, "")
+	if len(arch) != 1 || arch[0].ID != "jb2" {
+		t.Fatalf("archived: want jb2 only, got %v", arch)
+	}
+
+	// reversible; ListJobs (version-scan path) always sees everything
+	if err := s.UnarchiveJob(ctx, "jb2"); err != nil {
+		t.Fatal(err)
+	}
+	all, _ := s.ListJobs(ctx, "")
+	if len(all) != 3 {
+		t.Fatalf("ListJobs must always return all rows, got %d", len(all))
 	}
 }

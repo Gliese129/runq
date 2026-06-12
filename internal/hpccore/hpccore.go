@@ -41,7 +41,10 @@ func ShellQuote(s string) string {
 	return "'" + s + "'"
 }
 
-const ParamRegex = `\{\{\s*([\w\-]+)\s*}}`
+// ParamRegex matches {{name}} placeholders. Dots are allowed so namespaced
+// vars like {{param.h_rt}} (task params exposed to submit_template) resolve;
+// templates whose var set lacks the key still fail closed as before.
+const ParamRegex = `\{\{\s*([\w.\-]+)\s*}}`
 
 // Render fills {{name}} placeholders in tmpl with the matching value from vars.
 // Every substituted value MUST pass through ShellQuote so the rendered string

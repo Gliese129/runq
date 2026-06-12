@@ -221,7 +221,11 @@ func TestSubmitJobNoWandb(t *testing.T) {
 }
 
 func TestSubmitJobMissingWorkingDir(t *testing.T) {
-	svc, jobCfg := setupSubmitJobTest(t, "/this/path/does/not/exist/anywhere", nil)
+	workDir := t.TempDir()
+	svc, jobCfg := setupSubmitJobTest(t, workDir, nil)
+	if err := os.RemoveAll(workDir); err != nil {
+		t.Fatalf("remove working_dir: %v", err)
+	}
 	_, _, err := svc.SubmitJobWithOpts(
 		context.Background(),
 		jobCfg,

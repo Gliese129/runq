@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"github.com/gliese129/runq/internal/config"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -219,6 +220,58 @@ func init() {
 	projectCmd.AddCommand(projectShowCmd)
 	projectCmd.AddCommand(projectEditCmd)
 	projectCmd.AddCommand(projectRmCmd)
+	projectCmd.AddCommand(projectArchiveCmd)
+	projectCmd.AddCommand(projectUnarchiveCmd)
 	projectCmd.GroupID = groupManagement
 	rootCmd.AddCommand(projectCmd)
+}
+
+// ── archive / unarchive (mode-aware) ──
+
+var projectArchiveCmd = &cobra.Command{
+	Use:   "archive <name>",
+	Short: "Hide a project (and its jobs in global lists) from default views; reversible",
+	Args:  cobra.ExactArgs(1),
+	RunE:  func(cmd *cobra.Command, args []string) error { return runProjectArchive(args[0], true) },
+}
+
+var projectUnarchiveCmd = &cobra.Command{
+	Use:   "unarchive <name>",
+	Short: "Bring an archived project back",
+	Args:  cobra.ExactArgs(1),
+	RunE:  func(cmd *cobra.Command, args []string) error { return runProjectArchive(args[0], false) },
+}
+
+func runProjectArchive(name string, archive bool) error {
+	verb := "archived"
+	if !archive {
+		verb = "unarchived"
+	}
+	if _, mode, err := loadModeConfig(); err == nil && mode == config.ModeHPC {
+		_, st, err := newHPCBackend()
+		if err != nil {
+			return err
+		}
+		defer st.Close()
+		reg := project.NewRegistry(st.DB())
+		op := reg.Unarchive
+		if archive {
+			op = reg.Archive
+		}
+		if err := op(name); err != nil {
+			return err
+		}
+		fmt.Printf("project %q %s\n", name, verb)
+		return nil
+	}
+	path := "/api/projects/" + name + "/unarchive"
+	if archive {
+		path = "/api/projects/" + name + "/archive"
+	}
+	var resp map[string]any
+	if err := doAndDecode("POST", path, nil, &resp); err != nil {
+		return err
+	}
+	fmt.Printf("project %q %s\n", name, verb)
+	return nil
 }

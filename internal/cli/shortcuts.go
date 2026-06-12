@@ -2,10 +2,10 @@ package cli
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"maps"
-	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -16,8 +16,10 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/gliese129/runq/internal/api"
+	"github.com/gliese129/runq/internal/config"
 	job2 "github.com/gliese129/runq/internal/job"
-	"github.com/gliese129/runq/internal/resource"
+	"github.com/gliese129/runq/internal/project"
 	"github.com/gliese129/runq/internal/utils"
 	"github.com/gosuri/uilive"
 	"github.com/olekukonko/tablewriter"
@@ -81,6 +83,7 @@ job.yaml in the current directory.`,
 		projectOverride, _ := cmd.Flags().GetString("project")
 		noteOverride, _ := cmd.Flags().GetString("note")
 		noPreflight, _ := cmd.Flags().GetBool("no-preflight")
+		jsonOut, _ := cmd.Flags().GetBool("json")
 
 		if file == "." {
 			file = "job.yaml"
@@ -102,33 +105,82 @@ job.yaml in the current directory.`,
 		if noteOverride != "" {
 			job.Note = noteOverride
 		}
-		// dry-run
+		// dry-run: param table + (parity with `runq hpc submit --dry-run`)
+		// the prospective workspace root and the first task's rendered
+		// command — the daemon has no submit_template/scheduler preflight,
+		// so those sections simply don't exist here (shape from capability).
 		if dryRun || dryRunAlias {
+			// HPC mode gets the FULL preview (preflight + run.sh + submit
+			// command) — same code path as `runq hpc submit --dry-run`.
+			if _, mode, merr := loadModeConfig(); merr == nil && mode == config.ModeHPC {
+				return previewHPCJobConfig(cmd, job, noPreflight)
+			}
 			tasks, err := job2.Expand(&job)
 			if err != nil {
 				return err
 			}
 			if len(tasks) == 0 {
-				fmt.Println("No sweep job")
-			} else {
-				keys := slices.Sorted(maps.Keys(tasks[0]))
-
-				table := tablewriter.NewTable(os.Stdout)
-				table.Header(keys)
-				data := make([][]string, 0, len(tasks))
-				for _, task := range tasks {
-					row := make([]string, 0, len(keys))
-					for _, key := range keys {
-						row = append(row, fmt.Sprintf("%v", task[key]))
-					}
-					data = append(data, row)
-				}
-				err := table.Bulk(data)
-				if err != nil {
-					return err
-				}
-				return table.Render()
+				fmt.Println("No tasks would be generated.")
+				return nil // bug fix: this used to FALL THROUGH into a real submit
 			}
+			fmt.Printf("dry-run: %d task(s) would be submitted\n", len(tasks))
+
+			keys := slices.Sorted(maps.Keys(tasks[0]))
+			table := tablewriter.NewTable(os.Stdout)
+			table.Header(keys)
+			data := make([][]string, 0, len(tasks))
+			for _, task := range tasks {
+				row := make([]string, 0, len(keys))
+				for _, key := range keys {
+					row = append(row, fmt.Sprintf("%v", task[key]))
+				}
+				data = append(data, row)
+			}
+			if err := table.Bulk(data); err != nil {
+				return err
+			}
+			if err := table.Render(); err != nil {
+				return err
+			}
+
+			// Best-effort preview details — needs the registered project
+			// (command_template, working_dir). A missing daemon/project
+			// degrades to the table alone, never to an error.
+			var proj project.Config
+			if perr := doAndDecode("GET", "/api/projects/"+job.Project, nil, &proj); perr == nil && proj.CmdTemplate != "" {
+				storageCfg, _ := config.Load()
+				root := config.ProspectiveRoot(storageCfg, proj.WorkingDir, proj.ProjectName)
+				fmt.Printf("\nworkspace root: %s/<note>-<job_id> (ids regenerate at submit)\n", root)
+				if cmdStr, rerr := job2.Render(proj.CmdTemplate, tasks[0]); rerr == nil {
+					fmt.Printf("\n── command (task 1 of %d) ──\n%s\n", len(tasks), cmdStr)
+				} else {
+					fmt.Printf("\ncommand render error (would also fail at submit): %v\n", rerr)
+				}
+			}
+			return nil
+		}
+		_, mode, err := loadModeConfig()
+		if err != nil {
+			return err
+		}
+		if mode == config.ModeHPC {
+			if watch {
+				return fmt.Errorf("--watch is not supported in hpc mode")
+			}
+			jobID, n, err := submitHPCJobConfig(cmd, job, noPreflight)
+			if err != nil {
+				return err
+			}
+			resp := struct {
+				JobID      string `json:"job_id"`
+				TotalTasks int    `json:"total_tasks"`
+			}{JobID: jobID, TotalTasks: n}
+			if jsonOut {
+				printJSON(resp)
+				return nil
+			}
+			fmt.Printf("submitted job %s (%d tasks)\n", utils.IDColor(jobID), n)
+			return nil
 		}
 		// submit
 		type JobResp struct {
@@ -145,8 +197,12 @@ job.yaml in the current directory.`,
 			// it and forwards into SubmitJobOpts.SkipPreflight.
 			submitPath = "/api/jobs?no_preflight=1"
 		}
-		if err := doAndDecode("POST", submitPath, job, &resp); err != nil {
+		if err := doAndDecodeWithTimeout("POST", submitPath, job, &resp, api.SubmitClientTimeout); err != nil {
 			return err
+		}
+		if jsonOut {
+			printJSON(resp)
+			return nil
 		}
 		fmt.Printf("Job submitted: id=%s tasks=%d\n", resp.JobId, resp.TotalTasks)
 		if resp.TotalGPUs > 0 && resp.FreeGPUs == 0 {
@@ -264,7 +320,7 @@ var runCmd = &cobra.Command{
 			TotalTasks int    `json:"total_tasks"`
 		}
 		var resp JobResp
-		if err := doAndDecode("POST", "/api/jobs", jobCfg, &resp); err != nil {
+		if err := doAndDecodeWithTimeout("POST", "/api/jobs", jobCfg, &resp, api.SubmitClientTimeout); err != nil {
 			return err
 		}
 		fmt.Printf("Job submitted: id=%s tasks=%d\n", resp.JobId, resp.TotalTasks)
@@ -272,64 +328,39 @@ var runCmd = &cobra.Command{
 	},
 }
 
-// ── runq ps (shortcut for task ls) ──
+// ── runq ps / ls (unified job list) ──
 
 var psCmd = &cobra.Command{
-	Use:   "ps",
-	Short: "List tasks (default: running + pending)",
-	Example: `  runq ps                     # running + pending
-  runq ps -a                  # include completed
-  runq ps -l                  # detailed view
-  runq ps --status failed     # filter by status
-  runq ps --job <job_id>      # filter by job
-  runq ps -o json             # JSON output`,
+	Use:     "ps",
+	Aliases: []string{"ls"},
+	Short:   "List jobs in the configured backend",
+	Example: `  runq ps
+  runq ls
+  runq ps --json`,
 	RunE: runPs,
 }
 
 func runPs(cmd *cobra.Command, args []string) error {
-	// Build query string from flags.
-	status, _ := cmd.Flags().GetString("status")
-	jobID, _ := cmd.Flags().GetString("job")
-	all, _ := cmd.Flags().GetBool("all")
 	output, _ := cmd.Flags().GetString("output")
-	noHeader, _ := cmd.Flags().GetBool("no-header")
-
-	values := url.Values{}
-	if all {
-		values.Set("status", "all")
-	} else if status != "" {
-		values.Set("status", status)
-	}
-	if jobID != "" {
-		values.Set("job", jobID)
-	}
-	path := "/api/tasks"
-	if encoded := values.Encode(); encoded != "" {
-		path += "?" + encoded
-	}
-
-	var tasks []taskRowView
-	if err := doAndDecode("GET", path, nil, &tasks); err != nil {
+	jsonOut, _ := cmd.Flags().GetBool("json")
+	_, mode, err := loadModeConfig()
+	if err != nil {
 		return err
 	}
-
-	if output == "json" {
-		printJSON(tasks)
+	backend, closeBackend, err := newDashboardBackend(mode)
+	if err != nil {
+		return err
+	}
+	defer closeBackend()
+	jobs, err := backend.ListJobs(context.Background(), "")
+	if err != nil {
+		return err
+	}
+	if output == "json" || jsonOut {
+		printJSON(jobs)
 		return nil
 	}
-
-	w := newTable()
-	if !noHeader {
-		fmt.Fprintf(w, "ID\tJOB\tPROJECT\tSTATUS\tGPUs\tRETRY\tAGE\n")
-	}
-	for _, t := range tasks {
-		age := time.Since(t.EnqueuedAt).Truncate(time.Second)
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%d\t%s\n",
-			utils.IDColor(t.ID), t.JobID, t.ProjectName,
-			utils.StatusColor(t.Status), t.GPUsNeeded, t.RetryCount, age)
-	}
-	w.Flush()
-	return nil
+	return printDashboardJobs(jobs)
 }
 
 // ── runq logs (shortcut for task logs) ──
@@ -423,21 +454,36 @@ var killCmd = &cobra.Command{
 
 func runKill(cmd *cobra.Command, args []string) error {
 	id := args[0]
+	_, mode, err := loadModeConfig()
+	if err != nil {
+		return err
+	}
+	backend, closeBackend, err := newDashboardBackend(mode)
+	if err != nil {
+		return err
+	}
+	defer closeBackend()
+	jsonOut, _ := cmd.Flags().GetBool("json")
 
 	// Try task kill first.
-	var taskResp map[string]any
-	err := doAndDecode("POST", "/api/tasks/"+id+"/kill", nil, &taskResp)
+	err = backend.KillTask(context.Background(), id)
 	if err == nil {
+		if jsonOut {
+			printJSON(map[string]bool{"ok": true})
+			return nil
+		}
 		fmt.Printf("task %s killed\n", id)
 		return nil
 	}
 
 	// If not found as task, try as job.
-	var jobResp map[string]any
-	err = doAndDecode("DELETE", "/api/jobs/"+id, nil, &jobResp)
+	err = backend.KillJob(context.Background(), id)
 	if err == nil {
-		killed := jobResp["tasks_killed"]
-		fmt.Printf("job %s: %v tasks killed\n", id, killed)
+		if jsonOut {
+			printJSON(map[string]bool{"ok": true})
+			return nil
+		}
+		fmt.Printf("job %s killed\n", id)
 		return nil
 	}
 
@@ -453,19 +499,30 @@ var gpuCmd = &cobra.Command{
 }
 
 func runGPU(cmd *cobra.Command, args []string) error {
-	var gpus []resource.GPUState
-	if err := doAndDecode("GET", "/api/gpu", nil, &gpus); err != nil {
+	_, mode, err := loadModeConfig()
+	if err != nil {
+		return err
+	}
+	backend, closeBackend, err := newDashboardBackend(mode)
+	if err != nil {
+		return err
+	}
+	defer closeBackend()
+
+	gpus, err := backend.GPUStatus(context.Background())
+	if err != nil {
 		return err
 	}
 
 	w := newTable()
-	fmt.Fprintf(w, "GPU\tMEM_FREE\tTASK\n")
+	fmt.Fprintf(w, "GPU\tNAME\tMEM\tUTIL\tTASK\n")
 	for _, g := range gpus {
 		task := "-"
 		if g.TaskID != "" {
 			task = g.TaskID
 		}
-		fmt.Fprintf(w, "%d\t%d MB\t%s\n", g.Index, g.MemFree, task)
+		mem := fmt.Sprintf("%d/%d MB", g.MemUsedMB, g.MemTotalMB)
+		fmt.Fprintf(w, "%d\t%s\t%s\t%d%%\t%s\n", g.Index, g.Name, mem, g.UtilPercent, task)
 	}
 	w.Flush()
 	return nil
@@ -474,15 +531,49 @@ func runGPU(cmd *cobra.Command, args []string) error {
 // ── runq status ──
 
 var statusCmd = &cobra.Command{
-	Use:   "status",
+	Use:   "status [job_id]",
 	Short: "Show daemon status, queue length, and scheduling info",
+	Args:  cobra.MaximumNArgs(1),
 	RunE:  runStatus,
 }
 
 func runStatus(cmd *cobra.Command, args []string) error {
+	jsonOut, _ := cmd.Flags().GetBool("json")
+	if len(args) == 1 {
+		_, mode, err := loadModeConfig()
+		if err != nil {
+			return err
+		}
+		backend, closeBackend, err := newDashboardBackend(mode)
+		if err != nil {
+			return err
+		}
+		defer closeBackend()
+		detail, err := backend.GetJob(context.Background(), args[0])
+		if err != nil {
+			return err
+		}
+		if jsonOut {
+			printJSON(detail)
+			return nil
+		}
+		return printDashboardDetail(detail)
+	}
+
+	_, mode, err := loadModeConfig()
+	if err != nil {
+		return err
+	}
+	if mode == config.ModeHPC {
+		return fmt.Errorf("status requires <job_id> in hpc mode")
+	}
 	var s map[string]any
 	if err := doAndDecode("GET", "/api/status", nil, &s); err != nil {
 		return err
+	}
+	if jsonOut {
+		printJSON(s)
+		return nil
 	}
 
 	fmt.Printf("Running:   %.0f\n", s["running"])
@@ -498,6 +589,8 @@ func init() {
 	submitCmd.Flags().Bool("watch", false, "Block and show live progress after submit")
 	submitCmd.Flags().String("project", "", "Override the project name in the YAML")
 	submitCmd.Flags().StringP("note", "n", "", "Experiment note (overrides YAML note: field)")
+	submitCmd.Flags().String("project-file", "", "load project config from a YAML file instead of the HPC registry")
+	submitCmd.Flags().Bool("json", false, "output raw JSON")
 	submitCmd.Flags().Bool(
 		"no-preflight",
 		false,
@@ -510,15 +603,13 @@ func init() {
 	runCmd.Flags().Int("max-retry", 1, "max try count for a task, default 1")
 
 	// ps flags
-	psCmd.Flags().BoolP("all", "a", false, "Include completed tasks")
-	psCmd.Flags().BoolP("long", "l", false, "Detailed output")
-	psCmd.Flags().String("status", "", "Filter by status (running,pending,failed,success,killed)")
-	psCmd.Flags().String("job", "", "Filter by job ID")
 	psCmd.Flags().StringP("output", "o", "", "Output format (json)")
-	psCmd.Flags().Bool("no-header", false, "Suppress table header")
+	psCmd.Flags().Bool("json", false, "output raw JSON")
 
 	// logs flags
 	logsCmd.Flags().Bool("no-follow", false, "Print log and exit (no tail -f)")
+	killCmd.Flags().Bool("json", false, "output raw JSON")
+	statusCmd.Flags().Bool("json", false, "output raw JSON")
 
 	// Core commands.
 	submitCmd.GroupID = groupCore

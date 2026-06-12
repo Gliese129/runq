@@ -65,11 +65,27 @@ It also works on HPC clusters (SLURM, PBS, SGE) — runq doesn't replace the clu
 go install github.com/gliese129/runq/cmd/runq@latest
 ```
 
-Or build from source:
+This installs the CLI core. The dashboard UI and Python SDK are optional.
+
+For the dashboard, download a `runq-dashboard-*` binary from GitHub Releases, or build it from source:
 
 ```bash
 git clone https://github.com/gliese129/runq.git && cd runq
-go build -o runq ./cmd/runq
+cd web/dashboard && yarn install --frozen-lockfile && yarn build
+cd ../..
+go build -tags dashboard -o runq ./cmd/runq
+```
+
+During dashboard UI development, run the backend with local assets:
+
+```bash
+runq dashboard --assets-dir internal/dashboard/dist
+```
+
+For the Python SDK:
+
+```bash
+pip install runq
 ```
 
 Daemon mode requires `nvidia-smi` on PATH. Run `runq doctor` to check your setup.
@@ -101,13 +117,15 @@ That's it. runq expands the parameter sweep, queues the tasks, assigns GPUs, and
 On a shared cluster, runq compiles your sweep, writes per-task workspaces, and delegates scheduling to the cluster's native job manager. No resident daemon needed.
 
 ```bash
-# 1. Generate config (edit it for your cluster)
-runq hpc init --scheduler slurm
+# 1. Generate config (edit it for your cluster, then validate)
+runq hpc init --scheduler slurm     # also: pbs | sge | tsubame | abci
+runq hpc config check               # renders every template with sample values
 
 # 2. Write project.yaml + job.yaml (same format as daemon mode)
 #    See examples/ for templates
 
-# 3. Submit
+# 3. Preview, then submit
+runq hpc submit job.yaml --project-file project.yaml --dry-run
 runq hpc submit job.yaml --project-file project.yaml
 
 # 4. Monitor
@@ -117,7 +135,15 @@ runq hpc best <job_id> --key loss    # best task by metric
 runq hpc collect <job_id> --key loss # all tasks ranked by metric
 ```
 
-After `runq hpc init`, edit `~/.runq/config.yaml` to match your cluster — the `submit_template`, `submit_id_regex`, and `kill_template` fields must be correct for your scheduler. Presets for Slurm, PBS, and SGE are provided as starting points.
+After `runq hpc init`, edit `~/.runq/config.yaml` to match your cluster — the `submit_template`, `submit_id_regex`, and `kill_template` fields must be correct for your scheduler (also editable in the dashboard Settings page, with presets, placeholder hints and a built-in checker). Presets for Slurm, PBS, SGE, TSUBAME and ABCI are provided as starting points.
+
+Per-task scheduler knobs (walltime, queue) can live in the sweep and be referenced from `submit_template` as `{{param.h_rt}}`, `{{param.node_kind}}` — one job can carry per-benchmark time limits. Declare them with `scope: scheduler` in project.yaml so they're consumed by the submit command, not your training command (see Configuration).
+
+### How runq behaves on the login node
+
+runq is a polite login-node citizen. Task state comes primarily from each task's `status.json`, written by the generated run.sh at start, at exit, and — via a signal trap — when the scheduler kills the task (walltime, `qdel`): those are local file reads, not scheduler queries. The `status_template` probe only covers tasks that died without last words, is rate-limited per job (20s floor for the dashboard's automatic polling; explicit `runq hpc status` / the Refresh button always probe), and listing-style templates like the presets' full `qstat` cost ONE scheduler call per pass regardless of task count. When nothing asks, nothing polls.
+
+Each task runs **from the project's `working_dir`** (relative paths in your command just work), with all output redirected to its own log (`runq logs <task_id>` and the dashboard read it; `-o/-e` in your submit_template only catches scheduler-level noise). Workspaces live under `.runq/<note>-<job id>/<task id>/` — ids carry `jb`/`tk` prefixes, and the job dir starts with your note so `ls .runq/` reads like an experiment log. runq's own operation log (every submit/kill with the rendered command and scheduler output) is at `~/.runq/logs/runq.log`; `runq doctor` checks the right paths per mode.
 
 ## Usage
 
@@ -162,6 +188,8 @@ runq submit --dry-run .      # preview tasks without submitting
 ### Job control
 
 ```bash
+runq job archive <job_id>    # hide from default lists (reversible; data untouched)
+runq project archive <name>  # hide a project and (in global lists) its jobs
 runq job pause <job_id>      # pause scheduling (running tasks continue)
 runq job resume <job_id>
 runq job kill <job_id>       # kill all tasks in a job
@@ -203,6 +231,22 @@ resume:
 
 Command templates support `{{args}}` (auto-generates `--key=value` for all parameters) and `{{param_name}}` (inserts a specific parameter). You can mix both: `python train.py --lr {{lr}} {{args}}`.
 
+More project-level fields:
+
+- `params:` — the parameter **catalog** (`type` / `default` / `choices` / `include` / `strict` / `scope`). The dashboard builds its submit form from this; a job.yaml is just one selection over it (`grid` = cross product, `list` = zip).
+  - `strict: true` upgrades `choices` from suggestions to a contract: any submitted value outside the list fails at submit time (CLI and GUI alike).
+  - `scope: scheduler` declares a param consumed by the HPC `submit_template` (`{{param.h_rt}}`) instead of the command — it is exempt from command-template consumption and never injected into `{{args}}`. Recommended pattern for queue-like knobs:
+
+    ```yaml
+    params:
+      - { name: node_kind, type: str, scope: scheduler, default: node_q, choices: [node_q, node_h, node_f], strict: true }
+    ```
+- `setup_command:` — runs once per submit, before anything is persisted (e.g. `hf download {{model}}`). May reference fixed params only; failure aborts cleanly.
+- `environment:` — injected into every task AND prefixed onto the HPC submit command, so `$TSUBAME_GROUP`-style references in `submit_template` resolve from project config.
+- `job_name:` — template for the per-task scheduler job name, exposed to `submit_template` as `{{name}}` (params + `{{project}}` `{{job_id}}` `{{task_id}}`; default `rq-{{task_id}}`). Always sanitized — scheduler-safe charset, never digit-first. job.yaml `name:` overrides per submission.
+- `.env` in `working_dir` is sourced at task start automatically (override with `env_file:`). runq never stores its values — tokens stay out of the DB, logs and UIs. Explicit `environment:` always wins.
+- Job `note` supports placeholders: params, `{{project}}` `{{user}}` `{{date}}` `{{time}}` `{{sweep}}`, and `{{version}}` — re-running the same named config auto-numbers it (`foo`, `foo-v2`, `foo-v3`), with timestamp differences ignored when finding the family.
+
 ### Python environments
 
 runq auto-detects uv, venv, and conda environments in your project directory and activates them before running tasks. Detection happens during `runq init` and can be overridden in project.yaml.
@@ -210,6 +254,8 @@ runq auto-detects uv, venv, and conda environments in your project directory and
 ### Config priority
 
 CLI flag > job.yaml override > project.yaml default > built-in default.
+
+`project.yaml` is the source of truth: hand-edits are picked up automatically the next time the project is selected or submitted (the DB copy is just a cache and re-syncs on read) — CLI and GUI can never disagree about a project.
 
 ## Scheduling
 

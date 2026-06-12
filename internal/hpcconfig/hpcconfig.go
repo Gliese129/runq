@@ -15,7 +15,9 @@ package hpcconfig
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
+	"strings"
 
 	"github.com/gliese129/runq/internal/config"
 	"gopkg.in/yaml.v3"
@@ -26,11 +28,11 @@ import (
 // only interpolation (via hpccore.Render) and one user-supplied regex.
 type Config struct {
 	// SubmitTemplate is the shell command that queues a job. Available vars:
-	// {{run_sh}} {{gpus}} {{job_id}} {{task_id}} {{task_dir}}.
-	SubmitTemplate string `yaml:"submit_template"`
+	// {{run_sh}} {{gpus}} {{job_id}} {{task_id}} {{task_dir}} {{name}} + {{param.*}}.
+	SubmitTemplate string `yaml:"submit_template" json:"submit_template"`
 	// SubmitIDRegex extracts the external job id from the submit command output.
 	// Must contain exactly one capture group.
-	SubmitIDRegex string `yaml:"submit_id_regex"`
+	SubmitIDRegex string `yaml:"submit_id_regex" json:"submit_id_regex"`
 	// StatusTemplate optionally probes scheduler state. Var: {{ext_id}}.
 	// Empty → status comes from status.json alone.
 	//
@@ -43,7 +45,7 @@ type Config struct {
 	// active queries like `qstat -f <id>` ERROR once the job leaves the queue, and
 	// that "error + empty output" is exactly the gone signal the parser turns into
 	// `gone`.
-	StatusTemplate string `yaml:"status_template,omitempty"`
+	StatusTemplate string `yaml:"status_template,omitempty" json:"status_template,omitempty"`
 	// StatusParser is an OPTIONAL pipeline that translates the scheduler's raw
 	// output into a normalized token, for schedulers whose output isn't directly
 	// recognizable (PBS qstat codes, SGE, etc.). It is a LIST of shell stages:
@@ -63,9 +65,14 @@ type Config struct {
 	// always tell "gone" from "finished".
 	//
 	// runq ships no built-in dialect parser — this pipeline is the extension point.
-	StatusParser []string `yaml:"status_parser,omitempty"`
+	StatusParser []string `yaml:"status_parser,omitempty" json:"status_parser,omitempty"`
 	// KillTemplate cancels a queued/running job. Var: {{ext_id}}.
-	KillTemplate string `yaml:"kill_template"`
+	KillTemplate string `yaml:"kill_template" json:"kill_template"`
+	// PreflightLocal controls the local-subprocess preflight checks
+	// (python imports, pip) on the submit node. nil/true = run them;
+	// false = report them as skipped — for clusters whose login-node
+	// policy forbids running user code there.
+	PreflightLocal *bool `yaml:"preflight_local,omitempty" json:"preflight_local,omitempty"`
 }
 
 // configFile is the on-disk shape used for parsing. Only the HPC section is
@@ -80,6 +87,15 @@ func DataDir() string { return config.ConfigDir() }
 
 // DBPath is <DataDir>/runq.db (the HPC store, separate from the daemon DB).
 func DBPath() string { return config.DBPath() }
+
+// LogDir is <DataDir>/logs — runq's own logs in HPC mode (operation log).
+// Task logs are experiment artifacts and stay in the per-task workspace.
+func LogDir() string { return filepath.Join(config.ConfigDir(), "logs") }
+
+// OpLogPath is the append-only HPC operation log: every submit/kill records
+// the rendered scheduler command, its output, and any error — so a rejected
+// qsub is diagnosable after the terminal scrolled away.
+func OpLogPath() string { return filepath.Join(LogDir(), "runq.log") }
 
 // Load reads and validates the `hpc:` section of config.yaml. A missing file
 // is a clear, actionable error pointing the user at `runq hpc init`.
@@ -126,8 +142,36 @@ func (c *Config) validate() error {
 	return nil
 }
 
+// Save rewrites the hpc: section of config.yaml, preserving every other
+// top-level key by value. NOTE: yaml round-tripping drops file comments —
+// the GUI states this; CLI users keep `runq hpc config edit` which never
+// touches the file beyond $EDITOR.
+func Save(cfg *Config) error {
+	if err := cfg.validate(); err != nil {
+		return err
+	}
+	path := config.ConfigPath()
+	doc := map[string]any{}
+	if buf, err := os.ReadFile(path); err == nil {
+		if err := yaml.Unmarshal(buf, &doc); err != nil {
+			return fmt.Errorf("parse %s: %w", path, err)
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("read %s: %w", path, err)
+	}
+	doc["hpc"] = cfg
+	out, err := yaml.Marshal(doc)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(config.ConfigDir(), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, out, 0o644)
+}
+
 // Presets returns the scheduler names WriteTemplate understands (for CLI help).
-func Presets() []string { return []string{"slurm", "pbs", "sge"} }
+func Presets() []string { return []string{"slurm", "pbs", "sge", "tsubame", "abci"} }
 
 // WriteTemplate creates the config dir and writes a starter config.yaml for
 // the named scheduler ("slurm" | "pbs" | "sge"; empty = generic).
@@ -191,19 +235,23 @@ func WriteTemplate(scheduler string) (path string, created bool, err error) {
 
 // templates maps a scheduler name to its full starter config.yaml (for new files).
 var templates = map[string]string{
-	"":      genericYAML,
-	"slurm": slurmYAML,
-	"pbs":   pbsYAML,
-	"sge":   sgeYAML,
+	"":        genericYAML,
+	"slurm":   slurmYAML,
+	"pbs":     pbsYAML,
+	"sge":     sgeYAML,
+	"tsubame": tsubameYAML,
+	"abci":    abciYAML,
 }
 
 // hpcSnippets maps a scheduler name to its hpc-only section (for appending to
 // an existing config that has global keys but no hpc: section).
 var hpcSnippets = map[string]string{
-	"":      hpcHeader + genericHPCBody,
-	"slurm": hpcHeader + slurmHPCBody,
-	"pbs":   hpcHeader + pbsHPCBody,
-	"sge":   hpcHeader + sgeHPCBody,
+	"":        hpcHeader + genericHPCBody,
+	"slurm":   hpcHeader + slurmHPCBody,
+	"pbs":     hpcHeader + pbsHPCBody,
+	"sge":     hpcHeader + sgeHPCBody,
+	"tsubame": hpcHeader + tsubameHPCBody,
+	"abci":    hpcHeader + abciHPCBody,
 }
 
 const configHeader = `# runq config — global settings + HPC cluster templates.
@@ -228,8 +276,8 @@ const hpcHeader = `
 // HPC body constants — used both in full templates and in hpcSnippets.
 const genericHPCBody = `
 hpc:
-  # Queue one task. Vars: {{run_sh}} {{gpus}} {{job_id}} {{task_id}} {{task_dir}}
-  submit_template: "sbatch --gpus={{gpus}} --job-name={{task_id}} {{run_sh}}"
+  # Queue one task. Vars: {{run_sh}} {{gpus}} {{job_id}} {{task_id}} {{task_dir}} {{name}}
+  submit_template: "sbatch --gpus={{gpus}} --job-name={{name}} {{run_sh}}"
   submit_id_regex: "Submitted batch job ([0-9]+)"
 
   # Optional scheduler probe (Var: {{ext_id}}). Empty → status from status.json alone.
@@ -242,7 +290,7 @@ hpc:
 
 const slurmHPCBody = `
 hpc:
-  submit_template: "sbatch --gpus={{gpus}} --job-name={{task_id}} {{run_sh}}"
+  submit_template: "sbatch --gpus={{gpus}} --job-name={{name}} {{run_sh}}"
   submit_id_regex: "Submitted batch job ([0-9]+)"
 
   status_template: "sacct -n -X -j {{ext_id}} -o State"
@@ -254,7 +302,7 @@ hpc:
 
 const pbsHPCBody = `
 hpc:
-  submit_template: "qsub -l ngpus={{gpus}} -N {{task_id}} {{run_sh}}"
+  submit_template: "qsub -l ngpus={{gpus}} -N {{name}} {{run_sh}}"
   submit_id_regex: "([0-9]+)"
 
   status_template: "qstat -f {{ext_id}} 2>/dev/null"
@@ -267,7 +315,7 @@ hpc:
 
 const sgeHPCBody = `
 hpc:
-  submit_template: "qsub -l gpu={{gpus}} -N {{task_id}} {{run_sh}}"
+  submit_template: "qsub -l gpu={{gpus}} -N {{name}} {{run_sh}}"
   submit_id_regex: "Your job ([0-9]+)"
 
   status_template: "qstat"
@@ -278,10 +326,57 @@ hpc:
   kill_template: "qdel {{ext_id}}"
 `
 
+const tsubameHPCBody = `
+hpc:
+  # TSUBAME (UGE). Per-task scheduler knobs live in the sweep and are
+  # referenced as {{param.*}} — zip node_kind / h_rt columns with your tasks.
+  # $TSUBAME_GROUP comes from the login shell (or hardcode it).
+  submit_template: "qsub -g $TSUBAME_GROUP -l {{param.node_kind}}=1 -l h_rt={{param.h_rt}} -N {{name}} -o {{task_dir}} -e {{task_dir}} {{run_sh}}"
+  submit_id_regex: "Your job ([0-9]+)"
+
+  status_template: "qstat"
+  status_parser:
+    - awk -v id={{ext_id}} '$1==id{print $5; f=1} END{if(!f) print "gone"}'
+    - sed -e s/r/running/ -e s/qw/pending/ -e s/Eqw/failed/
+
+  kill_template: "qdel {{ext_id}}"
+`
+
+const abciHPCBody = `
+hpc:
+  # ABCI (PBS Pro). Per-task knobs (queue, walltime) come from the sweep via
+  # {{param.*}}. $ABCI_GROUP comes from the login shell (or hardcode it).
+  submit_template: "qsub -P $ABCI_GROUP -q {{param.node_kind}} -l select=1 -l walltime={{param.walltime}} -N {{name}} -o {{task_dir}} -e {{task_dir}} -- {{run_sh}}"
+  submit_id_regex: "([0-9]+)"
+
+  status_template: "qstat -f {{ext_id}} 2>/dev/null"
+  status_parser:
+    - awk -F'= ' '/job_state/{print $2; f=1} END{if(!f) print "gone"}'
+    - sed -e s/R/running/ -e s/E/running/ -e s/Q/pending/ -e s/H/pending/
+
+  kill_template: "qdel {{ext_id}}"
+`
+
 // Full templates = global header + hpc header + hpc body (for new files).
 var (
 	genericYAML = configHeader + hpcHeader + genericHPCBody
 	slurmYAML   = configHeader + hpcHeader + slurmHPCBody
 	pbsYAML     = configHeader + hpcHeader + pbsHPCBody
 	sgeYAML     = configHeader + hpcHeader + sgeHPCBody
+	tsubameYAML = configHeader + hpcHeader + tsubameHPCBody
+	abciYAML    = configHeader + hpcHeader + abciHPCBody
 )
+
+// Preset parses a named template's hpc section into a Config — the GUI's
+// "load preset" uses this, so CLI init and GUI presets can never diverge.
+func Preset(name string) (*Config, error) {
+	body, ok := hpcSnippets[name]
+	if !ok {
+		return nil, fmt.Errorf("unknown preset %q (available: %s)", name, strings.Join(Presets(), ", "))
+	}
+	var f configFile
+	if err := yaml.Unmarshal([]byte(body), &f); err != nil {
+		return nil, fmt.Errorf("parse preset %q: %w", name, err)
+	}
+	return &f.HPC, nil
+}

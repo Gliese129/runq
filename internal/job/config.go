@@ -8,18 +8,22 @@ import (
 
 // JobConfig represents a parsed job.yaml file.
 type JobConfig struct {
-	Project     string       `yaml:"project"`
-	Description string       `yaml:"description,omitempty"`
-	Note        string       `yaml:"note,omitempty"`
-	Sweep       []SweepBlock `yaml:"sweep"`
-	Overrides   *Overrides   `yaml:"overrides,omitempty"`
+	Project     string `yaml:"project" json:"project"`
+	Description string `yaml:"description,omitempty" json:"description,omitempty"`
+	Note        string `yaml:"note,omitempty" json:"note,omitempty"`
+	// Name overrides the project's job_name template for this submission —
+	// the per-task scheduler job name ({{name}} in submit_template).
+	Name        string         `yaml:"name,omitempty" json:"name,omitempty"`
+	FixedParams map[string]any `yaml:"fixed_params,omitempty" json:"fixed_params,omitempty"` // params with fixed values (not swept)
+	Sweep       []SweepBlock   `yaml:"sweep" json:"sweep"`
+	Overrides   *Overrides     `yaml:"overrides,omitempty" json:"overrides,omitempty"`
 }
 
 // SweepBlock is one block inside the sweep array.
 // Blocks expand independently, then cross-product across blocks.
 type SweepBlock struct {
-	Method     string                   `yaml:"method"` // "grid" or "list"
-	Parameters map[string]ParameterSpec `yaml:"parameters"`
+	Method     string                   `yaml:"method" json:"method"` // "grid" or "list"
+	Parameters map[string]ParameterSpec `yaml:"parameters" json:"parameters"`
 }
 
 // ParameterSpec supports three input forms via custom UnmarshalYAML:
@@ -28,7 +32,7 @@ type SweepBlock struct {
 //	scalar:     lr: 0.01                         → Values = [0.01]
 //	full:       lr: { values: [0.001, 0.01, 0.1] } → Values = [0.001, 0.01, 0.1]
 type ParameterSpec struct {
-	Values []any `yaml:"values"`
+	Values []any `yaml:"values" json:"values"`
 	// Reserved for future sweep methods (random, bayesian):
 	// Distribution string  `yaml:"distribution,omitempty"`
 	// Min          float64 `yaml:"min,omitempty"`
@@ -38,10 +42,10 @@ type ParameterSpec struct {
 
 // Overrides are job-level overrides for project defaults.
 type Overrides struct {
-	GPUsPerTask *int              `yaml:"gpus_per_task,omitempty"`
-	MaxRetry    *int              `yaml:"max_retry,omitempty"`
-	Timeout     *string           `yaml:"timeout,omitempty"` // human duration, e.g. "3h"
-	Env         map[string]string `yaml:"env,omitempty"`
+	GPUsPerTask *int              `yaml:"gpus_per_task,omitempty" json:"gpus_per_task,omitempty"`
+	MaxRetry    *int              `yaml:"max_retry,omitempty" json:"max_retry,omitempty"`
+	Timeout     *string           `yaml:"timeout,omitempty" json:"timeout,omitempty"` // human duration, e.g. "3h"
+	Env         map[string]string `yaml:"env,omitempty" json:"env,omitempty"`
 }
 
 func (p *ParameterSpec) UnmarshalYAML(value *yaml.Node) error {

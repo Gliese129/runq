@@ -1,11 +1,15 @@
 package api
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gliese129/runq/internal/job"
@@ -25,8 +29,16 @@ func (s *Server) registerRoutes() {
 	{
 		projects.POST("", s.handleProjectAdd)
 		projects.GET("", s.handleProjectList)
+		projects.GET("/match", s.handleProjectMatch) // before /:name
 		projects.GET("/:name", s.handleProjectGet)
 		projects.PUT("/:name", s.handleProjectUpdate)
+		projects.POST("/:name/rename", s.handleProjectRename)
+		// Static segment alongside /:name — gin's radix tree gives static
+		// routes precedence over params regardless of registration order
+		// (same coexistence as /match above).
+		projects.GET("/summaries", s.handleProjectSummaries)
+		projects.POST("/:name/archive", s.handleProjectArchive)
+		projects.POST("/:name/unarchive", s.handleProjectUnarchive)
 		projects.DELETE("/:name", s.handleProjectDelete)
 	}
 
@@ -34,10 +46,13 @@ func (s *Server) registerRoutes() {
 	jobs := api.Group("/jobs")
 	{
 		jobs.POST("", s.handleJobSubmit)
+		jobs.POST("/resolve-note", s.handleResolveNote)
 		jobs.GET("", s.handleJobList)
 		jobs.GET("/:id", s.handleJobShow)
 		jobs.DELETE("/:id", s.handleJobKill)
 		jobs.POST("/:id/pause", s.handleJobPause)
+		jobs.POST("/:id/archive", s.handleJobArchive)
+		jobs.POST("/:id/unarchive", s.handleJobUnarchive)
 		jobs.POST("/:id/resume", s.handleJobResume)
 		jobs.POST("/:id/rm", s.handleJobRm)
 	}
@@ -47,6 +62,7 @@ func (s *Server) registerRoutes() {
 	{
 		tasks.GET("", s.handleTaskList)
 		tasks.GET("/:id", s.handleTaskGet)
+		tasks.GET("/:id/log", s.handleTaskLog)
 		tasks.POST("/:id/kill", s.handleTaskKill)
 		tasks.POST("/:id/retry", s.handleTaskRetry)
 	}
@@ -79,10 +95,31 @@ func (s *Server) handleProjectAdd(c *gin.Context) {
 		return
 	}
 	if err := s.deps.Registry.Add(cfg); err != nil {
-		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		status := http.StatusBadRequest
+		if strings.Contains(err.Error(), "already exists") {
+			status = http.StatusConflict
+		}
+		c.JSON(status, gin.H{"error": err.Error()})
 		return
 	}
 	c.JSON(http.StatusCreated, gin.H{"message": fmt.Sprintf("project %q registered", cfg.ProjectName)})
+}
+
+func (s *Server) handleProjectMatch(c *gin.Context) {
+	dir := c.Query("dir")
+	if dir == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "dir query parameter is required"})
+		return
+	}
+	configs, err := s.deps.Registry.Match(dir)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if configs == nil {
+		configs = []project.Config{}
+	}
+	c.JSON(http.StatusOK, configs)
 }
 
 func (s *Server) handleProjectList(c *gin.Context) {
@@ -118,6 +155,28 @@ func (s *Server) handleProjectUpdate(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": fmt.Sprintf("project %q updated", name)})
 }
 
+func (s *Server) handleProjectRename(c *gin.Context) {
+	oldName := c.Param("name")
+	var body struct {
+		NewName string `json:"new_name" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "new_name is required"})
+		return
+	}
+	if err := s.deps.Registry.Rename(oldName, body.NewName); err != nil {
+		status := http.StatusBadRequest
+		if strings.Contains(err.Error(), "not found") {
+			status = http.StatusNotFound
+		} else if strings.Contains(err.Error(), "already exists") {
+			status = http.StatusConflict
+		}
+		c.JSON(status, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": fmt.Sprintf("project %q renamed to %q", oldName, body.NewName)})
+}
+
 func (s *Server) handleProjectDelete(c *gin.Context) {
 	if err := s.deps.Registry.Remove(c.Param("name")); err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
@@ -127,6 +186,22 @@ func (s *Server) handleProjectDelete(c *gin.Context) {
 }
 
 // ── Job handlers (delegate to JobService) ──
+
+// handleResolveNote previews a note template's resolution ({{version}} scan
+// included) without submitting — same code path as submit (U1).
+func (s *Server) handleResolveNote(c *gin.Context) {
+	var jobCfg job.JobConfig
+	if err := c.ShouldBindJSON(&jobCfg); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	resolved, err := s.deps.JobService.ResolveNote(context.Background(), jobCfg)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"resolved": resolved})
+}
 
 func (s *Server) handleJobSubmit(c *gin.Context) {
 	// Parse job config — support both YAML and JSON.
@@ -185,12 +260,62 @@ func (s *Server) handleJobSubmit(c *gin.Context) {
 }
 
 func (s *Server) handleJobList(c *gin.Context) {
-	results, err := s.deps.JobService.ListJobs(context.Background(), c.Query("project"))
+	var results []service.JobSummary
+	var err error
+	if c.Query("archived") == "1" {
+		results, err = s.deps.JobService.ListArchivedJobs(context.Background(), c.Query("project"))
+	} else {
+		results, err = s.deps.JobService.ListJobs(context.Background(), c.Query("project"))
+	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 	c.JSON(http.StatusOK, results)
+}
+
+func (s *Server) handleJobArchive(c *gin.Context) {
+	if err := s.deps.JobService.ArchiveJob(context.Background(), c.Param("id")); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "archived"})
+}
+
+func (s *Server) handleJobUnarchive(c *gin.Context) {
+	if err := s.deps.JobService.UnarchiveJob(context.Background(), c.Param("id")); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "unarchived"})
+}
+
+// handleProjectSummaries returns server-assembled project summaries
+// (job_count + archived). /api/projects stays plain []project.Config
+// (yaml-truth material) for the CLI; this is the dashboard's listing.
+func (s *Server) handleProjectSummaries(c *gin.Context) {
+	out, err := s.deps.JobService.ProjectSummaries(context.Background())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, out)
+}
+
+func (s *Server) handleProjectArchive(c *gin.Context) {
+	if err := s.deps.Registry.Archive(c.Param("name")); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "archived"})
+}
+
+func (s *Server) handleProjectUnarchive(c *gin.Context) {
+	if err := s.deps.Registry.Unarchive(c.Param("name")); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "unarchived"})
 }
 
 func (s *Server) handleJobShow(c *gin.Context) {
@@ -277,6 +402,68 @@ func (s *Server) handleTaskGet(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, task)
+}
+
+// handleTaskLog reads the task's log file and returns the last N lines.
+// Query params: tail (default 500), offset (default 0, skip first N lines).
+func (s *Server) handleTaskLog(c *gin.Context) {
+	task, err := s.deps.Store.GetTask(context.Background(), c.Param("id"))
+	if err != nil || task == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
+		return
+	}
+	logPath := task.LogPath
+	if logPath == "" {
+		c.JSON(http.StatusOK, gin.H{"lines": []string{}, "total_lines": 0})
+		return
+	}
+
+	tail := 500
+	if v := c.Query("tail"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 5000 {
+			tail = n
+		}
+	}
+	offset := 0
+	if v := c.Query("offset"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			offset = n
+		}
+	}
+
+	f, err := os.Open(logPath)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"lines": []string{}, "total_lines": 0, "error": "log file not accessible"})
+		return
+	}
+	defer f.Close()
+
+	// Read all lines (simple approach; for huge files, optimize later)
+	var allLines []string
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // 1MB max line
+	for scanner.Scan() {
+		allLines = append(allLines, scanner.Text())
+	}
+	total := len(allLines)
+
+	// Apply offset + tail: return lines from [total-tail-offset, total-offset)
+	end := total - offset
+	if end < 0 {
+		end = 0
+	}
+	start := end - tail
+	if start < 0 {
+		start = 0
+	}
+	lines := allLines[start:end]
+
+	c.JSON(http.StatusOK, gin.H{
+		"lines":       lines,
+		"total_lines": total,
+		"start":       start,
+		"end":         end,
+	})
 }
 
 func (s *Server) handleTaskKill(c *gin.Context) {

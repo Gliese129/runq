@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -162,6 +163,9 @@ func TestLoad_MissingFile(t *testing.T) {
 	if cfg.DataPath != "" {
 		t.Errorf("DataPath = %q, want empty", cfg.DataPath)
 	}
+	if cfg.Mode != ModeDaemon {
+		t.Errorf("Mode = %q, want %q", cfg.Mode, ModeDaemon)
+	}
 }
 
 func TestLoad_WithDataPath(t *testing.T) {
@@ -176,5 +180,62 @@ func TestLoad_WithDataPath(t *testing.T) {
 	}
 	if cfg.DataPath != "/scratch/runq" {
 		t.Errorf("DataPath = %q, want /scratch/runq", cfg.DataPath)
+	}
+	if cfg.Mode != ModeDaemon {
+		t.Errorf("Mode = %q, want %q", cfg.Mode, ModeDaemon)
+	}
+}
+
+func TestLoad_WithMode(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("RUNQ_DATA_DIR", dir)
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("mode: hpc\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Mode != ModeHPC {
+		t.Errorf("Mode = %q, want %q", cfg.Mode, ModeHPC)
+	}
+}
+
+func TestLoad_InvalidMode(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("RUNQ_DATA_DIR", dir)
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("mode: cluster\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() error = nil, want invalid mode error")
+	}
+}
+
+func TestSetKeyPreservesHPCSection(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("RUNQ_DATA_DIR", dir)
+	src := []byte("data_path: /old\nhpc:\n  submit_template: sbatch {{run_sh}}\n  submit_id_regex: \"([0-9]+)\"\n  kill_template: scancel {{ext_id}}\n")
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := SetKey("mode", "hpc"); err != nil {
+		t.Fatalf("SetKey: %v", err)
+	}
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Mode != ModeHPC {
+		t.Errorf("Mode = %q, want %q", cfg.Mode, ModeHPC)
+	}
+
+	buf, err := os.ReadFile(filepath.Join(dir, "config.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(buf), "hpc:") || !strings.Contains(string(buf), "submit_template") {
+		t.Fatalf("hpc section was not preserved:\n%s", string(buf))
 	}
 }
