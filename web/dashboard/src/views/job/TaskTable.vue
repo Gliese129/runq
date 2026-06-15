@@ -47,7 +47,12 @@
           <tr
             v-for="task in sortedTasks" :key="task.id"
             class="cursor-pointer"
+            tabindex="0"
+            role="link"
+            :aria-label="t('a11y.open_task', { id: task.id.slice(0, 8) })"
             @click="$emit('click-task', task.id)"
+            @keydown.enter="$emit('click-task', task.id)"
+            @keydown.space.prevent="$emit('click-task', task.id)"
           >
             <td><StatusDot :status="task.status" /></td>
             <td><code>{{ task.id.slice(0, 8) }}</code></td>

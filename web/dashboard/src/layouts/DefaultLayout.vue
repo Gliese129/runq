@@ -10,7 +10,7 @@
       style="border-right: 0.5px solid rgb(var(--v-theme-outline-variant))"
     >
       <div class="d-flex align-center ga-2 pa-3" style="height: 56px">
-        <router-link :to="{ name: 'overview' }" class="text-decoration-none d-flex align-center ga-2">
+        <router-link :to="{ name: 'overview' }" :aria-label="t('a11y.home')" class="text-decoration-none d-flex align-center ga-2">
           <RunqLogo :size="28" />
           <span v-if="!collapsed" class="text-body-1 font-weight-bold text-on-surface">runq</span>
         </router-link>
@@ -29,6 +29,7 @@
           :to="item.to"
           :active="isActive(item.name)"
           :title="collapsed ? '' : item.label"
+          :aria-label="item.label"
           :prepend-icon="item.icon"
           density="compact"
           rounded="lg"
@@ -59,6 +60,7 @@
           :key="proj.name"
           :to="{ name: 'project', params: { project: proj.name } }"
           :active="projects.selected === proj.name"
+          :aria-label="proj.name"
           density="compact"
           rounded="lg"
           class="mb-1"
@@ -86,26 +88,39 @@
             :to="{ name: 'settings' }"
             :active="isActive('settings')"
             :title="collapsed ? '' : t('nav.settings')"
+            :aria-label="t('nav.settings')"
             prepend-icon="mdi-cog-outline"
             density="compact"
             rounded="lg"
             color="primary"
           />
-          <v-list-item
-            :title="collapsed ? '' : (settings.theme === 'dark' ? 'Light mode' : 'Dark mode')"
+          <v-btn
+            block
+            variant="text"
+            density="comfortable"
+            rounded="lg"
+            class="nav-btn mb-1"
+            :class="collapsed ? 'justify-center' : 'justify-start px-3'"
             :prepend-icon="settings.theme === 'dark' ? 'mdi-white-balance-sunny' : 'mdi-moon-waning-crescent'"
-            density="compact"
-            rounded="lg"
+            :aria-label="settings.theme === 'dark' ? 'Light mode' : 'Dark mode'"
             @click="toggleTheme"
-          />
-          <v-list-item
+          >
+            <span v-if="!collapsed" class="text-body-2">{{ settings.theme === 'dark' ? 'Light mode' : 'Dark mode' }}</span>
+          </v-btn>
+          <v-btn
             v-if="!mobile"
-            :title="collapsed ? '' : 'Collapse'"
-            :prepend-icon="collapsed ? 'mdi-chevron-right' : 'mdi-chevron-left'"
-            density="compact"
+            block
+            variant="text"
+            density="comfortable"
             rounded="lg"
+            class="nav-btn mb-1"
+            :class="collapsed ? 'justify-center' : 'justify-start px-3'"
+            :prepend-icon="collapsed ? 'mdi-chevron-right' : 'mdi-chevron-left'"
+            :aria-label="collapsed ? 'Expand sidebar' : 'Collapse sidebar'"
             @click="toggleCollapse"
-          />
+          >
+            <span v-if="!collapsed" class="text-body-2">Collapse</span>
+          </v-btn>
           <div class="d-flex align-center ga-2 px-3 py-1">
             <div class="status-dot" :class="conn.connected.value ? 'status-dot--completed' : 'status-dot--failed'" />
             <span v-if="!collapsed" class="text-caption text-on-surface-variant">
@@ -232,3 +247,15 @@ onMounted(async () => {
   } catch {}
 })
 </script>
+
+<style scoped>
+/* Theme / collapse toggles are real buttons; match the nav list-item look. */
+.nav-btn {
+  text-transform: none;
+  letter-spacing: 0;
+}
+/* Center the icon cleanly when the rail is collapsed (drop prepend gap). */
+.nav-btn.justify-center :deep(.v-btn__prepend) {
+  margin-inline: 0;
+}
+</style>

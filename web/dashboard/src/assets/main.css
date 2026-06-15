@@ -58,6 +58,12 @@
 .data-mono tbody tr:hover {
   background: rgb(var(--v-theme-surface-variant), 0.4);
 }
+/* Keyboard focus ring for clickable rows (tabindex/role=link) */
+.data-mono tbody tr[tabindex]:focus-visible {
+  outline: 2px solid rgb(var(--v-theme-primary));
+  outline-offset: -2px;
+  background: rgb(var(--v-theme-surface-variant), 0.4);
+}
 
 /* Status dots — colors come EXCLUSIVELY from statusGrammar.ts via
    <StatusDot>. Do not add per-status color rules here (philosophy U3). */

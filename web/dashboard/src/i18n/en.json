@@ -130,6 +130,7 @@
   "settings.hpc_f_status_hint": "Command that asks the scheduler about a task. Leave empty to rely on status.json written by the task itself.",
   "settings.hpc_f_kill": "Cancel command",
   "settings.hpc_f_kill_hint": "Shell command that cancels a queued/running task.",
+  "settings.tmpl_not_set": "not set",
   "settings.hpc_f_parser": "Status output parser (optional)",
   "settings.hpc_f_parser_hint": "Pipeline that turns the raw probe output into one status word: pending / running / success / failed / killed / gone. Each line is one stage; the previous stage's output is piped into the next via stdin.",
   "settings.hpc_rewrite_note": "Saving rewrites the hpc: section of config.yaml (file comments are not preserved).",
@@ -174,6 +175,7 @@
   "submit.filter": "Filter...",
   "submit.no_projects": "No projects yet — create one below",
   "submit.select_or_create": "Select a project or create a new one",
+  "submit.pick_from_left": "Select a project on the left, or create a new one",
   "submit.read_only": "Read-only — Next won't modify the project",
   "submit.pick_script": "Select a training script (.py / .sh) — or a project.yaml",
   "submit.script_file": "Script file",
@@ -217,5 +219,8 @@
   "archive.job_back": "Job unarchived",
   "archive.project_done": "Project archived",
   "archive.project_back": "Project unarchived",
-  "archive.projects_section": "Archived projects ({n})"
+  "archive.projects_section": "Archived projects ({n})",
+  "a11y.open_job": "Open job {id}",
+  "a11y.open_task": "Open task {id}",
+  "a11y.home": "runq home"
 }

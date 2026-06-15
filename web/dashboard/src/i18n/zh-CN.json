@@ -130,6 +130,7 @@
   "settings.hpc_f_status_hint": "向调度器查询任务状态的命令。留空则只依赖任务自己写的 status.json。",
   "settings.hpc_f_kill": "取消命令",
   "settings.hpc_f_kill_hint": "取消排队/运行中任务的 shell 命令。",
+  "settings.tmpl_not_set": "未设置",
   "settings.hpc_f_parser": "状态输出解析（可选）",
   "settings.hpc_f_parser_hint": "把探查命令的原始输出逐级过滤成一个状态词（pending / running / success / failed / killed / gone）的管道。每行一个 stage，上一段的输出经 stdin 进入下一段。",
   "settings.hpc_rewrite_note": "保存会重写 config.yaml 的 hpc: 段（文件注释不会保留）。",
@@ -174,6 +175,7 @@
   "submit.filter": "筛选...",
   "submit.no_projects": "还没有项目 — 在下方创建一个",
   "submit.select_or_create": "选择一个项目或新建",
+  "submit.pick_from_left": "在左侧选择一个项目，或新建一个",
   "submit.read_only": "只读 — 点 Next 不会修改项目",
   "submit.pick_script": "选择训练脚本（.py / .sh）或 project.yaml",
   "submit.script_file": "脚本文件",
@@ -217,5 +219,8 @@
   "archive.job_back": "Job 已取消归档",
   "archive.project_done": "项目已归档",
   "archive.project_back": "项目已取消归档",
-  "archive.projects_section": "已归档项目（{n}）"
+  "archive.projects_section": "已归档项目（{n}）",
+  "a11y.open_job": "打开 Job {id}",
+  "a11y.open_task": "打开 Task {id}",
+  "a11y.home": "runq 首页"
 }

@@ -67,7 +67,12 @@
               v-for="j in filteredJobs.slice(0, 20)"
               :key="j.id"
               class="cursor-pointer"
-              @click="router.push({ name: 'job-detail', params: { project: j.project, jobId: j.id } })"
+              tabindex="0"
+              role="link"
+              :aria-label="t('a11y.open_job', { id: j.id.slice(0, 8) })"
+              @click="openJob(j.project, j.id)"
+              @keydown.enter="openJob(j.project, j.id)"
+              @keydown.space.prevent="openJob(j.project, j.id)"
             >
               <td><code>{{ j.id.slice(0, 8) }}</code></td>
               <td>{{ j.project }}</td>
@@ -92,7 +97,12 @@
                 v-for="j in recentJobs"
                 :key="j.id"
                 class="cursor-pointer"
-                @click="router.push({ name: 'job-detail', params: { project: j.project, jobId: j.id } })"
+                tabindex="0"
+                role="link"
+                :aria-label="t('a11y.open_job', { id: j.id.slice(0, 8) })"
+                @click="openJob(j.project, j.id)"
+                @keydown.enter="openJob(j.project, j.id)"
+                @keydown.space.prevent="openJob(j.project, j.id)"
               >
                 <td style="width: 24px"><StatusDot :status="j.status" kind="job" /></td>
                 <td><code>{{ j.id.slice(0, 8) }}</code></td>
@@ -206,6 +216,10 @@ const totalCompleted = computed(() =>
 function retryConnection() {
   jobs.fetchJobs()
   if (config.caps.gpu_map) gpu.fetchGPU()
+}
+
+function openJob(project: string, id: string) {
+  router.push({ name: 'job-detail', params: { project, jobId: id } })
 }
 
 const filteredJobs = computed(() => {

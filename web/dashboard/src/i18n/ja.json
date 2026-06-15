@@ -130,6 +130,7 @@
   "settings.hpc_f_status_hint": "スケジューラにタスクの状態を問い合わせるコマンド。空ならタスク自身が書く status.json のみに依存します。",
   "settings.hpc_f_kill": "キャンセルコマンド",
   "settings.hpc_f_kill_hint": "待機中・実行中のタスクを取り消す shell コマンド。",
+  "settings.tmpl_not_set": "未設定",
   "settings.hpc_f_parser": "状態出力パーサ（任意）",
   "settings.hpc_f_parser_hint": "プローブの生出力を 1 つの状態語（pending / running / success / failed / killed / gone）に変換するパイプライン。1 行が 1 ステージで、前段の出力が stdin 経由で次段に渡ります。",
   "settings.hpc_rewrite_note": "保存すると config.yaml の hpc: セクションが書き換えられます（ファイル内のコメントは保持されません）。",
@@ -174,6 +175,7 @@
   "submit.filter": "絞り込み...",
   "submit.no_projects": "プロジェクトがまだありません — 下から作成してください",
   "submit.select_or_create": "プロジェクトを選択するか新規作成してください",
+  "submit.pick_from_left": "左側のプロジェクトを選択するか、新規作成してください",
   "submit.read_only": "読み取り専用 — Next を押してもプロジェクトは変更されません",
   "submit.pick_script": "学習スクリプト (.py / .sh) または project.yaml を選択",
   "submit.script_file": "スクリプトファイル",
@@ -217,5 +219,8 @@
   "archive.job_back": "ジョブのアーカイブを解除しました",
   "archive.project_done": "プロジェクトをアーカイブしました",
   "archive.project_back": "プロジェクトのアーカイブを解除しました",
-  "archive.projects_section": "アーカイブ済みプロジェクト（{n}）"
+  "archive.projects_section": "アーカイブ済みプロジェクト（{n}）",
+  "a11y.open_job": "ジョブ {id} を開く",
+  "a11y.open_task": "タスク {id} を開く",
+  "a11y.home": "runq ホーム"
 }

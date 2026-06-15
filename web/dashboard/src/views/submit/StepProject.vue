@@ -17,11 +17,14 @@
           class="mb-2"
         />
 
-        <v-list density="compact" class="pa-0" style="max-height: calc(100vh - 380px); overflow-y: auto">
+        <v-list density="compact" class="pa-0" role="listbox" :aria-label="t('submit.projects')" style="max-height: calc(100vh - 380px); overflow-y: auto">
           <v-list-item
             v-for="p in sortedProjects"
             :key="p.name"
             :active="state.projectName === p.name && mode === 'select'"
+            color="primary"
+            role="option"
+            :aria-selected="state.projectName === p.name && mode === 'select'"
             rounded
             class="mb-1"
             @click="selectProject(p.name)"
@@ -63,7 +66,7 @@
       <!-- Empty state: nothing selected -->
       <v-card v-if="mode === 'select' && !state.projectName" class="pa-5 d-flex flex-column align-center justify-center" style="min-height: 300px">
         <v-icon size="48" color="on-surface-variant" class="mb-3">mdi-folder-open-outline</v-icon>
-        <div class="text-body-1 text-on-surface-variant">{{ t('submit.select_or_create') }}</div>
+        <div class="text-body-1 text-on-surface-variant">{{ t('submit.pick_from_left') }}</div>
       </v-card>
 
       <!-- ═══ Path A: read-only summary card (the frequent path) ═══ -->

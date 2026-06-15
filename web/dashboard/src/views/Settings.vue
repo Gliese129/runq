@@ -80,8 +80,8 @@
         />
         <template v-else>
           <div class="tmpl-display rounded pa-2 mb-1 cursor-pointer d-flex align-center ga-2" @click="openEditor(f.key)">
-            <span class="font-mono flex-grow-1 text-body-2" :class="{ 'opacity-50': !hpcForm[f.key] }" style="word-break: break-all">
-              {{ hpcForm[f.key] || f.placeholder }}
+            <span class="font-mono flex-grow-1 text-body-2" :class="{ 'opacity-50 font-italic': !hpcForm[f.key] }" style="word-break: break-all">
+              {{ hpcForm[f.key] || t('settings.tmpl_not_set') }}
             </span>
             <v-icon size="14" color="on-surface-variant" class="flex-shrink-0">mdi-pencil-outline</v-icon>
           </div>
@@ -115,6 +115,7 @@
         :value="editorValue"
         :title="editorTitle"
         :placeholders="editorPlaceholders"
+        :hint="editorHint"
         @apply="onEditorApply"
       />
 
@@ -300,6 +301,7 @@ const editorOpen = ref(false)
 const editorTitle = ref('')
 const editorValue = ref('')
 const editorPlaceholders = ref<string[]>([])
+const editorHint = ref('')
 let editorTarget: { kind: 'field'; key: HPCFieldKey } | { kind: 'stage'; index: number } | null = null
 
 function openEditor(key: HPCFieldKey) {
@@ -307,6 +309,7 @@ function openEditor(key: HPCFieldKey) {
   editorTitle.value = key
   editorValue.value = hpcForm.value[key]
   editorPlaceholders.value = placeholdersFor(key)
+  editorHint.value = hpcFields.find(x => x.key === key)?.placeholder ?? ''
   editorOpen.value = true
 }
 
@@ -315,6 +318,7 @@ function openStageEditor(index: number) {
   editorTitle.value = `status_parser[${index}]`
   editorValue.value = hpcParser.value[index] ?? ''
   editorPlaceholders.value = placeholdersFor('status_parser')
+  editorHint.value = ''
   editorOpen.value = true
 }
 

@@ -71,7 +71,12 @@
               v-for="j in displayedJobs"
               :key="j.id"
               class="cursor-pointer"
+              tabindex="0"
+              role="link"
+              :aria-label="t('a11y.open_job', { id: j.id.slice(0, 8) })"
               @click="router.push({ name: 'job-detail', params: { project, jobId: j.id } })"
+              @keydown.enter="router.push({ name: 'job-detail', params: { project, jobId: j.id } })"
+              @keydown.space.prevent="router.push({ name: 'job-detail', params: { project, jobId: j.id } })"
             >
               <td><StatusDot :status="j.status" kind="job" /></td>
               <td><code>{{ j.id.slice(0, 8) }}</code></td>
