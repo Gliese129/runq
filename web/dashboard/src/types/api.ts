@@ -44,6 +44,9 @@ export interface TaskView {
   max_retry: number
   gpus?: string
   wandb_run_id?: string
+  /** HPC-specific; empty in daemon mode. Check caps.state_model == 'poll'. */
+  external_id?: string
+  status_source?: string
 }
 
 /** Mirrors logfile.Page — byte-offset based log page. */
@@ -75,8 +78,11 @@ export interface JobDetail {
 
 export interface CompareRow {
   task_id: string
+  status?: string
   params: Record<string, any>
   best: number
+  /** false when the task has no metric value (distinguish 0 from absent) */
+  has_value: boolean
   rank: number
 }
 

@@ -2,7 +2,6 @@ package hpc
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,20 +9,14 @@ import (
 	"testing"
 
 	"github.com/gliese129/runq/internal/hpcconfig"
-	"github.com/gliese129/runq/internal/hpccore"
 	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/project"
 	"github.com/gliese129/runq/internal/store"
 )
 
 // TestSubmitRefreshKill exercises the full HPC loop against an in-memory store
-// and a fake cluster (the injected Runner stands in for sbatch/scancel). It
-// uses the REAL internal/hpccore, so it only runs once those algorithms are
-// implemented — until then it skips cleanly (the stubs return ErrNotImplemented).
+// and a fake cluster (the injected Runner stands in for sbatch/scancel).
 func TestSubmitRefreshKill(t *testing.T) {
-	if _, err := hpccore.Render("{{x}}", map[string]string{"x": "y"}); errors.Is(err, hpccore.ErrNotImplemented) {
-		t.Skip("internal/hpccore not implemented yet — implement it to run this end-to-end test")
-	}
 
 	st, err := store.Open(":memory:")
 	if err != nil {

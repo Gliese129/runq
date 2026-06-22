@@ -12,7 +12,6 @@ import (
 
 	"github.com/gliese129/runq/internal/config"
 	"github.com/gliese129/runq/internal/hpcconfig"
-	"github.com/gliese129/runq/internal/hpccore"
 	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/preflight"
 	"github.com/gliese129/runq/internal/project"
@@ -56,7 +55,7 @@ func renderSubmitCmd(tmpl string, t submitplan.PlannedTask, plan submitplan.Plan
 	for name, value := range t.Params {
 		vars["param."+name] = fmt.Sprintf("%v", value)
 	}
-	return hpccore.Render(tmpl, vars)
+	return utils.Render(tmpl, vars)
 }
 
 // submitEnvPrefix turns the project's environment into `export K='v'; `
@@ -83,7 +82,7 @@ func submitEnvPrefix(env map[string]string) string {
 		b.WriteString("export ")
 		b.WriteString(k)
 		b.WriteString("=")
-		b.WriteString(hpccore.ShellQuote(env[k]))
+		b.WriteString(utils.ShellQuote(env[k]))
 		b.WriteString("; ")
 	}
 	return b.String()
@@ -242,11 +241,11 @@ func (b *Backend) Submit(ctx context.Context, jobCfg job.JobConfig, proj *projec
 			// sbatch itself errored → no cluster job exists → truly terminal.
 			opLog("SUBMIT FAIL task=%s job=%s\ncmd: %s\nerr: %v\noutput: %s", t.TaskID, plan.JobID, fullCmd, err, out)
 			_ = b.Store.UpdateTaskStatus(ctx, t.TaskID, "failed",
-				map[string]any{"finished_at": nowUnix(), "status_source": hpccore.SourceSubmit})
+				map[string]any{"finished_at": nowUnix(), "status_source": SourceSubmit})
 			return plan.JobID, submitted, fmt.Errorf("submit %s failed: %w\noutput:\n%s", t.TaskID, err, out)
 		}
 
-		extID, err := hpccore.ExtractSubmitID(out, b.Cfg.SubmitIDRegex)
+		extID, err := utils.ExtractSubmitID(out, b.Cfg.SubmitIDRegex)
 		if err != nil {
 			opLog("SUBMIT NOID task=%s job=%s\ncmd: %s\noutput: %s", t.TaskID, plan.JobID, fullCmd, out)
 			// Submit SUCCEEDED but the id is unparseable → a cluster job may be
@@ -273,7 +272,7 @@ func (b *Backend) Submit(ctx context.Context, jobCfg job.JobConfig, proj *projec
 
 // buildRunScript assembles the wrapper script. The script SKELETON is glue; the
 // security-sensitive part — escaping every env value — is delegated to
-// hpccore.ShellQuote. The user's command (t.Command, already env-activation
+// utils.ShellQuote. The user's command (t.Command, already env-activation
 // wrapped by the kernel) is embedded verbatim, exactly as the daemon would exec
 // it.
 func (b *Backend) buildRunScript(t submitplan.PlannedTask, plan submitplan.Plan) string {
@@ -300,15 +299,15 @@ func (b *Backend) buildRunScript(t submitplan.PlannedTask, plan submitplan.Plan)
 	// runq owns log placement: all task output goes to the DB's log_path,
 	// so `runq logs` / the dashboard work regardless of how the user's
 	// submit_template routes -o/-e (those keep only scheduler-level noise).
-	fmt.Fprintf(&s, "exec >> %s 2>&1\n", hpccore.ShellQuote(t.LogPath))
+	fmt.Fprintf(&s, "exec >> %s 2>&1\n", utils.ShellQuote(t.LogPath))
 	if envFile := env["RUNQ_ENV_FILE"]; envFile != "" {
-		q := hpccore.ShellQuote(envFile)
+		q := utils.ShellQuote(envFile)
 		fmt.Fprintf(&s, "if [ -f %s ]; then set -a; . %s; set +a; fi\n", q, q)
 	}
 	for _, k := range sortedKeys(env) {
-		fmt.Fprintf(&s, "export %s=%s\n", k, hpccore.ShellQuote(env[k]))
+		fmt.Fprintf(&s, "export %s=%s\n", k, utils.ShellQuote(env[k]))
 	}
-	fmt.Fprintf(&s, "STATUS_FILE=%s\n", hpccore.ShellQuote(filepath.Join(t.TaskDir, statusFileName)))
+	fmt.Fprintf(&s, "STATUS_FILE=%s\n", utils.ShellQuote(filepath.Join(t.TaskDir, statusFileName)))
 	s.WriteString(`_runq_status() { printf '%s\n' "$1" > "$STATUS_FILE.tmp" && mv "$STATUS_FILE.tmp" "$STATUS_FILE"; }` + "\n")
 	// Last words: schedulers send TERM (qdel/scancel/walltime) with a grace
 	// period before KILL — write a terminal status while we still can, so
@@ -321,8 +320,8 @@ func (b *Backend) buildRunScript(t submitplan.PlannedTask, plan submitplan.Plan)
 	// into 3-column activity.tsv {ts, bytes, lines}. The trap kills the sidecar
 	// on exit. Byte count is O(1) (fstat); line count reads only the delta bytes
 	// since the last sample (~1MB/60s typical), <10ms/tick.
-	activityFile := hpccore.ShellQuote(filepath.Join(t.TaskDir, "activity.tsv"))
-	logFileQuoted := hpccore.ShellQuote(t.LogPath)
+	activityFile := utils.ShellQuote(filepath.Join(t.TaskDir, "activity.tsv"))
+	logFileQuoted := utils.ShellQuote(t.LogPath)
 	fmt.Fprintf(&s, "ACTIVITY_FILE=%s\n", activityFile)
 	fmt.Fprintf(&s, "LOG_FILE=%s\n", logFileQuoted)
 	s.WriteString("_RUNQ_PREV_BYTES=0\n")
@@ -339,7 +338,7 @@ func (b *Backend) buildRunScript(t submitplan.PlannedTask, plan submitplan.Plan)
 	s.WriteString("_RUNQ_ACTIVITY_PID=$!\n")
 	// Tasks run from the project's working_dir (daemon/HPC parity) —
 	// schedulers start jobs in $HOME, where relative script paths break.
-	wd := hpccore.ShellQuote(t.WorkingDir)
+	wd := utils.ShellQuote(t.WorkingDir)
 	fmt.Fprintf(&s, "if cd %s; then\n", wd)
 	s.WriteString(t.Command + "\n")
 	s.WriteString("code=$?\n")

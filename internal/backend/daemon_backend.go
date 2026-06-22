@@ -13,7 +13,6 @@ import (
 	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/project"
 	"github.com/gliese129/runq/internal/resource"
-	"github.com/gliese129/runq/internal/service"
 	"github.com/gliese129/runq/internal/store"
 )
 
@@ -53,7 +52,7 @@ func (b *DaemonBackend) ListJobs(ctx context.Context, projectScope string) ([]Jo
 	if projectScope != "" {
 		path += "?project=" + url.QueryEscape(projectScope)
 	}
-	var jobs []service.JobSummary
+	var jobs []daemonJobWire
 	if err := b.do(ctx, "GET", path, nil, &jobs); err != nil {
 		return nil, err
 	}
@@ -65,7 +64,7 @@ func (b *DaemonBackend) ListJobs(ctx context.Context, projectScope string) ([]Jo
 }
 
 func (b *DaemonBackend) ListArchivedJobs(ctx context.Context) ([]JobSummary, error) {
-	var jobs []service.JobSummary
+	var jobs []daemonJobWire
 	if err := b.do(ctx, "GET", "/api/jobs?archived=1", nil, &jobs); err != nil {
 		return nil, err
 	}
@@ -233,6 +232,18 @@ func (b *DaemonBackend) UpdateProject(ctx context.Context, cfg project.Config) e
 	return b.do(ctx, "PUT", "/api/projects/"+url.PathEscape(cfg.ProjectName), cfg, nil)
 }
 
+func (b *DaemonBackend) DeleteJob(ctx context.Context, jobID string) error {
+	return b.do(ctx, "DELETE", "/api/jobs/"+url.PathEscape(jobID)+"/data", nil, nil)
+}
+
+func (b *DaemonBackend) CleanOldTasks(_ context.Context, _ time.Time, _ bool) (*CleanResult, error) {
+	return nil, fmt.Errorf("clean old tasks in daemon mode: %w", ErrNotSupported)
+}
+
+func (b *DaemonBackend) DeleteProject(ctx context.Context, name string) error {
+	return b.do(ctx, "DELETE", "/api/projects/"+url.PathEscape(name), nil, nil)
+}
+
 func (b *DaemonBackend) RenameProject(ctx context.Context, oldName, newName string) error {
 	return b.do(ctx, "POST", "/api/projects/"+url.PathEscape(oldName)+"/rename", map[string]string{
 		"new_name": newName,
@@ -332,7 +343,20 @@ func (b *DaemonBackend) doWithTimeout(ctx context.Context, method, path string, 
 	return json.NewDecoder(resp.Body).Decode(out)
 }
 
-func summaryFromDaemonList(job service.JobSummary) JobSummary {
+// daemonJobWire is the JSON shape the daemon's /api/jobs endpoint returns.
+// Private — isolates this adapter from the service layer's types.
+type daemonJobWire struct {
+	JobID       string         `json:"job_id"`
+	Project     string         `json:"project"`
+	Note        string         `json:"note"`
+	Status      string         `json:"status"`
+	TotalTasks  int            `json:"total_tasks"`
+	StatusCount map[string]int `json:"status_count"`
+	CreatedAt   time.Time      `json:"created_at"`
+	Archived    bool           `json:"archived"`
+}
+
+func summaryFromDaemonList(job daemonJobWire) JobSummary {
 	counts := TaskCountGroup{
 		Total:     job.TotalTasks,
 		Pending:   job.StatusCount["pending"],

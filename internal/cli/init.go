@@ -37,6 +37,9 @@ Examples:
 func init() {
 	initCmd.Flags().StringP("output", "o", ".", "Output directory for generated YAML files")
 	initCmd.Flags().String("project", "", "Project name (default: current directory name)")
+
+	initCmd.GroupID = groupDiag
+	rootCmd.AddCommand(initCmd)
 }
 
 // candidateScripts is the priority order for auto-detection.

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/gliese129/runq/internal/config"
 	"github.com/gliese129/runq/internal/backend"
 	"github.com/gliese129/runq/internal/utils"
 	"github.com/spf13/cobra"
@@ -162,30 +161,18 @@ func runJobArchive(jobID string, archive bool) error {
 	if !archive {
 		verb = "unarchived"
 	}
-	if _, mode, err := loadModeConfig(); err == nil && mode == config.ModeHPC {
-		_, st, err := newHPCBackend()
-		if err != nil {
-			return err
-		}
-		defer st.Close()
-		op := st.UnarchiveJob
+	return withBackend(func(be backend.Backend) error {
+		ctx := context.Background()
+		var err error
 		if archive {
-			op = st.ArchiveJob
+			err = be.ArchiveJob(ctx, jobID)
+		} else {
+			err = be.UnarchiveJob(ctx, jobID)
 		}
-		if err := op(context.Background(), jobID); err != nil {
+		if err != nil {
 			return err
 		}
 		fmt.Printf("job %s %s\n", utils.IDColor(jobID), verb)
 		return nil
-	}
-	path := "/api/jobs/" + jobID + "/unarchive"
-	if archive {
-		path = "/api/jobs/" + jobID + "/archive"
-	}
-	var resp map[string]any
-	if err := doAndDecode("POST", path, nil, &resp); err != nil {
-		return err
-	}
-	fmt.Printf("job %s %s\n", utils.IDColor(jobID), verb)
-	return nil
+	})
 }

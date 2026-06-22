@@ -9,7 +9,6 @@ import (
 
 	"github.com/gliese129/runq/internal/config"
 	"github.com/gliese129/runq/internal/hpcconfig"
-	"github.com/gliese129/runq/internal/hpccore"
 	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/project"
 	"github.com/gliese129/runq/internal/submitplan"
@@ -62,7 +61,7 @@ func (b *Backend) Preview(ctx context.Context, jobCfg job.JobConfig, proj *proje
 	for name, value := range t.Params {
 		vars["param."+name] = fmt.Sprintf("%v", value)
 	}
-	cmd, err := hpccore.Render(b.Cfg.SubmitTemplate, vars)
+	cmd, err := utils.Render(b.Cfg.SubmitTemplate, vars)
 	if err != nil {
 		return "", fmt.Errorf("render submit_template: %w", err)
 	}

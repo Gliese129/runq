@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gliese129/runq/internal/hpccore"
 	"github.com/gliese129/runq/internal/ingest"
+	"github.com/gliese129/runq/internal/utils"
 	"github.com/gliese129/runq/internal/store"
 )
 
@@ -41,7 +41,7 @@ func readStatus(taskDir string) statusFile {
 // best-effort projection (see the package doc). For each task it ingests
 // metrics.jsonl (always, idempotent — catches late/appended files), then, unless
 // the task is already a HARD terminal, reads status.json + probes the scheduler
-// and recomputes the canonical status+source via hpccore.Reconcile.
+// and recomputes the canonical status+source via Reconcile.
 //
 // Terminal handling keys off status_source:
 //   - wrapper / runq terminals are FINAL — skipped (no re-probe).
@@ -120,12 +120,12 @@ func (b *Backend) refresh(ctx context.Context, jobID string, forceProbe bool) er
 		// Only wrapper and runq terminals are hard-final (skip re-probe).
 		// Scheduler / submit / inferred terminals stay correctable so a late
 		// wrapper signal can overturn them.
-		if isTerminal(tk.Status) && (tk.StatusSource == hpccore.SourceWrapper || tk.StatusSource == hpccore.SourceRunq) {
+		if isTerminal(tk.Status) && (tk.StatusSource == SourceWrapper || tk.StatusSource == SourceRunq) {
 			continue
 		}
 
 		sf := readStatus(tk.TaskDir)
-		d := hpccore.Reconcile(tk.Status, tk.StatusSource, hpccore.Observed{
+		d := Reconcile(tk.Status, tk.StatusSource, Observed{
 			WrapperStatus: sf.Status,
 			ExitCode:      sf.ExitCode,
 			Scheduler:     b.maybeProbeScheduler(ctx, probeRun, tk.ExternalID, probe),
@@ -175,16 +175,16 @@ func (b *Backend) refresh(ctx context.Context, jobID string, forceProbe bool) er
 // hook) and maps the result to a semantic SchedulerSignal. It is deliberately
 // dialect-agnostic:
 //   - no status_template / no ext id / any command error → SchedUnknown (no new fact)
-//   - with a status_parser hook → its normalized token via hpccore.ParseSignal
+//   - with a status_parser hook → its normalized token via ParseSignal
 //   - without a hook → empty output = SchedGone, recognized token = that signal,
 //     present-but-unrecognized = SchedActive (alive)
 //
 // maybeProbeScheduler is probeScheduler behind the throttle gate: a skipped
 // probe yields SchedUnknown — "no new fact", which Reconcile treats as
 // keep-current-state (never an invented terminal).
-func (b *Backend) maybeProbeScheduler(ctx context.Context, run Runner, extID string, allowed bool) hpccore.SchedulerSignal {
+func (b *Backend) maybeProbeScheduler(ctx context.Context, run Runner, extID string, allowed bool) SchedulerSignal {
 	if !allowed {
-		return hpccore.SchedUnknown
+		return SchedUnknown
 	}
 	return b.probeSchedulerWith(ctx, run, extID)
 }
@@ -208,17 +208,17 @@ func memoRunner(run Runner) Runner {
 	}
 }
 
-func (b *Backend) probeScheduler(ctx context.Context, extID string) hpccore.SchedulerSignal {
+func (b *Backend) probeScheduler(ctx context.Context, extID string) SchedulerSignal {
 	return b.probeSchedulerWith(ctx, b.Run, extID)
 }
 
-func (b *Backend) probeSchedulerWith(ctx context.Context, run Runner, extID string) hpccore.SchedulerSignal {
+func (b *Backend) probeSchedulerWith(ctx context.Context, run Runner, extID string) SchedulerSignal {
 	if b.Cfg.StatusTemplate == "" || extID == "" {
-		return hpccore.SchedUnknown
+		return SchedUnknown
 	}
-	cmd, err := hpccore.Render(b.Cfg.StatusTemplate, map[string]string{"ext_id": extID})
+	cmd, err := utils.Render(b.Cfg.StatusTemplate, map[string]string{"ext_id": extID})
 	if err != nil {
-		return hpccore.SchedUnknown
+		return SchedUnknown
 	}
 	// Note: status command exit code handling differs by mode (below). Capture
 	// the output regardless of error so a parser can still interpret it.
@@ -238,35 +238,35 @@ func (b *Backend) probeSchedulerWith(ctx context.Context, run Runner, extID stri
 	if len(b.Cfg.StatusParser) > 0 {
 		stages := make([]string, 0, len(b.Cfg.StatusParser))
 		for _, s := range b.Cfg.StatusParser {
-			rs, perr := hpccore.Render(s, map[string]string{"ext_id": extID})
+			rs, perr := utils.Render(s, map[string]string{"ext_id": extID})
 			if perr != nil {
-				return hpccore.SchedUnknown
+				return SchedUnknown
 			}
 			stages = append(stages, rs)
 		}
-		pipeline := "printf '%s\\n' " + hpccore.ShellQuote(out) + " | " + strings.Join(stages, " | ")
+		pipeline := "printf '%s\\n' " + utils.ShellQuote(out) + " | " + strings.Join(stages, " | ")
 		pout, perr := run(ctx, pipeline)
 		if perr != nil {
-			return hpccore.SchedUnknown
+			return SchedUnknown
 		}
 		// Empty parser output = job absent from the active query = gone.
 		if strings.TrimSpace(pout) == "" {
-			return hpccore.SchedGone
+			return SchedGone
 		}
-		return hpccore.ParseSignal(pout)
+		return ParseSignal(pout)
 	}
 
 	// No parser: a status command error is "no info" (don't guess).
 	if runErr != nil {
-		return hpccore.SchedUnknown
+		return SchedUnknown
 	}
 	if strings.TrimSpace(out) == "" {
-		return hpccore.SchedGone
+		return SchedGone
 	}
-	if sig := hpccore.ParseSignal(out); sig != hpccore.SchedUnknown {
+	if sig := ParseSignal(out); sig != SchedUnknown {
 		return sig
 	}
-	return hpccore.SchedActive
+	return SchedActive
 }
 
 // JobView is the read model returned to the CLI.

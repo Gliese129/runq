@@ -1,6 +1,9 @@
 package backend
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"time"
+)
 
 // View types shared by HTTP responses and CLI --json output.
 // Keep this file free of business logic — only struct definitions.
@@ -55,6 +58,10 @@ type TaskView struct {
 	MaxRetry    int                `json:"max_retry"`
 	GPUs        string             `json:"gpus,omitempty"`
 	WandbRunID  string             `json:"wandb_run_id,omitempty"`
+	// HPC-specific; zero-valued in daemon mode. Consumers check
+	// Capabilities.StateModel == "poll" before rendering.
+	ExternalID   string `json:"external_id,omitempty"`
+	StatusSource string `json:"status_source,omitempty"`
 }
 
 type MetricPoint struct {
@@ -65,10 +72,12 @@ type MetricPoint struct {
 }
 
 type CompareRow struct {
-	TaskID string         `json:"task_id"`
-	Params map[string]any `json:"params"`
-	Best   float64        `json:"best"`
-	Rank   int            `json:"rank"`
+	TaskID   string         `json:"task_id"`
+	Status   string         `json:"status,omitempty"`
+	Params   map[string]any `json:"params"`
+	Best     float64        `json:"best"`
+	HasValue bool           `json:"has_value"`
+	Rank     int            `json:"rank"`
 }
 
 type GPUSlot struct {
@@ -121,6 +130,21 @@ type Capabilities struct {
 	// P6 features: log activity heatmap and cross-task log search.
 	ActivityHeatmap bool `json:"activity_heatmap"`
 	LogSearch       bool `json:"log_search"`
+}
+
+// CleanResult reports what CleanOldTasks did (or would do in dry-run mode).
+type CleanResult struct {
+	Tasks      int              `json:"tasks"`
+	Jobs       int              `json:"jobs"`
+	FreedBytes int64            `json:"freed_bytes"`
+	Preview    []CleanPreviewItem `json:"preview,omitempty"` // populated only in dry-run
+}
+
+type CleanPreviewItem struct {
+	TaskID     string     `json:"task_id"`
+	Status     string     `json:"status"`
+	FinishedAt *time.Time `json:"finished_at,omitempty"`
+	TaskDir    string     `json:"task_dir,omitempty"`
 }
 
 type ErrorResponse struct {

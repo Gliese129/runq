@@ -52,7 +52,7 @@ func runDashboard(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Printf("mode: %s (%s; override with --mode)\n", mode, modeSource)
 
-	be, closeBackend, err := newDashboardBackend(mode)
+	be, closeBackend, err := newBackend(mode)
 	if err != nil {
 		be = backend.NewUnavailableBackend(err)
 		closeBackend = func() {}
@@ -101,44 +101,3 @@ func runDashboard(cmd *cobra.Command, args []string) error {
 	}
 }
 
-func loadModeConfig() (*config.GlobalConfig, string, error) {
-	cfg, err := config.Load()
-	if err != nil {
-		return nil, "", err
-	}
-	return cfg, config.ConfigMode(cfg), nil
-}
-
-func newDashboardBackend(mode string) (backend.Backend, func(), error) {
-	switch mode {
-	case config.ModeHPC:
-		b, st, err := newHPCBackend()
-		if err != nil {
-			return nil, nil, err
-		}
-		return backend.NewHPCBackend(b, st), func() { _ = st.Close() }, nil
-	case config.ModeDaemon:
-		return backend.NewDaemonBackend(getSocketPath()), func() {}, nil
-	default:
-		return nil, nil, fmt.Errorf("unsupported mode %q", mode)
-	}
-}
-
-// withBackend resolves the configured mode, opens the mode-aware
-// dashboard.Backend, runs fn, and tears the backend down. This is the single
-// read/control entry point user-facing CLI commands should use so daemon and
-// HPC behave identically (same reconciliation, capabilities, summary
-// projection) — the same backend the WebUI goes through. Commands keep their
-// own output formatting; only the data access goes through here.
-func withBackend(fn func(backend.Backend) error) error {
-	_, mode, err := loadModeConfig()
-	if err != nil {
-		return err
-	}
-	be, closeBackend, err := newDashboardBackend(mode)
-	if err != nil {
-		return err
-	}
-	defer closeBackend()
-	return fn(be)
-}

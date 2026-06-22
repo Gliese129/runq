@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/gliese129/runq/internal/hpcconfig"
-	"github.com/gliese129/runq/internal/hpccore"
 	"github.com/gliese129/runq/internal/store"
 )
 
@@ -40,7 +39,7 @@ func nopRunner(ctx context.Context, command string) (string, error) { return "",
 // An "inferred" terminal (zombie guess) must be correctable: when the wrapper's
 // real terminal later appears, Refresh adopts it (status + source change).
 func TestRefreshInferredCorrectedByWrapper(t *testing.T) {
-	skipIfNoHPCCore(t)
+
 	st, err := store.Open(":memory:")
 	if err != nil {
 		t.Fatal(err)
@@ -48,7 +47,7 @@ func TestRefreshInferredCorrectedByWrapper(t *testing.T) {
 	defer st.Close()
 
 	dir := t.TempDir()
-	jobID, taskID := seedTask(t, st, dir, "failed", hpccore.SourceInferred)
+	jobID, taskID := seedTask(t, st, dir, "failed", SourceInferred)
 	if err := os.WriteFile(filepath.Join(dir, statusFileName),
 		[]byte(`{"status":"success","exit_code":0,"finished_at":1730000000}`), 0o644); err != nil {
 		t.Fatal(err)
@@ -59,7 +58,7 @@ func TestRefreshInferredCorrectedByWrapper(t *testing.T) {
 		t.Fatalf("Refresh: %v", err)
 	}
 	got, _ := st.GetTask(context.Background(), taskID)
-	if got.Status != "success" || got.StatusSource != hpccore.SourceWrapper {
+	if got.Status != "success" || got.StatusSource != SourceWrapper {
 		t.Fatalf("inferred-failed not corrected: status=%s source=%s", got.Status, got.StatusSource)
 	}
 }
@@ -67,7 +66,7 @@ func TestRefreshInferredCorrectedByWrapper(t *testing.T) {
 // A HARD terminal (source=wrapper) is final: a conflicting late status.json must
 // not override it (Refresh skips it).
 func TestRefreshHardTerminalNotReevaluated(t *testing.T) {
-	skipIfNoHPCCore(t)
+
 	st, err := store.Open(":memory:")
 	if err != nil {
 		t.Fatal(err)
@@ -75,7 +74,7 @@ func TestRefreshHardTerminalNotReevaluated(t *testing.T) {
 	defer st.Close()
 
 	dir := t.TempDir()
-	jobID, taskID := seedTask(t, st, dir, "success", hpccore.SourceWrapper)
+	jobID, taskID := seedTask(t, st, dir, "success", SourceWrapper)
 	if err := os.WriteFile(filepath.Join(dir, statusFileName),
 		[]byte(`{"status":"failed","exit_code":1}`), 0o644); err != nil {
 		t.Fatal(err)

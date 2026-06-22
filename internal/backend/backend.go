@@ -64,11 +64,20 @@ type Backend interface {
 	// scan needs the backend's store) — submit's code path, never a frontend
 	// simulation.
 	ResolveNote(ctx context.Context, cfg job.JobConfig) (string, error)
+	// DeleteJob removes a completed job from the DB (data + task records).
+	// Not the same as KillJob (which stops a running job).
+	DeleteJob(ctx context.Context, jobID string) error
+	// CleanOldTasks removes finished tasks older than cutoff and their
+	// on-disk artifacts. dryRun=true returns what would be cleaned without
+	// deleting. Backends without local storage return ErrNotSupported.
+	CleanOldTasks(ctx context.Context, cutoff time.Time, dryRun bool) (*CleanResult, error)
+
 	GetProject(ctx context.Context, name string) (*project.Config, error)
 	ListProjects(ctx context.Context) ([]ProjectSummary, error)
 	MatchProjects(ctx context.Context, dir string) ([]ProjectSummary, error)
 	CreateProject(ctx context.Context, cfg project.Config) error
 	UpdateProject(ctx context.Context, cfg project.Config) error
+	DeleteProject(ctx context.Context, name string) error
 	RenameProject(ctx context.Context, oldName, newName string) error
 }
 
@@ -150,16 +159,18 @@ func BuildTaskView(task store.TaskRow) TaskView {
 	params := decodeParams(task.ParamsJSON)
 	artifacts := readTaskArtifacts(task.TaskDir)
 	view := TaskView{
-		ID:          task.ID,
-		Status:      task.Status,
-		Params:      params,
-		Metrics:     artifacts.Metrics,
-		CurrentStep: artifacts.CurrentStep,
-		ExitCode:    artifacts.ExitCode,
-		RetryCount:  task.RetryCount,
-		MaxRetry:    task.MaxRetry,
-		GPUs:        task.GPUs,
-		WandbRunID:  artifacts.WandbRunID,
+		ID:           task.ID,
+		Status:       task.Status,
+		Params:       params,
+		Metrics:      artifacts.Metrics,
+		CurrentStep:  artifacts.CurrentStep,
+		ExitCode:     artifacts.ExitCode,
+		RetryCount:   task.RetryCount,
+		MaxRetry:     task.MaxRetry,
+		GPUs:         task.GPUs,
+		WandbRunID:   artifacts.WandbRunID,
+		ExternalID:   task.ExternalID,
+		StatusSource: task.StatusSource,
 	}
 	if task.StartedAt != nil {
 		sec := task.StartedAt.Unix()
@@ -187,22 +198,39 @@ func BuildCompareRows(tasks []store.TaskRow, key string, desc bool) []CompareRow
 	for _, task := range tasks {
 		best, ok := bestMetric(task.TaskDir, key, desc)
 		if !ok {
+			rows = append(rows, CompareRow{
+				TaskID:   task.ID,
+				Status:   task.Status,
+				Params:   decodeParams(task.ParamsJSON),
+				HasValue: false,
+			})
 			continue
 		}
 		rows = append(rows, CompareRow{
-			TaskID: task.ID,
-			Params: decodeParams(task.ParamsJSON),
-			Best:   best,
+			TaskID:   task.ID,
+			Status:   task.Status,
+			Params:   decodeParams(task.ParamsJSON),
+			Best:     best,
+			HasValue: true,
 		})
 	}
+	// Sort: tasks with values first (ranked), then tasks without values.
 	sort.SliceStable(rows, func(i, j int) bool {
+		if rows[i].HasValue != rows[j].HasValue {
+			return rows[i].HasValue
+		}
+		if !rows[i].HasValue {
+			return false
+		}
 		if desc {
 			return rows[i].Best > rows[j].Best
 		}
 		return rows[i].Best < rows[j].Best
 	})
 	for i := range rows {
-		rows[i].Rank = i + 1
+		if rows[i].HasValue {
+			rows[i].Rank = i + 1
+		}
 	}
 	return rows
 }

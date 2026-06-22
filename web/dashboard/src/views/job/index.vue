@@ -38,6 +38,7 @@
       :wandb="store.detail.wandb"
       :metric-keys="store.detail.metric_keys"
       :swept-params="sweptParams"
+      :can-retry="config.caps.retry"
       @kill-task="onKillTask"
       @retry-task="onRetryTask"
       @click-task="onClickTask"

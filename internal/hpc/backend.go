@@ -9,7 +9,7 @@
 // contract), ingest.ReapOutputs (metrics projection). The HPC-specific glue is
 // template rendering, run.sh generation, and DB reconciliation — the genuinely
 // algorithmic bits (shell-safe interpolation, id extraction, status reconcile)
-// live in internal/hpccore.
+// live in reconcile.go (this package) and internal/utils (shell quoting).
 //
 // # Best-effort status (read this before reasoning about task state)
 //

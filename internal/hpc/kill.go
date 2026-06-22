@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/gliese129/runq/internal/hpccore"
 	"github.com/gliese129/runq/internal/store"
+	"github.com/gliese129/runq/internal/utils"
 )
 
 // Kill cancels a job (all its tasks) or a single task. target is matched as a
@@ -53,7 +53,7 @@ func (b *Backend) Kill(ctx context.Context, target string) (killed int, err erro
 			continue
 		}
 
-		cmd, rErr := hpccore.Render(b.Cfg.KillTemplate, map[string]string{"ext_id": tk.ExternalID})
+		cmd, rErr := utils.Render(b.Cfg.KillTemplate, map[string]string{"ext_id": tk.ExternalID})
 		if rErr != nil {
 			problems = append(problems, fmt.Sprintf("%s: render kill_template: %v", tk.ID, rErr))
 			continue
@@ -68,7 +68,7 @@ func (b *Backend) Kill(ctx context.Context, target string) (killed int, err erro
 		opLog("KILL OK task=%s ext=%s cmd: %s", tk.ID, tk.ExternalID, cmd)
 
 		if uErr := b.Store.UpdateTaskStatus(ctx, tk.ID, "killed",
-			map[string]any{"finished_at": nowUnix(), "status_source": hpccore.SourceRunq}); uErr != nil {
+			map[string]any{"finished_at": nowUnix(), "status_source": SourceRunq}); uErr != nil {
 			return killed, fmt.Errorf("mark task %s killed: %w", tk.ID, uErr)
 		}
 		killed++

@@ -3,12 +3,9 @@ package cli
 import (
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
-	"strings"
 	"time"
 
-	"github.com/gliese129/runq/internal/store"
+	"github.com/gliese129/runq/internal/backend"
 	"github.com/gliese129/runq/internal/utils"
 	"github.com/spf13/cobra"
 )
@@ -34,6 +31,9 @@ func init() {
 	cleanCmd.Flags().String("older-than", "", "Age threshold (required), e.g. 7d, 1m2w, 2w3d4h")
 	cleanCmd.Flags().Bool("show", false, "Preview what would be deleted without actually deleting")
 	cleanCmd.MarkFlagRequired("older-than")
+
+	cleanCmd.GroupID = groupDiag
+	rootCmd.AddCommand(cleanCmd)
 }
 
 func runClean(cmd *cobra.Command, args []string) error {
@@ -44,96 +44,37 @@ func runClean(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-
 	cutoff := time.Now().Add(-dur)
 
-	// Open DB directly — clean works without daemon running.
-	dbPath := store.DefaultDBPath()
-	st, err := store.Open(dbPath)
-	if err != nil {
-		return fmt.Errorf("open database: %w", err)
-	}
-	defer st.Close()
+	return withBackend(func(be backend.Backend) error {
+		result, err := be.CleanOldTasks(context.Background(), cutoff, showOnly)
+		if err != nil {
+			return err
+		}
 
-	ctx := context.Background()
-
-	tasks, err := st.ListFinishedTasksBefore(ctx, cutoff)
-	if err != nil {
-		return fmt.Errorf("query tasks: %w", err)
-	}
-
-	if len(tasks) == 0 {
-		fmt.Println("Nothing to clean.")
-		return nil
-	}
-
-	if showOnly {
-		fmt.Printf("Would clean %d tasks (finished before %s):\n", len(tasks), cutoff.Format("2006-01-02 15:04"))
-		for _, t := range tasks {
-			finished := ""
-			if t.FinishedAt != nil {
-				finished = t.FinishedAt.Format("2006-01-02 15:04")
+		if showOnly {
+			if len(result.Preview) == 0 {
+				fmt.Println("Nothing to clean.")
+				return nil
 			}
-			fmt.Printf("  %s  %-8s  finished=%s  log=%s\n", t.ID, t.Status, finished, t.LogPath)
+			fmt.Printf("Would clean %d tasks (finished before %s):\n", len(result.Preview), cutoff.Format("2006-01-02 15:04"))
+			for _, p := range result.Preview {
+				finished := ""
+				if p.FinishedAt != nil {
+					finished = p.FinishedAt.Format("2006-01-02 15:04")
+				}
+				fmt.Printf("  %s  %-8s  finished=%s\n", p.TaskID, p.Status, finished)
+			}
+			return nil
 		}
-		return nil
-	}
 
-	// Delete log files and task records.
-	var deletedTasks int
-	var freedBytes int64
-	for _, t := range tasks {
-		freed := cleanTaskArtifacts(t)
-		freedBytes += freed
-
-		if err := st.DeleteTask(ctx, t.ID); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: failed to delete task %s: %v\n", t.ID, err)
-			continue
+		fmt.Printf("Cleaned %d tasks, %d jobs", result.Tasks, result.Jobs)
+		if result.FreedBytes > 0 {
+			fmt.Printf(", freed %s", formatBytes(result.FreedBytes))
 		}
-		deletedTasks++
-	}
-
-	// Delete orphan jobs (done jobs with no remaining tasks).
-	deletedJobs, err := st.DeleteOrphanJobs(ctx)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: failed to clean orphan jobs: %v\n", err)
-	}
-
-	fmt.Printf("Cleaned %d tasks, %d jobs", deletedTasks, deletedJobs)
-	if freedBytes > 0 {
-		fmt.Printf(", freed %s", formatBytes(freedBytes))
-	}
-	fmt.Println()
-	return nil
-}
-
-// cleanTaskArtifacts removes the task's workspace directory (task_dir) and log
-// file (if it lives outside task_dir). Returns total bytes freed.
-func cleanTaskArtifacts(t store.TaskRow) int64 {
-	var freed int64
-	if t.TaskDir != "" {
-		freed += dirSize(t.TaskDir)
-		os.RemoveAll(t.TaskDir)
-	}
-	if t.LogPath != "" && (t.TaskDir == "" || !strings.HasPrefix(t.LogPath, t.TaskDir)) {
-		if info, err := os.Stat(t.LogPath); err == nil {
-			freed += info.Size()
-			os.Remove(t.LogPath)
-		}
-	}
-	return freed
-}
-
-// dirSize returns the total size of all regular files under dir.
-func dirSize(dir string) int64 {
-	var total int64
-	filepath.Walk(dir, func(_ string, info os.FileInfo, err error) error {
-		if err == nil && !info.IsDir() {
-			total += info.Size()
-		}
+		fmt.Println()
 		return nil
 	})
-	return total
 }
 
 // formatBytes formats byte count into human-readable form.

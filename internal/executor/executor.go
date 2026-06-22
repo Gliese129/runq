@@ -15,8 +15,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/gliese129/runq/internal/hpccore"
-
 	"github.com/gliese129/runq/internal/utils"
 )
 
@@ -75,9 +73,9 @@ func (e *Executor) Start(parentCtx context.Context, spec RunSpec) (Result, error
 	// file's values — secrets stay out of the DB, logs, and UIs.
 	if envFile := spec.Env["RUNQ_ENV_FILE"]; envFile != "" {
 		var b strings.Builder
-		fmt.Fprintf(&b, "if [ -f %s ]; then set -a; . %s; set +a; fi\n", hpccore.ShellQuote(envFile), hpccore.ShellQuote(envFile))
+		fmt.Fprintf(&b, "if [ -f %s ]; then set -a; . %s; set +a; fi\n", utils.ShellQuote(envFile), utils.ShellQuote(envFile))
 		for k, v := range spec.Env {
-			fmt.Fprintf(&b, "export %s=%s\n", k, hpccore.ShellQuote(v))
+			fmt.Fprintf(&b, "export %s=%s\n", k, utils.ShellQuote(v))
 		}
 		b.WriteString(command)
 		command = b.String()

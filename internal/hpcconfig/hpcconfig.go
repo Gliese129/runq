@@ -25,7 +25,7 @@ import (
 
 // Config is the `hpc:` section of ~/.runq/config.yaml. The cluster dialect
 // lives entirely in these templates — runq does no Slurm/PBS/SGE parsing,
-// only interpolation (via hpccore.Render) and one user-supplied regex.
+// only interpolation (via utils.Render) and one user-supplied regex.
 type Config struct {
 	// SubmitTemplate is the shell command that queues a job. Available vars:
 	// {{run_sh}} {{gpus}} {{job_id}} {{task_id}} {{task_dir}} {{name}} + {{param.*}}.
@@ -36,7 +36,7 @@ type Config struct {
 	// StatusTemplate optionally probes scheduler state. Var: {{ext_id}}.
 	// Empty → status comes from status.json alone.
 	//
-	// WITHOUT a status_parser: the raw output is interpreted by hpccore.ParseSignal
+	// WITHOUT a status_parser: the raw output is interpreted by hpc.ParseSignal
 	// (canonical tokens + Slurm sacct states); empty output = gone, present-but-
 	// unrecognized = alive, and a non-zero command exit = no info (SchedUnknown).
 	//

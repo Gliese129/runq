@@ -2,7 +2,6 @@ package hpc
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -13,19 +12,11 @@ import (
 	"time"
 
 	"github.com/gliese129/runq/internal/hpcconfig"
-	"github.com/gliese129/runq/internal/hpccore"
 	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/project"
 	"github.com/gliese129/runq/internal/store"
 	"github.com/gliese129/runq/internal/submitplan"
 )
-
-func skipIfNoHPCCore(t *testing.T) {
-	t.Helper()
-	if _, err := hpccore.Render("{{x}}", map[string]string{"x": "y"}); errors.Is(err, hpccore.ErrNotImplemented) {
-		t.Skip("internal/hpccore not implemented yet")
-	}
-}
 
 func newTestBackend(t *testing.T, cfg *hpcconfig.Config, runner Runner) (*Backend, *project.Config, job.JobConfig) {
 	t.Helper()
@@ -48,7 +39,7 @@ func newTestBackend(t *testing.T, cfg *hpcconfig.Config, runner Runner) (*Backen
 // stays pending — NOT failed — because the job may be running untracked, and
 // pending is non-terminal so Refresh won't stamp a bogus finished_at.
 func TestSubmitUnparseableIDLeavesVisibleTask(t *testing.T) {
-	skipIfNoHPCCore(t)
+
 	cfg := &hpcconfig.Config{SubmitTemplate: "submit {{run_sh}}", SubmitIDRegex: `job ([0-9]+)`, KillTemplate: "cancel {{ext_id}}"}
 	runner := func(ctx context.Context, command string) (string, error) {
 		if strings.HasPrefix(command, "submit") {
@@ -81,7 +72,7 @@ func TestSubmitUnparseableIDLeavesVisibleTask(t *testing.T) {
 // #3: when the cancel command fails, the task must NOT be marked killed (else
 // the DB says killed while the cluster job keeps running).
 func TestKillFailureLeavesTaskUnkilled(t *testing.T) {
-	skipIfNoHPCCore(t)
+
 	cfg := &hpcconfig.Config{SubmitTemplate: "submit {{run_sh}}", SubmitIDRegex: `job ([0-9]+)`, KillTemplate: "cancel {{ext_id}}"}
 	runner := func(ctx context.Context, command string) (string, error) {
 		switch {
@@ -113,7 +104,7 @@ func TestKillFailureLeavesTaskUnkilled(t *testing.T) {
 // cancelled — Kill must refuse and NOT mark it killed (the job may be running
 // untracked; recording killed would be a lie about what runq did).
 func TestKillNoExternalIDRefuses(t *testing.T) {
-	skipIfNoHPCCore(t)
+
 	cfg := &hpcconfig.Config{SubmitTemplate: "submit {{run_sh}}", SubmitIDRegex: `job ([0-9]+)`, KillTemplate: "cancel {{ext_id}}"}
 	runner := func(ctx context.Context, command string) (string, error) {
 		if strings.HasPrefix(command, "submit") {
@@ -146,7 +137,7 @@ func TestKillNoExternalIDRefuses(t *testing.T) {
 // F1: task params are exposed to submit_template as {{param.*}}, so per-task
 // scheduler knobs (walltime, queue, job name) can live in the sweep.
 func TestSubmitTemplateParamNamespace(t *testing.T) {
-	skipIfNoHPCCore(t)
+
 	cfg := &hpcconfig.Config{
 		SubmitTemplate: "qsub -l h_rt={{param.h_rt}} -N {{param.lr}} {{run_sh}}",
 		SubmitIDRegex:  `job ([0-9]+)`,
@@ -177,7 +168,7 @@ func TestSubmitTemplateParamNamespace(t *testing.T) {
 
 // F2: a failing setup_command aborts before anything is persisted/submitted.
 func TestSetupCommandFailureAborts(t *testing.T) {
-	skipIfNoHPCCore(t)
+
 	cfg := &hpcconfig.Config{SubmitTemplate: "submit {{run_sh}}", SubmitIDRegex: `job ([0-9]+)`, KillTemplate: "cancel {{ext_id}}"}
 	submitCalls := 0
 	runner := func(ctx context.Context, command string) (string, error) {
@@ -204,7 +195,7 @@ func TestSetupCommandFailureAborts(t *testing.T) {
 // demanded by command_template nor leak into {{args}} — no fake-consumption
 // workarounds needed.
 func TestSchedulerParamsExemptFromCommand(t *testing.T) {
-	skipIfNoHPCCore(t)
+
 	cfg := &hpcconfig.Config{
 		SubmitTemplate: "qsub -l h_rt={{param.h_rt}} {{run_sh}}",
 		SubmitIDRegex:  `job ([0-9]+)`,
@@ -252,7 +243,7 @@ func TestSubmitEnvPrefixResolvesSameLineReferences(t *testing.T) {
 // table actually carries the name, and the override beats the project
 // template.
 func TestSubmitCommandReceivesRenderedJobName(t *testing.T) {
-	skipIfNoHPCCore(t)
+
 	cfg := &hpcconfig.Config{
 		SubmitTemplate: "qsub -N {{name}} {{run_sh}}",
 		SubmitIDRegex:  `job ([0-9]+)`,
@@ -383,7 +374,7 @@ func TestRunScriptTrapWritesKilledOnTerm(t *testing.T) {
 // the window reconciles from local files but runs NO qstat. An explicit
 // Refresh() is the user's command and always probes.
 func TestStatusThrottlesSchedulerProbe(t *testing.T) {
-	skipIfNoHPCCore(t)
+
 	cfg := &hpcconfig.Config{
 		SubmitTemplate: "qsub {{run_sh}}",
 		SubmitIDRegex:  `job ([0-9]+)`,
@@ -429,7 +420,7 @@ func TestStatusThrottlesSchedulerProbe(t *testing.T) {
 // `qstat` and row-select in the parser) must cost ONE scheduler query per
 // refresh pass regardless of task count.
 func TestListingStatusTemplateBatchesPerPass(t *testing.T) {
-	skipIfNoHPCCore(t)
+
 	cfg := &hpcconfig.Config{
 		SubmitTemplate: "qsub {{run_sh}}",
 		SubmitIDRegex:  `job ([0-9]+)`,
@@ -480,7 +471,7 @@ func TestListingStatusTemplateBatchesPerPass(t *testing.T) {
 // lives in Submit (one backend point: GUI rerun/draft/import, CLI,
 // --project-file all pass through here).
 func TestSubmitRefusesArchivedProject(t *testing.T) {
-	skipIfNoHPCCore(t)
+
 	cfg := &hpcconfig.Config{
 		SubmitTemplate: "qsub {{run_sh}}",
 		SubmitIDRegex:  `job ([0-9]+)`,

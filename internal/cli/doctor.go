@@ -16,6 +16,11 @@ import (
 	"github.com/spf13/cobra"
 )
 
+func init() {
+	doctorCmd.GroupID = groupDiag
+	rootCmd.AddCommand(doctorCmd)
+}
+
 var doctorCmd = &cobra.Command{
 	Use:   "doctor",
 	Short: "Check system health for the configured mode (daemon or hpc)",

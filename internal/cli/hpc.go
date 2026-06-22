@@ -7,13 +7,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gliese129/runq/internal/config"
 	"github.com/gliese129/runq/internal/backend"
-	"github.com/gliese129/runq/internal/hpc"
+	"github.com/gliese129/runq/internal/config"
 	"github.com/gliese129/runq/internal/hpcconfig"
 	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/project"
-	"github.com/gliese129/runq/internal/store"
 	"github.com/gliese129/runq/internal/utils"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
@@ -133,30 +131,39 @@ func init() {
 	rootCmd.AddCommand(hpcCmd)
 }
 
-// openHPCStore ensures the data dir exists and opens the HPC store.
-func openHPCStore() (*store.Store, error) {
-	if err := os.MkdirAll(hpcconfig.DataDir(), 0o755); err != nil {
-		return nil, fmt.Errorf("create data dir: %w", err)
+// withHPCBackend opens an HPC backend via the factory and runs fn.
+func withHPCBackend(fn func(backend.Backend) error) error {
+	be, closer, err := backend.NewHPCBackendFromConfig()
+	if err != nil {
+		return err
 	}
-	return store.Open(hpcconfig.DBPath())
+	defer closer()
+	return fn(be)
 }
 
-// newHPCBackend loads both configs, opens the store, and returns a ready
-// Backend. The caller must defer st.Close() on the returned store.
-func newHPCBackend() (*hpc.Backend, *store.Store, error) {
-	globalCfg, err := config.Load()
-	if err != nil {
-		return nil, nil, err
+// ensureProjectRegistered registers a project from --project-file if provided.
+// The project is registered in the DB so SubmitJob can find it by name.
+func ensureProjectRegistered(cmd *cobra.Command, be backend.Backend, jobProject string) error {
+	pf, _ := cmd.Flags().GetString("project-file")
+	if pf == "" {
+		return nil
 	}
-	hpcCfg, err := hpcconfig.Load()
+	buf, err := os.ReadFile(pf)
 	if err != nil {
-		return nil, nil, err
+		return err
 	}
-	st, err := openHPCStore()
-	if err != nil {
-		return nil, nil, err
+	var cfg project.Config
+	if err := yaml.Unmarshal(buf, &cfg); err != nil {
+		return fmt.Errorf("parse %s: %w", pf, err)
 	}
-	return hpc.New(hpcCfg, st, globalCfg), st, nil
+	if cfg.ProjectName == "" {
+		cfg.ProjectName = jobProject
+	}
+	ctx := context.Background()
+	if _, err := be.GetProject(ctx, cfg.ProjectName); err != nil {
+		return be.CreateProject(ctx, cfg)
+	}
+	return be.UpdateProject(ctx, cfg)
 }
 
 func runHPCInit(cmd *cobra.Command, args []string) error {
@@ -171,10 +178,6 @@ func runHPCInit(cmd *cobra.Command, args []string) error {
 		fmt.Printf("%s already exists (left unchanged)\n", path)
 	}
 
-	// Someone running `hpc init` almost certainly wants the unified CLI
-	// (dashboard included) in HPC mode. Only flip the DEFAULT — an explicit
-	// `mode: daemon` is user intent and stays. Either way say what happened
-	// (side effects are explicit, philosophy C5).
 	rawMode, explicit := config.RawMode()
 	switch {
 	case !explicit:
@@ -184,7 +187,7 @@ func runHPCInit(cmd *cobra.Command, args []string) error {
 			fmt.Println("mode set to hpc (was unset) — `runq dashboard` and friends now use the HPC backend")
 		}
 	case rawMode == config.ModeHPC:
-		// already hpc — nothing to announce
+		// already hpc
 	default:
 		fmt.Printf("note: mode is %q — run `runq config set mode=hpc` if this machine should use the HPC backend\n", rawMode)
 	}
@@ -200,7 +203,6 @@ func runHPCSubmit(cmd *cobra.Command, args []string) error {
 	if err := yaml.Unmarshal(buf, &jobCfg); err != nil {
 		return fmt.Errorf("parse %s: %w", args[0], err)
 	}
-
 	if noteOverride, _ := cmd.Flags().GetString("note"); noteOverride != "" {
 		jobCfg.Note = noteOverride
 	}
@@ -208,287 +210,214 @@ func runHPCSubmit(cmd *cobra.Command, args []string) error {
 	skip, _ := cmd.Flags().GetBool("no-preflight")
 
 	if dry, _ := cmd.Flags().GetBool("dry-run"); dry {
-		b, st, err := newHPCBackend()
+		return withHPCBackend(func(be backend.Backend) error {
+			if err := ensureProjectRegistered(cmd, be, jobCfg.Project); err != nil {
+				return err
+			}
+			out, err := be.PreviewSubmit(context.Background(), jobCfg, skip)
+			if err != nil {
+				return err
+			}
+			fmt.Print(out)
+			return nil
+		})
+	}
+
+	return withHPCBackend(func(be backend.Backend) error {
+		if err := ensureProjectRegistered(cmd, be, jobCfg.Project); err != nil {
+			return err
+		}
+		jobID, n, err := be.SubmitJob(context.Background(), jobCfg, backend.SubmitOptions{SkipPreflight: skip})
 		if err != nil {
 			return err
 		}
-		defer st.Close()
-		proj, err := resolveHPCProject(cmd, st, jobCfg.Project)
-		if err != nil {
-			return err
-		}
-		out, err := b.Preview(context.Background(), jobCfg, proj, skip)
-		if err != nil {
-			return err
-		}
-		fmt.Print(out)
+		fmt.Printf("submitted job %s (%d tasks)\n", utils.IDColor(jobID), n)
 		return nil
-	}
-
-	jobID, n, err := submitHPCJobConfig(cmd, jobCfg, skip)
-	if err != nil {
-		return err
-	}
-	fmt.Printf("submitted job %s (%d tasks)\n", utils.IDColor(jobID), n)
-	return nil
+	})
 }
 
-// previewHPCJobConfig is `runq submit --dry` in hpc mode: the same Preview
-// text as `runq hpc submit --dry-run` (preflight, run.sh, submit command).
+// previewHPCJobConfig is `runq submit --dry` in hpc mode.
 func previewHPCJobConfig(cmd *cobra.Command, jobCfg job.JobConfig, skipPreflight bool) error {
-	b, st, err := newHPCBackend()
-	if err != nil {
-		return err
-	}
-	defer st.Close()
-	proj, err := resolveHPCProject(cmd, st, jobCfg.Project)
-	if err != nil {
-		return err
-	}
-	out, err := b.Preview(context.Background(), jobCfg, proj, skipPreflight)
-	if err != nil {
-		return err
-	}
-	fmt.Println(out)
-	return nil
-}
-
-func submitHPCJobConfig(cmd *cobra.Command, jobCfg job.JobConfig, skipPreflight bool) (string, int, error) {
-	b, st, err := newHPCBackend()
-	if err != nil {
-		return "", 0, err
-	}
-	defer st.Close()
-
-	proj, err := resolveHPCProject(cmd, st, jobCfg.Project)
-	if err != nil {
-		return "", 0, err
-	}
-	return b.Submit(context.Background(), jobCfg, proj, hpc.SubmitOpts{SkipPreflight: skipPreflight})
-}
-
-// resolveHPCProject loads the project config from --project-file when given,
-// otherwise from the HPC store's registry. When loaded from a file with no
-// project_name, it inherits the job's project field so the FK lines up.
-func resolveHPCProject(cmd *cobra.Command, st *store.Store, jobProject string) (*project.Config, error) {
-	if pf, _ := cmd.Flags().GetString("project-file"); pf != "" {
-		buf, err := os.ReadFile(pf)
+	return withHPCBackend(func(be backend.Backend) error {
+		if err := ensureProjectRegistered(cmd, be, jobCfg.Project); err != nil {
+			return err
+		}
+		out, err := be.PreviewSubmit(context.Background(), jobCfg, skipPreflight)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		var cfg project.Config
-		if err := yaml.Unmarshal(buf, &cfg); err != nil {
-			return nil, fmt.Errorf("parse %s: %w", pf, err)
-		}
-		if cfg.ProjectName == "" {
-			cfg.ProjectName = jobProject
-		}
-		return &cfg, nil
-	}
-
-	reg := project.NewRegistry(st.DB())
-	p, err := reg.Get(jobProject)
-	if err != nil {
-		return nil, fmt.Errorf("project %q not in HPC store — pass --project-file or register it first: %w", jobProject, err)
-	}
-	return p, nil
+		fmt.Println(out)
+		return nil
+	})
 }
 
 func runHPCStatus(cmd *cobra.Command, args []string) error {
-	b, st, err := newHPCBackend()
-	if err != nil {
-		return err
-	}
-	defer st.Close()
+	return withHPCBackend(func(be backend.Backend) error {
+		ctx := context.Background()
+		if err := be.RefreshJob(ctx, args[0]); err != nil {
+			return err
+		}
+		detail, err := be.GetJob(ctx, args[0])
+		if err != nil {
+			return err
+		}
 
-	view, err := b.Status(context.Background(), args[0])
-	if err != nil {
-		return err
-	}
+		if jsonOut, _ := cmd.Flags().GetBool("json"); jsonOut {
+			printJSON(map[string]any{
+				"capabilities": be.Capabilities(),
+				"job":          detail.Job,
+				"tasks":        detail.Tasks,
+			})
+			return nil
+		}
 
-	if jsonOut, _ := cmd.Flags().GetBool("json"); jsonOut {
-		// Machine output carries the backend self-description so scripts/AI
-		// can branch on state_model/kill_async without parsing prose (X1).
-		printJSON(map[string]any{
-			"capabilities": backend.NewHPCBackend(b, st).Capabilities(),
-			"job":          view.Job,
-			"tasks":        view.Tasks,
-		})
+		fmt.Printf("job %s  project=%s  status=%s  tasks=%d\n\n",
+			utils.IDColor(detail.Job.ID), detail.Job.Project,
+			utils.StatusColor(detail.Job.Status), detail.Job.Tasks.Total)
+
+		w := newTable()
+		fmt.Fprintf(w, "TASK_ID\tEXT_ID\tSTATUS\tSOURCE\tAGE\n")
+		for _, t := range detail.Tasks {
+			age := ""
+			if t.StartedAt != nil {
+				age = time.Since(time.Unix(*t.StartedAt, 0)).Truncate(time.Second).String()
+			}
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
+				utils.IDColor(t.ID), t.ExternalID, utils.StatusColor(t.Status), t.StatusSource, age)
+		}
+		w.Flush()
 		return nil
-	}
-
-	fmt.Printf("job %s  project=%s  status=%s  tasks=%d\n\n",
-		utils.IDColor(view.Job.ID), view.Job.ProjectName,
-		utils.StatusColor(view.Job.Status), view.Job.TotalTasks)
-
-	w := newTable()
-	fmt.Fprintf(w, "TASK_ID\tEXT_ID\tSTATUS\tSOURCE\tAGE\n")
-	for _, t := range view.Tasks {
-		age := time.Since(t.EnqueuedAt).Truncate(time.Second)
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
-			utils.IDColor(t.ID), t.ExternalID, utils.StatusColor(t.Status), t.StatusSource, age)
-	}
-	w.Flush()
-	return nil
+	})
 }
 
 func runHPCKill(cmd *cobra.Command, args []string) error {
-	b, st, err := newHPCBackend()
-	if err != nil {
-		return err
-	}
-	defer st.Close()
-
-	n, err := b.Kill(context.Background(), args[0])
-	if err != nil {
-		return err
-	}
-	fmt.Printf("killed %d task(s)\n", n)
-	return nil
-}
-
-// hpcJobItem is the stable JSON shape for `hpc ls` (also consumed by L2-D / AI).
-type hpcJobItem struct {
-	JobID      string `json:"job_id"`
-	Project    string `json:"project"`
-	Status     string `json:"status"`
-	TotalTasks int    `json:"total_tasks"`
+	return withHPCBackend(func(be backend.Backend) error {
+		// Try as job first, then as task.
+		if err := be.KillJob(context.Background(), args[0]); err != nil {
+			if err2 := be.KillTask(context.Background(), args[0]); err2 != nil {
+				return err // return original job error
+			}
+			fmt.Println("killed 1 task")
+			return nil
+		}
+		fmt.Println("kill signal sent")
+		return nil
+	})
 }
 
 func runHPCLs(cmd *cobra.Command, args []string) error {
-	st, err := openHPCStore()
-	if err != nil {
-		return err
-	}
-	defer st.Close()
+	return withHPCBackend(func(be backend.Backend) error {
+		jobs, err := be.ListJobs(context.Background(), "")
+		if err != nil {
+			return err
+		}
 
-	jobs, err := st.ListJobs(context.Background(), "")
-	if err != nil {
-		return err
-	}
-	items := make([]hpcJobItem, 0, len(jobs))
-	for _, j := range jobs {
-		items = append(items, hpcJobItem{JobID: j.ID, Project: j.ProjectName, Status: j.Status, TotalTasks: j.TotalTasks})
-	}
-
-	if jsonOut, _ := cmd.Flags().GetBool("json"); jsonOut {
-		printJSON(items)
+		if jsonOut, _ := cmd.Flags().GetBool("json"); jsonOut {
+			printJSON(jobs)
+			return nil
+		}
+		if len(jobs) == 0 {
+			fmt.Println("no jobs")
+			return nil
+		}
+		w := newTable()
+		fmt.Fprintf(w, "JOB_ID\tPROJECT\tSTATUS\tTASKS\n")
+		for _, j := range jobs {
+			fmt.Fprintf(w, "%s\t%s\t%s\t%d\n",
+				utils.IDColor(j.ID), j.Project, utils.StatusColor(j.Status), j.Tasks.Total)
+		}
+		w.Flush()
 		return nil
-	}
-	if len(items) == 0 {
-		fmt.Println("no jobs")
-		return nil
-	}
-	w := newTable()
-	fmt.Fprintf(w, "JOB_ID\tPROJECT\tSTATUS\tTASKS\n")
-	for _, it := range items {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%d\n",
-			utils.IDColor(it.JobID), it.Project, utils.StatusColor(it.Status), it.TotalTasks)
-	}
-	w.Flush()
-	return nil
-}
-
-// hpcLeaderboard refreshes the job then returns its tasks ranked by --key. Shared
-// by best/collect so they stay thin and consistent.
-func hpcLeaderboard(cmd *cobra.Command, jobID string) ([]store.TaskScore, string, error) {
-	key, _ := cmd.Flags().GetString("key")
-	if key == "" {
-		return nil, "", fmt.Errorf("--key is required (e.g. --key loss)")
-	}
-	maximize, _ := cmd.Flags().GetBool("max")
-
-	b, st, err := newHPCBackend()
-	if err != nil {
-		return nil, "", err
-	}
-	defer st.Close()
-
-	ctx := context.Background()
-	if err := b.Refresh(ctx, jobID); err != nil {
-		return nil, "", err
-	}
-	scores, err := st.MetricLeaderboard(ctx, jobID, key, maximize)
-	return scores, key, err
+	})
 }
 
 func runHPCBest(cmd *cobra.Command, args []string) error {
-	scores, key, err := hpcLeaderboard(cmd, args[0])
-	if err != nil {
-		return err
+	key, _ := cmd.Flags().GetString("key")
+	if key == "" {
+		return fmt.Errorf("--key is required (e.g. --key loss)")
 	}
-	var top *store.TaskScore
-	for i := range scores {
-		if scores[i].HasValue {
-			top = &scores[i]
-			break
-		}
-	}
+	maximize, _ := cmd.Flags().GetBool("max")
 
-	if jsonOut, _ := cmd.Flags().GetBool("json"); jsonOut {
-		printJSON(top)
+	return withHPCBackend(func(be backend.Backend) error {
+		ctx := context.Background()
+		if err := be.RefreshJob(ctx, args[0]); err != nil {
+			return err
+		}
+		rows, err := be.CompareMetrics(ctx, args[0], key, maximize)
+		if err != nil {
+			return err
+		}
+
+		var top *backend.CompareRow
+		for i := range rows {
+			if rows[i].HasValue {
+				top = &rows[i]
+				break
+			}
+		}
+
+		if jsonOut, _ := cmd.Flags().GetBool("json"); jsonOut {
+			printJSON(top)
+			return nil
+		}
+		if top == nil {
+			fmt.Printf("no task has metric %q yet\n", key)
+			return nil
+		}
+		fmt.Printf("best %s = %v\n  task   %s (%s)\n  params %v\n",
+			key, top.Best, utils.IDColor(top.TaskID), utils.StatusColor(top.Status), top.Params)
 		return nil
-	}
-	if top == nil {
-		fmt.Printf("no task has metric %q yet\n", key)
-		return nil
-	}
-	fmt.Printf("best %s = %v\n  task   %s (%s, source=%s)\n  params %v\n",
-		key, top.Value, utils.IDColor(top.TaskID), utils.StatusColor(top.Status), top.Source, top.Params)
-	return nil
+	})
 }
 
 func runHPCCollect(cmd *cobra.Command, args []string) error {
-	scores, key, err := hpcLeaderboard(cmd, args[0])
-	if err != nil {
-		return err
+	key, _ := cmd.Flags().GetString("key")
+	if key == "" {
+		return fmt.Errorf("--key is required (e.g. --key loss)")
 	}
+	maximize, _ := cmd.Flags().GetBool("max")
 
-	if jsonOut, _ := cmd.Flags().GetBool("json"); jsonOut {
-		printJSON(scores)
-		return nil
-	}
-	if len(scores) == 0 {
-		fmt.Println("no tasks")
-		return nil
-	}
-	w := newTable()
-	fmt.Fprintf(w, "TASK_ID\tSTATUS\tSOURCE\t%s\tPARAMS\n", strings.ToUpper(key))
-	for _, s := range scores {
-		val := "-"
-		if s.HasValue {
-			val = fmt.Sprintf("%v", s.Value)
+	return withHPCBackend(func(be backend.Backend) error {
+		ctx := context.Background()
+		if err := be.RefreshJob(ctx, args[0]); err != nil {
+			return err
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%v\n",
-			utils.IDColor(s.TaskID), utils.StatusColor(s.Status), s.Source, val, s.Params)
-	}
-	w.Flush()
-	return nil
+		rows, err := be.CompareMetrics(ctx, args[0], key, maximize)
+		if err != nil {
+			return err
+		}
+
+		if jsonOut, _ := cmd.Flags().GetBool("json"); jsonOut {
+			printJSON(rows)
+			return nil
+		}
+		if len(rows) == 0 {
+			fmt.Println("no tasks")
+			return nil
+		}
+		w := newTable()
+		fmt.Fprintf(w, "TASK_ID\tSTATUS\t%s\tPARAMS\n", strings.ToUpper(key))
+		for _, r := range rows {
+			val := "-"
+			if r.HasValue {
+				val = fmt.Sprintf("%v", r.Best)
+			}
+			fmt.Fprintf(w, "%s\t%s\t%s\t%v\n",
+				utils.IDColor(r.TaskID), utils.StatusColor(r.Status), val, r.Params)
+		}
+		w.Flush()
+		return nil
+	})
 }
 
 func runHPCRm(cmd *cobra.Command, args []string) error {
-	st, err := openHPCStore()
-	if err != nil {
-		return err
-	}
-	defer st.Close()
-
-	ctx := context.Background()
-	j, err := st.GetJob(ctx, args[0])
-	if err != nil {
-		return err
-	}
-	if j == nil {
-		return fmt.Errorf("job %q not found", args[0])
-	}
-	if j.Status != "done" {
-		return fmt.Errorf("job %q is %s, only completed jobs can be removed (kill it first?)", args[0], j.Status)
-	}
-	if err := st.DeleteJob(ctx, args[0]); err != nil {
-		return err
-	}
-	fmt.Printf("removed job %s (DB records only; files on disk are untouched)\n", utils.IDColor(args[0]))
-	return nil
+	return withHPCBackend(func(be backend.Backend) error {
+		if err := be.DeleteJob(context.Background(), args[0]); err != nil {
+			return err
+		}
+		fmt.Printf("removed job %s (DB records only; files on disk are untouched)\n", utils.IDColor(args[0]))
+		return nil
+	})
 }
 
 func runHPCClean(cmd *cobra.Command, args []string) error {
@@ -501,56 +430,33 @@ func runHPCClean(cmd *cobra.Command, args []string) error {
 	}
 	cutoff := time.Now().Add(-dur)
 
-	st, err := openHPCStore()
-	if err != nil {
-		return err
-	}
-	defer st.Close()
+	return withHPCBackend(func(be backend.Backend) error {
+		result, err := be.CleanOldTasks(context.Background(), cutoff, showOnly)
+		if err != nil {
+			return err
+		}
 
-	ctx := context.Background()
-	tasks, err := st.ListFinishedTasksBefore(ctx, cutoff)
-	if err != nil {
-		return fmt.Errorf("query tasks: %w", err)
-	}
-	if len(tasks) == 0 {
-		fmt.Println("Nothing to clean.")
-		return nil
-	}
-
-	if showOnly {
-		fmt.Printf("Would clean %d tasks (finished before %s):\n", len(tasks), cutoff.Format("2006-01-02 15:04"))
-		for _, t := range tasks {
-			finished := ""
-			if t.FinishedAt != nil {
-				finished = t.FinishedAt.Format("2006-01-02 15:04")
+		if showOnly {
+			if len(result.Preview) == 0 {
+				fmt.Println("Nothing to clean.")
+				return nil
 			}
-			fmt.Printf("  %s  %-8s  finished=%s  task_dir=%s\n", t.ID, t.Status, finished, t.TaskDir)
+			fmt.Printf("Would clean %d tasks (finished before %s):\n", len(result.Preview), cutoff.Format("2006-01-02 15:04"))
+			for _, p := range result.Preview {
+				finished := ""
+				if p.FinishedAt != nil {
+					finished = p.FinishedAt.Format("2006-01-02 15:04")
+				}
+				fmt.Printf("  %s  %-8s  finished=%s  task_dir=%s\n", p.TaskID, p.Status, finished, p.TaskDir)
+			}
+			return nil
 		}
+
+		fmt.Printf("Cleaned %d tasks, %d jobs", result.Tasks, result.Jobs)
+		if result.FreedBytes > 0 {
+			fmt.Printf(", freed %s", formatBytes(result.FreedBytes))
+		}
+		fmt.Println()
 		return nil
-	}
-
-	var deletedTasks int
-	var freedBytes int64
-	for _, t := range tasks {
-		freed := cleanTaskArtifacts(t)
-		freedBytes += freed
-
-		if err := st.DeleteTask(ctx, t.ID); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: failed to delete task %s: %v\n", t.ID, err)
-			continue
-		}
-		deletedTasks++
-	}
-
-	deletedJobs, err := st.DeleteOrphanJobs(ctx)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: failed to clean orphan jobs: %v\n", err)
-	}
-
-	fmt.Printf("Cleaned %d tasks, %d jobs", deletedTasks, deletedJobs)
-	if freedBytes > 0 {
-		fmt.Printf(", freed %s", formatBytes(freedBytes))
-	}
-	fmt.Println()
-	return nil
+	})
 }

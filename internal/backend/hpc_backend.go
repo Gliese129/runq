@@ -3,6 +3,9 @@ package backend
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/gliese129/runq/internal/hpc"
@@ -25,7 +28,7 @@ func (b *HPCBackend) Capabilities() Capabilities {
 		GPUMap:        false, // no node-local GPU visibility from the login node
 		PauseResume:   false, // cluster queues have no runq-level pause concept
 		LiveLog:       true,  // deployment assumption: dashboard runs on a login node with the shared FS
-		Retry:         true,
+		Retry:         false, // HPC has no resident process to re-pick pending tasks
 		StateModel:    "poll", // best-effort projection; staleness must be surfaced
 		KillAsync:     true,   // qdel/scancel is forwarded; killed persisted as soon as the cancel command succeeds
 		SubmitPreview: true,   // zero-disk dry-run via the submit code path
@@ -181,30 +184,10 @@ func (b *HPCBackend) KillTask(ctx context.Context, taskID string) error {
 	return err
 }
 
-func (b *HPCBackend) RetryTask(ctx context.Context, taskID string) error {
-	task, err := b.store.GetTask(ctx, taskID)
-	if err != nil {
-		return err
-	}
-	if task == nil {
-		return fmt.Errorf("task %q not found", taskID)
-	}
-	if task.Status != "failed" && task.Status != "killed" {
-		return fmt.Errorf("task %q is %s, only failed/killed tasks can be retried", taskID, task.Status)
-	}
-	if err := b.store.UpdateTaskStatus(ctx, taskID, "pending", map[string]any{
-		"gpus":          nil,
-		"pid":           nil,
-		"start_time":    nil,
-		"started_at":    nil,
-		"finished_at":   nil,
-		"retry_count":   task.RetryCount + 1,
-		"external_id":   nil,
-		"status_source": nil,
-	}); err != nil {
-		return err
-	}
-	return refreshStoreJobStatus(ctx, b.store, task.JobID)
+// RetryTask is not supported in HPC mode — there is no resident process to
+// re-submit the task to the cluster scheduler after resetting its DB state.
+func (b *HPCBackend) RetryTask(_ context.Context, _ string) error {
+	return fmt.Errorf("retry task in hpc mode: %w", ErrNotSupported)
 }
 
 func (b *HPCBackend) KillJob(ctx context.Context, jobID string) error {
@@ -267,6 +250,11 @@ func (b *HPCBackend) UpdateProject(_ context.Context, cfg project.Config) error 
 	return reg.Update(cfg)
 }
 
+func (b *HPCBackend) DeleteProject(_ context.Context, name string) error {
+	reg := project.NewRegistry(b.store.DB())
+	return reg.Remove(name)
+}
+
 func (b *HPCBackend) RenameProject(_ context.Context, oldName, newName string) error {
 	reg := project.NewRegistry(b.store.DB())
 	return reg.Rename(oldName, newName)
@@ -293,6 +281,85 @@ func (b *HPCBackend) MatchProjects(ctx context.Context, dir string) ([]ProjectSu
 		return nil, err
 	}
 	return b.configsToSummaries(ctx, configs)
+}
+
+func (b *HPCBackend) DeleteJob(ctx context.Context, jobID string) error {
+	j, err := b.store.GetJob(ctx, jobID)
+	if err != nil {
+		return err
+	}
+	if j == nil {
+		return fmt.Errorf("job %q not found", jobID)
+	}
+	if j.Status != "done" {
+		return fmt.Errorf("job %q is %s, only completed jobs can be deleted (kill it first?)", jobID, j.Status)
+	}
+	return b.store.DeleteJob(ctx, jobID)
+}
+
+func (b *HPCBackend) CleanOldTasks(ctx context.Context, cutoff time.Time, dryRun bool) (*CleanResult, error) {
+	tasks, err := b.store.ListFinishedTasksBefore(ctx, cutoff)
+	if err != nil {
+		return nil, fmt.Errorf("query tasks: %w", err)
+	}
+
+	if dryRun {
+		preview := make([]CleanPreviewItem, 0, len(tasks))
+		for _, t := range tasks {
+			preview = append(preview, CleanPreviewItem{
+				TaskID:     t.ID,
+				Status:     t.Status,
+				FinishedAt: t.FinishedAt,
+				TaskDir:    t.TaskDir,
+			})
+		}
+		return &CleanResult{Preview: preview}, nil
+	}
+
+	var deletedTasks int
+	var freedBytes int64
+	for _, t := range tasks {
+		freedBytes += cleanTaskArtifacts(t)
+		if err := b.store.DeleteTask(ctx, t.ID); err != nil {
+			continue
+		}
+		deletedTasks++
+	}
+
+	deletedJobs, _ := b.store.DeleteOrphanJobs(ctx)
+
+	return &CleanResult{
+		Tasks:      deletedTasks,
+		Jobs:       int(deletedJobs),
+		FreedBytes: freedBytes,
+	}, nil
+}
+
+// cleanTaskArtifacts removes the task's workspace directory and log file.
+func cleanTaskArtifacts(t store.TaskRow) int64 {
+	var freed int64
+	if t.TaskDir != "" {
+		freed += dirSize(t.TaskDir)
+		os.RemoveAll(t.TaskDir)
+	}
+	if t.LogPath != "" && (t.TaskDir == "" || !strings.HasPrefix(t.LogPath, t.TaskDir)) {
+		if info, err := os.Stat(t.LogPath); err == nil {
+			freed += info.Size()
+			os.Remove(t.LogPath)
+		}
+	}
+	return freed
+}
+
+func dirSize(dir string) int64 {
+	var total int64
+	filepath.Walk(dir, func(_ string, info os.FileInfo, err error) error {
+		if err == nil && !info.IsDir() {
+			total += info.Size()
+		}
+		return nil
+	})
+	return total
 }
 
 func (b *HPCBackend) configsToSummaries(ctx context.Context, configs []project.Config) ([]ProjectSummary, error) {

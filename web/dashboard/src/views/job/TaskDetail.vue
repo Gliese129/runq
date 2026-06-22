@@ -11,7 +11,7 @@
           <v-btn v-if="displayStatus === 'running'" size="x-small" variant="tonal" color="error" @click="killTask">
             <v-icon start size="14">mdi-stop</v-icon> Kill
           </v-btn>
-          <v-btn v-if="task.status === 'failed' || task.status === 'killed'" size="x-small" variant="tonal" color="primary" @click="retryTask">
+          <v-btn v-if="config.caps.retry && (task.status === 'failed' || task.status === 'killed')" size="x-small" variant="tonal" color="primary" @click="retryTask">
             <v-icon start size="14">mdi-refresh</v-icon> Retry
           </v-btn>
         </div>

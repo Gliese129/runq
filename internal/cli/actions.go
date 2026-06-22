@@ -38,7 +38,7 @@ func runJobAction(cmd *cobra.Command, jobID, action string) error {
 	if err != nil {
 		return err
 	}
-	backend, closeBackend, err := newDashboardBackend(mode)
+	backend, closeBackend, err := newBackend(mode)
 	if err != nil {
 		return err
 	}

@@ -73,7 +73,7 @@
                   @click.stop="$emit('kill-task', task.id)"
                   :aria-label="t('job.kill')" :title="t('job.kill')"
                 ><v-icon size="14">mdi-stop</v-icon></v-btn>
-                <v-btn v-if="task.status === 'failed' || task.status === 'killed'" icon size="x-small" variant="text" color="primary"
+                <v-btn v-if="canRetry && (task.status === 'failed' || task.status === 'killed')" icon size="x-small" variant="text" color="primary"
                   @click.stop="$emit('retry-task', task.id)"
                   :aria-label="t('job.retry')" :title="t('job.retry')"
                 ><v-icon size="14">mdi-refresh</v-icon></v-btn>
@@ -99,13 +99,14 @@ import StatusDot from '@/components/StatusDot.vue'
 const { t } = useI18n()
 const prefs = usePreferences()
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   tasks: TaskView[]
   jobId: string
   wandb?: WandbInfo | null
   metricKeys?: string[]
   sweptParams?: string[]  // params that vary across tasks
-}>()
+  canRetry?: boolean
+}>(), { canRetry: true })
 
 defineEmits<{ 'kill-task': [id: string]; 'retry-task': [id: string]; 'click-task': [id: string] }>()
 

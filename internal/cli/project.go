@@ -1,12 +1,13 @@
 package cli
 
 import (
+	"context"
 	"fmt"
-	"github.com/gliese129/runq/internal/config"
 	"os"
 	"os/exec"
 	"path/filepath"
 
+	"github.com/gliese129/runq/internal/backend"
 	"github.com/gliese129/runq/internal/project"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
@@ -76,15 +77,13 @@ is also provided on the command line (CLI takes priority).`,
 			cfg.CmdTemplate = cmdTpl
 		}
 
-		type Resp struct {
-			Message string `json:"message"`
-		}
-		var resp Resp
-		if err := doAndDecode("POST", "/api/projects", cfg, &resp); err != nil {
-			return err
-		}
-		fmt.Println(resp.Message)
-		return nil
+		return withBackend(func(be backend.Backend) error {
+			if err := be.CreateProject(context.Background(), cfg); err != nil {
+				return err
+			}
+			fmt.Printf("project %q registered\n", cfg.ProjectName)
+			return nil
+		})
 	},
 }
 
@@ -96,30 +95,36 @@ var projectLsCmd = &cobra.Command{
 }
 
 func runProjectLs(cmd *cobra.Command, args []string) error {
-	var configs []project.Config
-	if err := doAndDecode("GET", "/api/projects", nil, &configs); err != nil {
-		return err
-	}
-	if len(configs) == 0 {
-		fmt.Println("no projects registered")
-		return nil
-	}
+	return withBackend(func(be backend.Backend) error {
+		ctx := context.Background()
+		summaries, err := be.ListProjects(ctx)
+		if err != nil {
+			return err
+		}
+		if len(summaries) == 0 {
+			fmt.Println("no projects registered")
+			return nil
+		}
 
-	w := newTable()
-	fmt.Fprintf(w, "NAME\tDIR\tGPUs/TASK\tRESUME\n")
-	for _, c := range configs {
-		gpus := c.Defaults.GPUsPerTask
-		if gpus == 0 {
-			gpus = 1
+		w := newTable()
+		fmt.Fprintf(w, "NAME\tDIR\tGPUs/TASK\tRESUME\tJOBS\n")
+		for _, s := range summaries {
+			// Fetch full config for display fields not in ProjectSummary.
+			gpus := 1
+			resume := "off"
+			if cfg, err := be.GetProject(ctx, s.Name); err == nil {
+				if cfg.Defaults.GPUsPerTask > 0 {
+					gpus = cfg.Defaults.GPUsPerTask
+				}
+				if cfg.Resume.Enabled {
+					resume = "on"
+				}
+			}
+			fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%d\n", s.Name, s.WorkDir, gpus, resume, s.JobCount)
 		}
-		resume := "off"
-		if c.Resume.Enabled {
-			resume = "on"
-		}
-		fmt.Fprintf(w, "%s\t%s\t%d\t%s\n", c.ProjectName, c.WorkingDir, gpus, resume)
-	}
-	w.Flush()
-	return nil
+		w.Flush()
+		return nil
+	})
 }
 
 var projectShowCmd = &cobra.Command{
@@ -130,13 +135,14 @@ var projectShowCmd = &cobra.Command{
 }
 
 func runProjectShow(cmd *cobra.Command, args []string) error {
-	name := args[0]
-	var cfg project.Config
-	if err := doAndDecode("GET", "/api/projects/"+name, nil, &cfg); err != nil {
-		return err
-	}
-	printJSON(cfg)
-	return nil
+	return withBackend(func(be backend.Backend) error {
+		cfg, err := be.GetProject(context.Background(), args[0])
+		if err != nil {
+			return err
+		}
+		printJSON(cfg)
+		return nil
+	})
 }
 
 var projectEditCmd = &cobra.Command{
@@ -144,50 +150,48 @@ var projectEditCmd = &cobra.Command{
 	Short: "Edit project config in $EDITOR",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		name := args[0]
-		query := fmt.Sprintf("/api/projects/%s", name)
-		var cfg project.Config
-		if err := doAndDecode("GET", query, nil, &cfg); err != nil {
-			return err
-		}
-		temp, err := os.CreateTemp("", fmt.Sprintf("%s-*.yaml", name))
-		if err != nil {
-			return err
-		}
-		defer os.Remove(temp.Name())
-		content, _ := yaml.Marshal(cfg) // Marshal on a plain struct won't fail
-		if err := os.WriteFile(temp.Name(), content, 0644); err != nil {
-			return fmt.Errorf("failed to write temp file: %w", err)
-		}
+		return withBackend(func(be backend.Backend) error {
+			ctx := context.Background()
+			name := args[0]
+			cfg, err := be.GetProject(ctx, name)
+			if err != nil {
+				return err
+			}
+			temp, err := os.CreateTemp("", fmt.Sprintf("%s-*.yaml", name))
+			if err != nil {
+				return err
+			}
+			defer os.Remove(temp.Name())
+			content, _ := yaml.Marshal(cfg)
+			if err := os.WriteFile(temp.Name(), content, 0644); err != nil {
+				return fmt.Errorf("failed to write temp file: %w", err)
+			}
 
-		editor := os.Getenv("EDITOR")
-		if editor == "" {
-			editor = "vim" // i prefer vim
-		}
-		cmd_ := exec.Command(editor, temp.Name())
-		cmd_.Stdin = os.Stdin
-		cmd_.Stdout = os.Stdout
-		cmd_.Stderr = os.Stderr
-		err = cmd_.Run()
-		if err != nil {
-			return err
-		}
-		content, err = os.ReadFile(temp.Name())
-		if err != nil {
-			return err
-		}
-		if err := yaml.Unmarshal(content, &cfg); err != nil {
-			return err
-		}
-		type Resp struct {
-			Message string `json:"message"`
-		}
-		var resp Resp
-		if err := doAndDecode("PUT", query, cfg, &resp); err != nil {
-			return err
-		}
-		fmt.Println(resp.Message)
-		return nil
+			editor := os.Getenv("EDITOR")
+			if editor == "" {
+				editor = "vim"
+			}
+			editorCmd := exec.Command(editor, temp.Name())
+			editorCmd.Stdin = os.Stdin
+			editorCmd.Stdout = os.Stdout
+			editorCmd.Stderr = os.Stderr
+			if err := editorCmd.Run(); err != nil {
+				return err
+			}
+			content, err = os.ReadFile(temp.Name())
+			if err != nil {
+				return err
+			}
+			var updated project.Config
+			if err := yaml.Unmarshal(content, &updated); err != nil {
+				return err
+			}
+			if err := be.UpdateProject(ctx, updated); err != nil {
+				return err
+			}
+			fmt.Printf("project %q updated\n", name)
+			return nil
+		})
 	},
 }
 
@@ -200,13 +204,13 @@ var projectRmCmd = &cobra.Command{
 }
 
 func runProjectRm(cmd *cobra.Command, args []string) error {
-	name := args[0]
-	var resp map[string]string
-	if err := doAndDecode("DELETE", "/api/projects/"+name, nil, &resp); err != nil {
-		return err
-	}
-	fmt.Println(resp["message"])
-	return nil
+	return withBackend(func(be backend.Backend) error {
+		if err := be.DeleteProject(context.Background(), args[0]); err != nil {
+			return err
+		}
+		fmt.Printf("project %q removed\n", args[0])
+		return nil
+	})
 }
 
 func init() {
@@ -247,31 +251,18 @@ func runProjectArchive(name string, archive bool) error {
 	if !archive {
 		verb = "unarchived"
 	}
-	if _, mode, err := loadModeConfig(); err == nil && mode == config.ModeHPC {
-		_, st, err := newHPCBackend()
-		if err != nil {
-			return err
-		}
-		defer st.Close()
-		reg := project.NewRegistry(st.DB())
-		op := reg.Unarchive
+	return withBackend(func(be backend.Backend) error {
+		ctx := context.Background()
+		var err error
 		if archive {
-			op = reg.Archive
+			err = be.ArchiveProject(ctx, name)
+		} else {
+			err = be.UnarchiveProject(ctx, name)
 		}
-		if err := op(name); err != nil {
+		if err != nil {
 			return err
 		}
 		fmt.Printf("project %q %s\n", name, verb)
 		return nil
-	}
-	path := "/api/projects/" + name + "/unarchive"
-	if archive {
-		path = "/api/projects/" + name + "/archive"
-	}
-	var resp map[string]any
-	if err := doAndDecode("POST", path, nil, &resp); err != nil {
-		return err
-	}
-	fmt.Printf("project %q %s\n", name, verb)
-	return nil
+	})
 }

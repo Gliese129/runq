@@ -43,6 +43,9 @@ func init() {
 	sweepCmd.Flags().StringP("note", "n", "", "Experiment note")
 	sweepCmd.Flags().Bool("list", false, "Use list (zip) mode instead of grid")
 	sweepCmd.Flags().Bool("dry", false, "Expand sweep and print tasks without submitting")
+
+	sweepCmd.GroupID = groupCore
+	rootCmd.AddCommand(sweepCmd)
 }
 
 // parseSweepArgs parses "key=v1,v2" arguments into a SweepBlock.

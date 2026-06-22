@@ -5,7 +5,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/gliese129/runq/internal/hpccore"
+	"github.com/gliese129/runq/internal/utils"
 )
 
 // Placeholders is the single source of truth for which {{vars}} each
@@ -100,7 +100,7 @@ func (c *Config) Check() []CheckResult {
 		if field == "submit_template" {
 			addParamSamples(vars, tmpl)
 		}
-		out, err := hpccore.Render(tmpl, vars)
+		out, err := utils.Render(tmpl, vars)
 		if err != nil {
 			return CheckResult{name, "fail", fmt.Sprintf("%v (valid: {{%s}} + {{param.*}} on submit_template)", err, strings.Join(Placeholders[field], "}} {{"))}
 		}
