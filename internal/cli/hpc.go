@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/gliese129/runq/internal/config"
-	"github.com/gliese129/runq/internal/dashboard"
+	"github.com/gliese129/runq/internal/backend"
 	"github.com/gliese129/runq/internal/hpc"
 	"github.com/gliese129/runq/internal/hpcconfig"
 	"github.com/gliese129/runq/internal/job"
@@ -310,7 +310,7 @@ func runHPCStatus(cmd *cobra.Command, args []string) error {
 		// Machine output carries the backend self-description so scripts/AI
 		// can branch on state_model/kill_async without parsing prose (X1).
 		printJSON(map[string]any{
-			"capabilities": dashboard.NewHPCBackend(b, st).Capabilities(),
+			"capabilities": backend.NewHPCBackend(b, st).Capabilities(),
 			"job":          view.Job,
 			"tasks":        view.Tasks,
 		})

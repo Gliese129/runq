@@ -1,4 +1,4 @@
-package dashboard
+package backend
 
 import (
 	"context"
@@ -22,13 +22,13 @@ func NewHPCBackend(backend *hpc.Backend, st *store.Store) *HPCBackend {
 
 func (b *HPCBackend) Capabilities() Capabilities {
 	return Capabilities{
-		GPUMap:          false, // no node-local GPU visibility from the login node
-		PauseResume:     false, // cluster queues have no runq-level pause concept
-		LiveLog:         true,  // deployment assumption: dashboard runs on a login node with the shared FS
-		Retry:           true,
-		StateModel:      "poll", // best-effort projection; staleness must be surfaced
-		KillAsync:       true,   // qdel/scancel is forwarded; killed persisted as soon as the cancel command succeeds
-		SubmitPreview:   true,   // zero-disk dry-run via the submit code path
+		GPUMap:        false, // no node-local GPU visibility from the login node
+		PauseResume:   false, // cluster queues have no runq-level pause concept
+		LiveLog:       true,  // deployment assumption: dashboard runs on a login node with the shared FS
+		Retry:         true,
+		StateModel:    "poll", // best-effort projection; staleness must be surfaced
+		KillAsync:     true,   // qdel/scancel is forwarded; killed persisted as soon as the cancel command succeeds
+		SubmitPreview: true,   // zero-disk dry-run via the submit code path
 		// Activity heatmap and log search handlers are still TODO stubs
 		// (server.go handleJobActivity p6-step4, handleJobLogSearch p6-step5).
 		// Keep the capabilities off until the endpoints have real behavior so

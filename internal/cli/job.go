@@ -5,7 +5,7 @@ import (
 	"fmt"
 
 	"github.com/gliese129/runq/internal/config"
-	"github.com/gliese129/runq/internal/dashboard"
+	"github.com/gliese129/runq/internal/backend"
 	"github.com/gliese129/runq/internal/utils"
 	"github.com/spf13/cobra"
 )
@@ -26,7 +26,7 @@ var jobLsCmd = &cobra.Command{
 // the same path the WebUI and `runq ps` use — so the list reconciles and
 // projects identically regardless of mode.
 func runJobLs(cmd *cobra.Command, args []string) error {
-	return withBackend(func(b dashboard.Backend) error {
+	return withBackend(func(b backend.Backend) error {
 		jobs, err := b.ListJobs(context.Background(), "")
 		if err != nil {
 			return err
@@ -43,7 +43,7 @@ var jobShowCmd = &cobra.Command{
 }
 
 func runJobShow(cmd *cobra.Command, args []string) error {
-	return withBackend(func(b dashboard.Backend) error {
+	return withBackend(func(b backend.Backend) error {
 		detail, err := b.GetJob(context.Background(), args[0])
 		if err != nil {
 			return err
@@ -62,7 +62,7 @@ var jobKillCmd = &cobra.Command{
 
 func runJobKill(cmd *cobra.Command, args []string) error {
 	jobID := args[0]
-	return withBackend(func(b dashboard.Backend) error {
+	return withBackend(func(b backend.Backend) error {
 		if err := b.KillJob(context.Background(), jobID); err != nil {
 			return err
 		}
@@ -80,7 +80,7 @@ var jobPauseCmd = &cobra.Command{
 
 func runJobPause(cmd *cobra.Command, args []string) error {
 	jobID := args[0]
-	return withBackend(func(b dashboard.Backend) error {
+	return withBackend(func(b backend.Backend) error {
 		if err := b.PauseJob(context.Background(), jobID); err != nil {
 			return err
 		}
@@ -98,7 +98,7 @@ var jobResumeCmd = &cobra.Command{
 
 func runJobResume(cmd *cobra.Command, args []string) error {
 	jobID := args[0]
-	return withBackend(func(b dashboard.Backend) error {
+	return withBackend(func(b backend.Backend) error {
 		if err := b.ResumeJob(context.Background(), jobID); err != nil {
 			return err
 		}
@@ -116,7 +116,7 @@ var jobRmCmd = &cobra.Command{
 }
 
 // runJobRm stays on the daemon API: removing a completed job record is not
-// part of the dashboard.Backend contract (the WebUI has no such action), so
+// part of the backend.Backend contract (the WebUI has no such action), so
 // there is no mode-aware path to route through. Daemon-only by design.
 func runJobRm(cmd *cobra.Command, args []string) error {
 	jobID := args[0]

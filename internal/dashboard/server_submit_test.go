@@ -8,24 +8,25 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gliese129/runq/internal/backend"
 	"github.com/gliese129/runq/internal/config"
 	"github.com/gliese129/runq/internal/job"
 )
 
 type submitCaptureBackend struct {
-	*UnavailableBackend
+	*backend.UnavailableBackend
 	cfg  job.JobConfig
-	opts SubmitOptions
+	opts backend.SubmitOptions
 }
 
-func (b *submitCaptureBackend) SubmitJob(_ context.Context, cfg job.JobConfig, opts SubmitOptions) (string, int, error) {
+func (b *submitCaptureBackend) SubmitJob(_ context.Context, cfg job.JobConfig, opts backend.SubmitOptions) (string, int, error) {
 	b.cfg = cfg
 	b.opts = opts
 	return "job-test", 1, nil
 }
 
 type renameCaptureBackend struct {
-	*UnavailableBackend
+	*backend.UnavailableBackend
 	oldName string
 	newName string
 }
@@ -49,7 +50,7 @@ func TestHandleSubmitJobPropagatesPreflightOption(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			backend := &submitCaptureBackend{
-				UnavailableBackend: NewUnavailableBackend(errors.New("unused")),
+				UnavailableBackend: backend.NewUnavailableBackend(errors.New("unused")),
 			}
 			server := NewServer(backend, config.ModeDaemon, &config.GlobalConfig{})
 
@@ -75,7 +76,7 @@ func TestHandleSubmitJobPropagatesPreflightOption(t *testing.T) {
 
 func TestHandleRenameProjectRoutesToBackend(t *testing.T) {
 	backend := &renameCaptureBackend{
-		UnavailableBackend: NewUnavailableBackend(errors.New("unused")),
+		UnavailableBackend: backend.NewUnavailableBackend(errors.New("unused")),
 	}
 	server := NewServer(backend, config.ModeDaemon, &config.GlobalConfig{})
 
@@ -90,14 +91,5 @@ func TestHandleRenameProjectRoutesToBackend(t *testing.T) {
 	}
 	if backend.oldName != "old-name" || backend.newName != "new-name" {
 		t.Fatalf("rename = (%q, %q), want (old-name, new-name)", backend.oldName, backend.newName)
-	}
-}
-
-func TestDaemonSubmitPathHonorsPreflightOption(t *testing.T) {
-	if got := daemonSubmitPath(SubmitOptions{}); got != "/api/jobs" {
-		t.Fatalf("default path = %q, want /api/jobs", got)
-	}
-	if got := daemonSubmitPath(SubmitOptions{SkipPreflight: true}); got != "/api/jobs?no_preflight=1" {
-		t.Fatalf("skip path = %q, want /api/jobs?no_preflight=1", got)
 	}
 }

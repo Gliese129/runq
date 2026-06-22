@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gliese129/runq/internal/backend"
 	"github.com/gliese129/runq/internal/config"
 	"github.com/gliese129/runq/internal/dashboard"
 	"github.com/spf13/cobra"
@@ -51,9 +52,9 @@ func runDashboard(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Printf("mode: %s (%s; override with --mode)\n", mode, modeSource)
 
-	backend, closeBackend, err := newDashboardBackend(mode)
+	be, closeBackend, err := newDashboardBackend(mode)
 	if err != nil {
-		backend = dashboard.NewUnavailableBackend(err)
+		be = backend.NewUnavailableBackend(err)
 		closeBackend = func() {}
 	}
 	defer closeBackend()
@@ -65,7 +66,7 @@ func runDashboard(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	server := dashboard.NewServerWithAssets(backend, mode, cfg, assetsDir)
+	server := dashboard.NewServerWithAssets(be, mode, cfg, assetsDir)
 	addr := net.JoinHostPort(host, strconv.Itoa(port))
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -108,16 +109,16 @@ func loadModeConfig() (*config.GlobalConfig, string, error) {
 	return cfg, config.ConfigMode(cfg), nil
 }
 
-func newDashboardBackend(mode string) (dashboard.Backend, func(), error) {
+func newDashboardBackend(mode string) (backend.Backend, func(), error) {
 	switch mode {
 	case config.ModeHPC:
 		b, st, err := newHPCBackend()
 		if err != nil {
 			return nil, nil, err
 		}
-		return dashboard.NewHPCBackend(b, st), func() { _ = st.Close() }, nil
+		return backend.NewHPCBackend(b, st), func() { _ = st.Close() }, nil
 	case config.ModeDaemon:
-		return dashboard.NewDaemonBackend(getSocketPath()), func() {}, nil
+		return backend.NewDaemonBackend(getSocketPath()), func() {}, nil
 	default:
 		return nil, nil, fmt.Errorf("unsupported mode %q", mode)
 	}
@@ -129,15 +130,15 @@ func newDashboardBackend(mode string) (dashboard.Backend, func(), error) {
 // HPC behave identically (same reconciliation, capabilities, summary
 // projection) — the same backend the WebUI goes through. Commands keep their
 // own output formatting; only the data access goes through here.
-func withBackend(fn func(dashboard.Backend) error) error {
+func withBackend(fn func(backend.Backend) error) error {
 	_, mode, err := loadModeConfig()
 	if err != nil {
 		return err
 	}
-	backend, closeBackend, err := newDashboardBackend(mode)
+	be, closeBackend, err := newDashboardBackend(mode)
 	if err != nil {
 		return err
 	}
 	defer closeBackend()
-	return fn(backend)
+	return fn(be)
 }

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/gliese129/runq/internal/backend"
 	"github.com/gliese129/runq/internal/config"
 )
 
@@ -28,9 +29,9 @@ func TestFSListFollowsSymlinkedDirs(t *testing.T) {
 		t.Skipf("cannot create symlink: %v", err)
 	}
 
-	s := NewServerWithAssets(NewUnavailableBackend(nil), config.ModeDaemon, &config.GlobalConfig{}, "")
+	s := NewServerWithAssets(backend.NewUnavailableBackend(nil), config.ModeDaemon, &config.GlobalConfig{}, "")
 
-	list := func(path string) []FSEntry {
+	list := func(path string) []backend.FSEntry {
 		t.Helper()
 		req := httptest.NewRequest(http.MethodGet,
 			"/api/dashboard/fs/list?path="+url.QueryEscape(path), nil)
@@ -39,7 +40,7 @@ func TestFSListFollowsSymlinkedDirs(t *testing.T) {
 		if rec.Code != http.StatusOK {
 			t.Fatalf("fs/list %s: status %d: %s", path, rec.Code, rec.Body.String())
 		}
-		var out []FSEntry
+		var out []backend.FSEntry
 		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 			t.Fatal(err)
 		}
@@ -47,7 +48,7 @@ func TestFSListFollowsSymlinkedDirs(t *testing.T) {
 	}
 
 	// The symlink itself must appear as a directory.
-	var found *FSEntry
+	var found *backend.FSEntry
 	for _, e := range list(home) {
 		if e.Name == "fast" {
 			found = &e
@@ -72,7 +73,7 @@ func TestFSListFollowsSymlinkedDirs(t *testing.T) {
 func TestFSListRejectsLexicallyOutsideHome(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	s := NewServerWithAssets(NewUnavailableBackend(nil), config.ModeDaemon, &config.GlobalConfig{}, "")
+	s := NewServerWithAssets(backend.NewUnavailableBackend(nil), config.ModeDaemon, &config.GlobalConfig{}, "")
 
 	req := httptest.NewRequest(http.MethodGet, "/api/dashboard/fs/list?path=/etc", nil)
 	rec := httptest.NewRecorder()

@@ -10,11 +10,12 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/gliese129/runq/internal/backend"
 	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/utils"
 )
 
-// FSEntry, ParseScriptRequest, ParseResult, ScriptArg are in types.go.
+
 
 func (s *Server) handleFSList(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Query().Get("path")
@@ -32,7 +33,7 @@ func (s *Server) handleFSList(w http.ResponseWriter, r *http.Request) {
 		writeErrorStatus(w, http.StatusBadRequest, err)
 		return
 	}
-	out := make([]FSEntry, 0, len(entries))
+	out := make([]backend.FSEntry, 0, len(entries))
 	for _, entry := range entries {
 		info, err := entry.Info()
 		if err != nil {
@@ -47,7 +48,7 @@ func (s *Server) handleFSList(w http.ResponseWriter, r *http.Request) {
 				isDir = target.IsDir()
 			}
 		}
-		out = append(out, FSEntry{
+		out = append(out, backend.FSEntry{
 			Name:  entry.Name(),
 			Path:  filepath.Join(safePath, entry.Name()),
 			IsDir: isDir,
@@ -91,7 +92,7 @@ func (s *Server) handleFSRead(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleParseScript(w http.ResponseWriter, r *http.Request) {
-	var req ParseScriptRequest
+	var req backend.ParseScriptRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErrorStatus(w, http.StatusBadRequest, err)
 		return
@@ -106,8 +107,8 @@ func (s *Server) handleParseScript(w http.ResponseWriter, r *http.Request) {
 	// but env detection (conda/venv/uv markers in the directory) still does
 	// — don't throw that away with a 400.
 	if !strings.HasSuffix(safePath, ".py") {
-		writeJSON(w, http.StatusOK, ParseResult{
-			Args: []ScriptArg{},
+		writeJSON(w, http.StatusOK, backend.ParseResult{
+			Args: []backend.ScriptArg{},
 			Env:  detectedEnv(filepath.Dir(safePath)),
 			Cmd:  fmt.Sprintf("bash %s {{args}}", filepath.Base(safePath)),
 		})
@@ -119,8 +120,8 @@ func (s *Server) handleParseScript(w http.ResponseWriter, r *http.Request) {
 		writeErrorStatus(w, http.StatusBadRequest, err)
 		return
 	}
-	out := ParseResult{
-		Args: make([]ScriptArg, 0, len(args)),
+	out := backend.ParseResult{
+		Args: make([]backend.ScriptArg, 0, len(args)),
 		Env:  detectedEnv(filepath.Dir(safePath)),
 		Cmd:  fmt.Sprintf("python %s {{args}}", filepath.Base(safePath)),
 	}
@@ -130,7 +131,7 @@ func (s *Server) handleParseScript(w http.ResponseWriter, r *http.Request) {
 			value := arg.Default
 			def = &value
 		}
-		out.Args = append(out.Args, ScriptArg{
+		out.Args = append(out.Args, backend.ScriptArg{
 			Name:    arg.Name,
 			Type:    arg.Type,
 			Default: def,

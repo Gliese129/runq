@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gliese129/runq/internal/backend"
 	"github.com/gliese129/runq/internal/config"
 	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/logfile"
@@ -17,7 +18,7 @@ import (
 )
 
 type Server struct {
-	backend      Backend
+	backend      backend.Backend
 	mode         string
 	cfg          *config.GlobalConfig
 	mux          *http.ServeMux
@@ -27,16 +28,14 @@ type Server struct {
 	utilsLogs    *utilsLogStore
 }
 
-// ConfigResponse and ErrorResponse are in types.go.
-
-func NewServer(backend Backend, mode string, cfg *config.GlobalConfig) *Server {
-	return NewServerWithAssets(backend, mode, cfg, "")
+func NewServer(be backend.Backend, mode string, cfg *config.GlobalConfig) *Server {
+	return NewServerWithAssets(be, mode, cfg, "")
 }
 
-func NewServerWithAssets(backend Backend, mode string, cfg *config.GlobalConfig, assetsDir string) *Server {
+func NewServerWithAssets(be backend.Backend, mode string, cfg *config.GlobalConfig, assetsDir string) *Server {
 	static := ResolveStaticAssets(assetsDir)
 	s := &Server{
-		backend:      backend,
+		backend:      be,
 		mode:         mode,
 		cfg:          cfg,
 		mux:          http.NewServeMux(),
@@ -130,7 +129,7 @@ func (s *Server) registerRoutes() {
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	// Capabilities come from the backend's self-description — the server
 	// does not infer them from mode (design philosophy #2).
-	writeJSON(w, http.StatusOK, ConfigResponse{
+	writeJSON(w, http.StatusOK, backend.ConfigResponse{
 		Mode:         s.mode,
 		DataPath:     s.cfg.DataPath,
 		ConfigPath:   config.ConfigPath(),
@@ -143,7 +142,7 @@ func (s *Server) handleRefreshJob(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, ActionResponse{OK: true})
+	writeJSON(w, http.StatusOK, backend.ActionResponse{OK: true})
 }
 
 func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
@@ -167,7 +166,7 @@ func (s *Server) handleMatchProjects(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if projects == nil {
-		projects = []ProjectSummary{}
+		projects = []backend.ProjectSummary{}
 	}
 	writeJSON(w, http.StatusOK, projects)
 }
@@ -307,7 +306,7 @@ func (s *Server) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
 		writeErrorStatus(w, http.StatusBadRequest, fmt.Errorf("project is required"))
 		return
 	}
-	opts := SubmitOptions{
+	opts := backend.SubmitOptions{
 		SkipPreflight: r.URL.Query().Get("no_preflight") == "1",
 	}
 	jobID, total, err := s.backend.SubmitJob(r.Context(), cfg, opts)
@@ -342,7 +341,7 @@ func (s *Server) handleListArchivedJobs(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if jobs == nil {
-		jobs = []JobSummary{}
+		jobs = []backend.JobSummary{}
 	}
 	writeJSON(w, http.StatusOK, jobs)
 }
@@ -524,7 +523,7 @@ func (s *Server) handleTaskMetrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if points == nil {
-		points = []MetricPoint{}
+		points = []backend.MetricPoint{}
 	}
 	writeJSON(w, http.StatusOK, points)
 }
@@ -610,7 +609,7 @@ func (s *Server) handleAction(w http.ResponseWriter, _ *http.Request, fn func() 
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, ActionResponse{OK: true})
+	writeJSON(w, http.StatusOK, backend.ActionResponse{OK: true})
 }
 
 func (s *Server) handleAPINotFound(w http.ResponseWriter, r *http.Request) {
@@ -669,9 +668,9 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 func writeError(w http.ResponseWriter, err error) {
 	status := http.StatusInternalServerError
 	msg := strings.ToLower(err.Error())
-	if errors.Is(err, ErrNotSupported) {
+	if errors.Is(err, backend.ErrNotSupported) {
 		status = http.StatusBadRequest
-	} else if isNotFound(err) {
+	} else if backend.IsNotFound(err) {
 		status = http.StatusNotFound
 	} else if strings.Contains(msg, "already exists") {
 		status = http.StatusConflict
@@ -682,7 +681,7 @@ func writeError(w http.ResponseWriter, err error) {
 }
 
 func writeErrorStatus(w http.ResponseWriter, status int, err error) {
-	writeJSON(w, status, ErrorResponse{
+	writeJSON(w, status, backend.ErrorResponse{
 		Error: err.Error(),
 		Code:  status,
 	})

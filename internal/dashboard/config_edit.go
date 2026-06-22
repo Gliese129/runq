@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/gliese129/runq/internal/backend"
 	"github.com/gliese129/runq/internal/config"
 	"github.com/gliese129/runq/internal/hpcconfig"
 	"github.com/gliese129/runq/internal/job"
@@ -77,7 +78,7 @@ func (s *Server) handlePutHPCConfig(w http.ResponseWriter, r *http.Request) {
 		writeErrorStatus(w, http.StatusBadRequest, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, ActionResponse{OK: true})
+	writeJSON(w, http.StatusOK, backend.ActionResponse{OK: true})
 }
 
 // handleResolveNote previews the job note's resolution via the backend
@@ -119,5 +120,5 @@ func (s *Server) handlePutGlobalConfig(w http.ResponseWriter, r *http.Request) {
 		writeErrorStatus(w, http.StatusBadRequest, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, ActionResponse{OK: true})
+	writeJSON(w, http.StatusOK, backend.ActionResponse{OK: true})
 }

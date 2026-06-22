@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/gliese129/runq/internal/dashboard"
+	"github.com/gliese129/runq/internal/backend"
 	"github.com/gliese129/runq/internal/utils"
 )
 
-func printDashboardJobs(jobs []dashboard.JobSummary) error {
+func printDashboardJobs(jobs []backend.JobSummary) error {
 	if len(jobs) == 0 {
 		fmt.Println("no jobs")
 		return nil
@@ -28,7 +28,7 @@ func printDashboardJobs(jobs []dashboard.JobSummary) error {
 	return w.Flush()
 }
 
-func printDashboardDetail(detail *dashboard.JobDetail) error {
+func printDashboardDetail(detail *backend.JobDetail) error {
 	fmt.Printf("job %s  project=%s  status=%s  tasks=%d\n\n",
 		utils.IDColor(detail.Job.ID), detail.Job.Project,
 		utils.StatusColor(detail.Job.Status), detail.Job.Tasks.Total)

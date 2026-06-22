@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/gliese129/runq/internal/dashboard"
+	"github.com/gliese129/runq/internal/backend"
 	"github.com/spf13/cobra"
 )
 
@@ -21,7 +21,7 @@ var taskShowCmd = &cobra.Command{
 }
 
 func runTaskShow(cmd *cobra.Command, args []string) error {
-	return withBackend(func(b dashboard.Backend) error {
+	return withBackend(func(b backend.Backend) error {
 		view, _, err := b.GetTask(context.Background(), args[0])
 		if err != nil {
 			return err
@@ -40,7 +40,7 @@ var taskRetryCmd = &cobra.Command{
 
 func runTaskRetry(cmd *cobra.Command, args []string) error {
 	id := args[0]
-	return withBackend(func(b dashboard.Backend) error {
+	return withBackend(func(b backend.Backend) error {
 		if err := b.RetryTask(context.Background(), id); err != nil {
 			return err
 		}
