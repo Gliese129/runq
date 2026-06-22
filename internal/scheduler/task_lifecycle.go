@@ -25,10 +25,12 @@ func (s *Scheduler) buildTaskEnv(task *Task) map[string]string {
 	}
 	for k, v := range runqenv.Base(
 		runqenv.Identity{
-			TaskID:  task.ID,
-			JobID:   task.JobID,
-			Project: task.ProjectName,
-			TaskDir: task.TaskDir,
+			TaskID:    task.ID,
+			JobID:     task.JobID,
+			Project:   task.ProjectName,
+			TaskDir:   task.TaskDir,
+			SweepKeys: task.SweepKeys,
+			JobNote:   task.JobNote,
 		},
 		runqenv.Safety{
 			FactorPercent: s.cfg.Disk.SafetyFactorPercent,
@@ -65,6 +67,7 @@ func (s *Scheduler) runTask(task *Task) {
 		Env:        s.buildTaskEnv(task),
 		GPUs:       task.GPUs,
 		LogPath:    task.LogPath,
+		TaskDir:    task.TaskDir,
 		OnStart: func(result executor.Result) {
 			task.PID = result.PID
 			task.StartTime = result.StartTime

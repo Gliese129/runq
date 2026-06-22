@@ -58,6 +58,11 @@ type Task struct {
 	// Used to inject RUNQ_TASK_DIR / RUNQ_PARAMS_FILE / etc. into the task env,
 	// and to locate metrics.jsonl during reap.
 	TaskDir string `json:"task_dir,omitempty"`
+
+	// P6: W&B integration — sweep key names and job note flow through to
+	// runqenv.Identity so Base() can emit WANDB_RUN_GROUP / WANDB_TAGS.
+	SweepKeys []string `json:"sweep_keys,omitempty"`
+	JobNote   string   `json:"job_note,omitempty"`
 }
 
 // Queue is a FIFO task queue with backfill + aging support. Thread-safe.
@@ -215,6 +220,8 @@ func (q *Queue) RetryExisting(task *Task) bool {
 	existing.Group = task.Group
 	existing.CheckpointDir = task.CheckpointDir
 	existing.TaskDir = task.TaskDir
+	existing.SweepKeys = task.SweepKeys
+	existing.JobNote = task.JobNote
 	return true
 }
 

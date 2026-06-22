@@ -1,8 +1,10 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 
+	"github.com/gliese129/runq/internal/dashboard"
 	"github.com/spf13/cobra"
 )
 
@@ -19,13 +21,14 @@ var taskShowCmd = &cobra.Command{
 }
 
 func runTaskShow(cmd *cobra.Command, args []string) error {
-	id := args[0]
-	var task map[string]any
-	if err := doAndDecode("GET", "/api/tasks/"+id, nil, &task); err != nil {
-		return err
-	}
-	printJSON(task)
-	return nil
+	return withBackend(func(b dashboard.Backend) error {
+		view, _, err := b.GetTask(context.Background(), args[0])
+		if err != nil {
+			return err
+		}
+		printJSON(view)
+		return nil
+	})
 }
 
 var taskRetryCmd = &cobra.Command{
@@ -37,12 +40,13 @@ var taskRetryCmd = &cobra.Command{
 
 func runTaskRetry(cmd *cobra.Command, args []string) error {
 	id := args[0]
-	var resp map[string]any
-	if err := doAndDecode("POST", "/api/tasks/"+id+"/retry", nil, &resp); err != nil {
-		return err
-	}
-	fmt.Printf("task %s re-enqueued\n", id)
-	return nil
+	return withBackend(func(b dashboard.Backend) error {
+		if err := b.RetryTask(context.Background(), id); err != nil {
+			return err
+		}
+		fmt.Printf("task %s re-enqueued\n", id)
+		return nil
+	})
 }
 
 func init() {

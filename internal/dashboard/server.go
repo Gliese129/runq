@@ -1,18 +1,18 @@
 package dashboard
 
 import (
-	"bufio"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gliese129/runq/internal/config"
 	"github.com/gliese129/runq/internal/job"
+	"github.com/gliese129/runq/internal/logfile"
 	"github.com/gliese129/runq/internal/project"
 )
 
@@ -24,6 +24,7 @@ type Server struct {
 	static       fs.FS
 	staticSource string
 	staticErr    error
+	utilsLogs    *utilsLogStore
 }
 
 // ConfigResponse and ErrorResponse are in types.go.
@@ -42,6 +43,7 @@ func NewServerWithAssets(backend Backend, mode string, cfg *config.GlobalConfig,
 		static:       static.FS,
 		staticSource: static.Source,
 		staticErr:    static.Err,
+		utilsLogs:    newUtilsLogStore(),
 	}
 	s.registerRoutes()
 	return s
@@ -95,9 +97,16 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/dashboard/jobs/resolve-note", s.handleResolveNote)
 	s.mux.HandleFunc("GET /api/dashboard/tasks/{id}", s.handleGetTask)
 	s.mux.HandleFunc("GET /api/dashboard/tasks/{id}/log", s.handleTaskLog)
+	s.mux.HandleFunc("GET /api/dashboard/tasks/{id}/log/stream", s.handleTaskLogStream)
 	s.mux.HandleFunc("GET /api/dashboard/tasks/{id}/metrics", s.handleTaskMetrics)
+	s.mux.HandleFunc("GET /api/dashboard/jobs/{id}/activity", s.handleJobActivity)
+	s.mux.HandleFunc("GET /api/dashboard/jobs/{id}/log/search", s.handleJobLogSearch)
 	s.mux.HandleFunc("POST /api/dashboard/tasks/{id}/kill", s.handleKillTask)
 	s.mux.HandleFunc("POST /api/dashboard/tasks/{id}/retry", s.handleRetryTask)
+	s.mux.HandleFunc("POST /api/dashboard/utils/log", s.handleUtilsLogUpload)
+	s.mux.HandleFunc("GET /api/dashboard/utils/log/{id}", s.handleUtilsLogRead)
+	s.mux.HandleFunc("GET /api/dashboard/utils/log/{id}/search", s.handleUtilsLogSearch)
+	s.mux.HandleFunc("DELETE /api/dashboard/utils/log/{id}", s.handleUtilsLogDelete)
 	s.mux.HandleFunc("POST /api/dashboard/jobs/{id}/kill", s.handleKillJob)
 	s.mux.HandleFunc("POST /api/dashboard/jobs/{id}/refresh", s.handleRefreshJob)
 	s.mux.HandleFunc("POST /api/dashboard/jobs/{id}/pause", s.handlePauseJob)
@@ -396,6 +405,13 @@ func (s *Server) handleGetTask(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, view)
 }
 
+// handleTaskLog reads a page of log lines starting at a byte offset.
+// Query params:
+//   - offset: byte offset into the raw log file (default 0)
+//   - lines:  number of lines to return (default 200, max 5000)
+//
+// Returns a logfile.Page JSON. The frontend uses start_offset / end_offset
+// for forward/backward paging and total_bytes for progress indication.
 func (s *Server) handleTaskLog(w http.ResponseWriter, r *http.Request) {
 	_, logPath, err := s.backend.GetTask(r.Context(), r.PathValue("id"))
 	if err != nil {
@@ -403,51 +419,102 @@ func (s *Server) handleTaskLog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if logPath == "" {
-		writeJSON(w, http.StatusOK, map[string]any{"lines": []string{}, "total_lines": 0, "start": 0, "end": 0})
+		writeJSON(w, http.StatusOK, &logfile.Page{Lines: []string{}})
 		return
 	}
 
-	tail := 500
-	if v := r.URL.Query().Get("tail"); v != "" {
-		if n, e := strconv.Atoi(v); e == nil && n > 0 && n <= 5000 {
-			tail = n
+	offset := int64(0)
+	if v := r.URL.Query().Get("offset"); v != "" {
+		if n, e := strconv.ParseInt(v, 10, 64); e == nil && n >= 0 {
+			offset = n
 		}
 	}
-	offset := 0
+	lines := logfile.DefaultPageLines
+	if v := r.URL.Query().Get("lines"); v != "" {
+		if n, e := strconv.Atoi(v); e == nil && n > 0 && n <= logfile.MaxPageLines {
+			lines = n
+		}
+	}
+
+	lr, err := logfile.Open(logPath)
+	if err != nil {
+		writeJSON(w, http.StatusOK, &logfile.Page{Lines: []string{}})
+		return
+	}
+	defer lr.Close()
+
+	page, err := lr.ReadLines(offset, lines)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, page)
+}
+
+// handleTaskLogStream streams new log lines via SSE.
+// Query params:
+//   - offset: byte offset to start streaming from (default 0)
+//
+// Sends "lines" events containing logfile.Page JSON as new content appears.
+// Stops when the client disconnects (EventSource.close / page navigation).
+func (s *Server) handleTaskLogStream(w http.ResponseWriter, r *http.Request) {
+	_, logPath, err := s.backend.GetTask(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		return
+	}
+	if logPath == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no log file"})
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	offset := int64(0)
 	if v := r.URL.Query().Get("offset"); v != "" {
-		if n, e := strconv.Atoi(v); e == nil && n >= 0 {
+		if n, e := strconv.ParseInt(v, 10, 64); e == nil && n >= 0 {
 			offset = n
 		}
 	}
 
-	f, err := os.Open(logPath)
+	lr, err := logfile.Open(logPath)
 	if err != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"lines": []string{}, "total_lines": 0, "start": 0, "end": 0, "error": "log file not accessible"})
+		http.Error(w, "cannot open log file", http.StatusInternalServerError)
 		return
 	}
-	defer f.Close()
+	defer lr.Close()
 
-	var allLines []string
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for scanner.Scan() {
-		allLines = append(allLines, scanner.Text())
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-ticker.C:
+			if err := lr.Refresh(); err != nil {
+				continue
+			}
+			if lr.Size() <= offset {
+				continue
+			}
+			page, err := lr.ReadLines(offset, logfile.DefaultPageLines)
+			if err != nil || len(page.Lines) == 0 {
+				continue
+			}
+			data, _ := json.Marshal(page)
+			fmt.Fprintf(w, "event: lines\ndata: %s\n\n", data)
+			flusher.Flush()
+			offset = page.EndOffset
+		}
 	}
-	total := len(allLines)
-	end := total - offset
-	if end < 0 {
-		end = 0
-	}
-	start := end - tail
-	if start < 0 {
-		start = 0
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"lines":       allLines[start:end],
-		"total_lines": total,
-		"start":       start,
-		"end":         end,
-	})
 }
 
 func (s *Server) handleTaskMetrics(w http.ResponseWriter, r *http.Request) {
@@ -460,6 +527,52 @@ func (s *Server) handleTaskMetrics(w http.ResponseWriter, r *http.Request) {
 		points = []MetricPoint{}
 	}
 	writeJSON(w, http.StatusOK, points)
+}
+
+// handleJobActivity returns activity.tsv data for all tasks in a job.
+// The conversion from bytes to lines is deferred to the logfile package
+// once it's implemented (Step 4).
+func (s *Server) handleJobActivity(w http.ResponseWriter, r *http.Request) {
+	detail, err := s.backend.GetJob(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	type activityPoint struct {
+		TS    int64 `json:"ts"`
+		Bytes int64 `json:"bytes"`
+		Lines int64 `json:"lines"`
+	}
+	type taskActivity struct {
+		TaskID string          `json:"task_id"`
+		Status string          `json:"status"`
+		Points []activityPoint `json:"points"`
+	}
+	tasks := make([]taskActivity, 0, len(detail.Tasks))
+	for _, t := range detail.Tasks {
+		ta := taskActivity{TaskID: t.ID, Status: t.Status, Points: []activityPoint{}}
+		// TODO(p6-step4): read activity.tsv from task dir + lazy bytes→lines
+		tasks = append(tasks, ta)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"tasks": tasks,
+	})
+}
+
+// handleJobLogSearch searches across all task logs in a job.
+// The actual search is deferred to the logfile package (Step 5).
+func (s *Server) handleJobLogSearch(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query().Get("q")
+	if q == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "q parameter required"})
+		return
+	}
+	// TODO(p6-step5): iterate task log files using logfile.Reader.Search
+	writeJSON(w, http.StatusOK, map[string]any{
+		"matches":     []any{},
+		"next_offset": 0,
+		"truncated":   false,
+	})
 }
 
 func (s *Server) handleKillTask(w http.ResponseWriter, r *http.Request) {

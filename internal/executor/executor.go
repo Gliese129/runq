@@ -1,9 +1,11 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -26,6 +28,7 @@ type RunSpec struct {
 	Env        map[string]string // extra env vars (merged with os.Environ)
 	GPUs       []int             // GPU indices → CUDA_VISIBLE_DEVICES
 	LogPath    string            // stdout+stderr are redirected here
+	TaskDir    string            // per-task workspace dir (for activity.tsv)
 	OnStart    func(Result)      // called after cmd.Start, before waiting
 }
 
@@ -111,6 +114,8 @@ func (e *Executor) Start(parentCtx context.Context, spec RunSpec) (Result, error
 		spec.OnStart(Result{PID: pid, StartTime: startTime})
 	}
 
+	go recordActivity(ctx, spec.LogPath, spec.TaskDir)
+
 	err = cmd.Wait()
 
 	// Kill the entire process group to clean up child processes (e.g. DataLoader
@@ -171,4 +176,77 @@ func killProcessGroup(pid int) {
 	if err == nil {
 		_ = syscall.Kill(-pgid, syscall.SIGKILL)
 	}
+}
+
+// recordActivity samples log file size and incrementally counts lines every 60s,
+// appending 3-column rows {ts, cumulative_bytes, cumulative_lines} to activity.tsv.
+// Exits when ctx is cancelled (task finishes).
+func recordActivity(ctx context.Context, logPath, taskDir string) {
+	if logPath == "" || taskDir == "" {
+		return
+	}
+	activityPath := filepath.Join(taskDir, "activity.tsv")
+	var prevBytes int64
+	var cumLines int64
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			info, err := os.Stat(logPath)
+			if err != nil {
+				continue
+			}
+			curBytes := info.Size()
+
+			// Count newlines in the delta bytes since last sample.
+			if delta := curBytes - prevBytes; delta > 0 {
+				cumLines += countNewlines(logPath, prevBytes, delta)
+			}
+			prevBytes = curBytes
+
+			line := fmt.Sprintf("%d\t%d\t%d\n", time.Now().Unix(), curBytes, cumLines)
+			f, err := os.OpenFile(activityPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+			if err != nil {
+				continue
+			}
+			_, _ = f.WriteString(line)
+			f.Close()
+		}
+	}
+}
+
+// countNewlines reads [offset, offset+count) from path and returns the number
+// of '\n' bytes. On any error it returns 0 (best-effort; the next tick catches up).
+func countNewlines(path string, offset, count int64) int64 {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+
+	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+		return 0
+	}
+
+	var total int64
+	buf := make([]byte, 64*1024)
+	remaining := count
+	for remaining > 0 {
+		toRead := int64(len(buf))
+		if toRead > remaining {
+			toRead = remaining
+		}
+		n, err := f.Read(buf[:toRead])
+		if n > 0 {
+			total += int64(bytes.Count(buf[:n], []byte{'\n'}))
+			remaining -= int64(n)
+		}
+		if err != nil {
+			break
+		}
+	}
+	return total
 }

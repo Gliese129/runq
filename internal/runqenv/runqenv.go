@@ -15,16 +15,19 @@ package runqenv
 import (
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/gliese129/runq/internal/workspace"
 )
 
 // Identity is the task's stable identity plus its workspace directory.
 type Identity struct {
-	TaskID  string
-	JobID   string
-	Project string
-	TaskDir string // per-task workspace; when empty, path vars are omitted
+	TaskID    string
+	JobID     string
+	Project   string
+	TaskDir   string   // per-task workspace; when empty, path vars are omitted
+	SweepKeys []string // sweep parameter key names (for WANDB_TAGS + WANDB_RUN_NAME)
+	JobNote   string   // job note (for WANDB_RUN_GROUP)
 }
 
 // Safety carries the disk self-freeze parameters the SDK reads to size its
@@ -58,5 +61,15 @@ func Base(id Identity, safety Safety) map[string]string {
 
 	env["RUNQ_SAFETY_FACTOR_PERCENT"] = strconv.Itoa(safety.FactorPercent)
 	env["RUNQ_SAFETY_EXTRA_GB"] = strconv.Itoa(safety.ExtraGB)
+
+	if len(id.SweepKeys) > 0 {
+		env["RUNQ_SWEEP_KEYS"] = strings.Join(id.SweepKeys, ",")
+		env["WANDB_TAGS"] = strings.Join(id.SweepKeys, ",")
+	}
+	if id.JobNote != "" {
+		env["RUNQ_JOB_NOTE"] = id.JobNote
+		env["WANDB_RUN_GROUP"] = id.JobNote
+	}
+
 	return env
 }

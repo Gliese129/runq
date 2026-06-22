@@ -65,6 +65,7 @@ func resolveNote(ctx context.Context, st *store.Store, cfg job.JobConfig) (strin
 type JobSummary struct {
 	JobID       string         `json:"job_id"`
 	Project     string         `json:"project"`
+	Note        string         `json:"note"`
 	Status      string         `json:"status"`
 	TotalTasks  int            `json:"total_tasks"`
 	StatusCount map[string]int `json:"status_count"`
@@ -179,6 +180,8 @@ func (s *JobService) SubmitJobWithOpts(ctx context.Context, jobCfg job.JobConfig
 			UID:           planned.UID,
 			TaskDir:       planned.TaskDir,
 			CheckpointDir: planned.CheckpointDir,
+			SweepKeys:     plan.SweepKeys,
+			JobNote:       plan.Note,
 		})
 	}
 
@@ -298,7 +301,7 @@ func (s *JobService) listJobs(ctx context.Context, projectFilter string, archive
 			counts[t.Status]++
 		}
 		results = append(results, JobSummary{
-			JobID: j.ID, Project: j.ProjectName, Status: j.Status,
+			JobID: j.ID, Project: j.ProjectName, Note: j.Note, Status: j.Status,
 			TotalTasks: j.TotalTasks, StatusCount: counts, CreatedAt: j.CreatedAt,
 			Archived: j.ArchivedAt != nil,
 		})
@@ -369,6 +372,15 @@ func (s *JobService) refreshJobStatus(ctx context.Context, jobID string) error {
 
 	isStarted := (counts["running"] + counts["done"]) > 0
 	isEnded := (counts["pending"] + counts["running"]) == 0
+
+	// Preserve the "paused" control state — same rule as
+	// scheduler.RefreshJobStatus. Lifecycle aggregation must not clobber a
+	// user pause; a paused job with work left stays paused, only "done" wins
+	// once every task is terminal. (Both aggregators share this rule; they
+	// should be consolidated into one helper — see RQ-12.)
+	if !isEnded && s.Scheduler != nil && s.Scheduler.IsJobPaused(jobID) {
+		return nil
+	}
 
 	var newStatus string
 	if isEnded {

@@ -11,6 +11,8 @@ const NO_CAPS: Capabilities = {
   state_model: 'push',
   kill_async: false,
   submit_preview: false,
+  activity_heatmap: false,
+  log_search: false,
 }
 
 export const useConfigStore = defineStore('config', () => {

@@ -5,6 +5,8 @@
   "nav.submit": "提交",
   "nav.settings": "设置",
   "nav.about": "关于",
+  "nav.utils": "工具",
+  "nav.log_viewer": "日志查看器",
   "status.disconnected": "未连接",
   "status.connected": "已连接",
   "status.daemon_down": "守护进程未运行",
@@ -222,5 +224,14 @@
   "archive.projects_section": "已归档项目（{n}）",
   "a11y.open_job": "打开 Job {id}",
   "a11y.open_task": "打开 Task {id}",
-  "a11y.home": "runq 首页"
+  "a11y.home": "runq 首页",
+  "log.search": "搜索日志",
+  "log.search_placeholder": "跨全部子任务搜索日志…",
+  "log.no_results": "无匹配",
+  "log.truncated": "结果已截断 — 请缩小搜索范围",
+  "log.follow": "跟随",
+  "log.load_earlier": "加载更早内容",
+  "log.processors": "处理器",
+  "activity.title": "活跃度",
+  "activity.no_data": "暂无活跃度数据"
 }

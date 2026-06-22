@@ -285,6 +285,7 @@ func (b *Backend) buildRunScript(t submitplan.PlannedTask, plan submitplan.Plan)
 	// is zeroed: HPC has no daemon to self-freeze against (no freeze in HPC).
 	for k, v := range runqenv.Base(runqenv.Identity{
 		TaskID: t.TaskID, JobID: plan.JobID, Project: plan.Project, TaskDir: t.TaskDir,
+		SweepKeys: plan.SweepKeys, JobNote: plan.Note,
 	}, runqenv.Safety{}) {
 		env[k] = v
 	}
@@ -314,8 +315,28 @@ func (b *Backend) buildRunScript(t submitplan.PlannedTask, plan submitplan.Plan)
 	// the kill becomes a wrapper FACT instead of a qstat inference.
 	// Deliberately NOT trapping USR1/USR2: training frameworks use those
 	// for checkpoint signaling and runq must not intercept them.
-	s.WriteString(`trap '_runq_status "$(printf '\''{"status":"killed","exit_code":143,"finished_at":%s}'\'' "$(date +%s)")"; exit 143' TERM INT HUP` + "\n")
+	s.WriteString(`trap 'kill $_RUNQ_ACTIVITY_PID 2>/dev/null; _runq_status "$(printf '\''{"status":"killed","exit_code":143,"finished_at":%s}'\'' "$(date +%s)")"; exit 143' TERM INT HUP` + "\n")
 	s.WriteString(`_runq_status "$(printf '{"status":"running","started_at":%s}' "$(date +%s)")"` + "\n")
+	// Activity sidecar: sample log file size + incremental line count every 60s
+	// into 3-column activity.tsv {ts, bytes, lines}. The trap kills the sidecar
+	// on exit. Byte count is O(1) (fstat); line count reads only the delta bytes
+	// since the last sample (~1MB/60s typical), <10ms/tick.
+	activityFile := hpccore.ShellQuote(filepath.Join(t.TaskDir, "activity.tsv"))
+	logFileQuoted := hpccore.ShellQuote(t.LogPath)
+	fmt.Fprintf(&s, "ACTIVITY_FILE=%s\n", activityFile)
+	fmt.Fprintf(&s, "LOG_FILE=%s\n", logFileQuoted)
+	s.WriteString("_RUNQ_PREV_BYTES=0\n")
+	s.WriteString("_RUNQ_CUM_LINES=0\n")
+	s.WriteString("(while sleep 60; do\n")
+	s.WriteString(`  _CUR=$(stat -c%s "$LOG_FILE" 2>/dev/null || echo 0)` + "\n")
+	s.WriteString("  _D=$((_CUR - _RUNQ_PREV_BYTES))\n")
+	s.WriteString(`  [ "$_D" -gt 0 ] && _RUNQ_CUM_LINES=$((_RUNQ_CUM_LINES + \` + "\n")
+	s.WriteString(`    $(dd if="$LOG_FILE" bs=65536 skip=$_RUNQ_PREV_BYTES count=$_D \` + "\n")
+	s.WriteString(`      iflag=skip_bytes,count_bytes 2>/dev/null | tr -cd '\n' | wc -c)))` + "\n")
+	s.WriteString(`  printf '%s\t%s\t%s\n' "$(date +%s)" "$_CUR" "$_RUNQ_CUM_LINES" >> "$ACTIVITY_FILE"` + "\n")
+	s.WriteString("  _RUNQ_PREV_BYTES=$_CUR\n")
+	s.WriteString("done) &\n")
+	s.WriteString("_RUNQ_ACTIVITY_PID=$!\n")
 	// Tasks run from the project's working_dir (daemon/HPC parity) —
 	// schedulers start jobs in $HOME, where relative script paths break.
 	wd := hpccore.ShellQuote(t.WorkingDir)
@@ -323,6 +344,7 @@ func (b *Backend) buildRunScript(t submitplan.PlannedTask, plan submitplan.Plan)
 	s.WriteString(t.Command + "\n")
 	s.WriteString("code=$?\n")
 	fmt.Fprintf(&s, "else\n  echo \"runq: cannot cd into working_dir %s\"\n  code=1\nfi\n", wd)
+	s.WriteString("kill $_RUNQ_ACTIVITY_PID 2>/dev/null\n")
 	s.WriteString(`if [ "$code" -eq 0 ]; then _st=success; else _st=failed; fi` + "\n")
 	s.WriteString(`_runq_status "$(printf '{"status":"%s","exit_code":%s,"finished_at":%s}' "$_st" "$code" "$(date +%s)")"` + "\n")
 	s.WriteString("exit $code\n")

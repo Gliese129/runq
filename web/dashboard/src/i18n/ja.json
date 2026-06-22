@@ -5,6 +5,8 @@
   "nav.submit": "投入",
   "nav.settings": "設定",
   "nav.about": "情報",
+  "nav.utils": "ユーティリティ",
+  "nav.log_viewer": "ログビューア",
   "status.disconnected": "未接続",
   "status.connected": "接続済み",
   "status.daemon_down": "デーモンが起動していません",
@@ -222,5 +224,14 @@
   "archive.projects_section": "アーカイブ済みプロジェクト（{n}）",
   "a11y.open_job": "ジョブ {id} を開く",
   "a11y.open_task": "タスク {id} を開く",
-  "a11y.home": "runq ホーム"
+  "a11y.home": "runq ホーム",
+  "log.search": "ログ検索",
+  "log.search_placeholder": "全タスクのログを横断検索…",
+  "log.no_results": "一致なし",
+  "log.truncated": "結果が切り詰められました — クエリを絞ってください",
+  "log.follow": "フォロー",
+  "log.load_earlier": "前を読み込む",
+  "log.processors": "プロセッサ",
+  "activity.title": "アクティビティ",
+  "activity.no_data": "アクティビティデータなし"
 }

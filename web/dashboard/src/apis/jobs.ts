@@ -1,5 +1,5 @@
 import { api, type RequestOptions } from './client'
-import type { CompareRow, JobConfigPayload, JobDetail, JobSubmitResponse, JobSummary, MessageResponse } from '@/types/api'
+import type { CompareRow, JobActivityResponse, JobConfigPayload, JobDetail, JobLogSearchResponse, JobSubmitResponse, JobSummary, MessageResponse } from '@/types/api'
 
 export interface SubmitJobOptions extends RequestOptions {
   preflightEnabled?: boolean
@@ -68,4 +68,14 @@ export const jobsApi = {
   /** Preview note resolution ({{version}} scan etc.) — submit's code path. */
   resolveNote: (cfg: JobConfigPayload) =>
     api.post<{ resolved: string }>('/jobs/resolve-note', cfg, { silent: true }),
+
+  /** P6: fetch activity.tsv data for all tasks in a job. */
+  activity: (jobId: string) =>
+    api.get<JobActivityResponse>(`/jobs/${encodeURIComponent(jobId)}/activity`),
+
+  /** P6: search across all task logs in a job. */
+  logSearch: (jobId: string, q: string, offset = 0, limit = 100) => {
+    const params = new URLSearchParams({ q, offset: String(offset), limit: String(limit) })
+    return api.get<JobLogSearchResponse>(`/jobs/${encodeURIComponent(jobId)}/log/search?${params}`)
+  },
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/gliese129/runq/internal/job"
@@ -49,6 +50,7 @@ type Plan struct {
 	GPUsPerTask int
 	Wandb       *project.WandbConfig
 	Tasks       []PlannedTask
+	SweepKeys   []string // swept parameter names (sorted), for WANDB_TAGS/RUN_NAME
 	// Preflight is the full three-state report (failed entries already
 	// aborted Build) — callers print it so skips stay visible.
 	Preflight preflight.Report
@@ -270,6 +272,19 @@ func Build(ctx context.Context, cfg job.JobConfig, proj *project.Config, d Deps)
 		})
 	}
 
+	// Derive sweep keys: unique parameter names across all sweep blocks.
+	var sweepKeys []string
+	seenKey := make(map[string]bool)
+	for _, block := range cfg.Sweep {
+		for k := range block.Parameters {
+			if !seenKey[k] {
+				seenKey[k] = true
+				sweepKeys = append(sweepKeys, k)
+			}
+		}
+	}
+	sort.Strings(sweepKeys)
+
 	return Plan{
 		JobID:       jobID,
 		Project:     cfg.Project,
@@ -278,6 +293,7 @@ func Build(ctx context.Context, cfg job.JobConfig, proj *project.Config, d Deps)
 		GPUsPerTask: gpusPerTask,
 		Wandb:       proj.Wandb,
 		Tasks:       tasks,
+		SweepKeys:   sweepKeys,
 		Preflight:   pfReport,
 	}, nil
 }

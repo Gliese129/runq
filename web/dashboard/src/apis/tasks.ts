@@ -1,9 +1,11 @@
 import { api, type RequestOptions } from './client'
-import type { ActionResponse, TaskLogResponse, TaskView } from '@/types/api'
+import type { ActionResponse, LogPage, TaskView } from '@/types/api'
 
 export interface TaskLogOptions {
-  tail?: number
+  /** Byte offset into the raw log file (default 0). */
   offset?: number
+  /** Number of lines to return (default 200, max 5000). */
+  lines?: number
 }
 
 export const tasksApi = {
@@ -12,11 +14,19 @@ export const tasksApi = {
 
   log: (taskId: string, opts: TaskLogOptions = {}) => {
     const params = new URLSearchParams()
-    if (opts.tail != null) params.set('tail', String(opts.tail))
     if (opts.offset != null) params.set('offset', String(opts.offset))
+    if (opts.lines != null) params.set('lines', String(opts.lines))
     const query = params.toString()
     const path = `/tasks/${encodeURIComponent(taskId)}/log${query ? `?${query}` : ''}`
-    return api.get<TaskLogResponse>(path)
+    return api.get<LogPage>(path)
+  },
+
+  logStream: (taskId: string, offset?: number) => {
+    const params = new URLSearchParams()
+    if (offset != null) params.set('offset', String(offset))
+    const query = params.toString()
+    const path = `/api/dashboard/tasks/${encodeURIComponent(taskId)}/log/stream${query ? `?${query}` : ''}`
+    return new EventSource(path)
   },
 
   metrics: (taskId: string) =>

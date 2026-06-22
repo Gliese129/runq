@@ -222,5 +222,16 @@
   "archive.projects_section": "Archived projects ({n})",
   "a11y.open_job": "Open job {id}",
   "a11y.open_task": "Open task {id}",
-  "a11y.home": "runq home"
+  "a11y.home": "runq home",
+  "log.search": "Search logs",
+  "log.search_placeholder": "Search across all task logs…",
+  "log.no_results": "No matches",
+  "log.truncated": "Results truncated — refine your query",
+  "log.follow": "Follow",
+  "log.load_earlier": "Load earlier",
+  "log.processors": "Processors",
+  "nav.utils": "Utils",
+  "nav.log_viewer": "Log Viewer",
+  "activity.title": "Activity",
+  "activity.no_data": "No activity data"
 }

@@ -33,6 +33,14 @@ func (s *Scheduler) isJobPaused(jobID string) bool {
 	return s.pausedJobs[jobID]
 }
 
+// IsJobPaused is the exported view of the in-memory pause set. "paused" is a
+// user control state that lives in the scheduler, separate from the derived
+// lifecycle status in the DB; the service-layer aggregator consults this so it
+// doesn't clobber a pause with a recomputed lifecycle status.
+func (s *Scheduler) IsJobPaused(jobID string) bool {
+	return s.isJobPaused(jobID)
+}
+
 // ── Kill request tracking ─────────────────────────────────────────────────
 
 // RequestKill marks a task as user-killed. Call before Executor.Stop().
@@ -85,6 +93,16 @@ func (s *Scheduler) RefreshJobStatus(jobID string) {
 
 	isStarted := (counts["running"] + counts["done"]) > 0
 	isEnded := (counts["pending"] + counts["running"]) == 0
+
+	// Preserve the "paused" control state. Lifecycle aggregation derives status
+	// purely from task states and must not overwrite a user-initiated pause;
+	// otherwise a running task completing flips the job to "running"/"pending"
+	// and the later ResumeJob rejects ("not paused"). A paused job with work
+	// still left stays paused so ResumeJob can find it; once every task is
+	// terminal, "done" wins (resume is meaningless).
+	if !isEnded && s.isJobPaused(jobID) {
+		return
+	}
 
 	var newStatus string
 	if isEnded {

@@ -6,6 +6,8 @@ cmd/*/runqd
 
 .claude
 .codex
+AGENTS.md
+CLAUDE.md
 
 demo/
 docs/

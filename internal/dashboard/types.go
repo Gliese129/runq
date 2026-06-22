@@ -107,13 +107,20 @@ type Capabilities struct {
 	// always current. "poll": best-effort projection, only advances on
 	// refresh; consumers must surface staleness (refreshed_at).
 	StateModel string `json:"state_model"`
-	// Action semantics — kill is asynchronous: the request is forwarded
-	// (e.g. qdel) and the status only changes once a later poll confirms
-	// it. UIs should show a transient local "cancelling" state.
+	// Action semantics — kill is forwarded to an external scheduler (e.g.
+	// qdel/scancel) rather than signalling a local process. The task is
+	// marked "killed" locally as soon as the cancel command itself succeeds;
+	// it is never marked killed unless that command returned success (the
+	// kill never lies). UIs may show a transient local "cancelling" state for
+	// the duration of the request — it clears on the next reconcile, which
+	// usually already shows "killed".
 	KillAsync bool `json:"kill_async"`
 	// SubmitPreview — the backend can render exactly what WOULD be
 	// submitted (run.sh + submit command) with zero side effects.
 	SubmitPreview bool `json:"submit_preview"`
+	// P6 features: log activity heatmap and cross-task log search.
+	ActivityHeatmap bool `json:"activity_heatmap"`
+	LogSearch       bool `json:"log_search"`
 }
 
 type ErrorResponse struct {

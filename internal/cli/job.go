@@ -3,9 +3,9 @@ package cli
 import (
 	"context"
 	"fmt"
-	"github.com/gliese129/runq/internal/config"
-	"time"
 
+	"github.com/gliese129/runq/internal/config"
+	"github.com/gliese129/runq/internal/dashboard"
 	"github.com/gliese129/runq/internal/utils"
 	"github.com/spf13/cobra"
 )
@@ -22,40 +22,17 @@ var jobLsCmd = &cobra.Command{
 	RunE:    runJobLs,
 }
 
-type jobSummary struct {
-	JobID       string         `json:"job_id"`
-	Project     string         `json:"project"`
-	Status      string         `json:"status"`
-	TotalTasks  int            `json:"total_tasks"`
-	StatusCount map[string]int `json:"status_count"`
-	CreatedAt   time.Time      `json:"created_at"`
-}
-
+// runJobLs lists jobs via the mode-aware backend (daemon socket or HPC store),
+// the same path the WebUI and `runq ps` use — so the list reconciles and
+// projects identically regardless of mode.
 func runJobLs(cmd *cobra.Command, args []string) error {
-	var jobs []jobSummary
-	if err := doAndDecode("GET", "/api/jobs", nil, &jobs); err != nil {
-		return err
-	}
-	if len(jobs) == 0 {
-		fmt.Println("no jobs")
-		return nil
-	}
-
-	w := newTable()
-	fmt.Fprintf(w, "JOB_ID\tPROJECT\tSTATUS\tRUN\tPEND\tFAIL\tOK\tAGE\n")
-	for _, j := range jobs {
-		age := time.Since(j.CreatedAt).Truncate(time.Second)
-		fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%d\t%d\t%d\t%s\n",
-			utils.IDColor(j.JobID), j.Project, utils.StatusColor(j.Status),
-			j.StatusCount["running"],
-			j.StatusCount["pending"],
-			j.StatusCount["failed"],
-			j.StatusCount["success"],
-			age,
-		)
-	}
-	w.Flush()
-	return nil
+	return withBackend(func(b dashboard.Backend) error {
+		jobs, err := b.ListJobs(context.Background(), "")
+		if err != nil {
+			return err
+		}
+		return printDashboardJobs(jobs)
+	})
 }
 
 var jobShowCmd = &cobra.Command{
@@ -66,13 +43,14 @@ var jobShowCmd = &cobra.Command{
 }
 
 func runJobShow(cmd *cobra.Command, args []string) error {
-	jobID := args[0]
-	var result map[string]any
-	if err := doAndDecode("GET", "/api/jobs/"+jobID, nil, &result); err != nil {
-		return err
-	}
-	printJSON(result)
-	return nil
+	return withBackend(func(b dashboard.Backend) error {
+		detail, err := b.GetJob(context.Background(), args[0])
+		if err != nil {
+			return err
+		}
+		printJSON(detail)
+		return nil
+	})
 }
 
 var jobKillCmd = &cobra.Command{
@@ -84,12 +62,13 @@ var jobKillCmd = &cobra.Command{
 
 func runJobKill(cmd *cobra.Command, args []string) error {
 	jobID := args[0]
-	var resp map[string]any
-	if err := doAndDecode("DELETE", "/api/jobs/"+jobID, nil, &resp); err != nil {
-		return err
-	}
-	fmt.Printf("job %s: %.0f tasks killed\n", utils.IDColor(jobID), resp["tasks_killed"])
-	return nil
+	return withBackend(func(b dashboard.Backend) error {
+		if err := b.KillJob(context.Background(), jobID); err != nil {
+			return err
+		}
+		fmt.Printf("job %s killed\n", utils.IDColor(jobID))
+		return nil
+	})
 }
 
 var jobPauseCmd = &cobra.Command{
@@ -101,12 +80,13 @@ var jobPauseCmd = &cobra.Command{
 
 func runJobPause(cmd *cobra.Command, args []string) error {
 	jobID := args[0]
-	var resp map[string]any
-	if err := doAndDecode("POST", "/api/jobs/"+jobID+"/pause", nil, &resp); err != nil {
-		return err
-	}
-	fmt.Printf("job %s paused\n", utils.IDColor(jobID))
-	return nil
+	return withBackend(func(b dashboard.Backend) error {
+		if err := b.PauseJob(context.Background(), jobID); err != nil {
+			return err
+		}
+		fmt.Printf("job %s paused\n", utils.IDColor(jobID))
+		return nil
+	})
 }
 
 var jobResumeCmd = &cobra.Command{
@@ -118,12 +98,13 @@ var jobResumeCmd = &cobra.Command{
 
 func runJobResume(cmd *cobra.Command, args []string) error {
 	jobID := args[0]
-	var resp map[string]any
-	if err := doAndDecode("POST", "/api/jobs/"+jobID+"/resume", nil, &resp); err != nil {
-		return err
-	}
-	fmt.Printf("job %s resumed\n", utils.IDColor(jobID))
-	return nil
+	return withBackend(func(b dashboard.Backend) error {
+		if err := b.ResumeJob(context.Background(), jobID); err != nil {
+			return err
+		}
+		fmt.Printf("job %s resumed\n", utils.IDColor(jobID))
+		return nil
+	})
 }
 
 var jobRmCmd = &cobra.Command{
@@ -134,6 +115,9 @@ var jobRmCmd = &cobra.Command{
 	RunE:    runJobRm,
 }
 
+// runJobRm stays on the daemon API: removing a completed job record is not
+// part of the dashboard.Backend contract (the WebUI has no such action), so
+// there is no mode-aware path to route through. Daemon-only by design.
 func runJobRm(cmd *cobra.Command, args []string) error {
 	jobID := args[0]
 	var resp map[string]any

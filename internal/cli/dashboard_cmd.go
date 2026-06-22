@@ -122,3 +122,22 @@ func newDashboardBackend(mode string) (dashboard.Backend, func(), error) {
 		return nil, nil, fmt.Errorf("unsupported mode %q", mode)
 	}
 }
+
+// withBackend resolves the configured mode, opens the mode-aware
+// dashboard.Backend, runs fn, and tears the backend down. This is the single
+// read/control entry point user-facing CLI commands should use so daemon and
+// HPC behave identically (same reconciliation, capabilities, summary
+// projection) — the same backend the WebUI goes through. Commands keep their
+// own output formatting; only the data access goes through here.
+func withBackend(fn func(dashboard.Backend) error) error {
+	_, mode, err := loadModeConfig()
+	if err != nil {
+		return err
+	}
+	backend, closeBackend, err := newDashboardBackend(mode)
+	if err != nil {
+		return err
+	}
+	defer closeBackend()
+	return fn(backend)
+}

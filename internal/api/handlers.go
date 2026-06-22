@@ -1,18 +1,18 @@
 package api
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gliese129/runq/internal/job"
+	"github.com/gliese129/runq/internal/logfile"
 	"github.com/gliese129/runq/internal/project"
 	"github.com/gliese129/runq/internal/scheduler"
 	"github.com/gliese129/runq/internal/service"
@@ -80,6 +80,9 @@ func (s *Server) registerRoutes() {
 	{
 		internal.POST("/freeze-self", s.handleFreezeSelf)
 	}
+
+	// Log SSE
+	tasks.GET("/:id/log/stream", s.handleTaskLogStream)
 }
 
 // ── Project handlers (thin — Registry is already a clean service) ──
@@ -404,8 +407,12 @@ func (s *Server) handleTaskGet(c *gin.Context) {
 	c.JSON(http.StatusOK, task)
 }
 
-// handleTaskLog reads the task's log file and returns the last N lines.
-// Query params: tail (default 500), offset (default 0, skip first N lines).
+// handleTaskLog reads a page of log lines starting at a byte offset.
+// Query params:
+//   - offset: byte offset into the raw log file (default 0)
+//   - lines:  number of lines to return (default 200, max 5000)
+//
+// Returns a logfile.Page JSON.
 func (s *Server) handleTaskLog(c *gin.Context) {
 	task, err := s.deps.Store.GetTask(context.Background(), c.Param("id"))
 	if err != nil || task == nil {
@@ -414,56 +421,98 @@ func (s *Server) handleTaskLog(c *gin.Context) {
 	}
 	logPath := task.LogPath
 	if logPath == "" {
-		c.JSON(http.StatusOK, gin.H{"lines": []string{}, "total_lines": 0})
+		c.JSON(http.StatusOK, &logfile.Page{Lines: []string{}})
 		return
 	}
 
-	tail := 500
-	if v := c.Query("tail"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 5000 {
-			tail = n
+	offset := int64(0)
+	if v := c.Query("offset"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n >= 0 {
+			offset = n
 		}
 	}
-	offset := 0
+	lines := logfile.DefaultPageLines
+	if v := c.Query("lines"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= logfile.MaxPageLines {
+			lines = n
+		}
+	}
+
+	lr, err := logfile.Open(logPath)
+	if err != nil {
+		c.JSON(http.StatusOK, &logfile.Page{Lines: []string{}})
+		return
+	}
+	defer lr.Close()
+
+	page, err := lr.ReadLines(offset, lines)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, page)
+}
+
+func (s *Server) handleTaskLogStream(c *gin.Context) {
+	task, err := s.deps.Store.GetTask(context.Background(), c.Param("id"))
+	if err != nil || task == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
+		return
+	}
+	logPath := task.LogPath
+	if logPath == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no log file"})
+		return
+	}
+
+	w := c.Writer
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	offset := int64(0)
 	if v := c.Query("offset"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n >= 0 {
 			offset = n
 		}
 	}
 
-	f, err := os.Open(logPath)
+	lr, err := logfile.Open(logPath)
 	if err != nil {
-		c.JSON(http.StatusOK, gin.H{"lines": []string{}, "total_lines": 0, "error": "log file not accessible"})
+		http.Error(w, "cannot open log file", http.StatusInternalServerError)
 		return
 	}
-	defer f.Close()
+	defer lr.Close()
 
-	// Read all lines (simple approach; for huge files, optimize later)
-	var allLines []string
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // 1MB max line
-	for scanner.Scan() {
-		allLines = append(allLines, scanner.Text())
-	}
-	total := len(allLines)
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
 
-	// Apply offset + tail: return lines from [total-tail-offset, total-offset)
-	end := total - offset
-	if end < 0 {
-		end = 0
+	for {
+		select {
+		case <-c.Request.Context().Done():
+			return
+		case <-ticker.C:
+			if err := lr.Refresh(); err != nil {
+				continue
+			}
+			if lr.Size() <= offset {
+				continue
+			}
+			page, err := lr.ReadLines(offset, logfile.DefaultPageLines)
+			if err != nil || len(page.Lines) == 0 {
+				continue
+			}
+			data, _ := json.Marshal(page)
+			fmt.Fprintf(w, "event: lines\ndata: %s\n\n", data)
+			flusher.Flush()
+			offset = page.EndOffset
+		}
 	}
-	start := end - tail
-	if start < 0 {
-		start = 0
-	}
-	lines := allLines[start:end]
-
-	c.JSON(http.StatusOK, gin.H{
-		"lines":       lines,
-		"total_lines": total,
-		"start":       start,
-		"end":         end,
-	})
 }
 
 func (s *Server) handleTaskKill(c *gin.Context) {

@@ -40,6 +40,32 @@
 
       <v-divider />
 
+      <div class="pa-2">
+        <div v-if="!collapsed" class="text-caption text-on-surface-variant px-2 mb-1">
+          {{ t('nav.utils') }}
+        </div>
+        <v-tooltip v-else :text="t('nav.utils')" location="end">
+          <template #activator="{ props: tp }">
+            <div v-bind="tp" class="text-center mb-1">
+              <v-icon size="16" color="on-surface-variant">mdi-toolbox-outline</v-icon>
+            </div>
+          </template>
+        </v-tooltip>
+        <v-list-item
+          :to="{ name: 'log-viewer' }"
+          :active="isActive('log-viewer')"
+          :title="collapsed ? '' : t('nav.log_viewer')"
+          :aria-label="t('nav.log_viewer')"
+          prepend-icon="mdi-text-box-search-outline"
+          density="compact"
+          rounded="lg"
+          class="mb-1"
+          color="primary"
+        />
+      </div>
+
+      <v-divider />
+
       <div class="pa-2 flex-grow-1 overflow-y-auto">
         <div v-if="!collapsed" class="text-caption text-on-surface-variant px-2 mb-1 d-flex align-center justify-space-between">
           Projects

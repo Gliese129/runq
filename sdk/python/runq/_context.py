@@ -126,14 +126,22 @@ class Context:
 
     @property
     def wandb_like_cfg(self) -> dict:
-        """Kwargs dict for ``wandb.init(**ctx.wandb_like_cfg)``. See F9.
+        """Kwargs dict for ``wandb.init(**ctx.wandb_like_cfg)``. See F9/P6.
+
+        When ``RUNQ_SWEEP_KEYS`` is set (P6 W&B integration), the run
+        name is built from sweep parameter key=value pairs so each task
+        in a sweep is immediately distinguishable in the W&B UI.
+
+        When ``RUNQ_JOB_NOTE`` is set, it becomes the W&B group — giving
+        the user's note semantics as the grouping label instead of a raw
+        job id.
 
         Shape::
 
             {
                 "project": self.project or "runq",
-                "name":    f"{job_id}/{task_id}" or task_id,
-                "group":   self.job_id or None,
+                "name":    "lr=0.01_bs=32" or f"{job_id}/{task_id}",
+                "group":   job_note or job_id or None,
                 "config":  dict(self.params),
             }
 
@@ -141,11 +149,22 @@ class Context:
         come from the user's ``WANDB_*`` env / ``~/.netrc`` and runq
         won't second-guess.
         """
-        name = f"{self.job_id}/{self.task_id}" if self.job_id else self.task_id
+        sweep_keys_raw = os.environ.get("RUNQ_SWEEP_KEYS", "")
+        sweep_keys = [k.strip() for k in sweep_keys_raw.split(",") if k.strip()] if sweep_keys_raw else []
+        job_note = os.environ.get("RUNQ_JOB_NOTE", "")
+
+        if sweep_keys and self.params:
+            parts = [f"{k}={self.params[k]}" for k in sweep_keys if k in self.params]
+            name = "_".join(parts) if parts else (f"{self.job_id}/{self.task_id}" if self.job_id else self.task_id)
+        else:
+            name = f"{self.job_id}/{self.task_id}" if self.job_id else self.task_id
+
+        group = job_note if job_note else (self.job_id or None)
+
         return {
             "project": self.project or "runq",
             "name": name,
-            "group": self.job_id or None,
+            "group": group,
             "config": dict(self.params or {}),
         }
 

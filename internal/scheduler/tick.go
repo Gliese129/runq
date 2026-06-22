@@ -154,6 +154,12 @@ func (s *Scheduler) dispatch(task *Task) {
 		return
 	}
 
+	// Advance the job aggregate on the running transition too — not just on
+	// completion. Without this a job stays "pending" in the DB while its task
+	// is already running, so daemon CLI/WebUI show stale job status. Uses the
+	// same aggregate helper as every terminal transition.
+	s.RefreshJobStatus(task.JobID)
+
 	s.logger.Info("task dispatched", "task", task.ID, "job", task.JobID, "gpus", gpus)
 	s.wg.Add(1)
 	go func() {

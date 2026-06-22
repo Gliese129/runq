@@ -27,12 +27,18 @@ func NewDaemonBackend(socketPath string) *DaemonBackend {
 
 func (b *DaemonBackend) Capabilities() Capabilities {
 	return Capabilities{
-		GPUMap:      true,
-		PauseResume: true,
-		LiveLog:     true,
-		Retry:       true,
-		StateModel:  "push", // the daemon owns the truth; data is always current
-		KillAsync:   false,
+		GPUMap:          true,
+		PauseResume:     true,
+		LiveLog:         true,
+		Retry:           true,
+		StateModel:      "push", // the daemon owns the truth; data is always current
+		KillAsync:       false,
+		// Activity heatmap and log search handlers are still TODO stubs
+		// (server.go handleJobActivity p6-step4, handleJobLogSearch p6-step5).
+		// Keep the capabilities off until the endpoints have real behavior so
+		// the UI doesn't render affordances for unimplemented features.
+		ActivityHeatmap: false,
+		LogSearch:       false,
 	}
 }
 
@@ -337,6 +343,7 @@ func summaryFromDaemonList(job service.JobSummary) JobSummary {
 	return JobSummary{
 		ID:        job.JobID,
 		Project:   job.Project,
+		Note:      job.Note,
 		Status:    job.Status,
 		Archived:  job.Archived,
 		CreatedAt: job.CreatedAt.Unix(),

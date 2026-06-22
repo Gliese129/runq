@@ -373,18 +373,31 @@ var logsCmd = &cobra.Command{
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		id := args[0]
-		var task taskRowView
-		if err := doAndDecode("GET", fmt.Sprintf("/api/tasks/%s", id), nil, &task); err != nil {
+		// Resolve the task (and its log path) through the mode-aware backend,
+		// same as the WebUI — daemon and HPC both work. We only need it to
+		// locate the file, so close the backend before the (possibly
+		// long-running) tail to release the HPC store handle.
+		_, mode, err := loadModeConfig()
+		if err != nil {
+			return err
+		}
+		backend, closeBackend, err := newDashboardBackend(mode)
+		if err != nil {
+			return err
+		}
+		view, logPath, err := backend.GetTask(context.Background(), id)
+		closeBackend()
+		if err != nil {
 			return err
 		}
 
 		// Print a colored header before tailing.
 		fmt.Printf("%s  %s  %s\n",
-			utils.IDColor(task.ID),
-			utils.StatusColor(task.Status),
-			utils.Dimf("%s", task.LogPath))
+			utils.IDColor(view.ID),
+			utils.StatusColor(view.Status),
+			utils.Dimf("%s", logPath))
 
-		logfile := task.LogPath
+		logfile := logPath
 		noFollow, _ := cmd.Flags().GetBool("no-follow")
 		if noFollow {
 			data, err := os.ReadFile(logfile)

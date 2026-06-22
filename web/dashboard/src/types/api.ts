@@ -46,13 +46,17 @@ export interface TaskView {
   wandb_run_id?: string
 }
 
-export interface TaskLogResponse {
+/** Mirrors logfile.Page — byte-offset based log page. */
+export interface LogPage {
   lines: string[]
-  total_lines: number
-  start: number
-  end: number
-  error?: string
+  start_offset: number
+  end_offset: number
+  total_bytes: number
+  total_lines: number // -1 when unknown
 }
+
+/** @deprecated Use LogPage. Kept for migration. */
+export type TaskLogResponse = LogPage
 
 export interface WandbInfo {
   entity?: string
@@ -90,7 +94,9 @@ export interface GPUSlot {
  * Backend self-description in three dimensions (mirrors Go Capabilities).
  * Feature bits: concept exists here at all → render or remove (never disable).
  * state_model: "poll" → surface staleness (refreshed_at) + manual refresh.
- * kill_async: show a local transient "cancelling" state after kill.
+ * kill_async: kill is forwarded to an external scheduler; the task is marked
+ *   "killed" as soon as the cancel command succeeds. Show a local transient
+ *   "cancelling" state for the request; it clears on the next reconcile.
  */
 export interface Capabilities {
   gpu_map: boolean
@@ -101,6 +107,10 @@ export interface Capabilities {
   kill_async: boolean
   /** backend can render exactly what would be submitted (zero side effects) */
   submit_preview: boolean
+  /** P6: log activity heatmap available */
+  activity_heatmap: boolean
+  /** P6: cross-task log search available */
+  log_search: boolean
 }
 
 export interface ConfigResponse {
@@ -246,4 +256,37 @@ export interface ProjectPayload {
 export interface WebhookConfig {
   url: string
   events: string[]
+}
+
+// ── P6: Activity + Search ──
+
+export interface ActivityPoint {
+  ts: number
+  bytes: number
+  lines: number
+}
+
+export interface TaskActivity {
+  task_id: string
+  status: string
+  points: ActivityPoint[]
+}
+
+export interface JobActivityResponse {
+  tasks: TaskActivity[]
+  job_start?: number
+  job_end?: number
+}
+
+export interface SearchMatch {
+  task_id: string
+  line_no: number
+  offset: number
+  line: string
+}
+
+export interface JobLogSearchResponse {
+  matches: SearchMatch[]
+  next_offset: number
+  truncated: boolean
 }

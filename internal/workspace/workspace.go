@@ -38,6 +38,58 @@ func NotePath(dir string) string {
 	return filepath.Join(dir, "note.txt")
 }
 
+func ActivityPath(dir string) string {
+	return filepath.Join(dir, "activity.tsv")
+}
+
+// TaskMetaPath returns the path to task.meta, a JSON file holding derived
+// post-mortem metadata (future fields like TotalLines, ErrorCount, etc.).
+func TaskMetaPath(dir string) string {
+	return filepath.Join(dir, "task.meta")
+}
+
+// TaskMeta is the JSON schema for task.meta. Add new fields here as needed;
+// existing files without the field will unmarshal to their zero value.
+// Activity data (ts/bytes/lines) is now recorded directly in activity.tsv
+// by the sidecar; this struct is reserved for other post-mortem metadata.
+type TaskMeta struct {
+	// Future fields: TotalLines, ErrorCount, TimeRange, etc.
+}
+
+// ReadTaskMeta reads and parses task.meta. Returns a zero-value TaskMeta
+// (not an error) if the file does not exist.
+func ReadTaskMeta(dir string) (TaskMeta, error) {
+	data, err := os.ReadFile(TaskMetaPath(dir))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return TaskMeta{}, nil
+		}
+		return TaskMeta{}, fmt.Errorf("read task.meta: %w", err)
+	}
+	var meta TaskMeta
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return TaskMeta{}, fmt.Errorf("parse task.meta: %w", err)
+	}
+	return meta, nil
+}
+
+// WriteTaskMeta atomically writes task.meta. It merges: reads existing meta,
+// applies the update function, then writes back. This way multiple callers
+// can add different fields without overwriting each other.
+func WriteTaskMeta(dir string, update func(*TaskMeta)) error {
+	meta, err := ReadTaskMeta(dir)
+	if err != nil {
+		// If parse fails, start fresh
+		meta = TaskMeta{}
+	}
+	update(&meta)
+	data, err := json.MarshalIndent(meta, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal task.meta: %w", err)
+	}
+	return utils.AtomicWriteFile(TaskMetaPath(dir), data, 0o644)
+}
+
 // Write creates <dir>/checkpoints/, writes params.json, and (when wandb is
 // configured at project level) writes wandb_config.json. When note is non-empty
 // it also writes note.txt. All writes are atomic via utils.AtomicWriteFile so

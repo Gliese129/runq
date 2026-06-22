@@ -73,7 +73,7 @@
                   @click.stop="$emit('kill-task', task.id)"
                   :aria-label="t('job.kill')" :title="t('job.kill')"
                 ><v-icon size="14">mdi-stop</v-icon></v-btn>
-                <v-btn v-if="task.status === 'failed'" icon size="x-small" variant="text" color="primary"
+                <v-btn v-if="task.status === 'failed' || task.status === 'killed'" icon size="x-small" variant="text" color="primary"
                   @click.stop="$emit('retry-task', task.id)"
                   :aria-label="t('job.retry')" :title="t('job.retry')"
                 ><v-icon size="14">mdi-refresh</v-icon></v-btn>

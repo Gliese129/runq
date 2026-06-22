@@ -43,22 +43,13 @@
       @click-task="onClickTask"
     />
 
-    <!-- W&B tab -->
+    <!-- W&B external link -->
     <div v-if="store.detail.wandb" class="mt-4">
-      <v-card class="pa-4">
-        <div class="d-flex align-center justify-space-between mb-2">
-          <div class="text-subtitle-2 d-flex align-center ga-1">
-            <v-icon size="16">mdi-chart-scatter-plot</v-icon> W&B
-          </div>
-          <v-btn size="x-small" variant="text" :href="store.detail.wandb.base_url" target="_blank">
-            <v-icon start size="14">mdi-open-in-new</v-icon> Open
-          </v-btn>
-        </div>
-        <iframe
-          :src="store.detail.wandb.base_url + '?jupyter=true'"
-          style="width: 100%; height: 500px; border: none; border-radius: 4px"
-        />
-      </v-card>
+      <v-btn size="small" variant="tonal" :href="store.detail.wandb.base_url" target="_blank">
+        <v-icon start size="16">mdi-chart-scatter-plot</v-icon>
+        W&B
+        <v-icon end size="14">mdi-open-in-new</v-icon>
+      </v-btn>
     </div>
   </div>
 
