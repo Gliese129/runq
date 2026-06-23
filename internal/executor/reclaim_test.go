@@ -100,7 +100,7 @@ func TestReclaimWarnsOnStopped(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	r := &Reclaimer{Store: st, Exec: New(), Logger: logger}
 
-	alive, err := r.Reclaim()
+	alive, err := r.Reclaim(context.Background())
 	if err != nil {
 		t.Fatalf("Reclaim: %v", err)
 	}

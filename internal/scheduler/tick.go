@@ -25,6 +25,7 @@ func (s *Scheduler) tick() {
 
 	running := s.queue.ListRunning()
 	sctx := ScheduleContext{
+		Ctx:      s.ctx,
 		Pending:  pending,
 		Running:  running,
 		FreeGPUs: s.pool.FreeCount(),
@@ -131,7 +132,7 @@ func (s *Scheduler) dispatch(task *Task) {
 	task.GPUs = gpus
 
 	now := time.Now()
-	dbCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	dbCtx, cancel := context.WithTimeout(s.ctx, 5*time.Second)
 	defer cancel()
 	if err := s.store.UpdateTaskStatus(dbCtx, task.ID, "running", map[string]any{
 		"gpus":       gpuString(gpus),

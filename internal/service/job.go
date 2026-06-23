@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/gliese129/runq/internal/backend"
 	"github.com/gliese129/runq/internal/config"
 	"github.com/gliese129/runq/internal/executor"
 	"github.com/gliese129/runq/internal/job"
@@ -61,23 +62,10 @@ func resolveNote(ctx context.Context, st *store.Store, cfg job.JobConfig) (strin
 	})
 }
 
-// JobSummary is the API response for job listing.
-type JobSummary struct {
-	JobID       string         `json:"job_id"`
-	Project     string         `json:"project"`
-	Note        string         `json:"note"`
-	Status      string         `json:"status"`
-	TotalTasks  int            `json:"total_tasks"`
-	StatusCount map[string]int `json:"status_count"`
-	CreatedAt   time.Time      `json:"created_at"`
-	Archived    bool           `json:"archived"`
-}
-
-// JobDetail is the API response for job show.
-type JobDetail struct {
-	Job   *store.JobRow   `json:"job"`
-	Tasks []store.TaskRow `json:"tasks"`
-}
+// JobSummary and JobDetail were previously defined here as service-layer
+// wire types. They are now unified with backend.JobSummary / backend.JobDetail
+// to eliminate the triple-mapping that lost information (ETA, structured
+// task counts) on the daemon path. See Phase 1B.
 
 // SubmitJob validates, expands, persists, and enqueues a job.
 // Returns the job ID and total task count.
@@ -95,13 +83,13 @@ func (s *JobService) SubmitJob(ctx context.Context, jobCfg job.JobConfig) (strin
 // schedulers) don't have to learn the new arg.
 func (s *JobService) SubmitJobWithOpts(ctx context.Context, jobCfg job.JobConfig, opts SubmitJobOpts) (string, int, error) {
 	// Validate project exists.
-	proj, err := s.Registry.Get(jobCfg.Project)
+	proj, err := s.Registry.Get(ctx, jobCfg.Project)
 	if err != nil {
 		return "", 0, fmt.Errorf("project %q not found", jobCfg.Project)
 	}
 	// THE submit precondition (exists + not archived, fail-closed) lives in
 	// one place — see Registry.RequireSubmittable.
-	if err := s.Registry.RequireSubmittable(jobCfg.Project); err != nil {
+	if err := s.Registry.RequireSubmittable(ctx, jobCfg.Project); err != nil {
 		return "", 0, err
 	}
 
@@ -234,7 +222,7 @@ type ProjectSummary struct {
 // ProjectSummaries lists every project with its TOTAL job count (all rows —
 // a count is an inventory, not a view) and archive state.
 func (s *JobService) ProjectSummaries(ctx context.Context) ([]ProjectSummary, error) {
-	configs, err := s.Registry.List()
+	configs, err := s.Registry.List(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -246,7 +234,7 @@ func (s *JobService) ProjectSummaries(ctx context.Context) ([]ProjectSummary, er
 	for _, j := range jobs {
 		counts[j.ProjectName]++
 	}
-	archived, err := s.Registry.ArchivedNames()
+	archived, err := s.Registry.ArchivedNames(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -265,11 +253,11 @@ func (s *JobService) ProjectSummaries(ctx context.Context) ([]ProjectSummary, er
 // ListJobs returns a summary of all VISIBLE jobs with task status breakdown.
 // Archived jobs (and, globally, jobs of archived projects) are hidden by
 // default; pass archived=true to list the explicitly archived ones instead.
-func (s *JobService) ListJobs(ctx context.Context, projectFilter string) ([]JobSummary, error) {
+func (s *JobService) ListJobs(ctx context.Context, projectFilter string) ([]backend.JobSummary, error) {
 	return s.listJobs(ctx, projectFilter, false)
 }
 
-func (s *JobService) ListArchivedJobs(ctx context.Context, projectFilter string) ([]JobSummary, error) {
+func (s *JobService) ListArchivedJobs(ctx context.Context, projectFilter string) ([]backend.JobSummary, error) {
 	return s.listJobs(ctx, projectFilter, true)
 }
 
@@ -281,7 +269,7 @@ func (s *JobService) UnarchiveJob(ctx context.Context, jobID string) error {
 	return s.Store.UnarchiveJob(ctx, jobID)
 }
 
-func (s *JobService) listJobs(ctx context.Context, projectFilter string, archived bool) ([]JobSummary, error) {
+func (s *JobService) listJobs(ctx context.Context, projectFilter string, archived bool) ([]backend.JobSummary, error) {
 	var jobs []store.JobRow
 	var err error
 	if archived {
@@ -293,24 +281,18 @@ func (s *JobService) listJobs(ctx context.Context, projectFilter string, archive
 		return nil, err
 	}
 
-	results := make([]JobSummary, 0, len(jobs))
+	results := make([]backend.JobSummary, 0, len(jobs))
 	for _, j := range jobs {
 		tasks, _ := s.Store.ListTasks(ctx, store.TaskFilter{JobID: j.ID})
-		counts := map[string]int{"pending": 0, "running": 0, "success": 0, "failed": 0, "killed": 0}
-		for _, t := range tasks {
-			counts[t.Status]++
-		}
-		results = append(results, JobSummary{
-			JobID: j.ID, Project: j.ProjectName, Note: j.Note, Status: j.Status,
-			TotalTasks: j.TotalTasks, StatusCount: counts, CreatedAt: j.CreatedAt,
-			Archived: j.ArchivedAt != nil,
-		})
+		results = append(results, backend.BuildJobSummary(j, tasks))
 	}
 	return results, nil
 }
 
-// ShowJob returns full job details with all tasks.
-func (s *JobService) ShowJob(ctx context.Context, jobID string) (*JobDetail, error) {
+// ShowJob returns full job details with all tasks, built via the shared
+// backend.BuildJobDetail builder so daemon and HPC paths produce
+// identical view types.
+func (s *JobService) ShowJob(ctx context.Context, jobID string) (*backend.JobDetail, error) {
 	j, err := s.Store.GetJob(ctx, jobID)
 	if err != nil {
 		return nil, err
@@ -322,7 +304,16 @@ func (s *JobService) ShowJob(ctx context.Context, jobID string) (*JobDetail, err
 	if err != nil {
 		return nil, err
 	}
-	return &JobDetail{Job: j, Tasks: tasks}, nil
+	detail := backend.BuildJobDetail(*j, tasks)
+	// Attach W&B info from project config (same logic as HPCBackend.GetJob).
+	if cfg, err := s.Registry.Get(ctx, j.ProjectName); err == nil && cfg.Wandb != nil {
+		detail.Wandb = &backend.WandbInfo{
+			Entity:  cfg.Wandb.Entity,
+			Project: cfg.Wandb.Project,
+			BaseURL: backend.WandbBaseURL(cfg.Wandb.Entity, cfg.Wandb.Project),
+		}
+	}
+	return &detail, nil
 }
 
 // KillJob kills all running/pending tasks in a job. Returns count of affected tasks.

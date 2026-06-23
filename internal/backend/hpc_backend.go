@@ -110,12 +110,12 @@ func (b *HPCBackend) UnarchiveJob(ctx context.Context, jobID string) error {
 	return b.store.UnarchiveJob(ctx, jobID)
 }
 
-func (b *HPCBackend) ArchiveProject(_ context.Context, name string) error {
-	return project.NewRegistry(b.store.DB()).Archive(name)
+func (b *HPCBackend) ArchiveProject(ctx context.Context, name string) error {
+	return project.NewRegistry(b.store.DB()).Archive(ctx, name)
 }
 
-func (b *HPCBackend) UnarchiveProject(_ context.Context, name string) error {
-	return project.NewRegistry(b.store.DB()).Unarchive(name)
+func (b *HPCBackend) UnarchiveProject(ctx context.Context, name string) error {
+	return project.NewRegistry(b.store.DB()).Unarchive(ctx, name)
 }
 
 func (b *HPCBackend) GetJob(ctx context.Context, jobID string) (*JobDetail, error) {
@@ -135,11 +135,11 @@ func (b *HPCBackend) GetJob(ctx context.Context, jobID string) (*JobDetail, erro
 	}
 	detail := BuildJobDetail(*job, tasks)
 	reg := project.NewRegistry(b.store.DB())
-	if cfg, err := reg.Get(job.ProjectName); err == nil && cfg.Wandb != nil {
+	if cfg, err := reg.Get(ctx, job.ProjectName); err == nil && cfg.Wandb != nil {
 		detail.Wandb = &WandbInfo{
 			Entity:  cfg.Wandb.Entity,
 			Project: cfg.Wandb.Project,
-			BaseURL: wandbBaseURL(cfg.Wandb.Entity, cfg.Wandb.Project),
+			BaseURL: WandbBaseURL(cfg.Wandb.Entity, cfg.Wandb.Project),
 		}
 	}
 	return &detail, nil
@@ -250,7 +250,7 @@ func (b *HPCBackend) ResumeJob(ctx context.Context, jobID string) error {
 
 func (b *HPCBackend) SubmitJob(ctx context.Context, cfg job.JobConfig, opts SubmitOptions) (string, int, error) {
 	reg := project.NewRegistry(b.store.DB())
-	proj, err := reg.Get(cfg.Project)
+	proj, err := reg.Get(ctx, cfg.Project)
 	if err != nil {
 		return "", 0, fmt.Errorf("project %q not found: %w", cfg.Project, err)
 	}
@@ -264,7 +264,7 @@ func (b *HPCBackend) DryRun(_ context.Context, cfg job.JobConfig) ([]job.TaskPar
 // PreviewSubmit is the GUI face of `--dry-run`: same code path, same text.
 func (b *HPCBackend) PreviewSubmit(ctx context.Context, cfg job.JobConfig, skipPreflight bool) (string, error) {
 	reg := project.NewRegistry(b.store.DB())
-	proj, err := reg.Get(cfg.Project)
+	proj, err := reg.Get(ctx, cfg.Project)
 	if err != nil {
 		return "", fmt.Errorf("project %q not found: %w", cfg.Project, err)
 	}
@@ -285,34 +285,34 @@ func (b *HPCBackend) ResolveNote(ctx context.Context, cfg job.JobConfig) (string
 	})
 }
 
-func (b *HPCBackend) CreateProject(_ context.Context, cfg project.Config) error {
+func (b *HPCBackend) CreateProject(ctx context.Context, cfg project.Config) error {
 	reg := project.NewRegistry(b.store.DB())
-	return reg.Add(cfg)
+	return reg.Add(ctx, cfg)
 }
 
-func (b *HPCBackend) UpdateProject(_ context.Context, cfg project.Config) error {
+func (b *HPCBackend) UpdateProject(ctx context.Context, cfg project.Config) error {
 	reg := project.NewRegistry(b.store.DB())
-	return reg.Update(cfg)
+	return reg.Update(ctx, cfg)
 }
 
-func (b *HPCBackend) DeleteProject(_ context.Context, name string) error {
+func (b *HPCBackend) DeleteProject(ctx context.Context, name string) error {
 	reg := project.NewRegistry(b.store.DB())
-	return reg.Remove(name)
+	return reg.Remove(ctx, name)
 }
 
-func (b *HPCBackend) RenameProject(_ context.Context, oldName, newName string) error {
+func (b *HPCBackend) RenameProject(ctx context.Context, oldName, newName string) error {
 	reg := project.NewRegistry(b.store.DB())
-	return reg.Rename(oldName, newName)
+	return reg.Rename(ctx, oldName, newName)
 }
 
-func (b *HPCBackend) GetProject(_ context.Context, name string) (*project.Config, error) {
+func (b *HPCBackend) GetProject(ctx context.Context, name string) (*project.Config, error) {
 	reg := project.NewRegistry(b.store.DB())
-	return reg.Get(name)
+	return reg.Get(ctx, name)
 }
 
 func (b *HPCBackend) ListProjects(ctx context.Context) ([]ProjectSummary, error) {
 	reg := project.NewRegistry(b.store.DB())
-	configs, err := reg.List()
+	configs, err := reg.List(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -321,7 +321,7 @@ func (b *HPCBackend) ListProjects(ctx context.Context) ([]ProjectSummary, error)
 
 func (b *HPCBackend) MatchProjects(ctx context.Context, dir string) ([]ProjectSummary, error) {
 	reg := project.NewRegistry(b.store.DB())
-	configs, err := reg.Match(dir)
+	configs, err := reg.Match(ctx, dir)
 	if err != nil {
 		return nil, err
 	}
@@ -414,7 +414,7 @@ func (b *HPCBackend) configsToSummaries(ctx context.Context, configs []project.C
 	for _, j := range jobs {
 		jobCounts[j.ProjectName]++
 	}
-	archived, _ := project.NewRegistry(b.store.DB()).ArchivedNames()
+	archived, _ := project.NewRegistry(b.store.DB()).ArchivedNames(ctx)
 	out := make([]ProjectSummary, 0, len(configs))
 	for _, c := range configs {
 		out = append(out, ProjectSummary{

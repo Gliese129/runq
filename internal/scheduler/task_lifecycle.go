@@ -131,7 +131,7 @@ func (s *Scheduler) runTask(task *Task) {
 
 // completeTask persists a terminal status to DB, then updates the queue.
 func (s *Scheduler) completeTask(task *Task, status TaskStatus) {
-	dbCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	dbCtx, cancel := context.WithTimeout(s.ctx, 5*time.Second)
 	defer cancel()
 	if err := s.store.UpdateTaskStatus(dbCtx, task.ID, string(status), map[string]any{
 		"finished_at": time.Now().Unix(),
@@ -206,7 +206,7 @@ func (s *Scheduler) handleFailure(task *Task) {
 	canRetry := task.MaxRetry == 0 || task.RetryCount < task.MaxRetry
 	if canRetry {
 		nextRetry := task.RetryCount + 1
-		dbCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		dbCtx, cancel := context.WithTimeout(s.ctx, 5*time.Second)
 		defer cancel()
 		if err := s.store.UpdateTaskStatus(dbCtx, task.ID, "pending", map[string]any{
 			"retry_count": nextRetry,
@@ -232,7 +232,7 @@ func (s *Scheduler) handleFailure(task *Task) {
 // persistFields updates arbitrary columns on a running task in DB. Non-critical — logs on error.
 // Reuses UpdateTaskStatus with status="running" so only the extra fields change.
 func (s *Scheduler) persistFields(taskID string, fields map[string]any) {
-	dbCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	dbCtx, cancel := context.WithTimeout(s.ctx, 5*time.Second)
 	defer cancel()
 	if err := s.store.UpdateTaskStatus(dbCtx, taskID, "running", fields); err != nil {
 		s.logger.Warn("persist fields failed", "task", taskID, "error", err)

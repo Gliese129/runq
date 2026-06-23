@@ -1,6 +1,7 @@
 package project
 
 import (
+	"context"
 	"database/sql"
 	"os"
 	"path/filepath"
@@ -28,7 +29,8 @@ func newTestRegistry(t *testing.T) *Registry {
 func TestGetSyncsFromYAML(t *testing.T) {
 	dir := t.TempDir()
 	r := newTestRegistry(t)
-	if err := r.Add(Config{ProjectName: "p", WorkingDir: dir, CmdTemplate: "python a.py {{args}}"}); err != nil {
+	ctx := context.Background()
+	if err := r.Add(ctx, Config{ProjectName: "p", WorkingDir: dir, CmdTemplate: "python a.py {{args}}"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -39,7 +41,7 @@ func TestGetSyncsFromYAML(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := r.Get("p")
+	got, err := r.Get(ctx, "p")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,21 +51,21 @@ func TestGetSyncsFromYAML(t *testing.T) {
 
 	// Cache refreshed: remove the file — Get must now serve the synced copy.
 	os.Remove(yamlPath)
-	got, _ = r.Get("p")
+	got, _ = r.Get(ctx, "p")
 	if got.CmdTemplate != "python b.py {{args}}" {
 		t.Fatalf("DB cache not refreshed: %q", got.CmdTemplate)
 	}
 
 	// Broken yaml → fall back to DB, project must not vanish.
 	os.WriteFile(yamlPath, []byte("::not yaml::"), 0o644)
-	got, err = r.Get("p")
+	got, err = r.Get(ctx, "p")
 	if err != nil || got.CmdTemplate != "python b.py {{args}}" {
 		t.Fatalf("broken yaml must fall back to DB: %v %+v", err, got)
 	}
 
 	// Hand-edited project_name must NOT change identity (FK safety).
 	os.WriteFile(yamlPath, []byte("project_name: renamed\nworking_dir: "+dir+"\ncommand_template: python c.py {{args}}\n"), 0o644)
-	got, _ = r.Get("p")
+	got, _ = r.Get(ctx, "p")
 	if got.ProjectName != "p" || got.CmdTemplate != "python c.py {{args}}" {
 		t.Fatalf("identity must stay with DB key: %+v", got)
 	}
@@ -81,27 +83,28 @@ func TestProjectArchiveRefusesActiveJobs(t *testing.T) {
 	defer st.Close()
 	reg := NewRegistry(st.DB())
 	cfg := Config{ProjectName: "p", WorkingDir: dir, CmdTemplate: "echo {{x}}"}
-	if err := reg.Add(cfg); err != nil {
+	ctx := context.Background()
+	if err := reg.Add(ctx, cfg); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.DB().Exec(
 		`INSERT INTO jobs (id, project_name, description, config_json, status, created_at) VALUES ('jb1','p','','{}','paused',1)`); err != nil {
 		t.Fatal(err)
 	}
-	if err := reg.Archive("p"); err == nil {
+	if err := reg.Archive(ctx, "p"); err == nil {
 		t.Fatal("archiving a project with a paused job must be refused")
 	}
 	if _, err := st.DB().Exec(`UPDATE jobs SET status = 'done' WHERE id = 'jb1'`); err != nil {
 		t.Fatal(err)
 	}
-	if err := reg.Archive("p"); err != nil {
+	if err := reg.Archive(ctx, "p"); err != nil {
 		t.Fatalf("archive with only terminal jobs: %v", err)
 	}
-	names, _ := reg.ArchivedNames()
+	names, _ := reg.ArchivedNames(ctx)
 	if !names["p"] {
 		t.Fatal("ArchivedNames must report p")
 	}
-	if err := reg.Unarchive("p"); err != nil {
+	if err := reg.Unarchive(ctx, "p"); err != nil {
 		t.Fatal(err)
 	}
 }

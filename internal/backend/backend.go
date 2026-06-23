@@ -237,7 +237,7 @@ func BuildCompareRows(tasks []store.TaskRow, key string, desc bool) []CompareRow
 
 // ---- helpers ----
 
-func wandbBaseURL(entity, project string) string {
+func WandbBaseURL(entity, project string) string {
 	if entity != "" {
 		return "https://wandb.ai/" + url.PathEscape(entity) + "/" + url.PathEscape(project)
 	}

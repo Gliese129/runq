@@ -1,6 +1,7 @@
 package project
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -27,9 +28,9 @@ func NewRegistry(db *sql.DB) *Registry {
 // inserts into the database. The directory must exist and be writable —
 // project.yaml is the source of truth, so a failed write blocks registration.
 // Returns an error if a project with the same name already exists.
-func (r *Registry) Add(cfg Config) error {
+func (r *Registry) Add(ctx context.Context, cfg Config) error {
 	var existing int
-	err := r.db.QueryRow(`SELECT 1 FROM projects WHERE name = ?`, cfg.ProjectName).Scan(&existing)
+	err := r.db.QueryRowContext(ctx, `SELECT 1 FROM projects WHERE name = ?`, cfg.ProjectName).Scan(&existing)
 	if err == nil {
 		return fmt.Errorf("project %q already exists", cfg.ProjectName)
 	}
@@ -46,7 +47,7 @@ func (r *Registry) Add(cfg Config) error {
 	if err != nil {
 		return fmt.Errorf("marshal project config: %w", err)
 	}
-	_, err = r.db.Exec(
+	_, err = r.db.ExecContext(ctx,
 		`INSERT INTO projects (name, config_json) VALUES (?, ?)`,
 		cfg.ProjectName, string(data),
 	)
@@ -59,9 +60,9 @@ func (r *Registry) Add(cfg Config) error {
 
 // Get returns a project by name.
 // Returns a descriptive error if the project does not exist.
-func (r *Registry) Get(name string) (*Config, error) {
+func (r *Registry) Get(ctx context.Context, name string) (*Config, error) {
 	var raw string
-	err := r.db.QueryRow(
+	err := r.db.QueryRowContext(ctx,
 		`SELECT config_json FROM projects WHERE name = ?`, name,
 	).Scan(&raw)
 	if err == sql.ErrNoRows {
@@ -74,7 +75,7 @@ func (r *Registry) Get(name string) (*Config, error) {
 	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
 		return nil, fmt.Errorf("unmarshal project %q: %w", name, err)
 	}
-	return r.syncFromYAML(name, &cfg), nil
+	return r.syncFromYAML(ctx, name, &cfg), nil
 }
 
 // syncFromYAML reconciles the DB copy with <working_dir>/project.yaml on
@@ -83,7 +84,7 @@ func (r *Registry) Get(name string) (*Config, error) {
 // refresh the cache, so CLI and GUI can never disagree about a project.
 // Fault-tolerant: a missing or unparsable file falls back to the DB copy
 // (a botched hand-edit must not make the project vanish).
-func (r *Registry) syncFromYAML(name string, dbCfg *Config) *Config {
+func (r *Registry) syncFromYAML(ctx context.Context, name string, dbCfg *Config) *Config {
 	if dbCfg.WorkingDir == "" {
 		return dbCfg
 	}
@@ -111,13 +112,13 @@ func (r *Registry) syncFromYAML(name string, dbCfg *Config) *Config {
 	}
 	// File wins: refresh the cache. Best-effort — a read-only DB still
 	// returns the file's truth for this call.
-	_, _ = r.db.Exec(`UPDATE projects SET config_json = ? WHERE name = ?`, string(fileJSON), name)
+	_, _ = r.db.ExecContext(ctx, `UPDATE projects SET config_json = ? WHERE name = ?`, string(fileJSON), name)
 	return &fileCfg
 }
 
 // List returns all registered projects, ordered by name.
-func (r *Registry) List() ([]Config, error) {
-	rows, err := r.db.Query(`SELECT config_json FROM projects ORDER BY name`)
+func (r *Registry) List(ctx context.Context) ([]Config, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT config_json FROM projects ORDER BY name`)
 	if err != nil {
 		return nil, fmt.Errorf("list projects: %w", err)
 	}
@@ -144,9 +145,9 @@ func (r *Registry) List() ([]Config, error) {
 // Update modifies an existing project's config.
 // Rewrites project.yaml and updates the database.
 // Returns an error if the project does not exist.
-func (r *Registry) Update(cfg Config) error {
+func (r *Registry) Update(ctx context.Context, cfg Config) error {
 	var existing int
-	err := r.db.QueryRow(`SELECT 1 FROM projects WHERE name = ?`, cfg.ProjectName).Scan(&existing)
+	err := r.db.QueryRowContext(ctx, `SELECT 1 FROM projects WHERE name = ?`, cfg.ProjectName).Scan(&existing)
 	if err == sql.ErrNoRows {
 		return fmt.Errorf("project %q not found", cfg.ProjectName)
 	}
@@ -163,7 +164,7 @@ func (r *Registry) Update(cfg Config) error {
 	if err != nil {
 		return fmt.Errorf("marshal project config: %w", err)
 	}
-	result, err := r.db.Exec(
+	result, err := r.db.ExecContext(ctx,
 		`UPDATE projects SET config_json = ?, updated_at = CURRENT_TIMESTAMP WHERE name = ?`,
 		string(data), cfg.ProjectName,
 	)
@@ -179,8 +180,8 @@ func (r *Registry) Update(cfg Config) error {
 
 // Match returns all projects whose WorkingDir is equal to or a parent of dir.
 // This is used to auto-detect which project(s) a script belongs to.
-func (r *Registry) Match(dir string) ([]Config, error) {
-	all, err := r.List()
+func (r *Registry) Match(ctx context.Context, dir string) ([]Config, error) {
+	all, err := r.List(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -201,17 +202,17 @@ func (r *Registry) Match(dir string) ([]Config, error) {
 // Rename atomically renames a project from oldName to newName.
 // Updates all references in jobs and tasks within a transaction,
 // then rewrites project.yaml with the new name.
-func (r *Registry) Rename(oldName, newName string) error {
+func (r *Registry) Rename(ctx context.Context, oldName, newName string) error {
 	if oldName == newName {
 		return nil
 	}
 	// Check new name doesn't already exist
 	var existing int
-	if err := r.db.QueryRow(`SELECT 1 FROM projects WHERE name = ?`, newName).Scan(&existing); err == nil {
+	if err := r.db.QueryRowContext(ctx, `SELECT 1 FROM projects WHERE name = ?`, newName).Scan(&existing); err == nil {
 		return fmt.Errorf("project %q already exists", newName)
 	}
 
-	tx, err := r.db.Begin()
+	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
 	}
@@ -219,7 +220,7 @@ func (r *Registry) Rename(oldName, newName string) error {
 
 	// Get old config
 	var raw string
-	if err := tx.QueryRow(`SELECT config_json FROM projects WHERE name = ?`, oldName).Scan(&raw); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT config_json FROM projects WHERE name = ?`, oldName).Scan(&raw); err != nil {
 		return fmt.Errorf("project %q not found", oldName)
 	}
 
@@ -235,16 +236,16 @@ func (r *Registry) Rename(oldName, newName string) error {
 	}
 
 	// Insert new, update references, delete old
-	if _, err := tx.Exec(`INSERT INTO projects (name, config_json) VALUES (?, ?)`, newName, string(data)); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO projects (name, config_json) VALUES (?, ?)`, newName, string(data)); err != nil {
 		return fmt.Errorf("insert renamed project: %w", err)
 	}
-	if _, err := tx.Exec(`UPDATE jobs SET project_name = ? WHERE project_name = ?`, newName, oldName); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE jobs SET project_name = ? WHERE project_name = ?`, newName, oldName); err != nil {
 		return fmt.Errorf("update jobs: %w", err)
 	}
-	if _, err := tx.Exec(`UPDATE tasks SET project_name = ? WHERE project_name = ?`, newName, oldName); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE tasks SET project_name = ? WHERE project_name = ?`, newName, oldName); err != nil {
 		return fmt.Errorf("update tasks: %w", err)
 	}
-	if _, err := tx.Exec(`DELETE FROM projects WHERE name = ?`, oldName); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM projects WHERE name = ?`, oldName); err != nil {
 		return fmt.Errorf("delete old project: %w", err)
 	}
 
@@ -260,8 +261,8 @@ func (r *Registry) Rename(oldName, newName string) error {
 
 // Remove deletes a project by name.
 // Returns an error if the project does not exist.
-func (r *Registry) Remove(name string) error {
-	result, err := r.db.Exec(`DELETE FROM projects WHERE name = ?`, name)
+func (r *Registry) Remove(ctx context.Context, name string) error {
+	result, err := r.db.ExecContext(ctx, `DELETE FROM projects WHERE name = ?`, name)
 	if err != nil {
 		return fmt.Errorf("remove project %q: %w", name, err)
 	}
@@ -280,12 +281,12 @@ func (r *Registry) Remove(name string) error {
 // experiment config, but "archived" is runq bookkeeping — a yaml re-sync
 // must not resurrect or clobber it.
 
-func (r *Registry) Archive(name string) error {
+func (r *Registry) Archive(ctx context.Context, name string) error {
 	// Guard: archiving cascades the project's jobs out of the global lists,
 	// so live work must not be hidden — same rule as the per-job guard
 	// (paused counts: it is resumable, hence forgettable).
 	var active int
-	err := r.db.QueryRow(
+	err := r.db.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM jobs WHERE project_name = ? AND status IN `+store.ActiveStatusesSQL(),
 		name).Scan(&active)
 	if err != nil {
@@ -294,7 +295,7 @@ func (r *Registry) Archive(name string) error {
 	if active > 0 {
 		return fmt.Errorf("project %q has %d active job(s) — kill them (or let them finish) before archiving", name, active)
 	}
-	res, err := r.db.Exec(`UPDATE projects SET archived_at = ? WHERE name = ?`, time.Now().Unix(), name)
+	res, err := r.db.ExecContext(ctx, `UPDATE projects SET archived_at = ? WHERE name = ?`, time.Now().Unix(), name)
 	if err != nil {
 		return err
 	}
@@ -304,8 +305,8 @@ func (r *Registry) Archive(name string) error {
 	return nil
 }
 
-func (r *Registry) Unarchive(name string) error {
-	res, err := r.db.Exec(`UPDATE projects SET archived_at = NULL WHERE name = ?`, name)
+func (r *Registry) Unarchive(ctx context.Context, name string) error {
+	res, err := r.db.ExecContext(ctx, `UPDATE projects SET archived_at = NULL WHERE name = ?`, name)
 	if err != nil {
 		return err
 	}
@@ -316,9 +317,9 @@ func (r *Registry) Unarchive(name string) error {
 }
 
 // IsArchived reports whether a project is archived.
-func (r *Registry) IsArchived(name string) (bool, error) {
+func (r *Registry) IsArchived(ctx context.Context, name string) (bool, error) {
 	var n int
-	err := r.db.QueryRow(
+	err := r.db.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM projects WHERE name = ? AND archived_at IS NOT NULL`, name).Scan(&n)
 	return n > 0, err
 }
@@ -329,9 +330,9 @@ func (r *Registry) IsArchived(name string) (bool, error) {
 // an unreadable state is a refusal, never a pass. Every submit path
 // (daemon service, HPC backend, and any future writer) calls this single
 // gate so a new entry point can't forget the rule.
-func (r *Registry) RequireSubmittable(name string) error {
+func (r *Registry) RequireSubmittable(ctx context.Context, name string) error {
 	var archived sql.NullInt64
-	err := r.db.QueryRow(`SELECT archived_at FROM projects WHERE name = ?`, name).Scan(&archived)
+	err := r.db.QueryRowContext(ctx, `SELECT archived_at FROM projects WHERE name = ?`, name).Scan(&archived)
 	if err == sql.ErrNoRows {
 		return fmt.Errorf("project %q not found", name)
 	}
@@ -347,8 +348,8 @@ func (r *Registry) RequireSubmittable(name string) error {
 // ArchivedNames returns the set of archived project names. Kept separate
 // from List() (which returns Configs — yaml-truth material) so archived
 // state rides alongside, not inside, the config.
-func (r *Registry) ArchivedNames() (map[string]bool, error) {
-	rows, err := r.db.Query(`SELECT name FROM projects WHERE archived_at IS NOT NULL`)
+func (r *Registry) ArchivedNames(ctx context.Context) (map[string]bool, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT name FROM projects WHERE archived_at IS NOT NULL`)
 	if err != nil {
 		return nil, err
 	}

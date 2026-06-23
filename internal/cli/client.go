@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -34,13 +35,15 @@ func doAndDecode(method, path string, body any, v any) error {
 }
 
 func doAndDecodeWithTimeout(method, path string, body any, v any, timeout time.Duration) error {
+	// CLI commands have no request lifecycle — context.Background() is correct.
+	ctx := context.Background()
 	client := newClient()
 	var resp *http.Response
 	var err error
 	if timeout > 0 {
-		resp, err = client.DoWithTimeout(method, path, body, timeout)
+		resp, err = client.DoWithTimeout(ctx, method, path, body, timeout)
 	} else {
-		resp, err = client.Do(method, path, body)
+		resp, err = client.Do(ctx, method, path, body)
 	}
 	if err != nil {
 		msg := api.DiagnoseDaemon(getSocketPath(), api.DefaultPIDPath())

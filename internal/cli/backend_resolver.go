@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 
+	"github.com/gliese129/runq/internal/api"
 	"github.com/gliese129/runq/internal/backend"
 	"github.com/gliese129/runq/internal/config"
 )
@@ -23,7 +24,7 @@ func newBackend(mode string) (backend.Backend, func(), error) {
 	case config.ModeHPC:
 		return backend.NewHPCBackendFromConfig()
 	case config.ModeDaemon:
-		return backend.NewDaemonBackend(getSocketPath()), func() {}, nil
+		return backend.NewDaemonBackend(api.NewClient(getSocketPath())), func() {}, nil
 	default:
 		return nil, nil, fmt.Errorf("unsupported mode %q", mode)
 	}

@@ -101,7 +101,7 @@ func setupSubmitJobTest(t *testing.T, workDir string, wandb *project.WandbConfig
 	t.Cleanup(func() { st.Close() })
 
 	reg := project.NewRegistry(st.DB())
-	if err := reg.Add(project.Config{
+	if err := reg.Add(ctx, project.Config{
 		ProjectName: "p",
 		WorkingDir:  workDir,
 		CmdTemplate: "echo {{args}}",

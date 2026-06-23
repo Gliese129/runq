@@ -12,6 +12,7 @@ CLAUDE.md
 
 demo/
 docs/
+scripts/
 
 # Go
 *.exe

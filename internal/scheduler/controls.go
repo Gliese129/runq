@@ -1,8 +1,6 @@
 package scheduler
 
 import (
-	"context"
-
 	"github.com/gliese129/runq/internal/store"
 )
 
@@ -72,8 +70,7 @@ func (s *Scheduler) consumeKillRequest(taskID string) bool {
 //   - all tasks terminal (success/failed/killed) → job = "done"
 //   - otherwise (some pending, none running) → keep current status
 func (s *Scheduler) RefreshJobStatus(jobID string) {
-	ctx := context.Background()
-	tasks, err := s.store.ListTasks(ctx, store.TaskFilter{JobID: jobID})
+	tasks, err := s.store.ListTasks(s.ctx, store.TaskFilter{JobID: jobID})
 	if err != nil {
 		s.logger.Error("refresh job status: list tasks failed", "job", jobID, "error", err)
 		return
@@ -113,7 +110,7 @@ func (s *Scheduler) RefreshJobStatus(jobID string) {
 		newStatus = "pending"
 	}
 
-	if err := s.store.UpdateJobStatus(ctx, jobID, newStatus); err != nil {
+	if err := s.store.UpdateJobStatus(s.ctx, jobID, newStatus); err != nil {
 		s.logger.Error("refresh job status: update failed", "job", jobID, "status", newStatus, "error", err)
 	}
 }

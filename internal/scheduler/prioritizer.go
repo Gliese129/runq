@@ -1,14 +1,18 @@
 package scheduler
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 // ScheduleContext is the snapshot passed to Prioritizer each tick.
 // Contains everything needed to make scheduling decisions.
 type ScheduleContext struct {
-	Pending  []*Task   // tasks waiting for GPUs
-	Running  []*Task   // tasks currently executing (L3: will carry Progress)
-	FreeGPUs int       // number of currently unallocated GPUs
-	Now      time.Time // current wall clock time
+	Ctx      context.Context // scheduler lifecycle context — cancels on shutdown
+	Pending  []*Task         // tasks waiting for GPUs
+	Running  []*Task         // tasks currently executing (L3: will carry Progress)
+	FreeGPUs int             // number of currently unallocated GPUs
+	Now      time.Time       // current wall clock time
 }
 
 // Priority is the output per task — score + optional metadata.

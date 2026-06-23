@@ -1,7 +1,6 @@
 package api
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gliese129/runq/internal/backend"
 	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/logfile"
 	"github.com/gliese129/runq/internal/project"
@@ -97,7 +97,7 @@ func (s *Server) handleProjectAdd(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "project_name is required"})
 		return
 	}
-	if err := s.deps.Registry.Add(cfg); err != nil {
+	if err := s.deps.Registry.Add(c.Request.Context(), cfg); err != nil {
 		status := http.StatusBadRequest
 		if strings.Contains(err.Error(), "already exists") {
 			status = http.StatusConflict
@@ -114,7 +114,7 @@ func (s *Server) handleProjectMatch(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "dir query parameter is required"})
 		return
 	}
-	configs, err := s.deps.Registry.Match(dir)
+	configs, err := s.deps.Registry.Match(c.Request.Context(), dir)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -126,7 +126,7 @@ func (s *Server) handleProjectMatch(c *gin.Context) {
 }
 
 func (s *Server) handleProjectList(c *gin.Context) {
-	configs, err := s.deps.Registry.List()
+	configs, err := s.deps.Registry.List(c.Request.Context())
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -135,7 +135,7 @@ func (s *Server) handleProjectList(c *gin.Context) {
 }
 
 func (s *Server) handleProjectGet(c *gin.Context) {
-	cfg, err := s.deps.Registry.Get(c.Param("name"))
+	cfg, err := s.deps.Registry.Get(c.Request.Context(), c.Param("name"))
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 		return
@@ -151,7 +151,7 @@ func (s *Server) handleProjectUpdate(c *gin.Context) {
 		return
 	}
 	cfg.ProjectName = name
-	if err := s.deps.Registry.Update(cfg); err != nil {
+	if err := s.deps.Registry.Update(c.Request.Context(), cfg); err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 		return
 	}
@@ -167,7 +167,7 @@ func (s *Server) handleProjectRename(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "new_name is required"})
 		return
 	}
-	if err := s.deps.Registry.Rename(oldName, body.NewName); err != nil {
+	if err := s.deps.Registry.Rename(c.Request.Context(), oldName, body.NewName); err != nil {
 		status := http.StatusBadRequest
 		if strings.Contains(err.Error(), "not found") {
 			status = http.StatusNotFound
@@ -181,7 +181,7 @@ func (s *Server) handleProjectRename(c *gin.Context) {
 }
 
 func (s *Server) handleProjectDelete(c *gin.Context) {
-	if err := s.deps.Registry.Remove(c.Param("name")); err != nil {
+	if err := s.deps.Registry.Remove(c.Request.Context(), c.Param("name")); err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 		return
 	}
@@ -198,7 +198,7 @@ func (s *Server) handleResolveNote(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	resolved, err := s.deps.JobService.ResolveNote(context.Background(), jobCfg)
+	resolved, err := s.deps.JobService.ResolveNote(c.Request.Context(), jobCfg)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -246,7 +246,7 @@ func (s *Server) handleJobSubmit(c *gin.Context) {
 	opts := service.SubmitJobOpts{
 		SkipPreflight: c.Query("no_preflight") == "1",
 	}
-	jobID, taskCount, err := s.deps.JobService.SubmitJobWithOpts(context.Background(), jobCfg, opts)
+	jobID, taskCount, err := s.deps.JobService.SubmitJobWithOpts(c.Request.Context(), jobCfg, opts)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -263,12 +263,12 @@ func (s *Server) handleJobSubmit(c *gin.Context) {
 }
 
 func (s *Server) handleJobList(c *gin.Context) {
-	var results []service.JobSummary
+	var results []backend.JobSummary
 	var err error
 	if c.Query("archived") == "1" {
-		results, err = s.deps.JobService.ListArchivedJobs(context.Background(), c.Query("project"))
+		results, err = s.deps.JobService.ListArchivedJobs(c.Request.Context(), c.Query("project"))
 	} else {
-		results, err = s.deps.JobService.ListJobs(context.Background(), c.Query("project"))
+		results, err = s.deps.JobService.ListJobs(c.Request.Context(), c.Query("project"))
 	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -278,7 +278,7 @@ func (s *Server) handleJobList(c *gin.Context) {
 }
 
 func (s *Server) handleJobArchive(c *gin.Context) {
-	if err := s.deps.JobService.ArchiveJob(context.Background(), c.Param("id")); err != nil {
+	if err := s.deps.JobService.ArchiveJob(c.Request.Context(), c.Param("id")); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -286,7 +286,7 @@ func (s *Server) handleJobArchive(c *gin.Context) {
 }
 
 func (s *Server) handleJobUnarchive(c *gin.Context) {
-	if err := s.deps.JobService.UnarchiveJob(context.Background(), c.Param("id")); err != nil {
+	if err := s.deps.JobService.UnarchiveJob(c.Request.Context(), c.Param("id")); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -297,7 +297,7 @@ func (s *Server) handleJobUnarchive(c *gin.Context) {
 // (job_count + archived). /api/projects stays plain []project.Config
 // (yaml-truth material) for the CLI; this is the dashboard's listing.
 func (s *Server) handleProjectSummaries(c *gin.Context) {
-	out, err := s.deps.JobService.ProjectSummaries(context.Background())
+	out, err := s.deps.JobService.ProjectSummaries(c.Request.Context())
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -306,7 +306,7 @@ func (s *Server) handleProjectSummaries(c *gin.Context) {
 }
 
 func (s *Server) handleProjectArchive(c *gin.Context) {
-	if err := s.deps.Registry.Archive(c.Param("name")); err != nil {
+	if err := s.deps.Registry.Archive(c.Request.Context(), c.Param("name")); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -314,7 +314,7 @@ func (s *Server) handleProjectArchive(c *gin.Context) {
 }
 
 func (s *Server) handleProjectUnarchive(c *gin.Context) {
-	if err := s.deps.Registry.Unarchive(c.Param("name")); err != nil {
+	if err := s.deps.Registry.Unarchive(c.Request.Context(), c.Param("name")); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -322,7 +322,7 @@ func (s *Server) handleProjectUnarchive(c *gin.Context) {
 }
 
 func (s *Server) handleJobShow(c *gin.Context) {
-	detail, err := s.deps.JobService.ShowJob(context.Background(), c.Param("id"))
+	detail, err := s.deps.JobService.ShowJob(c.Request.Context(), c.Param("id"))
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 		return
@@ -331,7 +331,7 @@ func (s *Server) handleJobShow(c *gin.Context) {
 }
 
 func (s *Server) handleJobKill(c *gin.Context) {
-	killed, err := s.deps.JobService.KillJob(context.Background(), c.Param("id"))
+	killed, err := s.deps.JobService.KillJob(c.Request.Context(), c.Param("id"))
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 		return
@@ -340,7 +340,7 @@ func (s *Server) handleJobKill(c *gin.Context) {
 }
 
 func (s *Server) handleJobPause(c *gin.Context) {
-	if err := s.deps.JobService.PauseJob(context.Background(), c.Param("id")); err != nil {
+	if err := s.deps.JobService.PauseJob(c.Request.Context(), c.Param("id")); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -348,7 +348,7 @@ func (s *Server) handleJobPause(c *gin.Context) {
 }
 
 func (s *Server) handleJobResume(c *gin.Context) {
-	if err := s.deps.JobService.ResumeJob(context.Background(), c.Param("id")); err != nil {
+	if err := s.deps.JobService.ResumeJob(c.Request.Context(), c.Param("id")); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -356,7 +356,7 @@ func (s *Server) handleJobResume(c *gin.Context) {
 }
 
 func (s *Server) handleJobRm(c *gin.Context) {
-	if err := s.deps.JobService.RemoveJob(context.Background(), c.Param("id")); err != nil {
+	if err := s.deps.JobService.RemoveJob(c.Request.Context(), c.Param("id")); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -366,7 +366,7 @@ func (s *Server) handleJobRm(c *gin.Context) {
 // ── Task handlers (delegate to TaskService for mutations) ──
 
 func (s *Server) handleTaskList(c *gin.Context) {
-	ctx := context.Background()
+	ctx := c.Request.Context()
 	status := c.Query("status")
 	jobID := c.Query("job")
 	includeAll := status == "all"
@@ -395,7 +395,7 @@ func (s *Server) handleTaskList(c *gin.Context) {
 }
 
 func (s *Server) handleTaskGet(c *gin.Context) {
-	task, err := s.deps.Store.GetTask(context.Background(), c.Param("id"))
+	task, err := s.deps.Store.GetTask(c.Request.Context(), c.Param("id"))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -414,7 +414,7 @@ func (s *Server) handleTaskGet(c *gin.Context) {
 //
 // Returns a logfile.Page JSON.
 func (s *Server) handleTaskLog(c *gin.Context) {
-	task, err := s.deps.Store.GetTask(context.Background(), c.Param("id"))
+	task, err := s.deps.Store.GetTask(c.Request.Context(), c.Param("id"))
 	if err != nil || task == nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
 		return
@@ -454,7 +454,7 @@ func (s *Server) handleTaskLog(c *gin.Context) {
 }
 
 func (s *Server) handleTaskLogStream(c *gin.Context) {
-	task, err := s.deps.Store.GetTask(context.Background(), c.Param("id"))
+	task, err := s.deps.Store.GetTask(c.Request.Context(), c.Param("id"))
 	if err != nil || task == nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
 		return
@@ -516,7 +516,7 @@ func (s *Server) handleTaskLogStream(c *gin.Context) {
 }
 
 func (s *Server) handleTaskKill(c *gin.Context) {
-	if err := s.deps.TaskService.KillTask(context.Background(), c.Param("id")); err != nil {
+	if err := s.deps.TaskService.KillTask(c.Request.Context(), c.Param("id")); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -524,7 +524,7 @@ func (s *Server) handleTaskKill(c *gin.Context) {
 }
 
 func (s *Server) handleTaskRetry(c *gin.Context) {
-	if err := s.deps.TaskService.RetryTask(context.Background(), c.Param("id")); err != nil {
+	if err := s.deps.TaskService.RetryTask(c.Request.Context(), c.Param("id")); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}

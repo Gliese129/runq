@@ -158,7 +158,7 @@ func (d *Daemon) restoreRuntimeState() error {
 		Exec:   d.Executor,
 		Logger: d.Logger,
 	}
-	aliveTasks, err := reclaimer.Reclaim()
+	aliveTasks, err := reclaimer.Reclaim(context.Background())
 	if err != nil {
 		d.Logger.Error("reclaim failed", "error", err)
 	}

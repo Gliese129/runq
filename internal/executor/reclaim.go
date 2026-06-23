@@ -37,11 +37,11 @@ type Reclaimer struct {
 // Alive tasks get reattached and returned with their monitoring channels.
 // Dead tasks get their DB status updated (pending for retry, or failed).
 // Pending tasks are not touched here (handled by daemon.go restore path).
-func (r *Reclaimer) Reclaim() ([]AliveTask, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+func (r *Reclaimer) Reclaim(ctx context.Context) ([]AliveTask, error) {
+	dbCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	tasks, err := r.Store.ListTasks(ctx, store.TaskFilter{Status: "running"})
+	tasks, err := r.Store.ListTasks(dbCtx, store.TaskFilter{Status: "running"})
 	if err != nil {
 		return nil, err
 	}
@@ -54,7 +54,7 @@ func (r *Reclaimer) Reclaim() ([]AliveTask, error) {
 			ch, err := r.Exec.Reattach(t.ID, t.PID)
 			if err != nil {
 				r.Logger.Warn("reattach failed, treating as dead", "task", t.ID, "error", err)
-				r.markDead(&t)
+				r.markDead(ctx, &t)
 				continue
 			}
 			r.Logger.Info("task reattached", "task", t.ID, "pid", t.PID)
@@ -73,15 +73,15 @@ func (r *Reclaimer) Reclaim() ([]AliveTask, error) {
 
 			alive = append(alive, AliveTask{Row: t, DoneCh: ch})
 		} else {
-			r.markDead(&t)
+			r.markDead(ctx, &t)
 		}
 	}
 	return alive, nil
 }
 
 // markDead updates a dead task's DB status: resumable → pending, otherwise → failed.
-func (r *Reclaimer) markDead(t *store.TaskRow) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+func (r *Reclaimer) markDead(ctx context.Context, t *store.TaskRow) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	if t.Resumable && (t.MaxRetry == 0 || t.RetryCount < t.MaxRetry) {

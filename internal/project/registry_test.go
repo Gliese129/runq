@@ -1,6 +1,7 @@
 package project
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -38,7 +39,7 @@ func TestAddAndGet(t *testing.T) {
 	defer cleanup()
 
 	cfg := sampleConfig(t, "resnet50")
-	if err := reg.Add(cfg); err != nil {
+	if err := reg.Add(context.Background(), cfg); err != nil {
 		t.Fatalf("Add failed: %v", err)
 	}
 
@@ -48,7 +49,7 @@ func TestAddAndGet(t *testing.T) {
 		t.Fatalf("project.yaml not written: %v", err)
 	}
 
-	got, err := reg.Get("resnet50")
+	got, err := reg.Get(context.Background(), "resnet50")
 	if err != nil {
 		t.Fatalf("Get failed: %v", err)
 	}
@@ -75,13 +76,13 @@ func TestAddFailsOnBadDir(t *testing.T) {
 		WorkingDir:  "/this/path/does/not/exist",
 		CmdTemplate: "echo {{args}}",
 	}
-	err := reg.Add(cfg)
+	err := reg.Add(context.Background(), cfg)
 	if err == nil {
 		t.Fatal("expected error for non-existent working_dir, got nil")
 	}
 
 	// DB should NOT have the project
-	_, getErr := reg.Get("bad")
+	_, getErr := reg.Get(context.Background(), "bad")
 	if getErr == nil {
 		t.Fatal("project should not be in DB after failed Add")
 	}
@@ -92,10 +93,10 @@ func TestAddDuplicate(t *testing.T) {
 	defer cleanup()
 
 	cfg := sampleConfig(t, "resnet50")
-	if err := reg.Add(cfg); err != nil {
+	if err := reg.Add(context.Background(), cfg); err != nil {
 		t.Fatalf("first Add failed: %v", err)
 	}
-	err := reg.Add(cfg)
+	err := reg.Add(context.Background(), cfg)
 	if err == nil {
 		t.Fatal("expected error for duplicate project, got nil")
 	}
@@ -116,7 +117,7 @@ func TestAddSkipsWriteIfYamlExists(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := reg.Add(cfg); err != nil {
+	if err := reg.Add(context.Background(), cfg); err != nil {
 		t.Fatalf("Add failed: %v", err)
 	}
 
@@ -131,7 +132,7 @@ func TestGetNotFound(t *testing.T) {
 	reg, cleanup := setup(t)
 	defer cleanup()
 
-	_, err := reg.Get("nonexistent")
+	_, err := reg.Get(context.Background(), "nonexistent")
 	if err == nil {
 		t.Fatal("expected error for missing project, got nil")
 	}
@@ -145,12 +146,12 @@ func TestList(t *testing.T) {
 	defer cleanup()
 
 	for _, name := range []string{"bert", "gpt2", "resnet50"} {
-		if err := reg.Add(sampleConfig(t, name)); err != nil {
+		if err := reg.Add(context.Background(), sampleConfig(t, name)); err != nil {
 			t.Fatalf("Add %q failed: %v", name, err)
 		}
 	}
 
-	configs, err := reg.List()
+	configs, err := reg.List(context.Background())
 	if err != nil {
 		t.Fatalf("List failed: %v", err)
 	}
@@ -167,7 +168,7 @@ func TestListEmpty(t *testing.T) {
 	reg, cleanup := setup(t)
 	defer cleanup()
 
-	configs, err := reg.List()
+	configs, err := reg.List(context.Background())
 	if err != nil {
 		t.Fatalf("List failed: %v", err)
 	}
@@ -181,17 +182,17 @@ func TestUpdate(t *testing.T) {
 	defer cleanup()
 
 	cfg := sampleConfig(t, "resnet50")
-	if err := reg.Add(cfg); err != nil {
+	if err := reg.Add(context.Background(), cfg); err != nil {
 		t.Fatalf("Add failed: %v", err)
 	}
 
 	cfg.CmdTemplate = "python train_v2.py {{args}}"
 	cfg.Defaults.MaxRetry = 5
-	if err := reg.Update(cfg); err != nil {
+	if err := reg.Update(context.Background(), cfg); err != nil {
 		t.Fatalf("Update failed: %v", err)
 	}
 
-	got, err := reg.Get("resnet50")
+	got, err := reg.Get(context.Background(), "resnet50")
 	if err != nil {
 		t.Fatalf("Get after Update failed: %v", err)
 	}
@@ -214,7 +215,7 @@ func TestUpdateNotFound(t *testing.T) {
 	defer cleanup()
 
 	cfg := sampleConfig(t, "nonexistent")
-	err := reg.Update(cfg)
+	err := reg.Update(context.Background(), cfg)
 	if err == nil {
 		t.Fatal("expected error for updating missing project, got nil")
 	}
@@ -228,13 +229,13 @@ func TestRemove(t *testing.T) {
 	defer cleanup()
 
 	cfg := sampleConfig(t, "resnet50")
-	if err := reg.Add(cfg); err != nil {
+	if err := reg.Add(context.Background(), cfg); err != nil {
 		t.Fatalf("Add failed: %v", err)
 	}
-	if err := reg.Remove("resnet50"); err != nil {
+	if err := reg.Remove(context.Background(), "resnet50"); err != nil {
 		t.Fatalf("Remove failed: %v", err)
 	}
-	_, err := reg.Get("resnet50")
+	_, err := reg.Get(context.Background(), "resnet50")
 	if err == nil {
 		t.Fatal("expected error after Remove, got nil")
 	}
@@ -244,7 +245,7 @@ func TestRemoveNotFound(t *testing.T) {
 	reg, cleanup := setup(t)
 	defer cleanup()
 
-	err := reg.Remove("nonexistent")
+	err := reg.Remove(context.Background(), "nonexistent")
 	if err == nil {
 		t.Fatal("expected error for removing missing project, got nil")
 	}

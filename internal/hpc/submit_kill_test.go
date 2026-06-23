@@ -509,7 +509,7 @@ func TestSubmitRefusesArchivedProject(t *testing.T) {
 	if _, err := b.Store.DB().Exec(`UPDATE jobs SET status = 'done'`); err != nil {
 		t.Fatal(err)
 	}
-	if err := reg.Archive(proj.ProjectName); err != nil {
+	if err := reg.Archive(context.Background(), proj.ProjectName); err != nil {
 		t.Fatalf("archive project: %v", err)
 	}
 	if _, _, err := b.Submit(context.Background(), jobCfg, proj, SubmitOpts{SkipPreflight: true}); err == nil {

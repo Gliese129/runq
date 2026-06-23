@@ -9,29 +9,43 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/gliese129/runq/internal/api"
 	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/project"
 	"github.com/gliese129/runq/internal/resource"
 	"github.com/gliese129/runq/internal/store"
 )
 
-type DaemonBackend struct {
-	client *api.Client
+// httpDoer abstracts the daemon HTTP client so DaemonBackend does not
+// depend on the api package (which imports service → would create a
+// cycle once service imports backend for the view builders).
+// Satisfied by *api.Client.
+type httpDoer interface {
+	Do(ctx context.Context, method, path string, body any) (*http.Response, error)
+	DoWithTimeout(ctx context.Context, method, path string, body any, timeout time.Duration) (*http.Response, error)
 }
 
-func NewDaemonBackend(socketPath string) *DaemonBackend {
-	return &DaemonBackend{client: api.NewClient(socketPath)}
+// daemonSubmitTimeout is the client-side timeout for the submit RPC,
+// which can be slow due to preflight checks.
+const daemonSubmitTimeout = 50 * time.Second
+
+type DaemonBackend struct {
+	client httpDoer
+}
+
+// NewDaemonBackend creates a Backend that proxies every call to the
+// daemon over a unix-socket HTTP client. Pass api.NewClient(socketPath).
+func NewDaemonBackend(client httpDoer) *DaemonBackend {
+	return &DaemonBackend{client: client}
 }
 
 func (b *DaemonBackend) Capabilities() Capabilities {
 	return Capabilities{
-		GPUMap:          true,
-		PauseResume:     true,
-		LiveLog:         true,
-		Retry:           true,
-		StateModel:      "push", // the daemon owns the truth; data is always current
-		KillAsync:       false,
+		GPUMap:      true,
+		PauseResume: true,
+		LiveLog:     true,
+		Retry:       true,
+		StateModel:  "push", // the daemon owns the truth; data is always current
+		KillAsync:   false,
 		// Activity heatmap and log search handlers are still TODO stubs
 		// (server.go handleJobActivity p6-step4, handleJobLogSearch p6-step5).
 		// Keep the capabilities off until the endpoints have real behavior so
@@ -52,25 +66,17 @@ func (b *DaemonBackend) ListJobs(ctx context.Context, projectScope string) ([]Jo
 	if projectScope != "" {
 		path += "?project=" + url.QueryEscape(projectScope)
 	}
-	var jobs []daemonJobWire
-	if err := b.do(ctx, "GET", path, nil, &jobs); err != nil {
+	var out []JobSummary
+	if err := b.do(ctx, "GET", path, nil, &out); err != nil {
 		return nil, err
-	}
-	out := make([]JobSummary, 0, len(jobs))
-	for _, job := range jobs {
-		out = append(out, summaryFromDaemonList(job))
 	}
 	return out, nil
 }
 
 func (b *DaemonBackend) ListArchivedJobs(ctx context.Context) ([]JobSummary, error) {
-	var jobs []daemonJobWire
-	if err := b.do(ctx, "GET", "/api/jobs?archived=1", nil, &jobs); err != nil {
+	var out []JobSummary
+	if err := b.do(ctx, "GET", "/api/jobs?archived=1", nil, &out); err != nil {
 		return nil, err
-	}
-	out := make([]JobSummary, 0, len(jobs))
-	for _, job := range jobs {
-		out = append(out, summaryFromDaemonList(job))
 	}
 	return out, nil
 }
@@ -92,27 +98,16 @@ func (b *DaemonBackend) UnarchiveProject(ctx context.Context, name string) error
 }
 
 func (b *DaemonBackend) GetJob(ctx context.Context, jobID string) (*JobDetail, error) {
-	var detail struct {
-		Job   *store.JobRow   `json:"job"`
-		Tasks []store.TaskRow `json:"tasks"`
-	}
+	// The daemon now returns a fully-built JobDetail (with TaskViews,
+	// MetricKeys, Wandb, Config) — no client-side re-derivation needed.
+	var detail JobDetail
 	if err := b.do(ctx, "GET", "/api/jobs/"+jobID, nil, &detail); err != nil {
 		return nil, err
 	}
-	if detail.Job == nil {
+	if detail.Job.ID == "" {
 		return nil, fmt.Errorf("job %q not found", jobID)
 	}
-	view := BuildJobDetail(*detail.Job, detail.Tasks)
-	// Project config (incl. W&B) lives in the daemon process. Fetch it over the
-	// API rather than holding a local registry, so there's a single source of truth.
-	if cfg, err := b.GetProject(ctx, detail.Job.ProjectName); err == nil && cfg.Wandb != nil {
-		view.Wandb = &WandbInfo{
-			Entity:  cfg.Wandb.Entity,
-			Project: cfg.Wandb.Project,
-			BaseURL: wandbBaseURL(cfg.Wandb.Entity, cfg.Wandb.Project),
-		}
-	}
-	return &view, nil
+	return &detail, nil
 }
 
 func (b *DaemonBackend) CompareMetrics(ctx context.Context, jobID, key string, desc bool) ([]CompareRow, error) {
@@ -189,7 +184,7 @@ func (b *DaemonBackend) SubmitJob(ctx context.Context, cfg job.JobConfig, opts S
 		JobID      string `json:"job_id"`
 		TotalTasks int    `json:"total_tasks"`
 	}
-	if err := b.doWithTimeout(ctx, "POST", daemonSubmitPath(opts), cfg, &resp, api.SubmitClientTimeout); err != nil {
+	if err := b.doWithTimeout(ctx, "POST", daemonSubmitPath(opts), cfg, &resp, daemonSubmitTimeout); err != nil {
 		return "", 0, err
 	}
 	return resp.JobID, resp.TotalTasks, nil
@@ -296,17 +291,11 @@ func (b *DaemonBackend) MatchProjects(ctx context.Context, dir string) ([]Projec
 }
 
 func (b *DaemonBackend) taskRows(ctx context.Context, jobID string) ([]store.TaskRow, error) {
-	var detail struct {
-		Job   *store.JobRow   `json:"job"`
-		Tasks []store.TaskRow `json:"tasks"`
-	}
-	if err := b.do(ctx, "GET", "/api/jobs/"+jobID, nil, &detail); err != nil {
+	var tasks []store.TaskRow
+	if err := b.do(ctx, "GET", "/api/tasks?job="+url.QueryEscape(jobID)+"&status=all", nil, &tasks); err != nil {
 		return nil, err
 	}
-	if detail.Job == nil {
-		return nil, fmt.Errorf("job %q not found", jobID)
-	}
-	return detail.Tasks, nil
+	return tasks, nil
 }
 
 func (b *DaemonBackend) do(ctx context.Context, method, path string, body any, out any) error {
@@ -314,13 +303,12 @@ func (b *DaemonBackend) do(ctx context.Context, method, path string, body any, o
 }
 
 func (b *DaemonBackend) doWithTimeout(ctx context.Context, method, path string, body any, out any, timeout time.Duration) error {
-	_ = ctx
 	var resp *http.Response
 	var err error
 	if timeout > 0 {
-		resp, err = b.client.DoWithTimeout(method, path, body, timeout)
+		resp, err = b.client.DoWithTimeout(ctx, method, path, body, timeout)
 	} else {
-		resp, err = b.client.Do(method, path, body)
+		resp, err = b.client.Do(ctx, method, path, body)
 	}
 	if err != nil {
 		return err
@@ -341,36 +329,4 @@ func (b *DaemonBackend) doWithTimeout(ctx context.Context, method, path string, 
 		return err
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
-}
-
-// daemonJobWire is the JSON shape the daemon's /api/jobs endpoint returns.
-// Private — isolates this adapter from the service layer's types.
-type daemonJobWire struct {
-	JobID       string         `json:"job_id"`
-	Project     string         `json:"project"`
-	Note        string         `json:"note"`
-	Status      string         `json:"status"`
-	TotalTasks  int            `json:"total_tasks"`
-	StatusCount map[string]int `json:"status_count"`
-	CreatedAt   time.Time      `json:"created_at"`
-	Archived    bool           `json:"archived"`
-}
-
-func summaryFromDaemonList(job daemonJobWire) JobSummary {
-	counts := TaskCountGroup{
-		Total:     job.TotalTasks,
-		Pending:   job.StatusCount["pending"],
-		Running:   job.StatusCount["running"],
-		Completed: job.StatusCount["success"],
-		Failed:    job.StatusCount["failed"] + job.StatusCount["killed"],
-	}
-	return JobSummary{
-		ID:        job.JobID,
-		Project:   job.Project,
-		Note:      job.Note,
-		Status:    job.Status,
-		Archived:  job.Archived,
-		CreatedAt: job.CreatedAt.Unix(),
-		Tasks:     counts,
-	}
 }

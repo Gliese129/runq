@@ -133,14 +133,14 @@ func (b *Backend) Submit(ctx context.Context, jobCfg job.JobConfig, proj *projec
 	// the HPC store. Add-if-missing covers both "resolved from registry" and
 	// "loaded from a file" callers.
 	reg := project.NewRegistry(b.Store.DB())
-	if _, gerr := reg.Get(proj.ProjectName); gerr != nil {
-		if aerr := reg.Add(*proj); aerr != nil {
+	if _, gerr := reg.Get(ctx, proj.ProjectName); gerr != nil {
+		if aerr := reg.Add(ctx, *proj); aerr != nil {
 			return "", 0, fmt.Errorf("register project %q: %w", proj.ProjectName, aerr)
 		}
 	}
 	// THE submit precondition (exists + not archived, fail-closed) lives in
 	// one place — see Registry.RequireSubmittable.
-	if err := reg.RequireSubmittable(proj.ProjectName); err != nil {
+	if err := reg.RequireSubmittable(ctx, proj.ProjectName); err != nil {
 		return "", 0, err
 	}
 

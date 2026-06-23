@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gliese129/runq/internal/backend"
 	"github.com/gliese129/runq/internal/executor"
 	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/project"
@@ -55,12 +56,12 @@ type Deps struct {
 		SubmitJob(ctx context.Context, jobCfg job.JobConfig) (string, int, error)
 		SubmitJobWithOpts(ctx context.Context, jobCfg job.JobConfig, opts service.SubmitJobOpts) (string, int, error)
 		ResolveNote(ctx context.Context, jobCfg job.JobConfig) (string, error)
-		ListJobs(ctx context.Context, project string) ([]service.JobSummary, error)
-		ListArchivedJobs(ctx context.Context, project string) ([]service.JobSummary, error)
+		ListJobs(ctx context.Context, project string) ([]backend.JobSummary, error)
+		ListArchivedJobs(ctx context.Context, project string) ([]backend.JobSummary, error)
 		ProjectSummaries(ctx context.Context) ([]service.ProjectSummary, error)
 		ArchiveJob(ctx context.Context, jobID string) error
 		UnarchiveJob(ctx context.Context, jobID string) error
-		ShowJob(ctx context.Context, jobID string) (*service.JobDetail, error)
+		ShowJob(ctx context.Context, jobID string) (*backend.JobDetail, error)
 		KillJob(ctx context.Context, jobID string) (int, error)
 		PauseJob(ctx context.Context, jobID string) error
 		ResumeJob(ctx context.Context, jobID string) error
@@ -274,17 +275,19 @@ func NewClientWithTimeout(socketPath string, timeout time.Duration) *Client {
 }
 
 // Do sends an HTTP request to the daemon. Body is JSON-encoded if non-nil.
-func (c *Client) Do(method, path string, body interface{}) (*http.Response, error) {
-	return c.do(c.httpc, method, path, body)
+// The ctx controls the request lifetime — cancelling it aborts the in-flight
+// HTTP call (client disconnect propagation).
+func (c *Client) Do(ctx context.Context, method, path string, body interface{}) (*http.Response, error) {
+	return c.do(ctx, c.httpc, method, path, body)
 }
 
-func (c *Client) DoWithTimeout(method, path string, body interface{}, timeout time.Duration) (*http.Response, error) {
+func (c *Client) DoWithTimeout(ctx context.Context, method, path string, body interface{}, timeout time.Duration) (*http.Response, error) {
 	httpc := *c.httpc
 	httpc.Timeout = timeout
-	return c.do(&httpc, method, path, body)
+	return c.do(ctx, &httpc, method, path, body)
 }
 
-func (c *Client) do(httpc *http.Client, method, path string, body interface{}) (*http.Response, error) {
+func (c *Client) do(ctx context.Context, httpc *http.Client, method, path string, body interface{}) (*http.Response, error) {
 	url := fmt.Sprintf("http://runq%s", path)
 	var bodyReader io.Reader
 	if body != nil {
@@ -294,7 +297,7 @@ func (c *Client) do(httpc *http.Client, method, path string, body interface{}) (
 		}
 		bodyReader = buf
 	}
-	httpReq, err := http.NewRequest(method, url, bodyReader)
+	httpReq, err := http.NewRequestWithContext(ctx, method, url, bodyReader)
 	if err != nil {
 		return nil, err
 	}

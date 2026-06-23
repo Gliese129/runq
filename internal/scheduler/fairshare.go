@@ -30,7 +30,7 @@ func (f *FairSharePrioritizer) Prioritize(ctx ScheduleContext) []Priority {
 	// Lower historical consumption → higher score → scheduled first.
 	// Within the same user, tasks are ordered FIFO by EnqueuedAt.
 	userPending, userRunning := make(map[int]float64), make(map[int]float64)
-	userConsumed := f.computeUsage(ctx.Now)
+	userConsumed := f.computeUsage(ctx.Ctx, ctx.Now)
 	for _, task := range ctx.Pending {
 		_, ok := userPending[task.UID]
 		if !ok {
@@ -78,14 +78,14 @@ func (f *FairSharePrioritizer) Prioritize(ctx ScheduleContext) []Priority {
 // computeUsage calculates per-UID GPU-seconds consumed by FINISHED tasks in [now-window, now].
 // Running task occupation is handled separately by Prioritize() via ctx.Running (userRunning dimension),
 // so this method intentionally excludes running tasks to avoid double-counting.
-func (f *FairSharePrioritizer) computeUsage(now time.Time) map[int]float64 {
+func (f *FairSharePrioritizer) computeUsage(ctx context.Context, now time.Time) map[int]float64 {
 	usage := make(map[int]float64)
 	if f.Store == nil {
 		return usage
 	}
 
 	cutoff := now.Add(-f.Window)
-	dbCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	dbCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 
 	// Finished tasks in window: sum(gpus_needed * duration) per UID.
