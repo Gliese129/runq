@@ -250,7 +250,7 @@ func (b *Backend) Submit(ctx context.Context, jobCfg job.JobConfig, proj *projec
 			opLog("SUBMIT NOID task=%s job=%s\ncmd: %s\noutput: %s", t.TaskID, plan.JobID, fullCmd, out)
 			// Submit SUCCEEDED but the id is unparseable → a cluster job may be
 			// running untracked. LEAVE the task pending (already inserted): it is
-			// not a failure, and pending is non-terminal so Refresh won't stamp a
+			// not a failure, and pending is non-terminal so reconcile won't stamp a
 			// bogus finished_at. If the job actually runs it self-reports via
 			// status.json and Reconcile heals pending→running/success. We just
 			// can't kill it (no external id). Surface the error so the user fixes

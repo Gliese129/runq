@@ -15,7 +15,7 @@
 //
 // Unlike the daemon, there is NO resident process driving state forward — no
 // scheduler loop, no timer. Every status the DB holds is a BEST-EFFORT
-// projection, recomputed only when a CLI command runs Refresh, of sources the
+// projection, recomputed only when a command calls EnsureFresh, of sources the
 // user owns:
 //
 //   - the wrapper's <task_dir>/status.json (written by run.sh / the SDK), and
@@ -23,9 +23,9 @@
 //
 // Consequences, by design:
 //
-//   - State only advances when a command (status / best / collect) runs Refresh
-//     on that job. Between commands the DB is frozen; a job can finish on the
-//     cluster and still read "running" until the next poll. That is expected.
+//   - State only advances when a command calls EnsureFresh on that job. Between
+//     calls the DB is frozen; a job can finish on the cluster and still read
+//     "running" until the next reconcile. That is expected.
 //   - The honest default for a submitted-but-not-yet-terminal task is "(maybe)
 //     running". runq does NOT own liveness truth — whether running/done is
 //     accurate depends on the user's shell integration (run.sh writing
@@ -68,8 +68,9 @@ type Backend struct {
 	Run        Runner
 	StorageCfg *config.GlobalConfig // nil-safe: nil = project_path mode
 
-	// Scheduler-probe throttle (see refresh.go): per-job floor so the
-	// dashboard's poll loop can't hammer qstat on a shared login node.
+	// Per-job TTL cache (see refresh.go): tracks when each job's scheduler
+	// was last probed, so EnsureFresh can skip the probe (not the local
+	// reconcile) within the caller's TTL window.
 	probeMu   sync.Mutex
 	lastProbe map[string]time.Time
 }

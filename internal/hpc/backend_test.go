@@ -35,7 +35,7 @@ func TestSubmitRefreshKill(t *testing.T) {
 	}
 
 	// Fake cluster: submit returns an incrementing job id; everything else
-	// (scancel) returns empty. Submit/Refresh/Kill call this sequentially.
+	// (scancel) returns empty. Submit/EnsureFresh/Kill call this sequentially.
 	next := 100
 	var calls []string
 	runner := func(ctx context.Context, command string) (string, error) {
@@ -102,8 +102,8 @@ func TestSubmitRefreshKill(t *testing.T) {
 	writeFile(t, filepath.Join(done.TaskDir, "metrics.jsonl"),
 		`{"type":"metric","key":"loss","value":0.5,"step":1,"ts":1730000000}`)
 
-	if err := b.Refresh(ctx, jobID); err != nil {
-		t.Fatalf("Refresh: %v", err)
+	if err := b.EnsureFresh(ctx, jobID, 0); err != nil {
+		t.Fatalf("EnsureFresh: %v", err)
 	}
 
 	got, err := st.GetTask(ctx, done.ID)
@@ -125,9 +125,9 @@ func TestSubmitRefreshKill(t *testing.T) {
 		t.Fatalf("metrics = %+v, want one loss=0.5", metrics)
 	}
 
-	// Refresh is idempotent: running again must not duplicate metrics.
-	if err := b.Refresh(ctx, jobID); err != nil {
-		t.Fatalf("Refresh #2: %v", err)
+	// EnsureFresh is idempotent: running again must not duplicate metrics.
+	if err := b.EnsureFresh(ctx, jobID, 0); err != nil {
+		t.Fatalf("EnsureFresh #2: %v", err)
 	}
 	if m, _ := st.ListMetrics(ctx, done.ID, "loss"); len(m) != 1 {
 		t.Fatalf("metrics duplicated after second refresh: %d", len(m))

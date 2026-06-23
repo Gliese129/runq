@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"github.com/gliese129/runq/internal/ingest"
-	"github.com/gliese129/runq/internal/utils"
 	"github.com/gliese129/runq/internal/store"
+	"github.com/gliese129/runq/internal/utils"
 )
 
 // statusFile is the shape run.sh writes to <task_dir>/status.json.
@@ -36,67 +36,81 @@ func readStatus(taskDir string) statusFile {
 	return sf
 }
 
-// Refresh is the ONLY engine that advances task state — there is no resident
-// process on HPC, so state moves forward only when a command calls this. It is a
-// best-effort projection (see the package doc). For each task it ingests
-// metrics.jsonl (always, idempotent — catches late/appended files), then, unless
-// the task is already a HARD terminal, reads status.json + probes the scheduler
-// and recomputes the canonical status+source via Reconcile.
+// ── Reconciler (satisfies backend.Reconciler via duck typing) ──
+
+// EnsureFresh ensures jobID's data is current. Local reconcile (status.json,
+// metrics.jsonl ingest) ALWAYS runs. The scheduler probe runs only when ttl=0
+// (force) or when the probe cache has expired. This is the ONLY entry point
+// for advancing HPC task state — there is no resident process, so state moves
+// forward only when a command calls this.
 //
-// Terminal handling keys off status_source:
-//   - wrapper / runq terminals are FINAL — skipped (no re-probe).
-//   - scheduler / submit / inferred terminals stay correctable: Refresh
-//     re-probes every cycle so a late wrapper signal can overturn them
-//     ("wrapper terminal wins").
+// Two-tier design:
+//   - Local file reads (cheap): always run so wrapper-written status/metrics
+//     surface immediately.
+//   - Scheduler probe (expensive, may ssh/qstat): TTL-gated.
 //
-// The DB is the (lazily-updated) source of truth and this is its only writer;
-// there is no user-visible sync — status/best/collect call Refresh internally.
-func (b *Backend) Refresh(ctx context.Context, jobID string) error {
-	return b.refresh(ctx, jobID, true)
+// The method satisfies backend.Reconciler implicitly (Go structural typing).
+func (b *Backend) EnsureFresh(ctx context.Context, jobID string, ttl time.Duration) error {
+	probe := ttl == 0 || !b.probeIsFresh(jobID, ttl)
+	return b.reconcile(ctx, jobID, probe)
 }
 
-// RefreshLazy is the read-path variant: local reconcile every time, the
-// scheduler probe only when the per-job floor allows. For callers that are
-// polled by UIs (Status, compare tables) rather than commanded by a human.
-func (b *Backend) RefreshLazy(ctx context.Context, jobID string) error {
-	return b.refresh(ctx, jobID, false)
+// EnsureAllFresh reconciles all active (non-done) jobs within the TTL window.
+func (b *Backend) EnsureAllFresh(ctx context.Context, ttl time.Duration) error {
+	jobs, err := b.Store.ListJobs(ctx, "")
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for _, j := range jobs {
+		if j.Status == "done" {
+			continue // all tasks terminal, nothing to reconcile
+		}
+		if err := b.EnsureFresh(ctx, j.ID, ttl); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
 
-// schedProbeMinInterval is the login-node citizenship guard: the dashboard
-// polls Status() continuously, and without a floor every poll would fan out
-// one qstat per active task. Within this window Status() still reconciles
-// from status.json + ingests metrics (cheap local reads) — only the
-// scheduler probe is skipped. Explicit Refresh (GUI button, CLI commands —
-// always a fresh process anyway) is never throttled.
-const schedProbeMinInterval = 20 * time.Second
+// probeIsFresh returns true if jobID's scheduler was probed within the TTL.
+func (b *Backend) probeIsFresh(jobID string, ttl time.Duration) bool {
+	b.probeMu.Lock()
+	defer b.probeMu.Unlock()
+	if b.lastProbe == nil {
+		return false
+	}
+	return time.Since(b.lastProbe[jobID]) < ttl
+}
 
-// probeAllowed records a probe pass for jobID, returning false while the
-// previous one is younger than the floor. In-memory by design: the throttle
-// exists for the long-running dashboard process, not for one-shot CLIs.
-func (b *Backend) probeAllowed(jobID string) bool {
+// markProbed records that jobID's scheduler was just probed.
+func (b *Backend) markProbed(jobID string) {
 	b.probeMu.Lock()
 	defer b.probeMu.Unlock()
 	if b.lastProbe == nil {
 		b.lastProbe = make(map[string]time.Time)
 	}
-	if time.Since(b.lastProbe[jobID]) < schedProbeMinInterval {
-		return false
-	}
 	b.lastProbe[jobID] = time.Now()
-	return true
 }
 
-func (b *Backend) refresh(ctx context.Context, jobID string, forceProbe bool) error {
-	probe := forceProbe || b.probeAllowed(jobID)
-	if forceProbe {
-		// An explicit refresh resets the clock for the throttled path too.
-		b.probeMu.Lock()
-		if b.lastProbe == nil {
-			b.lastProbe = make(map[string]time.Time)
-		}
-		b.lastProbe[jobID] = time.Now()
-		b.probeMu.Unlock()
-	}
+// reconcile is the core engine that advances task state. For each task it
+// ingests metrics.jsonl (always, idempotent), then reads status.json and
+// optionally probes the scheduler, recomputing the canonical status+source
+// via Reconcile.
+//
+// When probe=true the scheduler is queried (status_template); when false,
+// only local file reads run (status.json + metrics.jsonl). The TTL cache
+// in EnsureFresh decides which mode to use — callers of reconcile should
+// not need to worry about this.
+//
+// Terminal handling keys off status_source:
+//   - wrapper / runq terminals are FINAL — skipped (no re-probe).
+//   - scheduler / submit / inferred terminals stay correctable: reconcile
+//     re-probes every cycle so a late wrapper signal can overturn them
+//     ("wrapper terminal wins").
+//
+// The DB is the (lazily-updated) source of truth and this is its only writer.
+func (b *Backend) reconcile(ctx context.Context, jobID string, probe bool) error {
 	tasks, err := b.Store.ListTasks(ctx, store.TaskFilter{JobID: jobID})
 	if err != nil {
 		return err
@@ -125,10 +139,14 @@ func (b *Backend) refresh(ctx context.Context, jobID string, forceProbe bool) er
 		}
 
 		sf := readStatus(tk.TaskDir)
+		schedSignal := SchedUnknown
+		if probe {
+			schedSignal = b.probeSchedulerWith(ctx, probeRun, tk.ExternalID)
+		}
 		d := Reconcile(tk.Status, tk.StatusSource, Observed{
 			WrapperStatus: sf.Status,
 			ExitCode:      sf.ExitCode,
-			Scheduler:     b.maybeProbeScheduler(ctx, probeRun, tk.ExternalID, probe),
+			Scheduler:     schedSignal,
 			KillRequested: false, // hpc kill writes killed/runq directly; never infer intent from status
 		})
 
@@ -165,11 +183,18 @@ func (b *Backend) refresh(ctx context.Context, jobID string, forceProbe bool) er
 	if err := b.Store.TouchJobRefreshedAt(ctx, jobID, time.Now()); err != nil {
 		return fmt.Errorf("touch refreshed_at for job %s: %w", jobID, err)
 	}
+	// Mark the in-memory TTL cache so subsequent calls within the window skip
+	// the scheduler probe (local reconcile always runs regardless).
+	if probe {
+		b.markProbed(jobID)
+	}
 	if len(ingestErrs) > 0 {
 		return fmt.Errorf("status refreshed but ingest had errors: %w", errors.Join(ingestErrs...))
 	}
 	return nil
 }
+
+// ── Scheduler probing ──
 
 // probeScheduler runs the configured status_template (and optional status_parser
 // hook) and maps the result to a semantic SchedulerSignal. It is deliberately
@@ -178,36 +203,6 @@ func (b *Backend) refresh(ctx context.Context, jobID string, forceProbe bool) er
 //   - with a status_parser hook → its normalized token via ParseSignal
 //   - without a hook → empty output = SchedGone, recognized token = that signal,
 //     present-but-unrecognized = SchedActive (alive)
-//
-// maybeProbeScheduler is probeScheduler behind the throttle gate: a skipped
-// probe yields SchedUnknown — "no new fact", which Reconcile treats as
-// keep-current-state (never an invented terminal).
-func (b *Backend) maybeProbeScheduler(ctx context.Context, run Runner, extID string, allowed bool) SchedulerSignal {
-	if !allowed {
-		return SchedUnknown
-	}
-	return b.probeSchedulerWith(ctx, run, extID)
-}
-
-// memoRunner caches command → result for the lifetime of one refresh pass.
-// Status queries are idempotent reads, so within a pass the same rendered
-// command need not hit the scheduler twice. Sequential use only (no lock).
-func memoRunner(run Runner) Runner {
-	type result struct {
-		out string
-		err error
-	}
-	cache := map[string]result{}
-	return func(ctx context.Context, command string) (string, error) {
-		if r, ok := cache[command]; ok {
-			return r.out, r.err
-		}
-		out, err := run(ctx, command)
-		cache[command] = result{out, err}
-		return out, err
-	}
-}
-
 func (b *Backend) probeScheduler(ctx context.Context, extID string) SchedulerSignal {
 	return b.probeSchedulerWith(ctx, b.Run, extID)
 }
@@ -269,29 +264,21 @@ func (b *Backend) probeSchedulerWith(ctx context.Context, run Runner, extID stri
 	return SchedActive
 }
 
-// JobView is the read model returned to the CLI.
-type JobView struct {
-	Job   *store.JobRow
-	Tasks []store.TaskRow
-}
-
-// Status refreshes the job, then returns its current DB state.
-func (b *Backend) Status(ctx context.Context, jobID string) (*JobView, error) {
-	// Read path: reconcile from local files every time, but let the
-	// scheduler probe ride the throttle — the dashboard calls this in a loop.
-	if err := b.RefreshLazy(ctx, jobID); err != nil {
-		return nil, err
+// memoRunner caches command → result for the lifetime of one reconcile pass.
+// Status queries are idempotent reads, so within a pass the same rendered
+// command need not hit the scheduler twice. Sequential use only (no lock).
+func memoRunner(run Runner) Runner {
+	type result struct {
+		out string
+		err error
 	}
-	job, err := b.Store.GetJob(ctx, jobID)
-	if err != nil {
-		return nil, err
+	cache := map[string]result{}
+	return func(ctx context.Context, command string) (string, error) {
+		if r, ok := cache[command]; ok {
+			return r.out, r.err
+		}
+		out, err := run(ctx, command)
+		cache[command] = result{out, err}
+		return out, err
 	}
-	if job == nil {
-		return nil, fmt.Errorf("job %q not found", jobID)
-	}
-	tasks, err := b.Store.ListTasks(ctx, store.TaskFilter{JobID: jobID})
-	if err != nil {
-		return nil, err
-	}
-	return &JobView{Job: job, Tasks: tasks}, nil
 }

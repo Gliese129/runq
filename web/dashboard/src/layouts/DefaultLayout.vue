@@ -284,4 +284,9 @@ onMounted(async () => {
 .nav-btn.justify-center :deep(.v-btn__prepend) {
   margin-inline: 0;
 }
+/* Nudge list-item prepend icons left to align with the nav visual grid. */
+:deep(.v-list-item__prepend > .v-icon) {
+  position: relative;
+  left: -8px;
+}
 </style>

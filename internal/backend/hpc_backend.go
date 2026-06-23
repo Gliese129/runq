@@ -25,10 +25,10 @@ func NewHPCBackend(backend *hpc.Backend, st *store.Store) *HPCBackend {
 
 func (b *HPCBackend) Capabilities() Capabilities {
 	return Capabilities{
-		GPUMap:        false, // no node-local GPU visibility from the login node
-		PauseResume:   false, // cluster queues have no runq-level pause concept
-		LiveLog:       true,  // deployment assumption: dashboard runs on a login node with the shared FS
-		Retry:         false, // HPC has no resident process to re-pick pending tasks
+		GPUMap:        false,  // no node-local GPU visibility from the login node
+		PauseResume:   false,  // cluster queues have no runq-level pause concept
+		LiveLog:       true,   // deployment assumption: dashboard runs on a login node with the shared FS
+		Retry:         false,  // HPC has no resident process to re-pick pending tasks
 		StateModel:    "poll", // best-effort projection; staleness must be surfaced
 		KillAsync:     true,   // qdel/scancel is forwarded; killed persisted as soon as the cancel command succeeds
 		SubmitPreview: true,   // zero-disk dry-run via the submit code path
@@ -43,14 +43,33 @@ func (b *HPCBackend) Capabilities() Capabilities {
 
 // RefreshJob forces a reconcile pass (status.json + optional scheduler probe).
 func (b *HPCBackend) RefreshJob(ctx context.Context, jobID string) error {
-	return b.backend.Refresh(ctx, jobID)
+	return b.backend.EnsureFresh(ctx, jobID, 0)
 }
 
 func (b *HPCBackend) ListJobs(ctx context.Context, projectScope string) ([]JobSummary, error) {
+	// Query visible jobs first to scope the reconcile to exactly this result
+	// set. Without this, an unscoped EnsureAllFresh would reconcile every
+	// active job in the DB (including archived/hidden projects) — wasteful on
+	// a cluster with many projects (RQ-26 P2).
 	jobs, err := b.store.ListJobsVisible(ctx, projectScope)
 	if err != nil {
 		return nil, err
 	}
+
+	// Reconcile only the non-done jobs in this result set (best-effort: a
+	// reconcile failure should not block the list entirely).
+	for _, j := range jobs {
+		if j.Status != "done" {
+			_ = b.backend.EnsureFresh(ctx, j.ID, DefaultReadTTL)
+		}
+	}
+
+	// Re-query to pick up any status changes from the reconcile pass.
+	jobs, err = b.store.ListJobsVisible(ctx, projectScope)
+	if err != nil {
+		return nil, err
+	}
+
 	// Load all tasks once and group by job_id to avoid N+1 queries.
 	allTasks, err := b.store.ListTasks(ctx, store.TaskFilter{})
 	if err != nil {
@@ -81,6 +100,9 @@ func (b *HPCBackend) ListArchivedJobs(ctx context.Context) ([]JobSummary, error)
 }
 
 func (b *HPCBackend) ArchiveJob(ctx context.Context, jobID string) error {
+	if err := b.backend.EnsureFresh(ctx, jobID, 0); err != nil {
+		return fmt.Errorf("reconcile before archive: %w", err)
+	}
 	return b.store.ArchiveJob(ctx, jobID)
 }
 
@@ -97,13 +119,23 @@ func (b *HPCBackend) UnarchiveProject(_ context.Context, name string) error {
 }
 
 func (b *HPCBackend) GetJob(ctx context.Context, jobID string) (*JobDetail, error) {
-	view, err := b.backend.Status(ctx, jobID)
+	if err := b.backend.EnsureFresh(ctx, jobID, DefaultReadTTL); err != nil {
+		return nil, err
+	}
+	job, err := b.store.GetJob(ctx, jobID)
 	if err != nil {
 		return nil, err
 	}
-	detail := BuildJobDetail(*view.Job, view.Tasks)
+	if job == nil {
+		return nil, fmt.Errorf("job %q not found", jobID)
+	}
+	tasks, err := b.store.ListTasks(ctx, store.TaskFilter{JobID: jobID})
+	if err != nil {
+		return nil, err
+	}
+	detail := BuildJobDetail(*job, tasks)
 	reg := project.NewRegistry(b.store.DB())
-	if cfg, err := reg.Get(view.Job.ProjectName); err == nil && cfg.Wandb != nil {
+	if cfg, err := reg.Get(job.ProjectName); err == nil && cfg.Wandb != nil {
 		detail.Wandb = &WandbInfo{
 			Entity:  cfg.Wandb.Entity,
 			Project: cfg.Wandb.Project,
@@ -114,8 +146,7 @@ func (b *HPCBackend) GetJob(ctx context.Context, jobID string) (*JobDetail, erro
 }
 
 func (b *HPCBackend) CompareMetrics(ctx context.Context, jobID, key string, desc bool) ([]CompareRow, error) {
-	// Read path (UI-polled): throttled probe, same as GetJob.
-	if err := b.backend.RefreshLazy(ctx, jobID); err != nil {
+	if err := b.backend.EnsureFresh(ctx, jobID, DefaultReadTTL); err != nil {
 		return nil, err
 	}
 	tasks, err := b.store.ListTasks(ctx, store.TaskFilter{JobID: jobID})
@@ -158,12 +189,11 @@ func (b *HPCBackend) TaskMetrics(ctx context.Context, taskID string) ([]MetricPo
 	return readMetricPoints(task.TaskDir), nil
 }
 
-// reconcileTask runs the throttled HPC read-path reconcile for the task's job,
-// then returns the freshest task row. On any reconcile/re-read error it falls
-// back to the row passed in, so callers always get a usable task. Centralizes
-// the reconcile so list, detail, and metrics paths can't drift apart.
+// reconcileTask ensures the task's job data is fresh, then returns the freshest
+// task row. On any error it falls back to the row passed in, so callers always
+// get a usable task.
 func (b *HPCBackend) reconcileTask(ctx context.Context, taskID string, fallback *store.TaskRow) *store.TaskRow {
-	if err := b.backend.RefreshLazy(ctx, fallback.JobID); err != nil {
+	if err := b.backend.EnsureFresh(ctx, fallback.JobID, DefaultReadTTL); err != nil {
 		return fallback
 	}
 	if fresh, err := b.store.GetTask(ctx, taskID); err == nil && fresh != nil {
@@ -180,6 +210,18 @@ func (b *HPCBackend) KillTask(ctx context.Context, taskID string) error {
 	if task == nil {
 		return fmt.Errorf("task %q not found", taskID)
 	}
+	// Reconcile before kill so we don't send qdel for an already-finished task.
+	if err := b.backend.EnsureFresh(ctx, task.JobID, 0); err != nil {
+		return fmt.Errorf("reconcile before kill: %w", err)
+	}
+	// Re-read: the reconcile may have advanced the task to a terminal state.
+	task, err = b.store.GetTask(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	if task == nil || task.Status == "success" || task.Status == "failed" || task.Status == "killed" {
+		return nil // already finished, nothing to kill
+	}
 	_, err = b.backend.Kill(ctx, taskID)
 	return err
 }
@@ -191,6 +233,9 @@ func (b *HPCBackend) RetryTask(_ context.Context, _ string) error {
 }
 
 func (b *HPCBackend) KillJob(ctx context.Context, jobID string) error {
+	if err := b.backend.EnsureFresh(ctx, jobID, 0); err != nil {
+		return fmt.Errorf("reconcile before kill: %w", err)
+	}
 	_, err := b.backend.Kill(ctx, jobID)
 	return err
 }

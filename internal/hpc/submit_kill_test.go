@@ -37,7 +37,7 @@ func newTestBackend(t *testing.T, cfg *hpcconfig.Config, runner Runner) (*Backen
 // #1: a submit that succeeds on the cluster but whose id can't be parsed must
 // leave a VISIBLE task (the durable ledger row), not an invisible orphan. It
 // stays pending — NOT failed — because the job may be running untracked, and
-// pending is non-terminal so Refresh won't stamp a bogus finished_at.
+// pending is non-terminal so reconcile won't stamp a bogus finished_at.
 func TestSubmitUnparseableIDLeavesVisibleTask(t *testing.T) {
 
 	cfg := &hpcconfig.Config{SubmitTemplate: "submit {{run_sh}}", SubmitIDRegex: `job ([0-9]+)`, KillTemplate: "cancel {{ext_id}}"}
@@ -369,11 +369,10 @@ func TestRunScriptTrapWritesKilledOnTerm(t *testing.T) {
 	}
 }
 
-// Login-node citizenship: the dashboard calls Status() in a poll loop, so
-// the scheduler probe must ride a per-job floor — repeated Status() within
-// the window reconciles from local files but runs NO qstat. An explicit
-// Refresh() is the user's command and always probes.
-func TestStatusThrottlesSchedulerProbe(t *testing.T) {
+// TTL-based throttle: repeated EnsureFresh calls within the TTL window skip
+// the scheduler probe but still run local reconcile (status.json + metrics).
+// A zero TTL always forces a full reconcile including the probe.
+func TestEnsureFreshTTLThrottle(t *testing.T) {
 
 	cfg := &hpcconfig.Config{
 		SubmitTemplate: "qsub {{run_sh}}",
@@ -398,21 +397,41 @@ func TestStatusThrottlesSchedulerProbe(t *testing.T) {
 		t.Fatalf("submit: %v", err)
 	}
 
+	// Three calls with a long TTL: only the first should probe the scheduler.
 	for i := 0; i < 3; i++ {
-		if _, err := b.Status(context.Background(), jobID); err != nil {
-			t.Fatalf("status #%d: %v", i, err)
+		if err := b.EnsureFresh(context.Background(), jobID, 30*time.Second); err != nil {
+			t.Fatalf("EnsureFresh #%d: %v", i, err)
 		}
 	}
 	if probes != 1 {
-		t.Errorf("3 Status() calls within the floor should probe exactly once, got %d", probes)
+		t.Errorf("3 EnsureFresh calls within TTL should probe exactly once, got %d", probes)
 	}
 
-	// Explicit Refresh = user command → always probes.
-	if err := b.Refresh(context.Background(), jobID); err != nil {
-		t.Fatalf("refresh: %v", err)
+	// Explicit TTL=0 = force reconcile → always probes (task still non-terminal).
+	if err := b.EnsureFresh(context.Background(), jobID, 0); err != nil {
+		t.Fatalf("EnsureFresh(0): %v", err)
 	}
 	if probes != 2 {
-		t.Errorf("explicit Refresh must bypass the throttle, got %d probes", probes)
+		t.Errorf("EnsureFresh(0) must bypass the TTL cache, got %d probes", probes)
+	}
+
+	// Even within TTL, local reconcile still runs: a wrapper status.json
+	// written after the first call must be picked up by the next call.
+	tasks, _ := b.Store.ListTasks(context.Background(), store.TaskFilter{JobID: jobID})
+	tk := tasks[0]
+	writeFile(t, filepath.Join(tk.TaskDir, statusFileName),
+		`{"status":"success","exit_code":0,"finished_at":1730000000}`)
+
+	probesBefore := probes
+	if err := b.EnsureFresh(context.Background(), jobID, 30*time.Second); err != nil {
+		t.Fatalf("EnsureFresh(within TTL after wrapper write): %v", err)
+	}
+	if probes != probesBefore {
+		t.Errorf("within-TTL call should NOT probe again, but probes went %d→%d", probesBefore, probes)
+	}
+	got, _ := b.Store.GetTask(context.Background(), tk.ID)
+	if got.Status != "success" {
+		t.Errorf("within-TTL call must still pick up wrapper status.json: got %s, want success", got.Status)
 	}
 }
 
@@ -451,8 +470,8 @@ func TestListingStatusTemplateBatchesPerPass(t *testing.T) {
 	if err != nil || n != 2 {
 		t.Fatalf("submit: n=%d err=%v", n, err)
 	}
-	if err := b.Refresh(context.Background(), jobID); err != nil {
-		t.Fatalf("refresh: %v", err)
+	if err := b.EnsureFresh(context.Background(), jobID, 0); err != nil {
+		t.Fatalf("EnsureFresh: %v", err)
 	}
 	if statCalls != 1 {
 		t.Errorf("2 tasks with a listing-style template should run the status command ONCE per pass, got %d", statCalls)
