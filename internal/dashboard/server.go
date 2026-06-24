@@ -326,12 +326,12 @@ func (s *Server) handleDryRun(w http.ResponseWriter, r *http.Request) {
 		writeErrorStatus(w, http.StatusBadRequest, err)
 		return
 	}
-	tasks, err := s.backend.DryRun(r.Context(), cfg)
+	result, err := s.backend.DryRun(r.Context(), cfg)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, tasks)
+	writeJSON(w, http.StatusOK, result.Tasks)
 }
 
 func (s *Server) handleListArchivedJobs(w http.ResponseWriter, r *http.Request) {

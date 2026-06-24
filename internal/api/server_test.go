@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gliese129/runq/internal/backend"
 	"github.com/gliese129/runq/internal/executor"
 	"github.com/gliese129/runq/internal/project"
 	"github.com/gliese129/runq/internal/resource"
@@ -276,7 +277,7 @@ func TestThawUnfrozen(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
-	var resp ThawResponse
+	var resp backend.ThawResponse
 	json.NewDecoder(w.Body).Decode(&resp)
 	if len(resp.Thawed) != 0 {
 		t.Errorf("Thawed should be empty on idle daemon, got %v", resp.Thawed)
@@ -330,7 +331,7 @@ func TestThawFrozenBlocked(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
-	var resp ThawResponse
+	var resp backend.ThawResponse
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -375,7 +376,7 @@ func TestThawFrozenForce(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
-	var resp ThawResponse
+	var resp backend.ThawResponse
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}

@@ -71,6 +71,7 @@ func (s *Server) registerRoutes() {
 	api.GET("/gpu", s.handleGPUStatus)
 	api.GET("/status", s.handleStatus)
 	api.POST("/thaw", s.handleThaw)
+	api.POST("/clean", s.handleClean)
 
 	// Internal — SDK-only control plane. Not for human / CLI use.
 	// Auth model matches Linux file permissions on the unix socket: any
@@ -543,6 +544,23 @@ func (s *Server) handleStatus(c *gin.Context) {
 		"pending":   s.deps.Queue.PendingCount(),
 		"gpus_free": s.deps.Pool.FreeCount(),
 	})
+}
+
+func (s *Server) handleClean(c *gin.Context) {
+	cutoffStr := c.Query("cutoff")
+	cutoffUnix, err := strconv.ParseInt(cutoffStr, 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid or missing cutoff timestamp"})
+		return
+	}
+	dryRun := c.Query("dry_run") == "true"
+
+	result, err := backend.PerformClean(c.Request.Context(), s.deps.Store, time.Unix(cutoffUnix, 0), dryRun)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, result)
 }
 
 // ── Freeze / Thaw lives in handlers_freeze.go ──

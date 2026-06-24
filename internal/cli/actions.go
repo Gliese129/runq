@@ -1,9 +1,9 @@
 package cli
 
 import (
-	"context"
 	"fmt"
 
+	"github.com/gliese129/runq/internal/backend"
 	"github.com/spf13/cobra"
 )
 
@@ -34,31 +34,25 @@ func init() {
 }
 
 func runJobAction(cmd *cobra.Command, jobID, action string) error {
-	_, mode, err := loadModeConfig()
-	if err != nil {
-		return err
-	}
-	backend, closeBackend, err := newBackend(mode)
-	if err != nil {
-		return err
-	}
-	defer closeBackend()
-
-	switch action {
-	case "pause":
-		err = backend.PauseJob(context.Background(), jobID)
-	case "resume":
-		err = backend.ResumeJob(context.Background(), jobID)
-	default:
-		err = fmt.Errorf("unknown action %q", action)
-	}
-	if err != nil {
-		return err
-	}
-	if jsonOut, _ := cmd.Flags().GetBool("json"); jsonOut {
-		printJSON(map[string]bool{"ok": true})
+	return withBackend(func(be backend.Backend) error {
+		ctx := cmd.Context()
+		var err error
+		switch action {
+		case "pause":
+			err = be.PauseJob(ctx, jobID)
+		case "resume":
+			err = be.ResumeJob(ctx, jobID)
+		default:
+			err = fmt.Errorf("unknown action %q", action)
+		}
+		if err != nil {
+			return err
+		}
+		if jsonOut, _ := cmd.Flags().GetBool("json"); jsonOut {
+			printJSON(map[string]bool{"ok": true})
+			return nil
+		}
+		fmt.Printf("job %s %sd\n", jobID, action)
 		return nil
-	}
-	fmt.Printf("job %s %sd\n", jobID, action)
-	return nil
+	})
 }

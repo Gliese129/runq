@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gliese129/runq/internal/config"
 	"github.com/gliese129/runq/internal/hpc"
 	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/project"
@@ -257,8 +258,27 @@ func (b *HPCBackend) SubmitJob(ctx context.Context, cfg job.JobConfig, opts Subm
 	return b.backend.Submit(ctx, cfg, proj, hpc.SubmitOpts{SkipPreflight: opts.SkipPreflight})
 }
 
-func (b *HPCBackend) DryRun(_ context.Context, cfg job.JobConfig) ([]job.TaskParams, error) {
-	return job.Expand(&cfg)
+func (b *HPCBackend) DryRun(ctx context.Context, cfg job.JobConfig) (*DryRunResult, error) {
+	tasks, err := job.Expand(&cfg)
+	if err != nil {
+		return nil, err
+	}
+	result := &DryRunResult{Tasks: tasks}
+	// Best-effort command preview and workspace root.
+	if cfg.Project != "" && len(tasks) > 0 {
+		reg := project.NewRegistry(b.store.DB())
+		if proj, perr := reg.Get(ctx, cfg.Project); perr == nil {
+			if proj.CmdTemplate != "" {
+				if cmd, rerr := job.Render(proj.CmdTemplate, tasks[0]); rerr == nil {
+					result.SampleCommand = cmd
+				}
+			}
+			if storageCfg, cerr := config.Load(); cerr == nil {
+				result.WorkspaceRoot = config.ProspectiveRoot(storageCfg, proj.WorkingDir, proj.ProjectName)
+			}
+		}
+	}
+	return result, nil
 }
 
 // PreviewSubmit is the GUI face of `--dry-run`: same code path, same text.
@@ -343,7 +363,18 @@ func (b *HPCBackend) DeleteJob(ctx context.Context, jobID string) error {
 }
 
 func (b *HPCBackend) CleanOldTasks(ctx context.Context, cutoff time.Time, dryRun bool) (*CleanResult, error) {
-	tasks, err := b.store.ListFinishedTasksBefore(ctx, cutoff)
+	return PerformClean(ctx, b.store, cutoff, dryRun)
+}
+
+func (b *HPCBackend) ThawTasks(_ context.Context, _ int, _ bool) (*ThawResponse, error) {
+	return nil, fmt.Errorf("thaw in HPC mode: %w", ErrNotSupported)
+}
+
+// PerformClean removes finished tasks older than cutoff and cleans their
+// on-disk artifacts. If dryRun is true it returns a preview without deleting.
+// Exported so the daemon API handler can reuse the same logic.
+func PerformClean(ctx context.Context, st *store.Store, cutoff time.Time, dryRun bool) (*CleanResult, error) {
+	tasks, err := st.ListFinishedTasksBefore(ctx, cutoff)
 	if err != nil {
 		return nil, fmt.Errorf("query tasks: %w", err)
 	}
@@ -365,13 +396,13 @@ func (b *HPCBackend) CleanOldTasks(ctx context.Context, cutoff time.Time, dryRun
 	var freedBytes int64
 	for _, t := range tasks {
 		freedBytes += cleanTaskArtifacts(t)
-		if err := b.store.DeleteTask(ctx, t.ID); err != nil {
+		if err := st.DeleteTask(ctx, t.ID); err != nil {
 			continue
 		}
 		deletedTasks++
 	}
 
-	deletedJobs, _ := b.store.DeleteOrphanJobs(ctx)
+	deletedJobs, _ := st.DeleteOrphanJobs(ctx)
 
 	return &CleanResult{
 		Tasks:      deletedTasks,

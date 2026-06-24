@@ -1,14 +1,11 @@
 package cli
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"strings"
 
-	"github.com/gliese129/runq/internal/api"
 	"github.com/gliese129/runq/internal/backend"
-	"github.com/gliese129/runq/internal/config"
 	job2 "github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/utils"
 	"github.com/spf13/cobra"
@@ -57,31 +54,14 @@ var runCmd = &cobra.Command{
 			},
 		}
 
-		_, mode, merr := loadModeConfig()
-		if merr != nil {
-			return merr
-		}
-		if mode == config.ModeHPC {
-			return withHPCBackend(func(be backend.Backend) error {
-				jobID, n, err := be.SubmitJob(context.Background(), jobCfg, backend.SubmitOptions{})
-				if err != nil {
-					return err
-				}
-				fmt.Printf("Job submitted: id=%s tasks=%d\n", utils.IDColor(jobID), n)
-				return nil
-			})
-		}
-
-		type JobResp struct {
-			JobId      string `json:"job_id"`
-			TotalTasks int    `json:"total_tasks"`
-		}
-		var resp JobResp
-		if err := doAndDecodeWithTimeout("POST", "/api/jobs", jobCfg, &resp, api.SubmitClientTimeout); err != nil {
-			return err
-		}
-		fmt.Printf("Job submitted: id=%s tasks=%d\n", resp.JobId, resp.TotalTasks)
-		return nil
+		return withBackend(func(be backend.Backend) error {
+			jobID, n, err := be.SubmitJob(cmd.Context(), jobCfg, backend.SubmitOptions{})
+			if err != nil {
+				return err
+			}
+			fmt.Printf("Job submitted: id=%s tasks=%d\n", utils.IDColor(jobID), n)
+			return nil
+		})
 	},
 }
 

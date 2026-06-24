@@ -195,24 +195,6 @@ var projectEditCmd = &cobra.Command{
 	},
 }
 
-var projectRmCmd = &cobra.Command{
-	Use:     "rm <name>",
-	Aliases: []string{"remove", "delete"},
-	Short:   "Remove a project",
-	Args:    cobra.ExactArgs(1),
-	RunE:    runProjectRm,
-}
-
-func runProjectRm(cmd *cobra.Command, args []string) error {
-	return withBackend(func(be backend.Backend) error {
-		if err := be.DeleteProject(context.Background(), args[0]); err != nil {
-			return err
-		}
-		fmt.Printf("project %q removed\n", args[0])
-		return nil
-	})
-}
-
 func init() {
 	// Flags for project add
 	projectAddCmd.Flags().StringP("file", "f", "", "Path to project.yaml")
@@ -223,7 +205,6 @@ func init() {
 	projectCmd.AddCommand(projectLsCmd)
 	projectCmd.AddCommand(projectShowCmd)
 	projectCmd.AddCommand(projectEditCmd)
-	projectCmd.AddCommand(projectRmCmd)
 	projectCmd.AddCommand(projectArchiveCmd)
 	projectCmd.AddCommand(projectUnarchiveCmd)
 	projectCmd.GroupID = groupManagement

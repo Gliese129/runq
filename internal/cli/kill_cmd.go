@@ -1,9 +1,9 @@
 package cli
 
 import (
-	"context"
 	"fmt"
 
+	"github.com/gliese129/runq/internal/backend"
 	"github.com/spf13/cobra"
 )
 
@@ -18,40 +18,35 @@ var killCmd = &cobra.Command{
 
 func runKill(cmd *cobra.Command, args []string) error {
 	id := args[0]
-	_, mode, err := loadModeConfig()
-	if err != nil {
-		return err
-	}
-	backend, closeBackend, err := newBackend(mode)
-	if err != nil {
-		return err
-	}
-	defer closeBackend()
 	jsonOut, _ := cmd.Flags().GetBool("json")
 
-	// Try task kill first.
-	err = backend.KillTask(context.Background(), id)
-	if err == nil {
-		if jsonOut {
-			printJSON(map[string]bool{"ok": true})
+	return withBackend(func(be backend.Backend) error {
+		ctx := cmd.Context()
+
+		// Try task kill first.
+		err := be.KillTask(ctx, id)
+		if err == nil {
+			if jsonOut {
+				printJSON(map[string]bool{"ok": true})
+				return nil
+			}
+			fmt.Printf("task %s killed\n", id)
 			return nil
 		}
-		fmt.Printf("task %s killed\n", id)
-		return nil
-	}
 
-	// If not found as task, try as job.
-	err = backend.KillJob(context.Background(), id)
-	if err == nil {
-		if jsonOut {
-			printJSON(map[string]bool{"ok": true})
+		// If not found as task, try as job.
+		err = be.KillJob(ctx, id)
+		if err == nil {
+			if jsonOut {
+				printJSON(map[string]bool{"ok": true})
+				return nil
+			}
+			fmt.Printf("job %s killed\n", id)
 			return nil
 		}
-		fmt.Printf("job %s killed\n", id)
-		return nil
-	}
 
-	return fmt.Errorf("no task or job found with id %q", id)
+		return fmt.Errorf("no task or job found with id %q", id)
+	})
 }
 
 func init() {

@@ -26,7 +26,7 @@ var jobLsCmd = &cobra.Command{
 // projects identically regardless of mode.
 func runJobLs(cmd *cobra.Command, args []string) error {
 	return withBackend(func(b backend.Backend) error {
-		jobs, err := b.ListJobs(context.Background(), "")
+		jobs, err := b.ListJobs(cmd.Context(), "")
 		if err != nil {
 			return err
 		}
@@ -43,7 +43,7 @@ var jobShowCmd = &cobra.Command{
 
 func runJobShow(cmd *cobra.Command, args []string) error {
 	return withBackend(func(b backend.Backend) error {
-		detail, err := b.GetJob(context.Background(), args[0])
+		detail, err := b.GetJob(cmd.Context(), args[0])
 		if err != nil {
 			return err
 		}
@@ -62,7 +62,7 @@ var jobKillCmd = &cobra.Command{
 func runJobKill(cmd *cobra.Command, args []string) error {
 	jobID := args[0]
 	return withBackend(func(b backend.Backend) error {
-		if err := b.KillJob(context.Background(), jobID); err != nil {
+		if err := b.KillJob(cmd.Context(), jobID); err != nil {
 			return err
 		}
 		fmt.Printf("job %s killed\n", utils.IDColor(jobID))
@@ -80,7 +80,7 @@ var jobPauseCmd = &cobra.Command{
 func runJobPause(cmd *cobra.Command, args []string) error {
 	jobID := args[0]
 	return withBackend(func(b backend.Backend) error {
-		if err := b.PauseJob(context.Background(), jobID); err != nil {
+		if err := b.PauseJob(cmd.Context(), jobID); err != nil {
 			return err
 		}
 		fmt.Printf("job %s paused\n", utils.IDColor(jobID))
@@ -98,33 +98,12 @@ var jobResumeCmd = &cobra.Command{
 func runJobResume(cmd *cobra.Command, args []string) error {
 	jobID := args[0]
 	return withBackend(func(b backend.Backend) error {
-		if err := b.ResumeJob(context.Background(), jobID); err != nil {
+		if err := b.ResumeJob(cmd.Context(), jobID); err != nil {
 			return err
 		}
 		fmt.Printf("job %s resumed\n", utils.IDColor(jobID))
 		return nil
 	})
-}
-
-var jobRmCmd = &cobra.Command{
-	Use:     "rm <job_id>",
-	Aliases: []string{"remove", "delete"},
-	Short:   "Remove a completed job record",
-	Args:    cobra.ExactArgs(1),
-	RunE:    runJobRm,
-}
-
-// runJobRm stays on the daemon API: removing a completed job record is not
-// part of the backend.Backend contract (the WebUI has no such action), so
-// there is no mode-aware path to route through. Daemon-only by design.
-func runJobRm(cmd *cobra.Command, args []string) error {
-	jobID := args[0]
-	var resp map[string]any
-	if err := doAndDecode("POST", "/api/jobs/"+jobID+"/rm", nil, &resp); err != nil {
-		return err
-	}
-	fmt.Printf("job %s removed\n", utils.IDColor(jobID))
-	return nil
 }
 
 func init() {
@@ -133,7 +112,6 @@ func init() {
 	jobCmd.AddCommand(jobKillCmd)
 	jobCmd.AddCommand(jobPauseCmd)
 	jobCmd.AddCommand(jobResumeCmd)
-	jobCmd.AddCommand(jobRmCmd)
 	jobCmd.AddCommand(jobArchiveCmd)
 	jobCmd.AddCommand(jobUnarchiveCmd)
 	jobCmd.GroupID = groupManagement
@@ -146,23 +124,26 @@ var jobArchiveCmd = &cobra.Command{
 	Use:   "archive <job_id>",
 	Short: "Hide a job from default lists (data and workspace untouched; reversible)",
 	Args:  cobra.ExactArgs(1),
-	RunE:  func(cmd *cobra.Command, args []string) error { return runJobArchive(args[0], true) },
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runJobArchive(cmd.Context(), args[0], true)
+	},
 }
 
 var jobUnarchiveCmd = &cobra.Command{
 	Use:   "unarchive <job_id>",
 	Short: "Bring an archived job back to the default lists",
 	Args:  cobra.ExactArgs(1),
-	RunE:  func(cmd *cobra.Command, args []string) error { return runJobArchive(args[0], false) },
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runJobArchive(cmd.Context(), args[0], false)
+	},
 }
 
-func runJobArchive(jobID string, archive bool) error {
+func runJobArchive(ctx context.Context, jobID string, archive bool) error {
 	verb := "archived"
 	if !archive {
 		verb = "unarchived"
 	}
 	return withBackend(func(be backend.Backend) error {
-		ctx := context.Background()
 		var err error
 		if archive {
 			err = be.ArchiveJob(ctx, jobID)

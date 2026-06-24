@@ -1,8 +1,7 @@
 package cli
 
 import (
-	"context"
-
+	"github.com/gliese129/runq/internal/backend"
 	"github.com/spf13/cobra"
 )
 
@@ -21,24 +20,17 @@ var psCmd = &cobra.Command{
 func runPs(cmd *cobra.Command, args []string) error {
 	output, _ := cmd.Flags().GetString("output")
 	jsonOut, _ := cmd.Flags().GetBool("json")
-	_, mode, err := loadModeConfig()
-	if err != nil {
-		return err
-	}
-	backend, closeBackend, err := newBackend(mode)
-	if err != nil {
-		return err
-	}
-	defer closeBackend()
-	jobs, err := backend.ListJobs(context.Background(), "")
-	if err != nil {
-		return err
-	}
-	if output == "json" || jsonOut {
-		printJSON(jobs)
-		return nil
-	}
-	return printDashboardJobs(jobs)
+	return withBackend(func(be backend.Backend) error {
+		jobs, err := be.ListJobs(cmd.Context(), "")
+		if err != nil {
+			return err
+		}
+		if output == "json" || jsonOut {
+			printJSON(jobs)
+			return nil
+		}
+		return printDashboardJobs(jobs)
+	})
 }
 
 func init() {

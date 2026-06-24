@@ -12,41 +12,14 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/gliese129/runq/internal/api"
 	"github.com/gliese129/runq/internal/backend"
-	"github.com/gliese129/runq/internal/config"
 	job2 "github.com/gliese129/runq/internal/job"
-	"github.com/gliese129/runq/internal/project"
 	"github.com/gliese129/runq/internal/utils"
 	"github.com/gosuri/uilive"
 	"github.com/olekukonko/tablewriter"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )
-
-// taskRowView mirrors the task DTO returned by /api/tasks.
-type taskRowView struct {
-	ID          string
-	JobID       string
-	ProjectName string
-	Command     string
-	ParamsJSON  string
-	GPUsNeeded  int
-	GPUs        string
-	Status      string
-	RetryCount  int
-	MaxRetry    int
-	PID         int
-	StartTime   int64
-	LogPath     string
-	WorkingDir  string
-	EnvJSON     string
-	Resumable   bool
-	ExtraArgs   string
-	EnqueuedAt  time.Time
-	StartedAt   *time.Time
-	FinishedAt  *time.Time
-}
 
 // ── runq submit (shortcut for job submit) ──
 
@@ -86,47 +59,141 @@ job.yaml in the current directory.`,
 		if wd, err := os.Getwd(); err == nil && !filepath.IsAbs(file) {
 			file = filepath.Join(wd, file)
 		}
-		var job job2.JobConfig
+		var jobCfg job2.JobConfig
 		fs, err := os.ReadFile(file)
 		if err != nil {
 			return err
 		}
-		if err := yaml.Unmarshal(fs, &job); err != nil {
+		if err := yaml.Unmarshal(fs, &jobCfg); err != nil {
 			return err
 		}
 		if projectOverride != "" {
-			job.Project = projectOverride
+			jobCfg.Project = projectOverride
 		}
 		if noteOverride != "" {
-			job.Note = noteOverride
+			jobCfg.Note = noteOverride
 		}
-		// dry-run: param table + (parity with `runq hpc submit --dry-run`)
-		if dryRun || dryRunAlias {
-			// HPC mode gets the FULL preview (preflight + run.sh + submit
-			// command) — same code path as `runq hpc submit --dry-run`.
-			if _, mode, merr := loadModeConfig(); merr == nil && mode == config.ModeHPC {
-				return previewHPCJobConfig(cmd, job, noPreflight)
+
+		return withBackend(func(be backend.Backend) error {
+			ctx := cmd.Context()
+
+			// HPC may need project registration from --project-file.
+			if err := ensureProjectRegistered(cmd, be, jobCfg.Project); err != nil {
+				return err
 			}
-			tasks, err := job2.Expand(&job)
+
+			// ── dry-run ──
+			if dryRun || dryRunAlias {
+				return submitDryRun(ctx, be, jobCfg, noPreflight)
+			}
+
+			// ── submit ──
+			jobID, n, err := be.SubmitJob(ctx, jobCfg, backend.SubmitOptions{SkipPreflight: noPreflight})
 			if err != nil {
 				return err
 			}
-			if len(tasks) == 0 {
-				fmt.Println("No tasks would be generated.")
+			if jsonOut {
+				printJSON(struct {
+					JobID      string `json:"job_id"`
+					TotalTasks int    `json:"total_tasks"`
+				}{JobID: jobID, TotalTasks: n})
 				return nil
 			}
-			fmt.Printf("dry-run: %d task(s) would be submitted\n", len(tasks))
+			fmt.Printf("submitted job %s (%d tasks)\n", utils.IDColor(jobID), n)
+			printGPUHint(ctx, be)
 
-			keys := slices.Sorted(maps.Keys(tasks[0]))
-			table := tablewriter.NewTable(os.Stdout)
-			table.Header(keys)
-			data := make([][]string, 0, len(tasks))
-			for _, task := range tasks {
-				row := make([]string, 0, len(keys))
-				for _, key := range keys {
-					row = append(row, fmt.Sprintf("%v", task[key]))
+			if watch {
+				return watchJob(ctx, be, jobID)
+			}
+			return nil
+		})
+	},
+}
+
+// submitDryRun shows the task expansion table plus optional preview info.
+// HPC backends with SubmitPreview get the full render (run.sh + submit
+// command); other backends get a parameter table + command preview from
+// the enriched DryRunResult.
+func submitDryRun(ctx context.Context, be backend.Backend, jobCfg job2.JobConfig, noPreflight bool) error {
+	// HPC-specific: full submit preview (run.sh + submit command).
+	if be.Capabilities().SubmitPreview {
+		out, err := be.PreviewSubmit(ctx, jobCfg, noPreflight)
+		if err != nil {
+			return err
+		}
+		fmt.Println(out)
+		return nil
+	}
+
+	// Common dry-run: task expansion + command preview.
+	result, err := be.DryRun(ctx, jobCfg)
+	if err != nil {
+		return err
+	}
+	if len(result.Tasks) == 0 {
+		fmt.Println("No tasks would be generated.")
+		return nil
+	}
+	fmt.Printf("dry-run: %d task(s) would be submitted\n", len(result.Tasks))
+
+	keys := slices.Sorted(maps.Keys(result.Tasks[0]))
+	table := tablewriter.NewTable(os.Stdout)
+	table.Header(keys)
+	data := make([][]string, 0, len(result.Tasks))
+	for _, task := range result.Tasks {
+		row := make([]string, 0, len(keys))
+		for _, key := range keys {
+			row = append(row, fmt.Sprintf("%v", task[key]))
+		}
+		data = append(data, row)
+	}
+	if err := table.Bulk(data); err != nil {
+		return err
+	}
+	if err := table.Render(); err != nil {
+		return err
+	}
+
+	if result.WorkspaceRoot != "" {
+		fmt.Printf("\nworkspace root: %s/<note>-<job_id> (ids regenerate at submit)\n", result.WorkspaceRoot)
+	}
+	if result.SampleCommand != "" {
+		fmt.Printf("\n── command (task 1 of %d) ──\n%s\n", len(result.Tasks), result.SampleCommand)
+	}
+	return nil
+}
+
+// watchJob polls job status and renders a live-updating task table.
+func watchJob(ctx context.Context, be backend.Backend, jobID string) error {
+	writer := uilive.New()
+	writer.Start()
+	defer writer.Stop()
+
+	ticker := time.NewTicker(time.Second)
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGTERM, syscall.SIGINT)
+	for {
+		select {
+		case <-sigChan:
+			fmt.Println("Kill signal received!")
+			return nil
+		case <-ticker.C:
+			detail, err := be.GetJob(ctx, jobID)
+			if err != nil {
+				return err
+			}
+			table := tablewriter.NewTable(writer)
+			table.Header([]string{"ID", "STATUS", "GPUS", "RETRY", "DURATION"})
+			data := make([][]string, 0, len(detail.Tasks))
+			for _, task := range detail.Tasks {
+				duration := "-"
+				if task.ElapsedSec != nil {
+					duration = (time.Duration(*task.ElapsedSec * float64(time.Second))).Round(time.Second).String()
 				}
-				data = append(data, row)
+				data = append(data, []string{
+					task.ID, task.Status, task.GPUs,
+					strconv.Itoa(task.RetryCount), duration,
+				})
 			}
 			if err := table.Bulk(data); err != nil {
 				return err
@@ -134,136 +201,8 @@ job.yaml in the current directory.`,
 			if err := table.Render(); err != nil {
 				return err
 			}
-
-			// Best-effort preview details.
-			var proj project.Config
-			if perr := doAndDecode("GET", "/api/projects/"+job.Project, nil, &proj); perr == nil && proj.CmdTemplate != "" {
-				storageCfg, _ := config.Load()
-				root := config.ProspectiveRoot(storageCfg, proj.WorkingDir, proj.ProjectName)
-				fmt.Printf("\nworkspace root: %s/<note>-<job_id> (ids regenerate at submit)\n", root)
-				if cmdStr, rerr := job2.Render(proj.CmdTemplate, tasks[0]); rerr == nil {
-					fmt.Printf("\n── command (task 1 of %d) ──\n%s\n", len(tasks), cmdStr)
-				} else {
-					fmt.Printf("\ncommand render error (would also fail at submit): %v\n", rerr)
-				}
-			}
-			return nil
 		}
-		_, mode, err := loadModeConfig()
-		if err != nil {
-			return err
-		}
-		if mode == config.ModeHPC {
-			if watch {
-				return fmt.Errorf("--watch is not supported in hpc mode")
-			}
-			var jobID string
-			var n int
-			if serr := withHPCBackend(func(be backend.Backend) error {
-				if err := ensureProjectRegistered(cmd, be, job.Project); err != nil {
-					return err
-				}
-				var submitErr error
-				jobID, n, submitErr = be.SubmitJob(context.Background(), job, backend.SubmitOptions{SkipPreflight: noPreflight})
-				return submitErr
-			}); serr != nil {
-				return serr
-			}
-			resp := struct {
-				JobID      string `json:"job_id"`
-				TotalTasks int    `json:"total_tasks"`
-			}{JobID: jobID, TotalTasks: n}
-			if jsonOut {
-				printJSON(resp)
-				return nil
-			}
-			fmt.Printf("submitted job %s (%d tasks)\n", utils.IDColor(jobID), n)
-			return nil
-		}
-		// submit
-		type JobResp struct {
-			JobId      string `json:"job_id"`
-			TotalTasks int    `json:"total_tasks"`
-			FreeGPUs   int    `json:"free_gpus"`
-			TotalGPUs  int    `json:"total_gpus"`
-		}
-		var resp JobResp
-		submitPath := "/api/jobs"
-		if noPreflight {
-			submitPath = "/api/jobs?no_preflight=1"
-		}
-		if err := doAndDecodeWithTimeout("POST", submitPath, job, &resp, api.SubmitClientTimeout); err != nil {
-			return err
-		}
-		if jsonOut {
-			printJSON(resp)
-			return nil
-		}
-		fmt.Printf("Job submitted: id=%s tasks=%d\n", resp.JobId, resp.TotalTasks)
-		if resp.TotalGPUs > 0 && resp.FreeGPUs == 0 {
-			fmt.Printf("  queued: waiting for GPUs (0/%d free)\n", resp.TotalGPUs)
-		} else if resp.TotalGPUs > 0 && resp.FreeGPUs < resp.TotalGPUs {
-			fmt.Printf("  %d/%d GPUs free — some tasks may queue\n", resp.FreeGPUs, resp.TotalGPUs)
-		}
-		// watch
-		if watch {
-			writer := uilive.New()
-			writer.Start()
-			defer writer.Stop()
-
-			ticker := time.NewTicker(time.Second * 1)
-			sigChan := make(chan os.Signal, 1)
-			signal.Notify(sigChan, syscall.SIGTERM, syscall.SIGINT)
-			for {
-				select {
-				case <-sigChan:
-					fmt.Println("Kill signal received!")
-					return nil
-				case <-ticker.C:
-					var tasks []taskRowView
-					query := fmt.Sprintf("/api/tasks?job=%s", resp.JobId)
-					if err := doAndDecode("GET", query, nil, &tasks); err != nil {
-						return err
-					}
-
-					table := tablewriter.NewTable(writer)
-					table.Header([]string{
-						"ID",
-						"STATUS",
-						"GPUS",
-						"RETRY",
-						"PID",
-						"DURATION",
-						"COMMAND",
-					})
-					data := make([][]string, 0, len(tasks))
-					for _, task := range tasks {
-						duration := "-"
-						if task.StartedAt != nil {
-							end := time.Now()
-							if task.FinishedAt != nil {
-								end = *task.FinishedAt
-							}
-							duration = end.Sub(*task.StartedAt).Round(time.Second).String()
-						}
-						data = append(data, []string{
-							task.ID, string(task.Status), fmt.Sprintf("%v", task.GPUs),
-							strconv.Itoa(task.RetryCount), strconv.Itoa(task.PID),
-							duration, task.Command,
-						})
-					}
-
-					if err := table.Bulk(data); err != nil {
-						return err
-					}
-					if err := table.Render(); err != nil {
-						return err
-					}
-				}
-			}
-		}
-		return nil
-	},
+	}
 }
 
 func init() {

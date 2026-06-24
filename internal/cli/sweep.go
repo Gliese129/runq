@@ -1,16 +1,15 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"maps"
-	"net/url"
 	"os"
 	"slices"
 	"strings"
 
-	"github.com/gliese129/runq/internal/api"
+	"github.com/gliese129/runq/internal/backend"
 	job2 "github.com/gliese129/runq/internal/job"
-	"github.com/gliese129/runq/internal/project"
 	"github.com/olekukonko/tablewriter"
 	"github.com/spf13/cobra"
 )
@@ -105,19 +104,6 @@ func runSweep(cmd *cobra.Command, args []string) error {
 	listMode, _ := cmd.Flags().GetBool("list")
 	dryRun, _ := cmd.Flags().GetBool("dry")
 
-	// Auto-detect project from current directory via match API.
-	if projectName == "" {
-		wd, err := os.Getwd()
-		if err != nil {
-			return fmt.Errorf("cannot detect project: %w (use --project)", err)
-		}
-		detected, err := detectProject(wd, "runq sweep --project <name>")
-		if err != nil {
-			return err
-		}
-		projectName = detected
-	}
-
 	method := "grid"
 	if listMode {
 		method = "list"
@@ -128,81 +114,119 @@ func runSweep(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	jobCfg := job2.JobConfig{
-		Project:     projectName,
-		Description: description,
-		Note:        note,
-		Sweep:       []job2.SweepBlock{block},
+	// Dry-run is pure-local expansion — no backend needed.
+	if dryRun {
+		jobCfg := job2.JobConfig{
+			Project:     projectName,
+			Description: description,
+			Note:        note,
+			Sweep:       []job2.SweepBlock{block},
+		}
+		return printSweepPreview(jobCfg, method)
 	}
 
-	// Dry-run: expand and print.
-	if dryRun {
-		tasks, err := job2.Expand(&jobCfg)
+	// Submit requires a backend for project detection and job submission.
+	return withBackend(func(be backend.Backend) error {
+		ctx := cmd.Context()
+
+		// Auto-detect project from current directory.
+		if projectName == "" {
+			wd, err := os.Getwd()
+			if err != nil {
+				return fmt.Errorf("cannot detect project: %w (use --project)", err)
+			}
+			detected, err := detectProject(ctx, be, wd, "runq sweep --project <name>")
+			if err != nil {
+				return err
+			}
+			projectName = detected
+		}
+
+		jobCfg := job2.JobConfig{
+			Project:     projectName,
+			Description: description,
+			Note:        note,
+			Sweep:       []job2.SweepBlock{block},
+		}
+
+		jobID, totalTasks, err := be.SubmitJob(ctx, jobCfg, backend.SubmitOptions{})
 		if err != nil {
 			return err
 		}
-		if len(tasks) == 0 {
-			fmt.Println("No tasks generated.")
-			return nil
-		}
-		fmt.Printf("Method: %s, %d tasks:\n", method, len(tasks))
-		keys := slices.Sorted(maps.Keys(tasks[0]))
-		table := tablewriter.NewTable(os.Stdout)
-		table.Header(keys)
-		data := make([][]string, 0, len(tasks))
-		for _, task := range tasks {
-			row := make([]string, 0, len(keys))
-			for _, key := range keys {
-				row = append(row, fmt.Sprintf("%v", task[key]))
-			}
-			data = append(data, row)
-		}
-		if err := table.Bulk(data); err != nil {
-			return err
-		}
-		return table.Render()
-	}
-
-	// Submit.
-	type JobResp struct {
-		JobId      string `json:"job_id"`
-		TotalTasks int    `json:"total_tasks"`
-		FreeGPUs   int    `json:"free_gpus"`
-		TotalGPUs  int    `json:"total_gpus"`
-	}
-	var resp JobResp
-	if err := doAndDecodeWithTimeout("POST", "/api/jobs", jobCfg, &resp, api.SubmitClientTimeout); err != nil {
-		return err
-	}
-	fmt.Printf("Job submitted: id=%s tasks=%d (method=%s)\n", resp.JobId, resp.TotalTasks, method)
-	if resp.TotalGPUs > 0 && resp.FreeGPUs == 0 {
-		fmt.Printf("  queued: waiting for GPUs (0/%d free)\n", resp.TotalGPUs)
-	} else if resp.TotalGPUs > 0 && resp.FreeGPUs < resp.TotalGPUs {
-		fmt.Printf("  %d/%d GPUs free — some tasks may queue\n", resp.FreeGPUs, resp.TotalGPUs)
-	}
-	return nil
+		fmt.Printf("Job submitted: id=%s tasks=%d (method=%s)\n", jobID, totalTasks, method)
+		printGPUHint(ctx, be)
+		return nil
+	})
 }
 
-// detectProject calls the match API to find projects for a directory.
+// printSweepPreview expands sweep parameters and prints the task table.
+func printSweepPreview(jobCfg job2.JobConfig, method string) error {
+	tasks, err := job2.Expand(&jobCfg)
+	if err != nil {
+		return err
+	}
+	if len(tasks) == 0 {
+		fmt.Println("No tasks generated.")
+		return nil
+	}
+	fmt.Printf("Method: %s, %d tasks:\n", method, len(tasks))
+	keys := slices.Sorted(maps.Keys(tasks[0]))
+	table := tablewriter.NewTable(os.Stdout)
+	table.Header(keys)
+	data := make([][]string, 0, len(tasks))
+	for _, task := range tasks {
+		row := make([]string, 0, len(keys))
+		for _, key := range keys {
+			row = append(row, fmt.Sprintf("%v", task[key]))
+		}
+		data = append(data, row)
+	}
+	if err := table.Bulk(data); err != nil {
+		return err
+	}
+	return table.Render()
+}
+
+// printGPUHint prints a best-effort GPU utilization message after job submit.
+// Silent on error or when GPU info is unavailable (e.g. HPC mode).
+func printGPUHint(ctx context.Context, be backend.Backend) {
+	gpus, err := be.GPUStatus(ctx)
+	if err != nil || len(gpus) == 0 {
+		return
+	}
+	total := len(gpus)
+	free := 0
+	for _, g := range gpus {
+		if g.TaskID == "" {
+			free++
+		}
+	}
+	if free == 0 {
+		fmt.Printf("  queued: waiting for GPUs (0/%d free)\n", total)
+	} else if free < total {
+		fmt.Printf("  %d/%d GPUs free — some tasks may queue\n", free, total)
+	}
+}
+
+// detectProject uses the backend to find projects registered for a directory.
 // Returns the project name if exactly one match, or a descriptive error
 // listing candidates (with copyable commands) if zero or multiple.
-func detectProject(dir string, usagePrefix string) (string, error) {
-	var configs []project.Config
-	query := "/api/projects/match?dir=" + url.QueryEscape(dir)
-	if err := doAndDecode("GET", query, nil, &configs); err != nil {
+func detectProject(ctx context.Context, be backend.Backend, dir string, usagePrefix string) (string, error) {
+	matches, err := be.MatchProjects(ctx, dir)
+	if err != nil {
 		return "", fmt.Errorf("cannot detect project for %s: %w\n  use --project to specify", dir, err)
 	}
 
-	switch len(configs) {
+	switch len(matches) {
 	case 0:
 		return "", fmt.Errorf("no project registered for directory %s\n\n  Register one first:\n    runq project add . --dir %s\n\n  Or specify explicitly:\n    %s", dir, dir, usagePrefix)
 	case 1:
-		return configs[0].ProjectName, nil
+		return matches[0].Name, nil
 	default:
 		var sb strings.Builder
 		fmt.Fprintf(&sb, "multiple projects found for %s:\n\n", dir)
-		for _, c := range configs {
-			fmt.Fprintf(&sb, "  %s  --project %s\n", usagePrefix, c.ProjectName)
+		for _, m := range matches {
+			fmt.Fprintf(&sb, "  %s  --project %s\n", usagePrefix, m.Name)
 		}
 		fmt.Fprintf(&sb, "\nSpecify one with --project")
 		return "", fmt.Errorf("%s", sb.String())

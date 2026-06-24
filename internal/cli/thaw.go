@@ -6,7 +6,7 @@ import (
 	"sort"
 	"strconv"
 
-	"github.com/gliese129/runq/internal/api"
+	"github.com/gliese129/runq/internal/backend"
 	"github.com/spf13/cobra"
 )
 
@@ -38,16 +38,14 @@ will likely re-trigger the freeze immediately if disk hasn't recovered —
 use this only when you know what you're doing (or want to kill the task
 afterward with 'runq kill').`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		path := fmt.Sprintf("/api/thaw?owner=%d", os.Getuid())
-		if thawForce {
-			path += "&force=true"
-		}
-		var result api.ThawResponse
-		if err := doAndDecode("POST", path, nil, &result); err != nil {
-			return err
-		}
-		printThawResult(result)
-		return nil
+		return withBackend(func(be backend.Backend) error {
+			result, err := be.ThawTasks(cmd.Context(), os.Getuid(), thawForce)
+			if err != nil {
+				return err
+			}
+			printThawResult(result)
+			return nil
+		})
 	},
 }
 
@@ -63,7 +61,7 @@ afterward with 'runq kill').`,
 //	  alice/job-A123 · t7 — 120 GB (latest 12 GB)
 //
 // Empty thaw → "nothing was frozen for you".
-func printThawResult(r api.ThawResponse) {
+func printThawResult(r *backend.ThawResponse) {
 	if len(r.Thawed) == 0 && len(r.Blocked) == 0 {
 		fmt.Println("nothing was frozen for you")
 		return
@@ -82,7 +80,7 @@ func printThawResult(r api.ThawResponse) {
 	// IDs for deterministic output.
 	type blockedEntry struct {
 		TaskID string
-		Detail api.BlockedDetail
+		Detail backend.BlockedDetail
 	}
 	byMount := make(map[string][]blockedEntry)
 	for tid, br := range r.Blocked {

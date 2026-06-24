@@ -1,14 +1,9 @@
 package cli
 
 import (
-	"context"
 	"encoding/json"
-	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"text/tabwriter"
-	"time"
 
 	"github.com/gliese129/runq/internal/api"
 )
@@ -21,59 +16,6 @@ func getSocketPath() string {
 		return socketPathEnv
 	}
 	return api.DefaultSocketPath()
-}
-
-// newClient creates an API client connecting to the daemon's unix socket.
-func newClient() *api.Client {
-	return api.NewClient(getSocketPath())
-}
-
-// doAndDecode sends a request to the daemon and decodes the JSON response.
-// If v is nil, the response body is drained and discarded.
-func doAndDecode(method, path string, body any, v any) error {
-	return doAndDecodeWithTimeout(method, path, body, v, 0)
-}
-
-func doAndDecodeWithTimeout(method, path string, body any, v any, timeout time.Duration) error {
-	// CLI commands have no request lifecycle — context.Background() is correct.
-	ctx := context.Background()
-	client := newClient()
-	var resp *http.Response
-	var err error
-	if timeout > 0 {
-		resp, err = client.DoWithTimeout(ctx, method, path, body, timeout)
-	} else {
-		resp, err = client.Do(ctx, method, path, body)
-	}
-	if err != nil {
-		msg := api.DiagnoseDaemon(getSocketPath(), api.DefaultPIDPath())
-		return fmt.Errorf("%s", msg)
-	}
-
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 400 {
-		type ErrResp struct {
-			Error string
-		}
-		var errResp ErrResp
-		err := json.NewDecoder(resp.Body).Decode(&errResp)
-		if err != nil {
-			return err
-		}
-		return fmt.Errorf("%s", errResp.Error)
-	}
-	if v == nil {
-		if _, err := io.Copy(io.Discard, resp.Body); err != nil {
-			return err
-		}
-		return nil
-	}
-	err = json.NewDecoder(resp.Body).Decode(v)
-	if err != nil {
-		return err
-	}
-	return nil
 }
 
 // ── Helpers (provided) ──

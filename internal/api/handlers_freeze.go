@@ -8,6 +8,7 @@ import (
 	"strconv"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gliese129/runq/internal/backend"
 	"github.com/gliese129/runq/internal/scheduler"
 	"github.com/gliese129/runq/internal/utils"
 	"github.com/shirou/gopsutil/v4/disk"
@@ -24,39 +25,6 @@ type FreezeSelfReq struct {
 	FreeBytes int64  `json:"free_bytes"`
 	NeededEst int64  `json:"needed_est" binding:"required"`
 	Mount     string `json:"mount" binding:"required"`
-}
-
-// ThawResponse is the JSON body of POST /api/thaw.
-//
-// Thawed lists task IDs that successfully resumed.
-//
-// Blocked entries each carry the mount they're on, current free, the
-// per-task threshold (== FrozenTask.NeededBytes == SDK-reported
-// upcoming-ckpt × safety factor), and the list of OTHER running tasks
-// sharing that mount so the user knows whose ckpts to ask about deleting.
-type ThawResponse struct {
-	Thawed  []string                 `json:"thawed"`
-	Blocked map[string]BlockedDetail `json:"blocked,omitempty"`
-}
-
-// BlockedDetail enriches scheduler.BlockReason with per-mount mate info.
-type BlockedDetail struct {
-	Mount     string      `json:"mount"`
-	FreeBytes int64       `json:"free_bytes"` // -1 if disk.Usage failed
-	Threshold int64       `json:"threshold"`  // per-task NeededBytes
-	DiskUsers []MountMate `json:"disk_users,omitempty"`
-}
-
-// MountMate is one other running task sharing the same mount as a blocked
-// task — sorted by total ckpt bytes desc so the disk-hog stands out.
-// Includes the user's own tasks too: a job with 4 tasks on the same disk
-// will see itself listed.
-type MountMate struct {
-	TaskID          string `json:"task_id"`
-	User            string `json:"user"`
-	JobID           string `json:"job_id"`
-	LatestCkptBytes int64  `json:"latest_ckpt_bytes"`
-	TotalCkptBytes  int64  `json:"total_ckpt_bytes"`
 }
 
 // handleFreezeSelf is the SDK-only endpoint that registers a task as frozen
@@ -150,7 +118,7 @@ func (s *Server) handleThaw(c *gin.Context) {
 		thawed := s.deps.Freeze.ThawForce(owned)
 		s.deps.Logger.Info("force-thaw via API",
 			"requested", len(owned), "thawed", len(thawed))
-		c.JSON(http.StatusOK, ThawResponse{Thawed: thawed})
+		c.JSON(http.StatusOK, backend.ThawResponse{Thawed: thawed})
 		return
 	}
 
@@ -164,15 +132,15 @@ func (s *Server) handleThaw(c *gin.Context) {
 	}
 	result := s.deps.Freeze.ThawTasks(owned, freeFn)
 
-	resp := ThawResponse{Thawed: result.Thawed}
+	resp := backend.ThawResponse{Thawed: result.Thawed}
 	if len(result.Blocked) > 0 {
-		resp.Blocked = make(map[string]BlockedDetail, len(result.Blocked))
+		resp.Blocked = make(map[string]backend.BlockedDetail, len(result.Blocked))
 
 		// Cache mount mates by mount — multiple blocked siblings on the
 		// same disk would otherwise re-query store.checkpoints N times.
 		// Also load partition table once and reuse across all mounts.
 		parts, _ := utils.LoadMountTable()
-		matesCache := make(map[string][]MountMate, len(result.Blocked))
+		matesCache := make(map[string][]backend.MountMate, len(result.Blocked))
 		ctx := c.Request.Context()
 
 		for tid, br := range result.Blocked {
@@ -181,7 +149,7 @@ func (s *Server) handleThaw(c *gin.Context) {
 				mates = s.collectMountMates(ctx, br.Mount, parts)
 				matesCache[br.Mount] = mates
 			}
-			resp.Blocked[tid] = BlockedDetail{
+			resp.Blocked[tid] = backend.BlockedDetail{
 				Mount:     br.Mount,
 				FreeBytes: br.FreeBytes,
 				Threshold: br.Threshold,
@@ -241,9 +209,9 @@ func (s *Server) collectMountMates(
 	ctx context.Context,
 	mount string,
 	parts []disk.PartitionStat,
-) []MountMate {
+) []backend.MountMate {
 	running := s.deps.Queue.ListByStatus(scheduler.StatusRunning)
-	mates := make([]MountMate, 0, len(running))
+	mates := make([]backend.MountMate, 0, len(running))
 	for _, t := range running {
 		// Skip tasks whose ckpt dir doesn't resolve to a mount (unmounted
 		// path, weird overlay). Don't lump them under "" — different
@@ -257,7 +225,7 @@ func (s *Server) collectMountMates(
 			latestBytes = latest.SizeBytes
 		}
 		total, _ := s.deps.Store.TotalCheckpointSize(ctx, t.ID)
-		mates = append(mates, MountMate{
+		mates = append(mates, backend.MountMate{
 			TaskID:          t.ID,
 			User:            t.User,
 			JobID:           t.JobID,

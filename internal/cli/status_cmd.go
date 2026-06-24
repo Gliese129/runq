@@ -1,10 +1,9 @@
 package cli
 
 import (
-	"context"
 	"fmt"
 
-	"github.com/gliese129/runq/internal/config"
+	"github.com/gliese129/runq/internal/backend"
 	"github.com/spf13/cobra"
 )
 
@@ -19,47 +18,58 @@ var statusCmd = &cobra.Command{
 
 func runStatus(cmd *cobra.Command, args []string) error {
 	jsonOut, _ := cmd.Flags().GetBool("json")
-	if len(args) == 1 {
-		_, mode, err := loadModeConfig()
+
+	return withBackend(func(be backend.Backend) error {
+		ctx := cmd.Context()
+
+		// With a job_id argument: show that job's details.
+		if len(args) == 1 {
+			detail, err := be.GetJob(ctx, args[0])
+			if err != nil {
+				return err
+			}
+			if jsonOut {
+				printJSON(detail)
+				return nil
+			}
+			return printDashboardDetail(detail)
+		}
+
+		// No arguments: show aggregate status (running/pending/GPU).
+		jobs, err := be.ListJobs(ctx, "")
 		if err != nil {
 			return err
 		}
-		backend, closeBackend, err := newBackend(mode)
-		if err != nil {
-			return err
+
+		var running, pending int
+		for _, j := range jobs {
+			running += j.Tasks.Running
+			pending += j.Tasks.Pending
 		}
-		defer closeBackend()
-		detail, err := backend.GetJob(context.Background(), args[0])
-		if err != nil {
-			return err
+
+		gpusFree := 0
+		if gpus, gerr := be.GPUStatus(ctx); gerr == nil {
+			for _, g := range gpus {
+				if g.TaskID == "" {
+					gpusFree++
+				}
+			}
 		}
+
 		if jsonOut {
-			printJSON(detail)
+			printJSON(map[string]int{
+				"running":   running,
+				"pending":   pending,
+				"gpus_free": gpusFree,
+			})
 			return nil
 		}
-		return printDashboardDetail(detail)
-	}
 
-	_, mode, err := loadModeConfig()
-	if err != nil {
-		return err
-	}
-	if mode == config.ModeHPC {
-		return fmt.Errorf("status requires <job_id> in hpc mode")
-	}
-	var s map[string]any
-	if err := doAndDecode("GET", "/api/status", nil, &s); err != nil {
-		return err
-	}
-	if jsonOut {
-		printJSON(s)
+		fmt.Printf("Running:   %d\n", running)
+		fmt.Printf("Pending:   %d\n", pending)
+		fmt.Printf("GPUs free: %d\n", gpusFree)
 		return nil
-	}
-
-	fmt.Printf("Running:   %.0f\n", s["running"])
-	fmt.Printf("Pending:   %.0f\n", s["pending"])
-	fmt.Printf("GPUs free: %.0f\n", s["gpus_free"])
-	return nil
+	})
 }
 
 func init() {

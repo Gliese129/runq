@@ -7,8 +7,10 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"time"
 
+	"github.com/gliese129/runq/internal/config"
 	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/project"
 	"github.com/gliese129/runq/internal/resource"
@@ -203,8 +205,26 @@ func (b *DaemonBackend) PreviewSubmit(_ context.Context, _ job.JobConfig, _ bool
 	return "", fmt.Errorf("submit preview in daemon mode: %w", ErrNotSupported)
 }
 
-func (b *DaemonBackend) DryRun(_ context.Context, cfg job.JobConfig) ([]job.TaskParams, error) {
-	return job.Expand(&cfg)
+func (b *DaemonBackend) DryRun(ctx context.Context, cfg job.JobConfig) (*DryRunResult, error) {
+	tasks, err := job.Expand(&cfg)
+	if err != nil {
+		return nil, err
+	}
+	result := &DryRunResult{Tasks: tasks}
+	// Best-effort command preview and workspace root.
+	if cfg.Project != "" && len(tasks) > 0 {
+		if proj, perr := b.GetProject(ctx, cfg.Project); perr == nil {
+			if proj.CmdTemplate != "" {
+				if cmd, rerr := job.Render(proj.CmdTemplate, tasks[0]); rerr == nil {
+					result.SampleCommand = cmd
+				}
+			}
+			if storageCfg, cerr := config.Load(); cerr == nil {
+				result.WorkspaceRoot = config.ProspectiveRoot(storageCfg, proj.WorkingDir, proj.ProjectName)
+			}
+		}
+	}
+	return result, nil
 }
 
 // ResolveNote goes over the socket — the daemon owns the store, and the
@@ -231,8 +251,30 @@ func (b *DaemonBackend) DeleteJob(ctx context.Context, jobID string) error {
 	return b.do(ctx, "DELETE", "/api/jobs/"+url.PathEscape(jobID)+"/data", nil, nil)
 }
 
-func (b *DaemonBackend) CleanOldTasks(_ context.Context, _ time.Time, _ bool) (*CleanResult, error) {
-	return nil, fmt.Errorf("clean old tasks in daemon mode: %w", ErrNotSupported)
+func (b *DaemonBackend) CleanOldTasks(ctx context.Context, cutoff time.Time, dryRun bool) (*CleanResult, error) {
+	q := url.Values{}
+	q.Set("cutoff", strconv.FormatInt(cutoff.Unix(), 10))
+	if dryRun {
+		q.Set("dry_run", "true")
+	}
+	var result CleanResult
+	if err := b.do(ctx, "POST", "/api/clean?"+q.Encode(), nil, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
+func (b *DaemonBackend) ThawTasks(ctx context.Context, owner int, force bool) (*ThawResponse, error) {
+	q := url.Values{}
+	q.Set("owner", strconv.Itoa(owner))
+	if force {
+		q.Set("force", "true")
+	}
+	var result ThawResponse
+	if err := b.do(ctx, "POST", "/api/thaw?"+q.Encode(), nil, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
 }
 
 func (b *DaemonBackend) DeleteProject(ctx context.Context, name string) error {

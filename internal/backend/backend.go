@@ -49,7 +49,7 @@ type Backend interface {
 	ResumeJob(ctx context.Context, jobID string) error
 
 	SubmitJob(ctx context.Context, cfg job.JobConfig, opts SubmitOptions) (jobID string, totalTasks int, err error)
-	DryRun(ctx context.Context, cfg job.JobConfig) ([]job.TaskParams, error)
+	DryRun(ctx context.Context, cfg job.JobConfig) (*DryRunResult, error)
 	// PreviewSubmit renders what WOULD be submitted (preview is truth, zero
 	// side effects). Backends without the concept return ErrNotSupported.
 	PreviewSubmit(ctx context.Context, cfg job.JobConfig, skipPreflight bool) (string, error)
@@ -71,6 +71,11 @@ type Backend interface {
 	// on-disk artifacts. dryRun=true returns what would be cleaned without
 	// deleting. Backends without local storage return ErrNotSupported.
 	CleanOldTasks(ctx context.Context, cutoff time.Time, dryRun bool) (*CleanResult, error)
+
+	// ThawTasks releases SDK-frozen (SIGSTOPped) tasks. owner scopes by
+	// UID; force bypasses the per-task disk safety check. Returns
+	// ErrNotSupported in HPC mode (freeze/thaw is daemon-only).
+	ThawTasks(ctx context.Context, owner int, force bool) (*ThawResponse, error)
 
 	GetProject(ctx context.Context, name string) (*project.Config, error)
 	ListProjects(ctx context.Context) ([]ProjectSummary, error)

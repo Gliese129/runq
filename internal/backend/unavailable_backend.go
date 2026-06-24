@@ -96,7 +96,7 @@ func (b *UnavailableBackend) PreviewSubmit(context.Context, job.JobConfig, bool)
 	return "", b.wrap()
 }
 
-func (b *UnavailableBackend) DryRun(ctx context.Context, cfg job.JobConfig) ([]job.TaskParams, error) {
+func (b *UnavailableBackend) DryRun(ctx context.Context, cfg job.JobConfig) (*DryRunResult, error) {
 	return nil, b.wrap()
 }
 
@@ -133,6 +133,10 @@ func (b *UnavailableBackend) DeleteJob(ctx context.Context, jobID string) error 
 }
 
 func (b *UnavailableBackend) CleanOldTasks(ctx context.Context, cutoff time.Time, dryRun bool) (*CleanResult, error) {
+	return nil, b.wrap()
+}
+
+func (b *UnavailableBackend) ThawTasks(ctx context.Context, owner int, force bool) (*ThawResponse, error) {
 	return nil, b.wrap()
 }
 

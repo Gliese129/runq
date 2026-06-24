@@ -3,6 +3,8 @@ package backend
 import (
 	"encoding/json"
 	"time"
+
+	"github.com/gliese129/runq/internal/job"
 )
 
 // View types shared by HTTP responses and CLI --json output.
@@ -134,9 +136,9 @@ type Capabilities struct {
 
 // CleanResult reports what CleanOldTasks did (or would do in dry-run mode).
 type CleanResult struct {
-	Tasks      int              `json:"tasks"`
-	Jobs       int              `json:"jobs"`
-	FreedBytes int64            `json:"freed_bytes"`
+	Tasks      int                `json:"tasks"`
+	Jobs       int                `json:"jobs"`
+	FreedBytes int64              `json:"freed_bytes"`
 	Preview    []CleanPreviewItem `json:"preview,omitempty"` // populated only in dry-run
 }
 
@@ -145,6 +147,16 @@ type CleanPreviewItem struct {
 	Status     string     `json:"status"`
 	FinishedAt *time.Time `json:"finished_at,omitempty"`
 	TaskDir    string     `json:"task_dir,omitempty"`
+}
+
+// DryRunResult is what DryRun returns: expanded tasks plus best-effort
+// preview info (command rendering and prospective workspace root).
+// SampleCommand and WorkspaceRoot may be empty when the project has no
+// command template or the config cannot be loaded.
+type DryRunResult struct {
+	Tasks         []job.TaskParams `json:"tasks"`
+	SampleCommand string           `json:"sample_command,omitempty"`
+	WorkspaceRoot string           `json:"workspace_root,omitempty"`
 }
 
 type ErrorResponse struct {
@@ -184,4 +196,34 @@ type ScriptArg struct {
 	Name    string  `json:"name"`
 	Type    string  `json:"type"`
 	Default *string `json:"default,omitempty"`
+}
+
+// ── Thaw types ──
+
+// ThawResponse is the structured result of a thaw operation.
+// Thawed lists task IDs that were successfully resumed.
+// Blocked entries carry the mount, free/threshold bytes, and co-tenants
+// so the user knows whose checkpoints to clean up.
+type ThawResponse struct {
+	Thawed  []string                 `json:"thawed"`
+	Blocked map[string]BlockedDetail `json:"blocked,omitempty"`
+}
+
+// BlockedDetail enriches a blocked-task entry with per-mount info.
+type BlockedDetail struct {
+	Mount     string      `json:"mount"`
+	FreeBytes int64       `json:"free_bytes"` // -1 if disk.Usage failed
+	Threshold int64       `json:"threshold"`  // per-task NeededBytes
+	DiskUsers []MountMate `json:"disk_users,omitempty"`
+}
+
+// MountMate describes another running task sharing the same mount as a
+// blocked task — sorted by total ckpt bytes desc so the disk-hog stands
+// out.
+type MountMate struct {
+	TaskID          string `json:"task_id"`
+	User            string `json:"user"`
+	JobID           string `json:"job_id"`
+	LatestCkptBytes int64  `json:"latest_ckpt_bytes"`
+	TotalCkptBytes  int64  `json:"total_ckpt_bytes"`
 }
