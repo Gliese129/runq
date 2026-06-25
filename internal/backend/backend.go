@@ -175,10 +175,6 @@ func BuildTaskView(task store.TaskRow) TaskView {
 		NativeState:  task.NativeState,
 		Queue:        task.Queue,
 	}
-	if task.OrphanAt != nil {
-		ts := task.OrphanAt.Unix()
-		view.OrphanAt = &ts
-	}
 	if task.StartedAt != nil {
 		sec := task.StartedAt.Unix()
 		view.StartedAt = &sec

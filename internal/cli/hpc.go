@@ -292,9 +292,6 @@ func runHPCStatus(cmd *cobra.Command, args []string) error {
 				age = time.Since(time.Unix(*t.StartedAt, 0)).Truncate(time.Second).String()
 			}
 			status := utils.StatusColor(t.Status)
-			if t.OrphanAt != nil {
-				status += " [orphan]"
-			}
 			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 				utils.IDColor(t.ID), t.ExternalID, status,
 				t.NativeState, t.Queue, t.StatusSource, age)

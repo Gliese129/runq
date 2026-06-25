@@ -256,9 +256,6 @@ func (b *Backend) reconcileWith(ctx context.Context, jobID string, probe bool, p
 		}
 	}
 
-	// Phase 2F: orphan detection — check taskDir existence for all tasks.
-	detectOrphans(ctx, b.Store, tasks)
-
 	if err := b.refreshJobStatus(ctx, jobID); err != nil {
 		return err
 	}
@@ -350,9 +347,6 @@ func (b *Backend) reconcileWithBatch(ctx context.Context, jobID string, signals 
 		}
 	}
 
-	// Phase 2F: orphan detection.
-	detectOrphans(ctx, b.Store, tasks)
-
 	if err := b.refreshJobStatus(ctx, jobID); err != nil {
 		return err
 	}
@@ -364,12 +358,6 @@ func (b *Backend) reconcileWithBatch(ctx context.Context, jobID string, signals 
 		return fmt.Errorf("status refreshed but ingest had errors: %w", errors.Join(ingestErrs...))
 	}
 	return nil
-}
-
-// detectOrphans delegates to store.DetectOrphans. Kept as a local wrapper
-// so existing call sites don't change.
-func detectOrphans(ctx context.Context, st *store.Store, tasks []store.TaskRow) {
-	st.DetectOrphans(ctx, tasks)
 }
 
 // ── Scheduler probing ──

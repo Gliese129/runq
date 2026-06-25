@@ -62,9 +62,6 @@ func printDashboardDetail(detail *backend.JobDetail) error {
 			elapsed = fmt.Sprintf("%.0fs", *task.ElapsedSec)
 		}
 		status := utils.StatusColor(task.Status)
-		if task.OrphanAt != nil {
-			status += " [orphan]"
-		}
 		if hasHPC {
 			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\n",
 				utils.IDColor(task.ID), task.ExternalID, status,

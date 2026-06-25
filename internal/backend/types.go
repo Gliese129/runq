@@ -68,9 +68,6 @@ type TaskView struct {
 	// queue/partition name. Only populated in poll-model backends.
 	NativeState string `json:"native_state,omitempty"`
 	Queue       string `json:"queue,omitempty"`
-	// Phase 2F: orphan detection timestamp (Unix seconds). Non-nil when the
-	// task's workspace directory was missing at the last reconcile pass.
-	OrphanAt *int64 `json:"orphan_at,omitempty"`
 }
 
 type MetricPoint struct {
@@ -146,7 +143,7 @@ type Capabilities struct {
 // when combined with other selectors.
 type CleanOptions struct {
 	// Selectors — at least one must be true/non-empty.
-	Orphan   bool   // tasks with orphan_at set (taskDir missing)
+	Orphan   bool   // detect tasks whose taskDir is missing (on-demand os.Stat)
 	Archived bool   // tasks belonging to archived jobs
 	JobID    string // specific job
 	TaskID   string // specific task
@@ -184,7 +181,7 @@ type CleanPreviewItem struct {
 	TaskDir    string      `json:"task_dir,omitempty"`
 	Reason     string      `json:"reason"` // why selected: orphan / archived / job / task / older-than
 	Action     CleanAction `json:"action"` // what will be cleaned
-	Orphan     bool        `json:"orphan"` // true if orphan_at is set
+	Orphan     bool        `json:"orphan"` // true if task dir is missing from disk
 }
 
 // DryRunResult is what DryRun returns: expanded tasks plus best-effort

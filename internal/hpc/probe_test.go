@@ -119,7 +119,7 @@ func TestProbeScheduler(t *testing.T) {
 	t.Run("signal_map overrides unknown token", func(t *testing.T) {
 		b := &Backend{Cfg: &hpcconfig.Config{
 			StatusTemplate: "echo {{ext_id}}",
-			SignalMap:       map[string]string{"CONFIGURING": "pending"},
+			SignalMap:      map[string]string{"CONFIGURING": "pending"},
 		}, Run: constRunner("CONFIGURING", nil)}
 		got := b.probeScheduler(ctx, "1")
 		if got.Signal != SchedPending {
@@ -179,7 +179,7 @@ func TestProbeBatch(t *testing.T) {
 		b := &Backend{
 			Cfg: &hpcconfig.Config{
 				StatusListTemplate: "squeue",
-				SignalMap:           map[string]string{"COMPLETING": "running"},
+				SignalMap:          map[string]string{"COMPLETING": "running"},
 			},
 			Run: func(ctx context.Context, cmd string) (string, error) {
 				return "12345 COMPLETING gpu\n", nil

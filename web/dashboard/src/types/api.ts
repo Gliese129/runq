@@ -51,8 +51,6 @@ export interface TaskView {
   native_state?: string
   /** Scheduler queue/partition name (e.g. "gpu-a100", "cpu-batch"). */
   queue?: string
-  /** Phase 2F: Unix seconds when task was detected as orphan (workspace dir missing). */
-  orphan_at?: number
 }
 
 /** Mirrors logfile.Page — byte-offset based log page. */

@@ -33,6 +33,18 @@ func PerformClean(ctx context.Context, st *store.Store, opts CleanOptions) (*Cle
 		}
 	}
 
+	// Exclude active tasks — never clean running/pending/paused work.
+	{
+		var safe []tagged
+		for _, u := range unique {
+			if store.IsActiveStatus(u.task.Status) {
+				continue
+			}
+			safe = append(safe, u)
+		}
+		unique = safe
+	}
+
 	// Apply --older-than as an additional filter when combined with selectors.
 	if opts.OlderThan != nil {
 		cutoff := *opts.OlderThan
@@ -40,12 +52,8 @@ func PerformClean(ctx context.Context, st *store.Store, opts CleanOptions) (*Cle
 		for _, u := range unique {
 			if u.task.FinishedAt != nil && u.task.FinishedAt.Before(cutoff) {
 				filtered = append(filtered, u)
-			} else if u.task.FinishedAt == nil && u.task.OrphanAt != nil && u.task.OrphanAt.Before(cutoff) {
-				// No finished_at — use orphan_at as age proxy.
-				filtered = append(filtered, u)
 			}
-			// Tasks with neither finished_at nor orphan_at before cutoff
-			// have unknown age and are excluded.
+			// Tasks without finished_at have unknown age and are excluded.
 		}
 		unique = filtered
 	}
@@ -62,7 +70,7 @@ func PerformClean(ctx context.Context, st *store.Store, opts CleanOptions) (*Cle
 			TaskDir:    u.task.TaskDir,
 			Reason:     u.reason,
 			Action:     action,
-			Orphan:     u.task.OrphanAt != nil,
+			Orphan:     u.reason == "orphan",
 		})
 	}
 
@@ -76,10 +84,10 @@ func PerformClean(ctx context.Context, st *store.Store, opts CleanOptions) (*Cle
 		action := preview[i].Action
 		switch action {
 		case CleanActionAll:
-			freedBytes += cleanTaskArtifacts(u.task)
 			if err := st.DeleteTask(ctx, u.task.ID); err != nil {
 				continue
 			}
+			freedBytes += cleanTaskArtifacts(u.task)
 		case CleanActionDBOnly:
 			if err := st.DeleteTask(ctx, u.task.ID); err != nil {
 				continue
@@ -111,13 +119,20 @@ func collectCleanTargets(ctx context.Context, st *store.Store, opts CleanOptions
 	var reasons []string
 
 	if opts.Orphan {
-		rows, err := st.ListOrphanTasks(ctx)
+		// On-demand orphan detection: query non-active tasks with a task_dir,
+		// then os.Stat each to find missing directories.
+		rows, err := st.ListTasks(ctx, store.TaskFilter{})
 		if err != nil {
 			return nil, nil, err
 		}
 		for _, r := range rows {
-			tasks = append(tasks, r)
-			reasons = append(reasons, "orphan")
+			if store.IsActiveStatus(r.Status) || r.TaskDir == "" {
+				continue
+			}
+			if _, serr := os.Stat(r.TaskDir); serr != nil && os.IsNotExist(serr) {
+				tasks = append(tasks, r)
+				reasons = append(reasons, "orphan")
+			}
 		}
 	}
 
@@ -184,8 +199,11 @@ func classifyAction(t store.TaskRow, ckptOnly bool) CleanAction {
 		}
 		return CleanActionCkpt
 	}
-	if t.OrphanAt != nil || t.TaskDir == "" {
+	if t.TaskDir == "" {
 		return CleanActionDBOnly
+	}
+	if _, err := os.Stat(t.TaskDir); err != nil {
+		return CleanActionDBOnly // dir missing — nothing to delete on disk
 	}
 	return CleanActionAll
 }
