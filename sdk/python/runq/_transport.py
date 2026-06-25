@@ -107,6 +107,6 @@ def post_json(
         ) from e
     except json.JSONDecodeError as e:
         raise TransportError(
-            f"json parsed failed: {e}",
+            f"json parse failed: {e}",
             status=resp.status_code, body=resp.text
         ) from e

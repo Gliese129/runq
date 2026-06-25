@@ -65,7 +65,7 @@ def train() -> int:
             # demonstrates the no_daemon contract: raise instead of
             # freeze. In real code you'd let safe_save estimate.
             runq.safe_save(
-                "ckpt.pt",
+                f"ckpt-{ctx.current_step}.pt",
                 model.state_dict(),
                 size_hint=10 ** 18,
             )

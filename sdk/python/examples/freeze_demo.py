@@ -111,9 +111,15 @@ def train() -> float:
         # updates ctx.current_step, appends to metrics.jsonl.
         runq.report({"val_loss": val_loss})
 
-        # Disk-safe save with manifest-scoped rotation. ``size_hint``
-        # is auto-estimated from the model + optim state dicts.
-        save_checkpoint("ckpt.pt", model, optim, is_best=is_best)
+        # Disk-safe save with manifest-scoped rotation. The filename
+        # must include a varying component (here, the step number) so
+        # that keep_last_n=3 can actually retain 3 distinct files.
+        # A fixed name like "ckpt.pt" would be overwritten in place
+        # every epoch, making rotation meaningless.
+        # ``size_hint`` is auto-estimated from the model + optim dicts.
+        save_checkpoint(
+            f"ckpt-{ctx.current_step}.pt", model, optim, is_best=is_best,
+        )
 
     return best_loss
 

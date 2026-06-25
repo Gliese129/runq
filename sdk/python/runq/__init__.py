@@ -34,7 +34,6 @@ from ._policies import convergence, patience, threshold
 from ._range import is_preempted, range
 from ._report import Decision, early_stop, report
 from ._safe_save import safe_save
-from ._sync import sync_now
 from ._transport import TransportError
 
 __all__ = [  # noqa: RUF022
@@ -63,8 +62,6 @@ __all__ = [  # noqa: RUF022
     "safe_save",
     "best_checkpoint",
     "latest_checkpoint",
-    # Sync
-    "sync_now",
     # Exceptions
     "RunqError",
     "RunqDiskFullError",

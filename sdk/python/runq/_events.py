@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import sys
 import time
+import warnings
 
 from ._context import get_ctx
 from ._prefix import apply_prefix
@@ -43,7 +44,13 @@ def _append_event(event: dict) -> None:
     ctx = get_ctx()
     if ctx.metrics_file is None:
         # Shouldn't happen post-context() — context() always sets a path
-        # (cwd in manual mode). Defensive guard.
+        # (cwd in manual mode). Defensive guard; warn so users notice if
+        # metrics are being silently discarded.
+        warnings.warn(
+            "runq: metrics_file is not set — metric event discarded. "
+            "Call runq.context() before logging metrics.",
+            stacklevel=3,
+        )
         return
     try:
         # Append-and-flush per event. Slight overhead but guarantees
