@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"context"
 	"fmt"
 	"time"
 
@@ -47,7 +46,7 @@ func runClean(cmd *cobra.Command, args []string) error {
 	cutoff := time.Now().Add(-dur)
 
 	return withBackend(func(be backend.Backend) error {
-		result, err := be.CleanOldTasks(context.Background(), cutoff, showOnly)
+		result, err := be.CleanOldTasks(cmd.Context(), cutoff, showOnly)
 		if err != nil {
 			return err
 		}
@@ -70,28 +69,9 @@ func runClean(cmd *cobra.Command, args []string) error {
 
 		fmt.Printf("Cleaned %d tasks, %d jobs", result.Tasks, result.Jobs)
 		if result.FreedBytes > 0 {
-			fmt.Printf(", freed %s", formatBytes(result.FreedBytes))
+			fmt.Printf(", freed %s", humanBytes(result.FreedBytes))
 		}
 		fmt.Println()
 		return nil
 	})
-}
-
-// formatBytes formats byte count into human-readable form.
-func formatBytes(b int64) string {
-	const (
-		kb = 1024
-		mb = kb * 1024
-		gb = mb * 1024
-	)
-	switch {
-	case b >= gb:
-		return fmt.Sprintf("%.1f GB", float64(b)/float64(gb))
-	case b >= mb:
-		return fmt.Sprintf("%.1f MB", float64(b)/float64(mb))
-	case b >= kb:
-		return fmt.Sprintf("%.1f KB", float64(b)/float64(kb))
-	default:
-		return fmt.Sprintf("%d B", b)
-	}
 }

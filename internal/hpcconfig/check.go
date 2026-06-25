@@ -134,6 +134,22 @@ func (c *Config) Check() []CheckResult {
 		}
 	}
 
+	// Batch probe: status_list_template + status_list_parser.
+	if c.StatusListTemplate == "" {
+		results = append(results, CheckResult{"status_list_template", "skip", "not set — per-job probing via status_template"})
+	} else {
+		// No placeholders to render — it's a static command (no {{ext_id}}).
+		results = append(results, CheckResult{"status_list_template", "ok", c.StatusListTemplate})
+	}
+	if len(c.StatusListParser) == 0 && c.StatusListTemplate != "" {
+		results = append(results, CheckResult{"status_list_parser", "skip", "not set — raw output parsed as 'ext_id signal' lines"})
+	} else {
+		for i, stage := range c.StatusListParser {
+			// No {{ext_id}} in list parser stages — they process all jobs at once.
+			results = append(results, CheckResult{fmt.Sprintf("status_list_parser[%d]", i), "ok", stage})
+		}
+	}
+
 	return results
 }
 

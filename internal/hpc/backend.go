@@ -73,6 +73,11 @@ type Backend struct {
 	// reconcile) within the caller's TTL window.
 	probeMu   sync.Mutex
 	lastProbe map[string]time.Time
+
+	// Batch probe TTL: when status_list_template is configured,
+	// EnsureAllFresh skips the batch query if the last batch probe
+	// completed within the TTL window.
+	lastBatchProbe time.Time
 }
 
 // New builds a Backend with the real shell runner.

@@ -65,7 +65,6 @@ type Deps struct {
 		KillJob(ctx context.Context, jobID string) (int, error)
 		PauseJob(ctx context.Context, jobID string) error
 		ResumeJob(ctx context.Context, jobID string) error
-		RemoveJob(ctx context.Context, jobID string) error
 	}
 	TaskService interface {
 		KillTask(ctx context.Context, taskID string) error

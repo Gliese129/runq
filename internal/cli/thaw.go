@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"sort"
-	"strconv"
 
 	"github.com/gliese129/runq/internal/backend"
 	"github.com/spf13/cobra"
@@ -129,36 +128,6 @@ func printThawResult(r *backend.ThawResponse) {
 
 	fmt.Println("\nHint: clean disk space, then re-run 'runq thaw'.")
 	fmt.Println("Or 'runq thaw --force' to release without the disk check (will likely re-freeze).")
-}
-
-// humanBytes formats a byte count with a human-readable suffix. Mirrors
-// the precision style of `du -h`: 3 significant figures for sub-TB.
-// FreeBytes == -1 (stat failed) is rendered as "unknown".
-func humanBytes(n int64) string {
-	if n < 0 {
-		return "unknown"
-	}
-	const (
-		_  = iota
-		KB = 1 << (iota * 10)
-		MB
-		GB
-		TB
-		PB
-	)
-	switch {
-	case n >= PB:
-		return strconv.FormatFloat(float64(n)/float64(PB), 'f', 1, 64) + " PB"
-	case n >= TB:
-		return strconv.FormatFloat(float64(n)/float64(TB), 'f', 1, 64) + " TB"
-	case n >= GB:
-		return strconv.FormatFloat(float64(n)/float64(GB), 'f', 1, 64) + " GB"
-	case n >= MB:
-		return strconv.FormatFloat(float64(n)/float64(MB), 'f', 1, 64) + " MB"
-	case n >= KB:
-		return strconv.FormatFloat(float64(n)/float64(KB), 'f', 1, 64) + " KB"
-	}
-	return strconv.FormatInt(n, 10) + " B"
 }
 
 func init() {

@@ -57,8 +57,15 @@ func (b *HPCBackend) ListJobs(ctx context.Context, projectScope string) ([]JobSu
 		return nil, err
 	}
 
-	// Reconcile only the non-done jobs in this result set (best-effort: a
-	// reconcile failure should not block the list entirely).
+	// Per-job reconcile: local file reads (status.json, metrics.jsonl) ALWAYS
+	// run so wrapper-written updates surface within one poll cycle. The
+	// scheduler probe (qstat/squeue) is TTL-gated at DefaultReadTTL (30 s) —
+	// within the window only cheap local reads execute.
+	//
+	// When the dashboard's reconcileLoop is running, it pre-fills the per-job
+	// probe cache via batch probe (one `qstat -u $USER`), so the per-job
+	// probes here are all cache hits (local reads only). CLI callers (no
+	// reconcileLoop) fall back to per-job probes — correct but slower.
 	for _, j := range jobs {
 		if j.Status != "done" {
 			_ = b.backend.EnsureFresh(ctx, j.ID, DefaultReadTTL)
@@ -85,6 +92,13 @@ func (b *HPCBackend) ListJobs(ctx context.Context, projectScope string) ([]JobSu
 		out = append(out, BuildJobSummary(job, byJob[job.ID]))
 	}
 	return out, nil
+}
+
+// ReconcileAll runs a full reconcile pass over all active jobs. Called by
+// the dashboard's background ticker — never by the list endpoint itself.
+// Uses the standard read TTL so the scheduler probe is not hammered.
+func (b *HPCBackend) ReconcileAll(ctx context.Context) error {
+	return b.backend.EnsureAllFresh(ctx, DefaultReadTTL)
 }
 
 func (b *HPCBackend) ListArchivedJobs(ctx context.Context) ([]JobSummary, error) {

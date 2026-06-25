@@ -125,6 +125,21 @@ func (b *DaemonBackend) GPUStatus(ctx context.Context) ([]GPUSlot, error) {
 	if err := b.do(ctx, "GET", "/api/gpu", nil, &gpus); err != nil {
 		return nil, err
 	}
+
+	// Build taskID→jobID lookup for occupied GPUs. Best-effort: a failed
+	// task lookup just leaves JobID empty (same as before this fix).
+	jobOf := make(map[string]string)
+	for _, gpu := range gpus {
+		if gpu.TaskID != "" {
+			if _, seen := jobOf[gpu.TaskID]; !seen {
+				var task store.TaskRow
+				if err := b.do(ctx, "GET", "/api/tasks/"+gpu.TaskID, nil, &task); err == nil {
+					jobOf[gpu.TaskID] = task.JobID
+				}
+			}
+		}
+	}
+
 	out := make([]GPUSlot, 0, len(gpus))
 	for _, gpu := range gpus {
 		out = append(out, GPUSlot{
@@ -134,7 +149,7 @@ func (b *DaemonBackend) GPUStatus(ctx context.Context) ([]GPUSlot, error) {
 			MemUsedMB:   gpu.MemTotal - gpu.MemFree,
 			UtilPercent: gpu.UtilPct,
 			TaskID:      gpu.TaskID,
-			// JobID: requires task→job lookup; left empty for now.
+			JobID:       jobOf[gpu.TaskID],
 		})
 	}
 	return out, nil

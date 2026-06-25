@@ -454,7 +454,7 @@ func runHPCClean(cmd *cobra.Command, args []string) error {
 
 		fmt.Printf("Cleaned %d tasks, %d jobs", result.Tasks, result.Jobs)
 		if result.FreedBytes > 0 {
-			fmt.Printf(", freed %s", formatBytes(result.FreedBytes))
+			fmt.Printf(", freed %s", humanBytes(result.FreedBytes))
 		}
 		fmt.Println()
 		return nil

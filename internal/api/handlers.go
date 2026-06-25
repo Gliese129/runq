@@ -54,7 +54,6 @@ func (s *Server) registerRoutes() {
 		jobs.POST("/:id/archive", s.handleJobArchive)
 		jobs.POST("/:id/unarchive", s.handleJobUnarchive)
 		jobs.POST("/:id/resume", s.handleJobResume)
-		jobs.POST("/:id/rm", s.handleJobRm)
 	}
 
 	// Task
@@ -356,14 +355,6 @@ func (s *Server) handleJobResume(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": fmt.Sprintf("job %q resumed", c.Param("id"))})
 }
 
-func (s *Server) handleJobRm(c *gin.Context) {
-	if err := s.deps.JobService.RemoveJob(c.Request.Context(), c.Param("id")); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"message": fmt.Sprintf("job %q removed", c.Param("id"))})
-}
-
 // ── Task handlers (delegate to TaskService for mutations) ──
 
 func (s *Server) handleTaskList(c *gin.Context) {
@@ -551,6 +542,18 @@ func (s *Server) handleClean(c *gin.Context) {
 	cutoffUnix, err := strconv.ParseInt(cutoffStr, 10, 64)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid or missing cutoff timestamp"})
+		return
+	}
+	// Sanity: cutoff must be in the past (not the future) and no earlier
+	// than 2020-01-01 (protects against accidental epoch-zero wipes).
+	now := time.Now().Unix()
+	const minCutoff = 1577836800 // 2020-01-01 00:00:00 UTC
+	if cutoffUnix > now {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "cutoff must be in the past"})
+		return
+	}
+	if cutoffUnix < minCutoff {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "cutoff too far in the past (before 2020)"})
 		return
 	}
 	dryRun := c.Query("dry_run") == "true"

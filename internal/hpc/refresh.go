@@ -56,18 +56,65 @@ func (b *Backend) EnsureFresh(ctx context.Context, jobID string, ttl time.Durati
 }
 
 // EnsureAllFresh reconciles all active (non-done) jobs within the TTL window.
+//
+// When status_list_template is configured, a single batch probe replaces all
+// per-job scheduler queries — one `qstat -u $USER` (or equivalent) call serves
+// every active job. Without it, a shared memoRunner still deduplicates
+// listing-style per-job commands (e.g. SGE/UGE bare `qstat`) across jobs.
 func (b *Backend) EnsureAllFresh(ctx context.Context, ttl time.Duration) error {
 	jobs, err := b.Store.ListJobs(ctx, "")
 	if err != nil {
 		return err
 	}
-	var firstErr error
+
+	// Pre-scan: which jobs need a scheduler probe this pass?
+	type entry struct {
+		id    string
+		probe bool
+	}
+	var active []entry
+	anyNeedsProbe := false
 	for _, j := range jobs {
 		if j.Status == "done" {
-			continue // all tasks terminal, nothing to reconcile
+			continue
 		}
-		if err := b.EnsureFresh(ctx, j.ID, ttl); err != nil && firstErr == nil {
-			firstErr = err
+		probe := ttl == 0 || !b.probeIsFresh(j.ID, ttl)
+		active = append(active, entry{j.ID, probe})
+		if probe {
+			anyNeedsProbe = true
+		}
+	}
+
+	// Batch probe: only run when (a) configured, (b) at least one job needs
+	// a probe, AND (c) the batch TTL itself has expired. This prevents
+	// hitting qstat/squeue on every poll when everything is still fresh.
+	var batchSignals map[string]SchedulerSignal
+	if anyNeedsProbe && b.Cfg.StatusListTemplate != "" {
+		if !b.batchProbeIsFresh(ttl) {
+			signals, berr := b.probeBatch(ctx)
+			if signals != nil && berr == nil {
+				batchSignals = signals
+				b.markBatchProbed()
+			}
+			// On batch failure: batchSignals stays nil → fall back to
+			// per-job probing below. No error propagation — the per-job
+			// path is the safe fallback.
+		}
+	}
+
+	// Fallback: shared memoRunner deduplicates identical commands across jobs.
+	sharedRun := memoRunner(b.Run)
+
+	var firstErr error
+	for _, e := range active {
+		var rerr error
+		if batchSignals != nil && e.probe {
+			rerr = b.reconcileWithBatch(ctx, e.id, batchSignals)
+		} else {
+			rerr = b.reconcileWith(ctx, e.id, e.probe, sharedRun)
+		}
+		if rerr != nil && firstErr == nil {
+			firstErr = rerr
 		}
 	}
 	return firstErr
@@ -93,14 +140,38 @@ func (b *Backend) markProbed(jobID string) {
 	b.lastProbe[jobID] = time.Now()
 }
 
-// reconcile is the core engine that advances task state. For each task it
+// batchProbeIsFresh returns true if the global batch probe ran within the TTL.
+func (b *Backend) batchProbeIsFresh(ttl time.Duration) bool {
+	if ttl == 0 {
+		return false // force refresh
+	}
+	b.probeMu.Lock()
+	defer b.probeMu.Unlock()
+	return !b.lastBatchProbe.IsZero() && time.Since(b.lastBatchProbe) < ttl
+}
+
+// markBatchProbed records that a global batch probe just completed.
+func (b *Backend) markBatchProbed() {
+	b.probeMu.Lock()
+	defer b.probeMu.Unlock()
+	b.lastBatchProbe = time.Now()
+}
+
+// reconcile is the core engine that advances task state. Creates a fresh
+// memoRunner for the single-job case; EnsureAllFresh calls reconcileWith
+// directly with a shared runner.
+func (b *Backend) reconcile(ctx context.Context, jobID string, probe bool) error {
+	return b.reconcileWith(ctx, jobID, probe, memoRunner(b.Run))
+}
+
+// reconcileWith is the core engine that advances task state. For each task it
 // ingests metrics.jsonl (always, idempotent), then reads status.json and
 // optionally probes the scheduler, recomputing the canonical status+source
 // via Reconcile.
 //
 // When probe=true the scheduler is queried (status_template); when false,
 // only local file reads run (status.json + metrics.jsonl). The TTL cache
-// in EnsureFresh decides which mode to use — callers of reconcile should
+// in EnsureFresh decides which mode to use — callers of reconcileWith should
 // not need to worry about this.
 //
 // Terminal handling keys off status_source:
@@ -110,17 +181,15 @@ func (b *Backend) markProbed(jobID string) {
 //     ("wrapper terminal wins").
 //
 // The DB is the (lazily-updated) source of truth and this is its only writer.
-func (b *Backend) reconcile(ctx context.Context, jobID string, probe bool) error {
+//
+// The probeRun argument is a (possibly memo-cached) Runner: EnsureAllFresh
+// shares one across all jobs so listing-style commands (bare `qstat`) hit
+// the scheduler once; single-job callers pass memoRunner(b.Run).
+func (b *Backend) reconcileWith(ctx context.Context, jobID string, probe bool, probeRun Runner) error {
 	tasks, err := b.Store.ListTasks(ctx, store.TaskFilter{JobID: jobID})
 	if err != nil {
 		return err
 	}
-	// Batch effect for listing-style status templates: presets like SGE/UGE
-	// run a FULL `qstat` and select the task's row in the parser (awk). The
-	// rendered status command is then identical for every task — memoize it
-	// for this pass, so N tasks cost ONE scheduler query. Templates that
-	// embed {{ext_id}} render uniquely per task and behave as before.
-	probeRun := memoRunner(b.Run)
 	var ingestErrs []error
 	for _, tk := range tasks {
 		// Metrics/checkpoints: idempotent (INSERT OR IGNORE), run for every task
@@ -194,7 +263,131 @@ func (b *Backend) reconcile(ctx context.Context, jobID string, probe bool) error
 	return nil
 }
 
+// reconcileWithBatch is a variant of reconcileWith that uses pre-computed
+// batch probe results instead of per-task scheduler queries. ext_ids absent
+// from the batch map are treated as SchedGone (job left the scheduler queue).
+func (b *Backend) reconcileWithBatch(ctx context.Context, jobID string, signals map[string]SchedulerSignal) error {
+	tasks, err := b.Store.ListTasks(ctx, store.TaskFilter{JobID: jobID})
+	if err != nil {
+		return err
+	}
+	var ingestErrs []error
+	for _, tk := range tasks {
+		if _, ierr := ingest.ReapOutputs(ctx, b.Store, ingest.Target{
+			TaskID: tk.ID, JobID: tk.JobID, Dir: tk.TaskDir,
+		}); ierr != nil {
+			ingestErrs = append(ingestErrs, fmt.Errorf("ingest task %s: %w", tk.ID, ierr))
+		}
+
+		if isTerminal(tk.Status) && (tk.StatusSource == SourceWrapper || tk.StatusSource == SourceRunq) {
+			continue
+		}
+
+		sf := readStatus(tk.TaskDir)
+
+		// Look up pre-computed signal; absent ext_ids are gone.
+		schedSignal := SchedUnknown
+		if tk.ExternalID != "" {
+			if sig, ok := signals[tk.ExternalID]; ok {
+				schedSignal = sig
+			} else {
+				schedSignal = SchedGone
+			}
+		}
+
+		d := Reconcile(tk.Status, tk.StatusSource, Observed{
+			WrapperStatus: sf.Status,
+			ExitCode:      sf.ExitCode,
+			Scheduler:     schedSignal,
+			KillRequested: false,
+		})
+
+		if d.Status == tk.Status && d.Source == tk.StatusSource {
+			continue
+		}
+
+		fields := map[string]any{"status_source": d.Source}
+		switch {
+		case isTerminal(d.Status) && d.Status != tk.Status:
+			if sf.FinishedAt > 0 {
+				fields["finished_at"] = sf.FinishedAt
+			} else {
+				fields["finished_at"] = nowUnix()
+			}
+		case !isTerminal(d.Status) && isTerminal(tk.Status):
+			fields["finished_at"] = nil
+		}
+
+		if err := b.Store.UpdateTaskStatus(ctx, tk.ID, d.Status, fields); err != nil {
+			return fmt.Errorf("update task %s: %w", tk.ID, err)
+		}
+	}
+	if err := b.refreshJobStatus(ctx, jobID); err != nil {
+		return err
+	}
+	if err := b.Store.TouchJobRefreshedAt(ctx, jobID, time.Now()); err != nil {
+		return fmt.Errorf("touch refreshed_at for job %s: %w", jobID, err)
+	}
+	b.markProbed(jobID)
+	if len(ingestErrs) > 0 {
+		return fmt.Errorf("status refreshed but ingest had errors: %w", errors.Join(ingestErrs...))
+	}
+	return nil
+}
+
 // ── Scheduler probing ──
+
+// probeBatch runs the status_list_template once and parses the output into a
+// map of ext_id → SchedulerSignal. Returns (nil, nil) when no list template
+// is configured — callers should fall back to per-job probing.
+//
+// Safety: a non-nil but EMPTY map is treated as an error (returned as nil),
+// because "no jobs in output" most likely means the command failed silently
+// or the parser dropped everything — not that every tracked job is gone.
+// Callers seeing (nil, non-nil) should fall back to per-job probing.
+func (b *Backend) probeBatch(ctx context.Context) (map[string]SchedulerSignal, error) {
+	if b.Cfg.StatusListTemplate == "" {
+		return nil, nil
+	}
+	out, runErr := b.Run(ctx, b.Cfg.StatusListTemplate)
+
+	// Command failure is always an error — even when a parser is configured.
+	// The per-job path (probeSchedulerWith) intentionally ignores command
+	// errors when a parser exists (because e.g. `qstat -f <gone_id>` errors
+	// as its "gone" signal). But the LIST command is never per-job — it
+	// should always succeed when the scheduler is reachable.
+	if runErr != nil {
+		return nil, fmt.Errorf("status_list_template: %w", runErr)
+	}
+
+	if len(b.Cfg.StatusListParser) > 0 {
+		// Feed raw output through the parser pipeline.
+		pipeline := "printf '%s\\n' " + utils.ShellQuote(out) + " | " + strings.Join(b.Cfg.StatusListParser, " | ")
+		pout, perr := b.Run(ctx, pipeline)
+		if perr != nil {
+			return nil, fmt.Errorf("status_list_parser: %w", perr)
+		}
+		out = pout
+	}
+
+	// Parse "ext_id signal" lines into a lookup map.
+	result := make(map[string]SchedulerSignal)
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		parts := strings.Fields(line)
+		if len(parts) < 2 {
+			continue
+		}
+		result[parts[0]] = ParseSignal(parts[1])
+	}
+
+	// Empty result is suspicious — the command succeeded but produced
+	// nothing we could parse. Don't treat this as "all jobs are gone";
+	// fall back to per-job probing for safety.
+	if len(result) == 0 {
+		return nil, nil
+	}
+	return result, nil
+}
 
 // probeScheduler runs the configured status_template (and optional status_parser
 // hook) and maps the result to a semantic SchedulerSignal. It is deliberately

@@ -66,6 +66,30 @@ type Config struct {
 	//
 	// runq ships no built-in dialect parser — this pipeline is the extension point.
 	StatusParser []string `yaml:"status_parser,omitempty" json:"status_parser,omitempty"`
+	// StatusListTemplate is an OPTIONAL batch-query command that returns the
+	// status of ALL the user's scheduler jobs in one call. When set,
+	// EnsureAllFresh runs this command ONCE per reconcile pass and distributes
+	// results to individual jobs, eliminating per-job scheduler probes.
+	//
+	// Typical examples:
+	//   - SGE/UGE:  "qstat"
+	//   - PBS:      "qstat"
+	//   - Slurm:    "squeue -u $USER -h -o '%i %T'"
+	//
+	// The parser (status_list_parser) must transform the raw output into lines
+	// of "ext_id signal" (one per line). ext_ids not present in the output are
+	// treated as gone (absent from the active queue).
+	//
+	// When status_list_template is set, per-task status_template probes are
+	// SKIPPED during EnsureAllFresh (but still used for single-job refreshes
+	// like the Refresh button).
+	StatusListTemplate string `yaml:"status_list_template,omitempty" json:"status_list_template,omitempty"`
+	// StatusListParser is a shell pipeline that transforms the raw
+	// status_list_template output into "ext_id signal" lines. Each line must
+	// contain at least two whitespace-separated fields: the external job ID
+	// and a normalized status token (pending|running|success|failed|killed|gone).
+	// ext_ids absent from the output are treated as SchedGone.
+	StatusListParser []string `yaml:"status_list_parser,omitempty" json:"status_list_parser,omitempty"`
 	// KillTemplate cancels a queued/running job. Var: {{ext_id}}.
 	KillTemplate string `yaml:"kill_template" json:"kill_template"`
 	// PreflightLocal controls the local-subprocess preflight checks
@@ -271,6 +295,11 @@ const hpcHeader = `
 # of filter stages: runq feeds the raw status output to stage 1 on stdin and
 # pipes each stage into the next; the final line must print one of:
 #   pending | running | success | failed | killed | gone
+#
+# status_list_template + status_list_parser: optional BATCH probe. Runs ONCE
+# to get all user jobs (e.g. qstat, squeue -u $USER). Parser output must be
+# "ext_id signal" per line. Jobs absent from the output are treated as gone.
+# When set, dashboard bulk-refresh uses this instead of per-job probes.
 `
 
 // HPC body constants — used both in full templates and in hpcSnippets.
@@ -285,6 +314,12 @@ hpc:
   # Optional pipeline (each stage a shell filter; {{ext_id}} available).
   status_parser: []
 
+  # Optional BATCH probe: one call returns ALL user jobs. When set, the
+  # dashboard's periodic refresh uses this instead of per-job probes.
+  # Parser output: "ext_id signal" per line. Absent ext_ids → gone.
+  status_list_template: ""
+  status_list_parser: []
+
   kill_template: "scancel {{ext_id}}"
 `
 
@@ -296,6 +331,10 @@ hpc:
   status_template: "sacct -n -X -j {{ext_id}} -o State"
   status_parser:
     - awk 'NR==1{print $1}'
+
+  # Batch probe: one squeue call for all active jobs (dashboard refresh).
+  status_list_template: "squeue -u $USER -h -o '%i %T'"
+  status_list_parser: []
 
   kill_template: "scancel {{ext_id}}"
 `
@@ -310,6 +349,11 @@ hpc:
     - awk -F'= ' '/job_state/{print $2; f=1} END{if(!f) print "gone"}'
     - sed -e s/R/running/ -e s/E/running/ -e s/Q/pending/ -e s/H/pending/
 
+  # Batch probe: one qstat call for all active jobs.
+  status_list_template: "qstat"
+  status_list_parser:
+    - awk 'NR>5{sub(/\..*/,"",$1); s="unknown"; if($10=="R"||$10=="E") s="running"; else if($10=="Q"||$10=="H") s="pending"; print $1, s}'
+
   kill_template: "qdel {{ext_id}}"
 `
 
@@ -322,6 +366,11 @@ hpc:
   status_parser:
     - awk -v id={{ext_id}} '$1==id{print $5; f=1} END{if(!f) print "gone"}'
     - sed -e s/r/running/ -e s/qw/pending/ -e s/Eqw/failed/
+
+  # Batch probe: same qstat, but outputs all jobs at once.
+  status_list_template: "qstat"
+  status_list_parser:
+    - awk 'NR>2{s="unknown"; if($5=="r") s="running"; else if($5=="qw") s="pending"; else if($5=="Eqw") s="failed"; print $1, s}'
 
   kill_template: "qdel {{ext_id}}"
 `
@@ -339,6 +388,11 @@ hpc:
     - awk -v id={{ext_id}} '$1==id{print $5; f=1} END{if(!f) print "gone"}'
     - sed -e s/r/running/ -e s/qw/pending/ -e s/Eqw/failed/
 
+  # Batch probe: same qstat, but outputs all jobs at once.
+  status_list_template: "qstat"
+  status_list_parser:
+    - awk 'NR>2{s="unknown"; if($5=="r") s="running"; else if($5=="qw") s="pending"; else if($5=="Eqw") s="failed"; print $1, s}'
+
   kill_template: "qdel {{ext_id}}"
 `
 
@@ -353,6 +407,11 @@ hpc:
   status_parser:
     - awk -F'= ' '/job_state/{print $2; f=1} END{if(!f) print "gone"}'
     - sed -e s/R/running/ -e s/E/running/ -e s/Q/pending/ -e s/H/pending/
+
+  # Batch probe: one qstat call for all active jobs.
+  status_list_template: "qstat"
+  status_list_parser:
+    - awk 'NR>5{sub(/\..*/,"",$1); s="unknown"; if($10=="R"||$10=="E") s="running"; else if($10=="Q"||$10=="H") s="pending"; print $1, s}'
 
   kill_template: "qdel {{ext_id}}"
 `

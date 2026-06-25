@@ -5,9 +5,23 @@ import (
 	"time"
 )
 
-// DefaultReadTTL is the standard freshness window for read operations.
-// Within this window a second call to EnsureFresh is a no-op.
-const DefaultReadTTL = 15 * time.Second
+// DefaultReadTTL is the minimum interval between scheduler probes (qstat,
+// squeue, etc.) for a given job. Within this window EnsureFresh skips the
+// probe — only cheap local reads (status.json, metrics.jsonl) run.
+//
+// 30 s is chosen as the floor for HPC scheduler queries:
+//   - Scheduler daemons (pbs_server, slurmctld, sge_qmaster) are shared
+//     infrastructure. Polling faster than ~30 s risks throttling or ban,
+//     especially on busy clusters.
+//   - The dashboard's reconcileLoop ticks at this same interval, so the
+//     background batch probe (one `qstat -u $USER`) pre-fills every job's
+//     TTL cache. Inline reads (ListJobs, GetJob, …) then only do local
+//     file reads — fast, no scheduler traffic.
+//   - CLI callers (no reconcileLoop) still obey the TTL: `watch -n 1
+//     runq ps` fires a probe on the first call, then only local reads
+//     for the next 30 s. The user gets responsive file-level updates
+//     without hammering the scheduler.
+const DefaultReadTTL = 30 * time.Second
 
 // Reconciler ensures backend data is fresh before reads and writes.
 //
