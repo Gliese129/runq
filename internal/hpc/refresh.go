@@ -88,7 +88,7 @@ func (b *Backend) EnsureAllFresh(ctx context.Context, ttl time.Duration) error {
 	// Batch probe: only run when (a) configured, (b) at least one job needs
 	// a probe, AND (c) the batch TTL itself has expired. This prevents
 	// hitting qstat/squeue on every poll when everything is still fresh.
-	var batchSignals map[string]SchedulerSignal
+	var batchSignals map[string]ProbeResult
 	if anyNeedsProbe && b.Cfg.StatusListTemplate != "" {
 		if !b.batchProbeIsFresh(ttl) {
 			signals, berr := b.probeBatch(ctx)
@@ -208,22 +208,34 @@ func (b *Backend) reconcileWith(ctx context.Context, jobID string, probe bool, p
 		}
 
 		sf := readStatus(tk.TaskDir)
-		schedSignal := SchedUnknown
+		var pr ProbeResult
 		if probe {
-			schedSignal = b.probeSchedulerWith(ctx, probeRun, tk.ExternalID)
+			pr = b.probeSchedulerWith(ctx, probeRun, tk.ExternalID)
 		}
 		d := Reconcile(tk.Status, tk.StatusSource, Observed{
 			WrapperStatus: sf.Status,
 			ExitCode:      sf.ExitCode,
-			Scheduler:     schedSignal,
+			Scheduler:     pr.Signal,
 			KillRequested: false, // hpc kill writes killed/runq directly; never infer intent from status
 		})
 
-		if d.Status == tk.Status && d.Source == tk.StatusSource {
+		// Build extra fields. native_state and queue are only written when
+		// a probe ran — local-only reconcile must not overwrite existing values.
+		fields := map[string]any{"status_source": d.Source}
+		if probe && pr.NativeState != "" {
+			fields["native_state"] = pr.NativeState
+		}
+		if probe && pr.Queue != "" {
+			fields["queue"] = pr.Queue
+		}
+
+		statusChanged := d.Status != tk.Status || d.Source != tk.StatusSource
+		hpcFieldsChanged := (probe && pr.NativeState != "" && pr.NativeState != tk.NativeState) ||
+			(probe && pr.Queue != "" && pr.Queue != tk.Queue)
+		if !statusChanged && !hpcFieldsChanged {
 			continue // nothing changed
 		}
 
-		fields := map[string]any{"status_source": d.Source}
 		switch {
 		case isTerminal(d.Status) && d.Status != tk.Status:
 			// Entering a terminal, or correcting one terminal to another
@@ -266,7 +278,7 @@ func (b *Backend) reconcileWith(ctx context.Context, jobID string, probe bool, p
 // reconcileWithBatch is a variant of reconcileWith that uses pre-computed
 // batch probe results instead of per-task scheduler queries. ext_ids absent
 // from the batch map are treated as SchedGone (job left the scheduler queue).
-func (b *Backend) reconcileWithBatch(ctx context.Context, jobID string, signals map[string]SchedulerSignal) error {
+func (b *Backend) reconcileWithBatch(ctx context.Context, jobID string, signals map[string]ProbeResult) error {
 	tasks, err := b.Store.ListTasks(ctx, store.TaskFilter{JobID: jobID})
 	if err != nil {
 		return err
@@ -285,28 +297,39 @@ func (b *Backend) reconcileWithBatch(ctx context.Context, jobID string, signals 
 
 		sf := readStatus(tk.TaskDir)
 
-		// Look up pre-computed signal; absent ext_ids are gone.
-		schedSignal := SchedUnknown
+		// Look up pre-computed probe result; absent ext_ids are gone.
+		pr := ProbeResult{Signal: SchedUnknown}
 		if tk.ExternalID != "" {
-			if sig, ok := signals[tk.ExternalID]; ok {
-				schedSignal = sig
+			if p, ok := signals[tk.ExternalID]; ok {
+				pr = p
 			} else {
-				schedSignal = SchedGone
+				pr = ProbeResult{Signal: SchedGone}
 			}
 		}
 
 		d := Reconcile(tk.Status, tk.StatusSource, Observed{
 			WrapperStatus: sf.Status,
 			ExitCode:      sf.ExitCode,
-			Scheduler:     schedSignal,
+			Scheduler:     pr.Signal,
 			KillRequested: false,
 		})
 
-		if d.Status == tk.Status && d.Source == tk.StatusSource {
+		// Build extra fields. Batch probe always counts as probe=true.
+		fields := map[string]any{"status_source": d.Source}
+		if pr.NativeState != "" {
+			fields["native_state"] = pr.NativeState
+		}
+		if pr.Queue != "" {
+			fields["queue"] = pr.Queue
+		}
+
+		statusChanged := d.Status != tk.Status || d.Source != tk.StatusSource
+		hpcFieldsChanged := (pr.NativeState != "" && pr.NativeState != tk.NativeState) ||
+			(pr.Queue != "" && pr.Queue != tk.Queue)
+		if !statusChanged && !hpcFieldsChanged {
 			continue
 		}
 
-		fields := map[string]any{"status_source": d.Source}
 		switch {
 		case isTerminal(d.Status) && d.Status != tk.Status:
 			if sf.FinishedAt > 0 {
@@ -345,7 +368,7 @@ func (b *Backend) reconcileWithBatch(ctx context.Context, jobID string, signals 
 // because "no jobs in output" most likely means the command failed silently
 // or the parser dropped everything — not that every tracked job is gone.
 // Callers seeing (nil, non-nil) should fall back to per-job probing.
-func (b *Backend) probeBatch(ctx context.Context) (map[string]SchedulerSignal, error) {
+func (b *Backend) probeBatch(ctx context.Context) (map[string]ProbeResult, error) {
 	if b.Cfg.StatusListTemplate == "" {
 		return nil, nil
 	}
@@ -370,14 +393,21 @@ func (b *Backend) probeBatch(ctx context.Context) (map[string]SchedulerSignal, e
 		out = pout
 	}
 
-	// Parse "ext_id signal" lines into a lookup map.
-	result := make(map[string]SchedulerSignal)
+	// Parse "ext_id signal [queue]" lines into a lookup map.
+	result := make(map[string]ProbeResult)
 	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
 		parts := strings.Fields(line)
 		if len(parts) < 2 {
 			continue
 		}
-		result[parts[0]] = ParseSignal(parts[1])
+		pr := ProbeResult{
+			Signal:      MapSignal(b.Cfg, parts[1]),
+			NativeState: parts[1],
+		}
+		if len(parts) >= 3 {
+			pr.Queue = parts[2]
+		}
+		result[parts[0]] = pr
 	}
 
 	// Empty result is suspicious — the command succeeded but produced
@@ -396,17 +426,18 @@ func (b *Backend) probeBatch(ctx context.Context) (map[string]SchedulerSignal, e
 //   - with a status_parser hook → its normalized token via ParseSignal
 //   - without a hook → empty output = SchedGone, recognized token = that signal,
 //     present-but-unrecognized = SchedActive (alive)
-func (b *Backend) probeScheduler(ctx context.Context, extID string) SchedulerSignal {
+func (b *Backend) probeScheduler(ctx context.Context, extID string) ProbeResult {
 	return b.probeSchedulerWith(ctx, b.Run, extID)
 }
 
-func (b *Backend) probeSchedulerWith(ctx context.Context, run Runner, extID string) SchedulerSignal {
+func (b *Backend) probeSchedulerWith(ctx context.Context, run Runner, extID string) ProbeResult {
+	none := ProbeResult{Signal: SchedUnknown}
 	if b.Cfg.StatusTemplate == "" || extID == "" {
-		return SchedUnknown
+		return none
 	}
 	cmd, err := utils.Render(b.Cfg.StatusTemplate, map[string]string{"ext_id": extID})
 	if err != nil {
-		return SchedUnknown
+		return none
 	}
 	// Note: status command exit code handling differs by mode (below). Capture
 	// the output regardless of error so a parser can still interpret it.
@@ -428,33 +459,39 @@ func (b *Backend) probeSchedulerWith(ctx context.Context, run Runner, extID stri
 		for _, s := range b.Cfg.StatusParser {
 			rs, perr := utils.Render(s, map[string]string{"ext_id": extID})
 			if perr != nil {
-				return SchedUnknown
+				return none
 			}
 			stages = append(stages, rs)
 		}
 		pipeline := "printf '%s\\n' " + utils.ShellQuote(out) + " | " + strings.Join(stages, " | ")
 		pout, perr := run(ctx, pipeline)
 		if perr != nil {
-			return SchedUnknown
+			return none
 		}
+		token := strings.TrimSpace(pout)
 		// Empty parser output = job absent from the active query = gone.
-		if strings.TrimSpace(pout) == "" {
-			return SchedGone
+		if token == "" {
+			return ProbeResult{Signal: SchedGone}
 		}
-		return ParseSignal(pout)
+		return ProbeResult{
+			Signal:      MapSignal(b.Cfg, token),
+			NativeState: token,
+		}
 	}
 
 	// No parser: a status command error is "no info" (don't guess).
 	if runErr != nil {
-		return SchedUnknown
+		return none
 	}
-	if strings.TrimSpace(out) == "" {
-		return SchedGone
+	token := strings.TrimSpace(out)
+	if token == "" {
+		return ProbeResult{Signal: SchedGone}
 	}
-	if sig := ParseSignal(out); sig != SchedUnknown {
-		return sig
+	sig := MapSignal(b.Cfg, token)
+	if sig != SchedUnknown {
+		return ProbeResult{Signal: sig, NativeState: token}
 	}
-	return SchedActive
+	return ProbeResult{Signal: SchedActive, NativeState: token}
 }
 
 // memoRunner caches command → result for the lifetime of one reconcile pass.

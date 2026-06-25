@@ -30,6 +30,9 @@
             <th class="cursor-pointer" @click="setSort('id')">
               ID {{ sortIndicator('id') }}
             </th>
+            <th v-if="hasHPC" class="cursor-pointer" @click="setSort('ext_id')">
+              EXT_ID {{ sortIndicator('ext_id') }}
+            </th>
             <th
               v-for="col in shownCols" :key="col"
               class="cursor-pointer"
@@ -39,6 +42,12 @@
             </th>
             <th class="cursor-pointer" @click="setSort('step')">Step {{ sortIndicator('step') }}</th>
             <th class="cursor-pointer" @click="setSort('elapsed')">Elapsed {{ sortIndicator('elapsed') }}</th>
+            <th v-if="hasHPC" class="cursor-pointer" @click="setSort('native_state')">
+              SCHED_STATE {{ sortIndicator('native_state') }}
+            </th>
+            <th v-if="hasHPC" class="cursor-pointer" @click="setSort('queue')">
+              QUEUE {{ sortIndicator('queue') }}
+            </th>
             <th v-if="hasWandb" style="width:36px"></th>
             <th style="width:70px"></th>
           </tr>
@@ -56,11 +65,14 @@
           >
             <td><StatusDot :status="task.status" /></td>
             <td><code>{{ task.id.slice(0, 8) }}</code></td>
+            <td v-if="hasHPC" class="text-on-surface-variant"><code>{{ task.external_id || '—' }}</code></td>
             <td v-for="col in shownCols" :key="col" :class="paramColClass(col)">
               {{ task.params[col] ?? task.metrics?.[col] ?? '—' }}
             </td>
             <td>{{ task.current_step ?? '—' }}</td>
             <td class="text-on-surface-variant">{{ task.elapsed_seconds ? formatDuration(task.elapsed_seconds) : '—' }}</td>
+            <td v-if="hasHPC" class="text-on-surface-variant">{{ task.native_state || '—' }}</td>
+            <td v-if="hasHPC" class="text-on-surface-variant">{{ task.queue || '—' }}</td>
             <td v-if="hasWandb">
               <v-btn v-if="task.wandb_run_id" size="x-small" variant="text" icon
                 :href="wandbRunURL(task.wandb_run_id)" target="_blank" @click.stop
@@ -111,6 +123,7 @@ const props = withDefaults(defineProps<{
 defineEmits<{ 'kill-task': [id: string]; 'retry-task': [id: string]; 'click-task': [id: string] }>()
 
 const hasWandb = computed(() => !!props.wandb)
+const hasHPC = computed(() => props.tasks.some(t => !!t.external_id))
 
 // ── Column visibility (persisted per job) ──
 const visibleCols = ref(new Set<string>())
@@ -177,8 +190,11 @@ const sortedTasks = computed(() => {
   return [...props.tasks].sort((a, b) => {
     let va: any, vb: any
     if (key === 'id') { va = a.id; vb = b.id }
+    else if (key === 'ext_id') { va = a.external_id ?? ''; vb = b.external_id ?? '' }
     else if (key === 'step') { va = a.current_step ?? -1; vb = b.current_step ?? -1 }
     else if (key === 'elapsed') { va = a.elapsed_seconds ?? 0; vb = b.elapsed_seconds ?? 0 }
+    else if (key === 'native_state') { va = a.native_state ?? ''; vb = b.native_state ?? '' }
+    else if (key === 'queue') { va = a.queue ?? ''; vb = b.queue ?? '' }
     else {
       // Param or metric column
       va = a.params?.[key] ?? a.metrics?.[key] ?? ''

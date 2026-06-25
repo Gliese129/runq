@@ -276,14 +276,15 @@ func runHPCStatus(cmd *cobra.Command, args []string) error {
 			utils.StatusColor(detail.Job.Status), detail.Job.Tasks.Total)
 
 		w := newTable()
-		fmt.Fprintf(w, "TASK_ID\tEXT_ID\tSTATUS\tSOURCE\tAGE\n")
+		fmt.Fprintf(w, "TASK_ID\tEXT_ID\tSTATUS\tSCHED_STATE\tQUEUE\tSOURCE\tAGE\n")
 		for _, t := range detail.Tasks {
 			age := ""
 			if t.StartedAt != nil {
 				age = time.Since(time.Unix(*t.StartedAt, 0)).Truncate(time.Second).String()
 			}
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
-				utils.IDColor(t.ID), t.ExternalID, utils.StatusColor(t.Status), t.StatusSource, age)
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+				utils.IDColor(t.ID), t.ExternalID, utils.StatusColor(t.Status),
+				t.NativeState, t.Queue, t.StatusSource, age)
 		}
 		w.Flush()
 		return nil

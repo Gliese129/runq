@@ -50,6 +50,14 @@ type TaskRow struct {
 	// submit. Lets HPC refresh treat "inferred" terminals as correctable while
 	// wrapper/scheduler/runq terminals are final. Empty for daemon tasks.
 	StatusSource string
+
+	// Phase 2D: scheduler-native state token (e.g. "CONFIGURING", "COMPLETING").
+	// Written by the probe layer before ParseSignal collapses it. Empty for
+	// daemon tasks or when no probe has run yet.
+	NativeState string
+	// Phase 2D: scheduler queue (Slurm partition, PBS/SGE queue). Captured
+	// from probe output when available.
+	Queue string
 }
 
 // TaskFilter holds optional filter criteria for ListTasks.
@@ -65,7 +73,8 @@ const allTaskColumns = `id, job_id, project_name, command, params_json,
 	gpus_needed, gpus, status, retry_count, max_retry,
 	pid, start_time, log_path, working_dir, env_json,
 	resumable, extra_args, uid, timeout,
-	enqueued_at, started_at, finished_at, task_dir, external_id, status_source`
+	enqueued_at, started_at, finished_at, task_dir, external_id, status_source,
+	native_state, queue`
 
 // scanTask reads one result row into a TaskRow.
 // Column order must match allTaskColumns.
@@ -88,6 +97,8 @@ func scanTask(scanner interface{ Scan(dest ...any) error }) (*TaskRow, error) {
 		taskDir      sql.NullString
 		externalID   sql.NullString
 		statusSource sql.NullString
+		nativeState  sql.NullString
+		queue        sql.NullString
 	)
 
 	err := scanner.Scan(
@@ -96,6 +107,7 @@ func scanTask(scanner interface{ Scan(dest ...any) error }) (*TaskRow, error) {
 		&pid, &startTime, &logPath, &workingDir, &envJSON,
 		&resumable, &extraArgs, &uid, &timeout, &enqueuedAt, &startedAt, &finishedAt,
 		&taskDir, &externalID, &statusSource,
+		&nativeState, &queue,
 	)
 	if err != nil {
 		return nil, err
@@ -117,6 +129,8 @@ func scanTask(scanner interface{ Scan(dest ...any) error }) (*TaskRow, error) {
 	t.TaskDir = taskDir.String
 	t.ExternalID = externalID.String
 	t.StatusSource = statusSource.String
+	t.NativeState = nativeState.String
+	t.Queue = queue.String
 
 	return &t, nil
 }
@@ -128,8 +142,9 @@ func (s *Store) InsertTask(ctx context.Context, t *TaskRow) error {
 		gpus_needed, gpus, status, retry_count, max_retry,
 		pid, start_time, log_path, working_dir, env_json,
 		resumable, extra_args, uid, timeout,
-		enqueued_at, started_at, finished_at, task_dir, external_id, status_source
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+		enqueued_at, started_at, finished_at, task_dir, external_id, status_source,
+		native_state, queue
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	resumable := 0
 	if t.Resumable {
@@ -145,6 +160,7 @@ func (s *Store) InsertTask(ctx context.Context, t *TaskRow) error {
 		t.EnqueuedAt.Unix(),
 		nullTimeToUnix(t.StartedAt), nullTimeToUnix(t.FinishedAt),
 		nullString(t.TaskDir), nullString(t.ExternalID), nullString(t.StatusSource),
+		nullString(t.NativeState), nullString(t.Queue),
 	)
 	return err
 }
@@ -156,8 +172,9 @@ func (s *Store) InsertTaskTx(ctx context.Context, tx *sql.Tx, t *TaskRow) error 
 		gpus_needed, gpus, status, retry_count, max_retry,
 		pid, start_time, log_path, working_dir, env_json,
 		resumable, extra_args, uid, timeout,
-		enqueued_at, started_at, finished_at, task_dir, external_id, status_source
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+		enqueued_at, started_at, finished_at, task_dir, external_id, status_source,
+		native_state, queue
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	resumable := 0
 	if t.Resumable {
@@ -173,6 +190,7 @@ func (s *Store) InsertTaskTx(ctx context.Context, tx *sql.Tx, t *TaskRow) error 
 		t.EnqueuedAt.Unix(),
 		nullTimeToUnix(t.StartedAt), nullTimeToUnix(t.FinishedAt),
 		nullString(t.TaskDir), nullString(t.ExternalID), nullString(t.StatusSource),
+		nullString(t.NativeState), nullString(t.Queue),
 	)
 	return err
 }
@@ -193,6 +211,8 @@ var allowedStatusFields = map[string]bool{
 	"external_id":   true,
 	"status_source": true,
 	"extra_args":    true,
+	"native_state":  true,
+	"queue":         true,
 }
 
 // UpdateTaskStatus updates a task's status and any extra fields.

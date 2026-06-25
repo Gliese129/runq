@@ -47,6 +47,10 @@ export interface TaskView {
   /** HPC-specific; empty in daemon mode. Check caps.state_model == 'poll'. */
   external_id?: string
   status_source?: string
+  /** Raw scheduler state token before signal mapping (e.g. "COMPLETING", "R"). */
+  native_state?: string
+  /** Scheduler queue/partition name (e.g. "gpu-a100", "cpu-batch"). */
+  queue?: string
 }
 
 /** Mirrors logfile.Page — byte-offset based log page. */

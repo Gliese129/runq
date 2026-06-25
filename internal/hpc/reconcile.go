@@ -2,7 +2,11 @@
 // canonical task status. Pure logic, no I/O. Previously lived in hpccore.
 package hpc
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/gliese129/runq/internal/hpcconfig"
+)
 
 // SchedulerSignal is the semantic verdict about a task derived from the
 // scheduler, NOT a raw scheduler string.
@@ -18,6 +22,30 @@ const (
 	SchedFailed  SchedulerSignal = "failed"  // accounting: failed/timeout/oom/node_fail
 	SchedKilled  SchedulerSignal = "killed"  // accounting: cancelled
 )
+
+// ProbeResult holds the full output of a scheduler probe: the semantic signal
+// for Reconcile, plus raw strings for display in CLI/dashboard.
+type ProbeResult struct {
+	Signal      SchedulerSignal
+	NativeState string // raw state token before signal mapping (e.g. "CONFIGURING")
+	Queue       string // scheduler queue/partition, if available
+}
+
+// MapSignal maps a raw state token to a SchedulerSignal using the config's
+// SignalMap first (user-configurable, case-insensitive), then falls back to
+// the hardcoded ParseSignal. This keeps scheduler-specific knowledge in
+// config presets rather than Go code.
+func MapSignal(cfg *hpcconfig.Config, token string) SchedulerSignal {
+	if cfg != nil && len(cfg.SignalMap) > 0 {
+		upper := strings.ToUpper(strings.TrimSpace(token))
+		for k, v := range cfg.SignalMap {
+			if strings.ToUpper(k) == upper {
+				return ParseSignal(v)
+			}
+		}
+	}
+	return ParseSignal(token)
+}
 
 // ParseSignal maps a normalized token to a SchedulerSignal. Recognizes
 // canonical tokens plus Slurm sacct vocabulary as a convenience.

@@ -64,6 +64,15 @@ func (s *Store) addMissingColumns(ctx context.Context) error {
 	if err := addColumnIfMissing(ctx, s.db, "projects", "archived_at", "INTEGER"); err != nil {
 		return fmt.Errorf("add projects.archived_at: %w", err)
 	}
+	// Phase 2D: HPC scheduler native state (e.g. Slurm CONFIGURING, COMPLETING).
+	// Preserved from probe output before ParseSignal collapses it to a signal enum.
+	if err := addColumnIfMissing(ctx, s.db, "tasks", "native_state", "TEXT"); err != nil {
+		return fmt.Errorf("add tasks.native_state: %w", err)
+	}
+	// Phase 2D: scheduler queue/partition (Slurm partition, PBS/SGE queue).
+	if err := addColumnIfMissing(ctx, s.db, "tasks", "queue", "TEXT"); err != nil {
+		return fmt.Errorf("add tasks.queue: %w", err)
+	}
 	return nil
 }
 

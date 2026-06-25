@@ -90,6 +90,18 @@ type Config struct {
 	// and a normalized status token (pending|running|success|failed|killed|gone).
 	// ext_ids absent from the output are treated as SchedGone.
 	StatusListParser []string `yaml:"status_list_parser,omitempty" json:"status_list_parser,omitempty"`
+	// SignalMap maps scheduler-native state tokens to canonical signal names.
+	// Applied AFTER status_parser (if any), BEFORE the hardcoded ParseSignal
+	// fallback. Keys are matched case-insensitively. Values must be one of:
+	//   pending | running | success | failed | killed | gone
+	//
+	// Example (Slurm fine-grained states):
+	//   signal_map:
+	//     CONFIGURING: pending
+	//     COMPLETING: running
+	//     SUSPENDED: running
+	//     REQUEUED: pending
+	SignalMap map[string]string `yaml:"signal_map,omitempty" json:"signal_map,omitempty"`
 	// KillTemplate cancels a queued/running job. Var: {{ext_id}}.
 	KillTemplate string `yaml:"kill_template" json:"kill_template"`
 	// PreflightLocal controls the local-subprocess preflight checks
@@ -320,6 +332,13 @@ hpc:
   status_list_template: ""
   status_list_parser: []
 
+  # Map scheduler-native states to canonical signals (pending|running|
+  # success|failed|killed|gone). Keys are case-insensitive. Unmatched
+  # tokens fall back to the hardcoded defaults.
+  # signal_map:
+  #   CONFIGURING: pending
+  #   COMPLETING: running
+
   kill_template: "scancel {{ext_id}}"
 `
 
@@ -333,8 +352,20 @@ hpc:
     - awk 'NR==1{print $1}'
 
   # Batch probe: one squeue call for all active jobs (dashboard refresh).
-  status_list_template: "squeue -u $USER -h -o '%i %T'"
+  # %P = partition (shown as Queue in the dashboard).
+  status_list_template: "squeue -u $USER -h -o '%i %T %P'"
   status_list_parser: []
+
+  # Map Slurm-native states to canonical signals. Tokens not listed here
+  # fall back to the hardcoded ParseSignal (which knows the common ones).
+  signal_map:
+    CONFIGURING: pending
+    COMPLETING: running
+    RESIZING: pending
+    REQUEUED: pending
+    SUSPENDED: running
+    SPECIAL_EXIT: failed
+    PREEMPTED: failed
 
   kill_template: "scancel {{ext_id}}"
 `
@@ -350,9 +381,11 @@ hpc:
     - sed -e s/R/running/ -e s/E/running/ -e s/Q/pending/ -e s/H/pending/
 
   # Batch probe: one qstat call for all active jobs.
+  # PBS Pro qstat columns: Job_ID Username Queue Jobname ... S ...
+  # Output: ext_id signal queue
   status_list_template: "qstat"
   status_list_parser:
-    - awk 'NR>5{sub(/\..*/,"",$1); s="unknown"; if($10=="R"||$10=="E") s="running"; else if($10=="Q"||$10=="H") s="pending"; print $1, s}'
+    - awk 'NR>5{sub(/\..*/,"",$1); s="unknown"; if($10=="R"||$10=="E") s="running"; else if($10=="Q"||$10=="H") s="pending"; print $1, s, $3}'
 
   kill_template: "qdel {{ext_id}}"
 `
@@ -368,9 +401,11 @@ hpc:
     - sed -e s/r/running/ -e s/qw/pending/ -e s/Eqw/failed/
 
   # Batch probe: same qstat, but outputs all jobs at once.
+  # SGE qstat $8 = queue@host; strip @host for the queue name.
+  # Output: ext_id signal queue
   status_list_template: "qstat"
   status_list_parser:
-    - awk 'NR>2{s="unknown"; if($5=="r") s="running"; else if($5=="qw") s="pending"; else if($5=="Eqw") s="failed"; print $1, s}'
+    - awk 'NR>2{s="unknown"; if($5=="r") s="running"; else if($5=="qw") s="pending"; else if($5=="Eqw") s="failed"; q=$8; sub(/@.*/,"",q); print $1, s, q}'
 
   kill_template: "qdel {{ext_id}}"
 `
@@ -389,9 +424,11 @@ hpc:
     - sed -e s/r/running/ -e s/qw/pending/ -e s/Eqw/failed/
 
   # Batch probe: same qstat, but outputs all jobs at once.
+  # UGE qstat $8 = queue@host; strip @host for the queue name.
+  # Output: ext_id signal queue
   status_list_template: "qstat"
   status_list_parser:
-    - awk 'NR>2{s="unknown"; if($5=="r") s="running"; else if($5=="qw") s="pending"; else if($5=="Eqw") s="failed"; print $1, s}'
+    - awk 'NR>2{s="unknown"; if($5=="r") s="running"; else if($5=="qw") s="pending"; else if($5=="Eqw") s="failed"; q=$8; sub(/@.*/,"",q); print $1, s, q}'
 
   kill_template: "qdel {{ext_id}}"
 `
@@ -409,9 +446,11 @@ hpc:
     - sed -e s/R/running/ -e s/E/running/ -e s/Q/pending/ -e s/H/pending/
 
   # Batch probe: one qstat call for all active jobs.
+  # PBS Pro qstat columns: Job_ID Username Queue Jobname ... S ...
+  # Output: ext_id signal queue
   status_list_template: "qstat"
   status_list_parser:
-    - awk 'NR>5{sub(/\..*/,"",$1); s="unknown"; if($10=="R"||$10=="E") s="running"; else if($10=="Q"||$10=="H") s="pending"; print $1, s}'
+    - awk 'NR>5{sub(/\..*/,"",$1); s="unknown"; if($10=="R"||$10=="E") s="running"; else if($10=="Q"||$10=="H") s="pending"; print $1, s, $3}'
 
   kill_template: "qdel {{ext_id}}"
 `

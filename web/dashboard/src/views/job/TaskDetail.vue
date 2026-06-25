@@ -36,6 +36,21 @@
           <div class="text-body-2 font-weight-medium">{{ task.gpus || '—' }}</div>
         </v-col>
       </v-row>
+      <!-- HPC-specific stats (poll-model only) -->
+      <v-row v-if="task.external_id" dense class="mt-1">
+        <v-col cols="6" sm="3">
+          <div class="text-caption text-on-surface-variant">External ID</div>
+          <div class="text-body-2 font-weight-medium"><code>{{ task.external_id }}</code></div>
+        </v-col>
+        <v-col cols="6" sm="3">
+          <div class="text-caption text-on-surface-variant">Scheduler State</div>
+          <div class="text-body-2 font-weight-medium">{{ task.native_state || '—' }}</div>
+        </v-col>
+        <v-col cols="6" sm="3">
+          <div class="text-caption text-on-surface-variant">Queue</div>
+          <div class="text-body-2 font-weight-medium">{{ task.queue || '—' }}</div>
+        </v-col>
+      </v-row>
     </v-card>
 
     <!-- Parameters / Metrics / Log -->

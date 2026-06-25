@@ -64,6 +64,10 @@ type TaskView struct {
 	// Capabilities.StateModel == "poll" before rendering.
 	ExternalID   string `json:"external_id,omitempty"`
 	StatusSource string `json:"status_source,omitempty"`
+	// Phase 2D: scheduler-native state token (e.g. "CONFIGURING") and
+	// queue/partition name. Only populated in poll-model backends.
+	NativeState string `json:"native_state,omitempty"`
+	Queue       string `json:"queue,omitempty"`
 }
 
 type MetricPoint struct {

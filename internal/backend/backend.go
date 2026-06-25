@@ -176,6 +176,8 @@ func BuildTaskView(task store.TaskRow) TaskView {
 		WandbRunID:   artifacts.WandbRunID,
 		ExternalID:   task.ExternalID,
 		StatusSource: task.StatusSource,
+		NativeState:  task.NativeState,
+		Queue:        task.Queue,
 	}
 	if task.StartedAt != nil {
 		sec := task.StartedAt.Unix()
