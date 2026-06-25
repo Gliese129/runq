@@ -3,6 +3,7 @@ package backend
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -62,11 +63,16 @@ func PerformClean(ctx context.Context, st *store.Store, opts CleanOptions) (*Cle
 	preview := make([]CleanPreviewItem, 0, len(unique))
 	for _, u := range unique {
 		action := classifyAction(u.task, opts.CkptOnly)
+		var finishedUnix *int64
+		if u.task.FinishedAt != nil {
+			ts := u.task.FinishedAt.Unix()
+			finishedUnix = &ts
+		}
 		preview = append(preview, CleanPreviewItem{
 			TaskID:     u.task.ID,
 			JobID:      u.task.JobID,
 			Status:     u.task.Status,
-			FinishedAt: u.task.FinishedAt,
+			FinishedAt: finishedUnix,
 			TaskDir:    u.task.TaskDir,
 			Reason:     u.reason,
 			Action:     action,
@@ -78,35 +84,77 @@ func PerformClean(ctx context.Context, st *store.Store, opts CleanOptions) (*Cle
 		return &CleanResult{Preview: preview}, nil
 	}
 
-	var deletedTasks int
-	var freedBytes int64
+	// ── Phase 1: DB mutations inside a transaction ──
+	// All DB deletes happen first. File deletion is deferred until after
+	// commit so a rollback never leaves orphaned DB rows pointing at
+	// already-deleted workspaces.
+	tx, err := st.DB().BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin clean tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Track which tasks had their DB row deleted so we can clean files
+	// in phase 2.
+	type dbDeleted struct {
+		task   store.TaskRow
+		action CleanAction
+	}
+	var deleted []dbDeleted
+
 	for i, u := range unique {
 		action := preview[i].Action
 		switch action {
-		case CleanActionAll:
-			if err := st.DeleteTask(ctx, u.task.ID); err != nil {
+		case CleanActionAll, CleanActionDBOnly:
+			if _, err := tx.ExecContext(ctx, "DELETE FROM tasks WHERE id = ?", u.task.ID); err != nil {
 				continue
 			}
-			freedBytes += cleanTaskArtifacts(u.task)
-		case CleanActionDBOnly:
-			if err := st.DeleteTask(ctx, u.task.ID); err != nil {
-				continue
-			}
+			deleted = append(deleted, dbDeleted{u.task, action})
 		case CleanActionCkpt:
-			ckptDir := filepath.Join(u.task.TaskDir, "checkpoints")
-			freedBytes += dirSize(ckptDir)
-			os.RemoveAll(ckptDir)
+			// Checkpoint-only: no DB mutation, just file deletion in phase 2.
+			deleted = append(deleted, dbDeleted{u.task, action})
 		case CleanActionCkptDB:
-			// ckpt-only requested but no checkpoints dir — skip.
 			continue
 		}
-		deletedTasks++
 	}
 
-	deletedJobs, _ := st.DeleteOrphanJobs(ctx)
+	// Delete orphan jobs (done jobs with no remaining tasks) within the same tx.
+	// The status='done' guard mirrors store.DeleteOrphanJobs — never remove
+	// pending/running/paused jobs that just haven't spawned tasks yet.
+	res, _ := tx.ExecContext(ctx,
+		"DELETE FROM jobs WHERE status = 'done' AND id NOT IN (SELECT DISTINCT job_id FROM tasks)")
+	deletedJobs := int64(0)
+	if res != nil {
+		deletedJobs, _ = res.RowsAffected()
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit clean tx: %w", err)
+	}
+
+	// ── Phase 2: file deletion (after successful commit) ──
+	var freedBytes int64
+	for _, d := range deleted {
+		switch d.action {
+		case CleanActionAll:
+			cleaned, cerr := cleanTaskArtifacts(d.task)
+			if cerr != nil {
+				slog.Warn("clean: failed to remove task artifacts",
+					"task", d.task.ID, "err", cerr)
+			}
+			freedBytes += cleaned
+		case CleanActionCkpt:
+			ckptDir := filepath.Join(d.task.TaskDir, "checkpoints")
+			freedBytes += dirSize(ckptDir)
+			if err := os.RemoveAll(ckptDir); err != nil {
+				slog.Warn("clean: failed to remove checkpoints",
+					"task", d.task.ID, "err", err)
+			}
+		}
+	}
 
 	return &CleanResult{
-		Tasks:      deletedTasks,
+		Tasks:      len(deleted),
 		Jobs:       int(deletedJobs),
 		FreedBytes: freedBytes,
 	}, nil
@@ -209,19 +257,31 @@ func classifyAction(t store.TaskRow, ckptOnly bool) CleanAction {
 }
 
 // cleanTaskArtifacts removes the task's workspace directory and log file.
-func cleanTaskArtifacts(t store.TaskRow) int64 {
+// Returns freed bytes and the first error encountered (if any).
+func cleanTaskArtifacts(t store.TaskRow) (int64, error) {
 	var freed int64
+	var firstErr error
 	if t.TaskDir != "" {
-		freed += dirSize(t.TaskDir)
-		os.RemoveAll(t.TaskDir)
+		size := dirSize(t.TaskDir)
+		if err := os.RemoveAll(t.TaskDir); err != nil {
+			firstErr = err
+		} else {
+			freed += size
+		}
 	}
 	if t.LogPath != "" && (t.TaskDir == "" || !strings.HasPrefix(t.LogPath, t.TaskDir)) {
 		if info, err := os.Stat(t.LogPath); err == nil {
-			freed += info.Size()
-			os.Remove(t.LogPath)
+			logSize := info.Size()
+			if err := os.Remove(t.LogPath); err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+			} else {
+				freed += logSize
+			}
 		}
 	}
-	return freed
+	return freed, firstErr
 }
 
 func dirSize(dir string) int64 {

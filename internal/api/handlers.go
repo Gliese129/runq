@@ -517,7 +517,47 @@ func (s *Server) handleTaskRetry(c *gin.Context) {
 // ── System handlers ──
 
 func (s *Server) handleGPUStatus(c *gin.Context) {
-	c.JSON(http.StatusOK, s.deps.Pool.Status())
+	gpus := s.deps.Pool.Status()
+
+	// Collect unique occupied task IDs for a single batch lookup.
+	var taskIDs []string
+	seen := make(map[string]bool)
+	for _, g := range gpus {
+		if g.TaskID != "" && !seen[g.TaskID] {
+			seen[g.TaskID] = true
+			taskIDs = append(taskIDs, g.TaskID)
+		}
+	}
+
+	// Enrich with job_id via one DB query instead of N per-task lookups.
+	type enrichedGPU struct {
+		Index    int    `json:"index"`
+		Name     string `json:"name"`
+		MemTotal int    `json:"mem_total"`
+		MemFree  int    `json:"mem_free"`
+		UtilPct  int    `json:"util_pct"`
+		TaskID   string `json:"task_id,omitempty"`
+		JobID    string `json:"job_id,omitempty"`
+	}
+
+	jobMap, _ := s.deps.Store.GetJobIDsForTasks(c.Request.Context(), taskIDs)
+	if jobMap == nil {
+		jobMap = make(map[string]string)
+	}
+
+	out := make([]enrichedGPU, 0, len(gpus))
+	for _, g := range gpus {
+		out = append(out, enrichedGPU{
+			Index:    g.Index,
+			Name:     g.Name,
+			MemTotal: g.MemTotal,
+			MemFree:  g.MemFree,
+			UtilPct:  g.UtilPct,
+			TaskID:   g.TaskID,
+			JobID:    jobMap[g.TaskID],
+		})
+	}
+	c.JSON(http.StatusOK, out)
 }
 
 func (s *Server) handleStatus(c *gin.Context) {
@@ -528,6 +568,9 @@ func (s *Server) handleStatus(c *gin.Context) {
 	})
 }
 
+// handleClean invokes PerformClean directly (not via a Backend method) because
+// the daemon IS the store owner. DaemonBackend.Clean() proxies to this handler
+// over HTTP — inserting a service layer would just add indirection.
 func (s *Server) handleClean(c *gin.Context) {
 	opts := backend.CleanOptions{
 		DryRun:   c.Query("dry_run") == "true",

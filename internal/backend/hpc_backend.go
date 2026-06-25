@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/gliese129/runq/internal/config"
 	"github.com/gliese129/runq/internal/hpc"
 	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/project"
@@ -15,10 +14,15 @@ import (
 type HPCBackend struct {
 	backend *hpc.Backend
 	store   *store.Store
+	reg     *project.Registry
 }
 
 func NewHPCBackend(backend *hpc.Backend, st *store.Store) *HPCBackend {
-	return &HPCBackend{backend: backend, store: st}
+	return &HPCBackend{
+		backend: backend,
+		store:   st,
+		reg:     project.NewRegistry(st.DB()),
+	}
 }
 
 func (b *HPCBackend) Capabilities() Capabilities {
@@ -75,8 +79,12 @@ func (b *HPCBackend) ListJobs(ctx context.Context, projectScope string) ([]JobSu
 		return nil, err
 	}
 
-	// Load all tasks once and group by job_id to avoid N+1 queries.
-	allTasks, err := b.store.ListTasks(ctx, store.TaskFilter{})
+	// Load tasks scoped to visible jobs only (not the entire DB).
+	jobIDs := make([]string, len(jobs))
+	for i, j := range jobs {
+		jobIDs[i] = j.ID
+	}
+	allTasks, err := b.store.ListTasksForJobs(ctx, jobIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -103,10 +111,21 @@ func (b *HPCBackend) ListArchivedJobs(ctx context.Context) ([]JobSummary, error)
 	if err != nil {
 		return nil, err
 	}
+	jobIDs := make([]string, len(jobs))
+	for i, j := range jobs {
+		jobIDs[i] = j.ID
+	}
+	allTasks, err := b.store.ListTasksForJobs(ctx, jobIDs)
+	if err != nil {
+		return nil, err
+	}
+	byJob := make(map[string][]store.TaskRow, len(jobs))
+	for _, t := range allTasks {
+		byJob[t.JobID] = append(byJob[t.JobID], t)
+	}
 	out := make([]JobSummary, 0, len(jobs))
 	for _, j := range jobs {
-		tasks, _ := b.store.ListTasks(ctx, store.TaskFilter{JobID: j.ID})
-		out = append(out, BuildJobSummary(j, tasks))
+		out = append(out, BuildJobSummary(j, byJob[j.ID]))
 	}
 	return out, nil
 }
@@ -123,11 +142,11 @@ func (b *HPCBackend) UnarchiveJob(ctx context.Context, jobID string) error {
 }
 
 func (b *HPCBackend) ArchiveProject(ctx context.Context, name string) error {
-	return project.NewRegistry(b.store.DB()).Archive(ctx, name)
+	return b.reg.Archive(ctx, name)
 }
 
 func (b *HPCBackend) UnarchiveProject(ctx context.Context, name string) error {
-	return project.NewRegistry(b.store.DB()).Unarchive(ctx, name)
+	return b.reg.Unarchive(ctx, name)
 }
 
 func (b *HPCBackend) GetJob(ctx context.Context, jobID string) (*JobDetail, error) {
@@ -139,15 +158,14 @@ func (b *HPCBackend) GetJob(ctx context.Context, jobID string) (*JobDetail, erro
 		return nil, err
 	}
 	if job == nil {
-		return nil, fmt.Errorf("job %q not found", jobID)
+		return nil, fmt.Errorf("job %q: %w", jobID, ErrNotFound)
 	}
 	tasks, err := b.store.ListTasks(ctx, store.TaskFilter{JobID: jobID})
 	if err != nil {
 		return nil, err
 	}
 	detail := BuildJobDetail(*job, tasks)
-	reg := project.NewRegistry(b.store.DB())
-	if cfg, err := reg.Get(ctx, job.ProjectName); err == nil && cfg.Wandb != nil {
+	if cfg, err := b.reg.Get(ctx, job.ProjectName); err == nil && cfg.Wandb != nil {
 		detail.Wandb = &WandbInfo{
 			Entity:  cfg.Wandb.Entity,
 			Project: cfg.Wandb.Project,
@@ -172,13 +190,13 @@ func (b *HPCBackend) GPUStatus(ctx context.Context) ([]GPUSlot, error) {
 	return []GPUSlot{}, nil
 }
 
-func (b *HPCBackend) GetTask(ctx context.Context, taskID string) (*TaskView, string, error) {
+func (b *HPCBackend) GetTask(ctx context.Context, taskID string) (*TaskView, error) {
 	task, err := b.store.GetTask(ctx, taskID)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 	if task == nil {
-		return nil, "", fmt.Errorf("task %q not found", taskID)
+		return nil, fmt.Errorf("task %q: %w", taskID, ErrNotFound)
 	}
 	// Lazy reconcile from the external scheduler before reading detail, the
 	// same read-path reconcile the list/compare endpoints already do (the
@@ -187,13 +205,13 @@ func (b *HPCBackend) GetTask(ctx context.Context, taskID string) (*TaskView, str
 	// finished externally never advances until some other reconciled path runs.
 	task = b.reconcileTask(ctx, taskID, task)
 	view := BuildTaskView(*task)
-	return &view, task.LogPath, nil
+	return &view, nil
 }
 
 func (b *HPCBackend) TaskMetrics(ctx context.Context, taskID string) ([]MetricPoint, error) {
 	task, err := b.store.GetTask(ctx, taskID)
 	if err != nil || task == nil {
-		return nil, fmt.Errorf("task %q not found", taskID)
+		return nil, fmt.Errorf("task %q: %w", taskID, ErrNotFound)
 	}
 	// Same lazy reconcile as GetTask: status-sensitive read paths must run the
 	// reconcile pass so metrics/status don't lag behind external completion.
@@ -220,7 +238,7 @@ func (b *HPCBackend) KillTask(ctx context.Context, taskID string) error {
 		return err
 	}
 	if task == nil {
-		return fmt.Errorf("task %q not found", taskID)
+		return fmt.Errorf("task %q: %w", taskID, ErrNotFound)
 	}
 	// Reconcile before kill so we don't send qdel for an already-finished task.
 	if err := b.backend.EnsureFresh(ctx, task.JobID, 0); err != nil {
@@ -261,43 +279,24 @@ func (b *HPCBackend) ResumeJob(ctx context.Context, jobID string) error {
 }
 
 func (b *HPCBackend) SubmitJob(ctx context.Context, cfg job.JobConfig, opts SubmitOptions) (string, int, error) {
-	reg := project.NewRegistry(b.store.DB())
-	proj, err := reg.Get(ctx, cfg.Project)
+	proj, err := b.reg.Get(ctx, cfg.Project)
 	if err != nil {
-		return "", 0, fmt.Errorf("project %q not found: %w", cfg.Project, err)
+		return "", 0, fmt.Errorf("project %q: %w", cfg.Project, err)
 	}
 	return b.backend.Submit(ctx, cfg, proj, hpc.SubmitOpts{SkipPreflight: opts.SkipPreflight})
 }
 
 func (b *HPCBackend) DryRun(ctx context.Context, cfg job.JobConfig) (*DryRunResult, error) {
-	tasks, err := job.Expand(&cfg)
-	if err != nil {
-		return nil, err
-	}
-	result := &DryRunResult{Tasks: tasks}
-	// Best-effort command preview and workspace root.
-	if cfg.Project != "" && len(tasks) > 0 {
-		reg := project.NewRegistry(b.store.DB())
-		if proj, perr := reg.Get(ctx, cfg.Project); perr == nil {
-			if proj.CmdTemplate != "" {
-				if cmd, rerr := job.Render(proj.CmdTemplate, tasks[0]); rerr == nil {
-					result.SampleCommand = cmd
-				}
-			}
-			if storageCfg, cerr := config.Load(); cerr == nil {
-				result.WorkspaceRoot = config.ProspectiveRoot(storageCfg, proj.WorkingDir, proj.ProjectName)
-			}
-		}
-	}
-	return result, nil
+	return buildDryRunResult(cfg, func(name string) (*project.Config, error) {
+		return b.reg.Get(ctx, name)
+	})
 }
 
 // PreviewSubmit is the GUI face of `--dry-run`: same code path, same text.
 func (b *HPCBackend) PreviewSubmit(ctx context.Context, cfg job.JobConfig, skipPreflight bool) (string, error) {
-	reg := project.NewRegistry(b.store.DB())
-	proj, err := reg.Get(ctx, cfg.Project)
+	proj, err := b.reg.Get(ctx, cfg.Project)
 	if err != nil {
-		return "", fmt.Errorf("project %q not found: %w", cfg.Project, err)
+		return "", fmt.Errorf("project %q: %w", cfg.Project, err)
 	}
 	return b.backend.Preview(ctx, cfg, proj, skipPreflight)
 }
@@ -317,28 +316,23 @@ func (b *HPCBackend) ResolveNote(ctx context.Context, cfg job.JobConfig) (string
 }
 
 func (b *HPCBackend) CreateProject(ctx context.Context, cfg project.Config) error {
-	reg := project.NewRegistry(b.store.DB())
-	return reg.Add(ctx, cfg)
+	return b.reg.Add(ctx, cfg)
 }
 
 func (b *HPCBackend) UpdateProject(ctx context.Context, cfg project.Config) error {
-	reg := project.NewRegistry(b.store.DB())
-	return reg.Update(ctx, cfg)
+	return b.reg.Update(ctx, cfg)
 }
 
 func (b *HPCBackend) RenameProject(ctx context.Context, oldName, newName string) error {
-	reg := project.NewRegistry(b.store.DB())
-	return reg.Rename(ctx, oldName, newName)
+	return b.reg.Rename(ctx, oldName, newName)
 }
 
 func (b *HPCBackend) GetProject(ctx context.Context, name string) (*project.Config, error) {
-	reg := project.NewRegistry(b.store.DB())
-	return reg.Get(ctx, name)
+	return b.reg.Get(ctx, name)
 }
 
 func (b *HPCBackend) ListProjects(ctx context.Context) ([]ProjectSummary, error) {
-	reg := project.NewRegistry(b.store.DB())
-	configs, err := reg.List(ctx)
+	configs, err := b.reg.List(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -346,8 +340,7 @@ func (b *HPCBackend) ListProjects(ctx context.Context) ([]ProjectSummary, error)
 }
 
 func (b *HPCBackend) MatchProjects(ctx context.Context, dir string) ([]ProjectSummary, error) {
-	reg := project.NewRegistry(b.store.DB())
-	configs, err := reg.Match(ctx, dir)
+	configs, err := b.reg.Match(ctx, dir)
 	if err != nil {
 		return nil, err
 	}
@@ -369,7 +362,7 @@ func (b *HPCBackend) configsToSummaries(ctx context.Context, configs []project.C
 	for _, j := range jobs {
 		jobCounts[j.ProjectName]++
 	}
-	archived, _ := project.NewRegistry(b.store.DB()).ArchivedNames(ctx)
+	archived, _ := b.reg.ArchivedNames(ctx)
 	out := make([]ProjectSummary, 0, len(configs))
 	for _, c := range configs {
 		out = append(out, ProjectSummary{

@@ -494,7 +494,7 @@ func (s *Server) handlePreviewSubmit(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetTask(w http.ResponseWriter, r *http.Request) {
-	view, _, err := s.backend.GetTask(r.Context(), r.PathValue("id"))
+	view, err := s.backend.GetTask(r.Context(), r.PathValue("id"))
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
 		return
@@ -510,11 +510,12 @@ func (s *Server) handleGetTask(w http.ResponseWriter, r *http.Request) {
 // Returns a logfile.Page JSON. The frontend uses start_offset / end_offset
 // for forward/backward paging and total_bytes for progress indication.
 func (s *Server) handleTaskLog(w http.ResponseWriter, r *http.Request) {
-	_, logPath, err := s.backend.GetTask(r.Context(), r.PathValue("id"))
+	view, err := s.backend.GetTask(r.Context(), r.PathValue("id"))
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
 		return
 	}
+	logPath := view.LogPath
 	if logPath == "" {
 		writeJSON(w, http.StatusOK, &logfile.Page{Lines: []string{}})
 		return
@@ -555,11 +556,12 @@ func (s *Server) handleTaskLog(w http.ResponseWriter, r *http.Request) {
 // Sends "lines" events containing logfile.Page JSON as new content appears.
 // Stops when the client disconnects (EventSource.close / page navigation).
 func (s *Server) handleTaskLogStream(w http.ResponseWriter, r *http.Request) {
-	_, logPath, err := s.backend.GetTask(r.Context(), r.PathValue("id"))
+	view, err := s.backend.GetTask(r.Context(), r.PathValue("id"))
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
 		return
 	}
+	logPath := view.LogPath
 	if logPath == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no log file"})
 		return

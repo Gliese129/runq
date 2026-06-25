@@ -26,7 +26,7 @@ var logsCmd = &cobra.Command{
 		noFollow, _ := cmd.Flags().GetBool("no-follow")
 
 		return withBackend(func(be backend.Backend) error {
-			view, logPath, err := be.GetTask(cmd.Context(), id)
+			view, err := be.GetTask(cmd.Context(), id)
 			if err != nil {
 				return err
 			}
@@ -34,10 +34,10 @@ var logsCmd = &cobra.Command{
 			fmt.Printf("%s  %s  %s\n",
 				utils.IDColor(view.ID),
 				utils.StatusColor(view.Status),
-				utils.Dimf("%s", logPath))
+				utils.Dimf("%s", view.LogPath))
 
 			if noFollow {
-				data, err := os.ReadFile(logPath)
+				data, err := os.ReadFile(view.LogPath)
 				if err != nil {
 					return err
 				}
@@ -45,7 +45,7 @@ var logsCmd = &cobra.Command{
 				return nil
 			}
 
-			return tailLog(logPath)
+			return tailLog(view.LogPath)
 		})
 	},
 }

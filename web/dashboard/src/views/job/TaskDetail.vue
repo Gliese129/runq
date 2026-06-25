@@ -84,7 +84,7 @@
           <v-btn
             v-if="task.wandb_run_id"
             size="x-small" variant="text" class="mr-2"
-            :href="`https://wandb.ai/runs/${task.wandb_run_id}`" target="_blank"
+            :href="wandbRunURL(task.wandb_run_id)" target="_blank"
             @click.stop
           >
             <v-icon start size="14">mdi-open-in-new</v-icon> W&B
@@ -304,6 +304,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { tasksApi } from '@/apis/tasks'
+import { jobsApi } from '@/apis/jobs'
 import { useSnackbar } from '@/composables/useSnackbar'
 import { useConfigStore } from '@/stores/config'
 import { useLogViewerStore } from '@/stores/logViewer'
@@ -342,6 +343,20 @@ const logContainer = ref<HTMLElement>()
 
 const metricPoints = ref<any[]>([])
 const openPanels = ref(['params', 'metrics', 'log'])
+
+// W&B link: fetch base_url from job detail to avoid hardcoding wandb.ai.
+const wandbBaseUrl = ref('https://wandb.ai')
+async function fetchWandbInfo() {
+  try {
+    const detail = await jobsApi.get(props.jobId)
+    if (detail.wandb?.base_url) {
+      wandbBaseUrl.value = detail.wandb.base_url
+    }
+  } catch { /* best effort */ }
+}
+function wandbRunURL(runId: string): string {
+  return `${wandbBaseUrl.value}/runs/${runId}`
+}
 
 // ── Shared log surface (pipeline, fold state, search) — see useLogSurface ──
 const {
@@ -499,6 +514,7 @@ function formatBytes(b: number): string {
 }
 
 onMounted(async () => {
+  fetchWandbInfo() // fire-and-forget — best effort, doesn't block render
   await fetchTask()
   await Promise.all([fetchLog(), fetchMetrics()])
   if (isActive.value) {

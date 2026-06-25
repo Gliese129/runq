@@ -10,10 +10,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/gliese129/runq/internal/config"
 	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/project"
-	"github.com/gliese129/runq/internal/resource"
 	"github.com/gliese129/runq/internal/store"
 )
 
@@ -107,7 +105,7 @@ func (b *DaemonBackend) GetJob(ctx context.Context, jobID string) (*JobDetail, e
 		return nil, err
 	}
 	if detail.Job.ID == "" {
-		return nil, fmt.Errorf("job %q not found", jobID)
+		return nil, fmt.Errorf("job %q: %w", jobID, ErrNotFound)
 	}
 	return &detail, nil
 }
@@ -121,25 +119,21 @@ func (b *DaemonBackend) CompareMetrics(ctx context.Context, jobID, key string, d
 }
 
 func (b *DaemonBackend) GPUStatus(ctx context.Context) ([]GPUSlot, error) {
-	var gpus []resource.GPUState
+	// The daemon's /api/gpu endpoint now returns job_id alongside task_id,
+	// so no extra per-task HTTP lookups are needed (fixed N+1).
+	type enrichedGPU struct {
+		Index    int    `json:"index"`
+		Name     string `json:"name"`
+		MemTotal int    `json:"mem_total"`
+		MemFree  int    `json:"mem_free"`
+		UtilPct  int    `json:"util_pct"`
+		TaskID   string `json:"task_id"`
+		JobID    string `json:"job_id"`
+	}
+	var gpus []enrichedGPU
 	if err := b.do(ctx, "GET", "/api/gpu", nil, &gpus); err != nil {
 		return nil, err
 	}
-
-	// Build taskID→jobID lookup for occupied GPUs. Best-effort: a failed
-	// task lookup just leaves JobID empty (same as before this fix).
-	jobOf := make(map[string]string)
-	for _, gpu := range gpus {
-		if gpu.TaskID != "" {
-			if _, seen := jobOf[gpu.TaskID]; !seen {
-				var task store.TaskRow
-				if err := b.do(ctx, "GET", "/api/tasks/"+gpu.TaskID, nil, &task); err == nil {
-					jobOf[gpu.TaskID] = task.JobID
-				}
-			}
-		}
-	}
-
 	out := make([]GPUSlot, 0, len(gpus))
 	for _, gpu := range gpus {
 		out = append(out, GPUSlot{
@@ -149,19 +143,19 @@ func (b *DaemonBackend) GPUStatus(ctx context.Context) ([]GPUSlot, error) {
 			MemUsedMB:   gpu.MemTotal - gpu.MemFree,
 			UtilPercent: gpu.UtilPct,
 			TaskID:      gpu.TaskID,
-			JobID:       jobOf[gpu.TaskID],
+			JobID:       gpu.JobID,
 		})
 	}
 	return out, nil
 }
 
-func (b *DaemonBackend) GetTask(ctx context.Context, taskID string) (*TaskView, string, error) {
+func (b *DaemonBackend) GetTask(ctx context.Context, taskID string) (*TaskView, error) {
 	var task store.TaskRow
 	if err := b.do(ctx, "GET", "/api/tasks/"+taskID, nil, &task); err != nil {
-		return nil, "", err
+		return nil, err
 	}
 	view := BuildTaskView(task)
-	return &view, task.LogPath, nil
+	return &view, nil
 }
 
 func (b *DaemonBackend) TaskMetrics(ctx context.Context, taskID string) ([]MetricPoint, error) {
@@ -221,25 +215,9 @@ func (b *DaemonBackend) PreviewSubmit(_ context.Context, _ job.JobConfig, _ bool
 }
 
 func (b *DaemonBackend) DryRun(ctx context.Context, cfg job.JobConfig) (*DryRunResult, error) {
-	tasks, err := job.Expand(&cfg)
-	if err != nil {
-		return nil, err
-	}
-	result := &DryRunResult{Tasks: tasks}
-	// Best-effort command preview and workspace root.
-	if cfg.Project != "" && len(tasks) > 0 {
-		if proj, perr := b.GetProject(ctx, cfg.Project); perr == nil {
-			if proj.CmdTemplate != "" {
-				if cmd, rerr := job.Render(proj.CmdTemplate, tasks[0]); rerr == nil {
-					result.SampleCommand = cmd
-				}
-			}
-			if storageCfg, cerr := config.Load(); cerr == nil {
-				result.WorkspaceRoot = config.ProspectiveRoot(storageCfg, proj.WorkingDir, proj.ProjectName)
-			}
-		}
-	}
-	return result, nil
+	return buildDryRunResult(cfg, func(name string) (*project.Config, error) {
+		return b.GetProject(ctx, name)
+	})
 }
 
 // ResolveNote goes over the socket — the daemon owns the store, and the

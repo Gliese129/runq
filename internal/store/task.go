@@ -304,6 +304,66 @@ func (s *Store) ListTasks(ctx context.Context, filter TaskFilter) ([]TaskRow, er
 	return result, rows.Err()
 }
 
+// ListTasksForJobs returns tasks belonging to the given job IDs.
+// Returns nil, nil for an empty input slice.
+func (s *Store) ListTasksForJobs(ctx context.Context, jobIDs []string) ([]TaskRow, error) {
+	if len(jobIDs) == 0 {
+		return nil, nil
+	}
+	placeholders := make([]string, len(jobIDs))
+	args := make([]any, len(jobIDs))
+	for i, id := range jobIDs {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	query := fmt.Sprintf("SELECT %s FROM tasks WHERE job_id IN (%s) ORDER BY enqueued_at ASC",
+		allTaskColumns, strings.Join(placeholders, ","))
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []TaskRow
+	for rows.Next() {
+		t, err := scanTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, *t)
+	}
+	return result, rows.Err()
+}
+
+// GetJobIDsForTasks returns a taskID→jobID map for the given task IDs.
+// Unknown task IDs are silently omitted from the result.
+func (s *Store) GetJobIDsForTasks(ctx context.Context, taskIDs []string) (map[string]string, error) {
+	if len(taskIDs) == 0 {
+		return nil, nil
+	}
+	placeholders := make([]string, len(taskIDs))
+	args := make([]any, len(taskIDs))
+	for i, id := range taskIDs {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	query := fmt.Sprintf("SELECT id, job_id FROM tasks WHERE id IN (%s)",
+		strings.Join(placeholders, ","))
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make(map[string]string, len(taskIDs))
+	for rows.Next() {
+		var taskID, jobID string
+		if err := rows.Scan(&taskID, &jobID); err != nil {
+			return nil, err
+		}
+		result[taskID] = jobID
+	}
+	return result, rows.Err()
+}
+
 // ListActiveTasks returns all pending or running tasks, ordered by enqueue time.
 // Called at daemon startup to rebuild the in-memory Queue.
 func (s *Store) ListActiveTasks(ctx context.Context) ([]TaskRow, error) {

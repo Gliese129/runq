@@ -68,6 +68,9 @@ type TaskView struct {
 	// queue/partition name. Only populated in poll-model backends.
 	NativeState string `json:"native_state,omitempty"`
 	Queue       string `json:"queue,omitempty"`
+	// LogPath is the filesystem path to the task's log file. Omitted from
+	// JSON list responses; populated by GetTask for log-streaming endpoints.
+	LogPath string `json:"log_path,omitempty"`
 }
 
 type MetricPoint struct {
@@ -143,16 +146,16 @@ type Capabilities struct {
 // when combined with other selectors.
 type CleanOptions struct {
 	// Selectors — at least one must be true/non-empty.
-	Orphan   bool   // detect tasks whose taskDir is missing (on-demand os.Stat)
-	Archived bool   // tasks belonging to archived jobs
-	JobID    string // specific job
-	TaskID   string // specific task
+	Orphan   bool   `json:"orphan"`   // detect tasks whose taskDir is missing (on-demand os.Stat)
+	Archived bool   `json:"archived"` // tasks belonging to archived jobs
+	JobID    string `json:"job_id"`   // specific job
+	TaskID   string `json:"task_id"`  // specific task
 	// Time filter — optional when other selectors are present.
-	OlderThan *time.Time // only tasks finished before this time
+	OlderThan *time.Time `json:"older_than,omitempty"` // only tasks finished before this time
 	// Partial cleanup: only delete checkpoints/, keep DB + other artifacts.
-	CkptOnly bool
+	CkptOnly bool `json:"ckpt_only"`
 	// DryRun: preview what would be cleaned without deleting.
-	DryRun bool
+	DryRun bool `json:"dry_run"`
 }
 
 // CleanResult reports what Clean did (or would do in dry-run mode).
@@ -177,7 +180,7 @@ type CleanPreviewItem struct {
 	TaskID     string      `json:"task_id"`
 	JobID      string      `json:"job_id"`
 	Status     string      `json:"status"`
-	FinishedAt *time.Time  `json:"finished_at,omitempty"`
+	FinishedAt *int64      `json:"finished_at,omitempty"`
 	TaskDir    string      `json:"task_dir,omitempty"`
 	Reason     string      `json:"reason"` // why selected: orphan / archived / job / task / older-than
 	Action     CleanAction `json:"action"` // what will be cleaned

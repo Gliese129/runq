@@ -159,7 +159,7 @@ func printCleanPreview(items []backend.CleanPreviewItem) {
 		}
 		finished := ""
 		if p.FinishedAt != nil {
-			finished = " finished=" + p.FinishedAt.Format("2006-01-02 15:04")
+			finished = " finished=" + time.Unix(*p.FinishedAt, 0).Format("2006-01-02 15:04")
 		}
 		fmt.Printf("  %s  %-8s  (%s)%s  reason=%s%s\n",
 			p.TaskID[:min(8, len(p.TaskID))], p.Status, detail, orphanTag, p.Reason, finished)

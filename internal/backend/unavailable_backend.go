@@ -47,8 +47,8 @@ func (b *UnavailableBackend) GPUStatus(ctx context.Context) ([]GPUSlot, error) {
 	return nil, b.wrap()
 }
 
-func (b *UnavailableBackend) GetTask(ctx context.Context, taskID string) (*TaskView, string, error) {
-	return nil, "", b.wrap()
+func (b *UnavailableBackend) GetTask(ctx context.Context, taskID string) (*TaskView, error) {
+	return nil, b.wrap()
 }
 
 func (b *UnavailableBackend) TaskMetrics(ctx context.Context, taskID string) ([]MetricPoint, error) {
