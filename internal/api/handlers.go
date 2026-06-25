@@ -39,7 +39,6 @@ func (s *Server) registerRoutes() {
 		projects.GET("/summaries", s.handleProjectSummaries)
 		projects.POST("/:name/archive", s.handleProjectArchive)
 		projects.POST("/:name/unarchive", s.handleProjectUnarchive)
-		projects.DELETE("/:name", s.handleProjectDelete)
 	}
 
 	// Job
@@ -178,14 +177,6 @@ func (s *Server) handleProjectRename(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"message": fmt.Sprintf("project %q renamed to %q", oldName, body.NewName)})
-}
-
-func (s *Server) handleProjectDelete(c *gin.Context) {
-	if err := s.deps.Registry.Remove(c.Request.Context(), c.Param("name")); err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"message": fmt.Sprintf("project %q removed", c.Param("name"))})
 }
 
 // ── Job handlers (delegate to JobService) ──
@@ -538,27 +529,43 @@ func (s *Server) handleStatus(c *gin.Context) {
 }
 
 func (s *Server) handleClean(c *gin.Context) {
-	cutoffStr := c.Query("cutoff")
-	cutoffUnix, err := strconv.ParseInt(cutoffStr, 10, 64)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid or missing cutoff timestamp"})
-		return
+	opts := backend.CleanOptions{
+		DryRun:   c.Query("dry_run") == "true",
+		Orphan:   c.Query("orphan") == "true",
+		Archived: c.Query("archived") == "true",
+		JobID:    c.Query("job"),
+		TaskID:   c.Query("task"),
+		CkptOnly: c.Query("ckpt_only") == "true",
 	}
-	// Sanity: cutoff must be in the past (not the future) and no earlier
-	// than 2020-01-01 (protects against accidental epoch-zero wipes).
-	now := time.Now().Unix()
-	const minCutoff = 1577836800 // 2020-01-01 00:00:00 UTC
-	if cutoffUnix > now {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "cutoff must be in the past"})
-		return
-	}
-	if cutoffUnix < minCutoff {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "cutoff too far in the past (before 2020)"})
-		return
-	}
-	dryRun := c.Query("dry_run") == "true"
 
-	result, err := backend.PerformClean(c.Request.Context(), s.deps.Store, time.Unix(cutoffUnix, 0), dryRun)
+	if cutoffStr := c.Query("cutoff"); cutoffStr != "" {
+		cutoffUnix, err := strconv.ParseInt(cutoffStr, 10, 64)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid cutoff timestamp"})
+			return
+		}
+		// Sanity: cutoff must be in the past and no earlier than 2020-01-01.
+		now := time.Now().Unix()
+		const minCutoff = 1577836800 // 2020-01-01 00:00:00 UTC
+		if cutoffUnix > now {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "cutoff must be in the past"})
+			return
+		}
+		if cutoffUnix < minCutoff {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "cutoff too far in the past (before 2020)"})
+			return
+		}
+		t := time.Unix(cutoffUnix, 0)
+		opts.OlderThan = &t
+	}
+
+	// At least one selector must be present.
+	if !opts.Orphan && !opts.Archived && opts.JobID == "" && opts.TaskID == "" && opts.OlderThan == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "at least one selector required (cutoff, orphan, archived, job, task)"})
+		return
+	}
+
+	result, err := backend.PerformClean(c.Request.Context(), s.deps.Store, opts)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

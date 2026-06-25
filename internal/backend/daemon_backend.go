@@ -262,15 +262,28 @@ func (b *DaemonBackend) UpdateProject(ctx context.Context, cfg project.Config) e
 	return b.do(ctx, "PUT", "/api/projects/"+url.PathEscape(cfg.ProjectName), cfg, nil)
 }
 
-func (b *DaemonBackend) DeleteJob(ctx context.Context, jobID string) error {
-	return b.do(ctx, "DELETE", "/api/jobs/"+url.PathEscape(jobID)+"/data", nil, nil)
-}
-
-func (b *DaemonBackend) CleanOldTasks(ctx context.Context, cutoff time.Time, dryRun bool) (*CleanResult, error) {
+func (b *DaemonBackend) Clean(ctx context.Context, opts CleanOptions) (*CleanResult, error) {
 	q := url.Values{}
-	q.Set("cutoff", strconv.FormatInt(cutoff.Unix(), 10))
-	if dryRun {
+	if opts.OlderThan != nil {
+		q.Set("cutoff", strconv.FormatInt(opts.OlderThan.Unix(), 10))
+	}
+	if opts.DryRun {
 		q.Set("dry_run", "true")
+	}
+	if opts.Orphan {
+		q.Set("orphan", "true")
+	}
+	if opts.Archived {
+		q.Set("archived", "true")
+	}
+	if opts.JobID != "" {
+		q.Set("job", opts.JobID)
+	}
+	if opts.TaskID != "" {
+		q.Set("task", opts.TaskID)
+	}
+	if opts.CkptOnly {
+		q.Set("ckpt_only", "true")
 	}
 	var result CleanResult
 	if err := b.do(ctx, "POST", "/api/clean?"+q.Encode(), nil, &result); err != nil {
@@ -290,10 +303,6 @@ func (b *DaemonBackend) ThawTasks(ctx context.Context, owner int, force bool) (*
 		return nil, err
 	}
 	return &result, nil
-}
-
-func (b *DaemonBackend) DeleteProject(ctx context.Context, name string) error {
-	return b.do(ctx, "DELETE", "/api/projects/"+url.PathEscape(name), nil, nil)
 }
 
 func (b *DaemonBackend) RenameProject(ctx context.Context, oldName, newName string) error {

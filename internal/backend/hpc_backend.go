@@ -3,9 +3,6 @@ package backend
 import (
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/gliese129/runq/internal/config"
@@ -329,11 +326,6 @@ func (b *HPCBackend) UpdateProject(ctx context.Context, cfg project.Config) erro
 	return reg.Update(ctx, cfg)
 }
 
-func (b *HPCBackend) DeleteProject(ctx context.Context, name string) error {
-	reg := project.NewRegistry(b.store.DB())
-	return reg.Remove(ctx, name)
-}
-
 func (b *HPCBackend) RenameProject(ctx context.Context, oldName, newName string) error {
 	reg := project.NewRegistry(b.store.DB())
 	return reg.Rename(ctx, oldName, newName)
@@ -362,94 +354,12 @@ func (b *HPCBackend) MatchProjects(ctx context.Context, dir string) ([]ProjectSu
 	return b.configsToSummaries(ctx, configs)
 }
 
-func (b *HPCBackend) DeleteJob(ctx context.Context, jobID string) error {
-	j, err := b.store.GetJob(ctx, jobID)
-	if err != nil {
-		return err
-	}
-	if j == nil {
-		return fmt.Errorf("job %q not found", jobID)
-	}
-	if j.Status != "done" {
-		return fmt.Errorf("job %q is %s, only completed jobs can be deleted (kill it first?)", jobID, j.Status)
-	}
-	return b.store.DeleteJob(ctx, jobID)
-}
-
-func (b *HPCBackend) CleanOldTasks(ctx context.Context, cutoff time.Time, dryRun bool) (*CleanResult, error) {
-	return PerformClean(ctx, b.store, cutoff, dryRun)
+func (b *HPCBackend) Clean(ctx context.Context, opts CleanOptions) (*CleanResult, error) {
+	return PerformClean(ctx, b.store, opts)
 }
 
 func (b *HPCBackend) ThawTasks(_ context.Context, _ int, _ bool) (*ThawResponse, error) {
 	return nil, fmt.Errorf("thaw in HPC mode: %w", ErrNotSupported)
-}
-
-// PerformClean removes finished tasks older than cutoff and cleans their
-// on-disk artifacts. If dryRun is true it returns a preview without deleting.
-// Exported so the daemon API handler can reuse the same logic.
-func PerformClean(ctx context.Context, st *store.Store, cutoff time.Time, dryRun bool) (*CleanResult, error) {
-	tasks, err := st.ListFinishedTasksBefore(ctx, cutoff)
-	if err != nil {
-		return nil, fmt.Errorf("query tasks: %w", err)
-	}
-
-	if dryRun {
-		preview := make([]CleanPreviewItem, 0, len(tasks))
-		for _, t := range tasks {
-			preview = append(preview, CleanPreviewItem{
-				TaskID:     t.ID,
-				Status:     t.Status,
-				FinishedAt: t.FinishedAt,
-				TaskDir:    t.TaskDir,
-			})
-		}
-		return &CleanResult{Preview: preview}, nil
-	}
-
-	var deletedTasks int
-	var freedBytes int64
-	for _, t := range tasks {
-		freedBytes += cleanTaskArtifacts(t)
-		if err := st.DeleteTask(ctx, t.ID); err != nil {
-			continue
-		}
-		deletedTasks++
-	}
-
-	deletedJobs, _ := st.DeleteOrphanJobs(ctx)
-
-	return &CleanResult{
-		Tasks:      deletedTasks,
-		Jobs:       int(deletedJobs),
-		FreedBytes: freedBytes,
-	}, nil
-}
-
-// cleanTaskArtifacts removes the task's workspace directory and log file.
-func cleanTaskArtifacts(t store.TaskRow) int64 {
-	var freed int64
-	if t.TaskDir != "" {
-		freed += dirSize(t.TaskDir)
-		os.RemoveAll(t.TaskDir)
-	}
-	if t.LogPath != "" && (t.TaskDir == "" || !strings.HasPrefix(t.LogPath, t.TaskDir)) {
-		if info, err := os.Stat(t.LogPath); err == nil {
-			freed += info.Size()
-			os.Remove(t.LogPath)
-		}
-	}
-	return freed
-}
-
-func dirSize(dir string) int64 {
-	var total int64
-	filepath.Walk(dir, func(_ string, info os.FileInfo, err error) error {
-		if err == nil && !info.IsDir() {
-			total += info.Size()
-		}
-		return nil
-	})
-	return total
 }
 
 func (b *HPCBackend) configsToSummaries(ctx context.Context, configs []project.Config) ([]ProjectSummary, error) {

@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log"
+	"os"
 	"strings"
 	"time"
 )
@@ -58,6 +60,10 @@ type TaskRow struct {
 	// Phase 2D: scheduler queue (Slurm partition, PBS/SGE queue). Captured
 	// from probe output when available.
 	Queue string
+
+	// Phase 2F: orphan detection — set when os.Stat(taskDir) returns ENOENT
+	// during reconcile. Cleared (self-healing) if the directory reappears.
+	OrphanAt *time.Time
 }
 
 // TaskFilter holds optional filter criteria for ListTasks.
@@ -74,7 +80,7 @@ const allTaskColumns = `id, job_id, project_name, command, params_json,
 	pid, start_time, log_path, working_dir, env_json,
 	resumable, extra_args, uid, timeout,
 	enqueued_at, started_at, finished_at, task_dir, external_id, status_source,
-	native_state, queue`
+	native_state, queue, orphan_at`
 
 // scanTask reads one result row into a TaskRow.
 // Column order must match allTaskColumns.
@@ -99,6 +105,7 @@ func scanTask(scanner interface{ Scan(dest ...any) error }) (*TaskRow, error) {
 		statusSource sql.NullString
 		nativeState  sql.NullString
 		queue        sql.NullString
+		orphanAt     sql.NullInt64
 	)
 
 	err := scanner.Scan(
@@ -107,7 +114,7 @@ func scanTask(scanner interface{ Scan(dest ...any) error }) (*TaskRow, error) {
 		&pid, &startTime, &logPath, &workingDir, &envJSON,
 		&resumable, &extraArgs, &uid, &timeout, &enqueuedAt, &startedAt, &finishedAt,
 		&taskDir, &externalID, &statusSource,
-		&nativeState, &queue,
+		&nativeState, &queue, &orphanAt,
 	)
 	if err != nil {
 		return nil, err
@@ -131,6 +138,7 @@ func scanTask(scanner interface{ Scan(dest ...any) error }) (*TaskRow, error) {
 	t.StatusSource = statusSource.String
 	t.NativeState = nativeState.String
 	t.Queue = queue.String
+	t.OrphanAt = unixToNullTime(orphanAt)
 
 	return &t, nil
 }
@@ -143,8 +151,8 @@ func (s *Store) InsertTask(ctx context.Context, t *TaskRow) error {
 		pid, start_time, log_path, working_dir, env_json,
 		resumable, extra_args, uid, timeout,
 		enqueued_at, started_at, finished_at, task_dir, external_id, status_source,
-		native_state, queue
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+		native_state, queue, orphan_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	resumable := 0
 	if t.Resumable {
@@ -160,7 +168,7 @@ func (s *Store) InsertTask(ctx context.Context, t *TaskRow) error {
 		t.EnqueuedAt.Unix(),
 		nullTimeToUnix(t.StartedAt), nullTimeToUnix(t.FinishedAt),
 		nullString(t.TaskDir), nullString(t.ExternalID), nullString(t.StatusSource),
-		nullString(t.NativeState), nullString(t.Queue),
+		nullString(t.NativeState), nullString(t.Queue), nullTimeToUnix(t.OrphanAt),
 	)
 	return err
 }
@@ -173,8 +181,8 @@ func (s *Store) InsertTaskTx(ctx context.Context, tx *sql.Tx, t *TaskRow) error 
 		pid, start_time, log_path, working_dir, env_json,
 		resumable, extra_args, uid, timeout,
 		enqueued_at, started_at, finished_at, task_dir, external_id, status_source,
-		native_state, queue
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+		native_state, queue, orphan_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	resumable := 0
 	if t.Resumable {
@@ -190,7 +198,7 @@ func (s *Store) InsertTaskTx(ctx context.Context, tx *sql.Tx, t *TaskRow) error 
 		t.EnqueuedAt.Unix(),
 		nullTimeToUnix(t.StartedAt), nullTimeToUnix(t.FinishedAt),
 		nullString(t.TaskDir), nullString(t.ExternalID), nullString(t.StatusSource),
-		nullString(t.NativeState), nullString(t.Queue),
+		nullString(t.NativeState), nullString(t.Queue), nullTimeToUnix(t.OrphanAt),
 	)
 	return err
 }
@@ -213,6 +221,7 @@ var allowedStatusFields = map[string]bool{
 	"extra_args":    true,
 	"native_state":  true,
 	"queue":         true,
+	"orphan_at":     true,
 }
 
 // UpdateTaskStatus updates a task's status and any extra fields.
@@ -386,6 +395,109 @@ func (s *Store) ListFinishedTasksBefore(ctx context.Context, cutoff time.Time) (
 func (s *Store) DeleteTask(ctx context.Context, taskID string) error {
 	_, err := s.db.ExecContext(ctx, "DELETE FROM tasks WHERE id = ?", taskID)
 	return err
+}
+
+// ListOrphanTasks returns tasks with orphan_at set (task dir missing from disk).
+func (s *Store) ListOrphanTasks(ctx context.Context) ([]TaskRow, error) {
+	query := fmt.Sprintf(
+		"SELECT %s FROM tasks WHERE orphan_at IS NOT NULL ORDER BY orphan_at ASC",
+		allTaskColumns)
+	rows, err := s.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []TaskRow
+	for rows.Next() {
+		t, err := scanTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, *t)
+	}
+	return result, rows.Err()
+}
+
+// MarkTaskOrphan sets orphan_at to now if not already set.
+func (s *Store) MarkTaskOrphan(ctx context.Context, taskID string) error {
+	_, err := s.db.ExecContext(ctx,
+		"UPDATE tasks SET orphan_at = ? WHERE id = ? AND orphan_at IS NULL",
+		time.Now().Unix(), taskID)
+	return err
+}
+
+// ClearTaskOrphan clears orphan_at (self-healing: files reappeared).
+func (s *Store) ClearTaskOrphan(ctx context.Context, taskID string) error {
+	_, err := s.db.ExecContext(ctx,
+		"UPDATE tasks SET orphan_at = NULL WHERE id = ? AND orphan_at IS NOT NULL",
+		taskID)
+	return err
+}
+
+// DetectOrphans checks os.Stat(TaskDir) for each task. Marks missing dirs
+// as orphan; clears orphan_at if the dir reappears (self-healing).
+// Only checks tasks with a non-empty TaskDir.
+func (s *Store) DetectOrphans(ctx context.Context, tasks []TaskRow) {
+	for _, tk := range tasks {
+		if tk.TaskDir == "" {
+			continue
+		}
+		_, err := os.Stat(tk.TaskDir)
+		switch {
+		case err != nil && os.IsNotExist(err) && tk.OrphanAt == nil:
+			if merr := s.MarkTaskOrphan(ctx, tk.ID); merr != nil {
+				log.Printf("detectOrphans: mark %s orphan: %v", tk.ID, merr)
+			}
+		case err == nil && tk.OrphanAt != nil:
+			if merr := s.ClearTaskOrphan(ctx, tk.ID); merr != nil {
+				log.Printf("detectOrphans: clear %s orphan: %v", tk.ID, merr)
+			}
+		}
+	}
+}
+
+// ListArchivedTasks returns tasks belonging to archived jobs.
+func (s *Store) ListArchivedTasks(ctx context.Context) ([]TaskRow, error) {
+	query := fmt.Sprintf(
+		`SELECT %s FROM tasks WHERE job_id IN (
+			SELECT id FROM jobs WHERE archived_at IS NOT NULL
+		) ORDER BY enqueued_at ASC`, allTaskColumns)
+	rows, err := s.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []TaskRow
+	for rows.Next() {
+		t, err := scanTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, *t)
+	}
+	return result, rows.Err()
+}
+
+// ListFinishedTasks returns all tasks in terminal states (no time filter).
+func (s *Store) ListFinishedTasks(ctx context.Context) ([]TaskRow, error) {
+	query := fmt.Sprintf(
+		`SELECT %s FROM tasks
+		 WHERE status IN ('success', 'failed', 'killed')
+		 ORDER BY finished_at ASC`, allTaskColumns)
+	rows, err := s.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []TaskRow
+	for rows.Next() {
+		t, err := scanTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, *t)
+	}
+	return result, rows.Err()
 }
 
 // DeleteOrphanJobs removes jobs in "done" status that have no remaining tasks.

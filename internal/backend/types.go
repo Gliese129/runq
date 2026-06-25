@@ -68,6 +68,9 @@ type TaskView struct {
 	// queue/partition name. Only populated in poll-model backends.
 	NativeState string `json:"native_state,omitempty"`
 	Queue       string `json:"queue,omitempty"`
+	// Phase 2F: orphan detection timestamp (Unix seconds). Non-nil when the
+	// task's workspace directory was missing at the last reconcile pass.
+	OrphanAt *int64 `json:"orphan_at,omitempty"`
 }
 
 type MetricPoint struct {
@@ -138,7 +141,24 @@ type Capabilities struct {
 	LogSearch       bool `json:"log_search"`
 }
 
-// CleanResult reports what CleanOldTasks did (or would do in dry-run mode).
+// CleanOptions controls which tasks the clean command targets.
+// At least one selector must be set; --older-than acts as an additional filter
+// when combined with other selectors.
+type CleanOptions struct {
+	// Selectors — at least one must be true/non-empty.
+	Orphan   bool   // tasks with orphan_at set (taskDir missing)
+	Archived bool   // tasks belonging to archived jobs
+	JobID    string // specific job
+	TaskID   string // specific task
+	// Time filter — optional when other selectors are present.
+	OlderThan *time.Time // only tasks finished before this time
+	// Partial cleanup: only delete checkpoints/, keep DB + other artifacts.
+	CkptOnly bool
+	// DryRun: preview what would be cleaned without deleting.
+	DryRun bool
+}
+
+// CleanResult reports what Clean did (or would do in dry-run mode).
 type CleanResult struct {
 	Tasks      int                `json:"tasks"`
 	Jobs       int                `json:"jobs"`
@@ -146,11 +166,25 @@ type CleanResult struct {
 	Preview    []CleanPreviewItem `json:"preview,omitempty"` // populated only in dry-run
 }
 
+// CleanAction describes what kind of cleanup will happen for a task.
+type CleanAction string
+
+const (
+	CleanActionAll    CleanAction = "all"     // delete DB record + all files
+	CleanActionDBOnly CleanAction = "db_only" // delete DB record (no files on disk)
+	CleanActionCkpt   CleanAction = "ckpt"    // delete checkpoints/ only
+	CleanActionCkptDB CleanAction = "no_ckpt" // ckpt-only requested but no checkpoints/ dir
+)
+
 type CleanPreviewItem struct {
-	TaskID     string     `json:"task_id"`
-	Status     string     `json:"status"`
-	FinishedAt *time.Time `json:"finished_at,omitempty"`
-	TaskDir    string     `json:"task_dir,omitempty"`
+	TaskID     string      `json:"task_id"`
+	JobID      string      `json:"job_id"`
+	Status     string      `json:"status"`
+	FinishedAt *time.Time  `json:"finished_at,omitempty"`
+	TaskDir    string      `json:"task_dir,omitempty"`
+	Reason     string      `json:"reason"` // why selected: orphan / archived / job / task / older-than
+	Action     CleanAction `json:"action"` // what will be cleaned
+	Orphan     bool        `json:"orphan"` // true if orphan_at is set
 }
 
 // DryRunResult is what DryRun returns: expanded tasks plus best-effort

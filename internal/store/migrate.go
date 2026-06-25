@@ -73,6 +73,11 @@ func (s *Store) addMissingColumns(ctx context.Context) error {
 	if err := addColumnIfMissing(ctx, s.db, "tasks", "queue", "TEXT"); err != nil {
 		return fmt.Errorf("add tasks.queue: %w", err)
 	}
+	// Phase 2F: orphan detection — set when os.Stat(taskDir) returns ENOENT
+	// during reconcile; cleared (self-healing) if files reappear.
+	if err := addColumnIfMissing(ctx, s.db, "tasks", "orphan_at", "INTEGER"); err != nil {
+		return fmt.Errorf("add tasks.orphan_at: %w", err)
+	}
 	return nil
 }
 

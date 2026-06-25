@@ -51,6 +51,11 @@
           <div class="text-body-2 font-weight-medium">{{ task.queue || '—' }}</div>
         </v-col>
       </v-row>
+      <!-- Orphan warning -->
+      <v-alert v-if="task.orphan_at" type="warning" variant="tonal" density="compact" class="mt-2">
+        Workspace directory missing since {{ new Date(task.orphan_at * 1000).toLocaleString() }}.
+        This task's files are no longer on disk.
+      </v-alert>
     </v-card>
 
     <!-- Parameters / Metrics / Log -->

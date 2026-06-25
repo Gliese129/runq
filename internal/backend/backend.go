@@ -64,13 +64,10 @@ type Backend interface {
 	// scan needs the backend's store) — submit's code path, never a frontend
 	// simulation.
 	ResolveNote(ctx context.Context, cfg job.JobConfig) (string, error)
-	// DeleteJob removes a completed job from the DB (data + task records).
-	// Not the same as KillJob (which stops a running job).
-	DeleteJob(ctx context.Context, jobID string) error
-	// CleanOldTasks removes finished tasks older than cutoff and their
-	// on-disk artifacts. dryRun=true returns what would be cleaned without
+	// Clean removes tasks matching the given selectors and their on-disk
+	// artifacts. opts.DryRun=true returns what would be cleaned without
 	// deleting. Backends without local storage return ErrNotSupported.
-	CleanOldTasks(ctx context.Context, cutoff time.Time, dryRun bool) (*CleanResult, error)
+	Clean(ctx context.Context, opts CleanOptions) (*CleanResult, error)
 
 	// ThawTasks releases SDK-frozen (SIGSTOPped) tasks. owner scopes by
 	// UID; force bypasses the per-task disk safety check. Returns
@@ -82,7 +79,6 @@ type Backend interface {
 	MatchProjects(ctx context.Context, dir string) ([]ProjectSummary, error)
 	CreateProject(ctx context.Context, cfg project.Config) error
 	UpdateProject(ctx context.Context, cfg project.Config) error
-	DeleteProject(ctx context.Context, name string) error
 	RenameProject(ctx context.Context, oldName, newName string) error
 }
 
@@ -178,6 +174,10 @@ func BuildTaskView(task store.TaskRow) TaskView {
 		StatusSource: task.StatusSource,
 		NativeState:  task.NativeState,
 		Queue:        task.Queue,
+	}
+	if task.OrphanAt != nil {
+		ts := task.OrphanAt.Unix()
+		view.OrphanAt = &ts
 	}
 	if task.StartedAt != nil {
 		sec := task.StartedAt.Unix()
@@ -422,33 +422,6 @@ func numericFloat(value any) (float64, bool) {
 	default:
 		return 0, false
 	}
-}
-
-func refreshStoreJobStatus(ctx context.Context, st *store.Store, jobID string) error {
-	tasks, err := st.ListTasks(ctx, store.TaskFilter{JobID: jobID})
-	if err != nil {
-		return err
-	}
-	var pending, running int
-	var started bool
-	for _, task := range tasks {
-		switch task.Status {
-		case "pending":
-			pending++
-		case "running":
-			running++
-			started = true
-		case "success", "failed", "killed":
-			started = true
-		}
-	}
-	status := "pending"
-	if pending+running == 0 {
-		status = "done"
-	} else if started {
-		status = "running"
-	}
-	return st.UpdateJobStatus(ctx, jobID, status)
 }
 
 // readMetricPoints reads metrics.jsonl and returns all metric points (excluding internal keys).

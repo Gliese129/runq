@@ -3,7 +3,6 @@ package backend
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/project"
@@ -120,19 +119,11 @@ func (b *UnavailableBackend) UpdateProject(ctx context.Context, cfg project.Conf
 	return b.wrap()
 }
 
-func (b *UnavailableBackend) DeleteProject(ctx context.Context, name string) error {
-	return b.wrap()
-}
-
 func (b *UnavailableBackend) RenameProject(ctx context.Context, oldName, newName string) error {
 	return b.wrap()
 }
 
-func (b *UnavailableBackend) DeleteJob(ctx context.Context, jobID string) error {
-	return b.wrap()
-}
-
-func (b *UnavailableBackend) CleanOldTasks(ctx context.Context, cutoff time.Time, dryRun bool) (*CleanResult, error) {
+func (b *UnavailableBackend) Clean(ctx context.Context, opts CleanOptions) (*CleanResult, error) {
 	return nil, b.wrap()
 }
 

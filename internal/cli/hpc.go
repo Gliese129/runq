@@ -34,8 +34,7 @@ var hpcCmd = &cobra.Command{
     runq hpc submit job.yaml          Compile + submit every task
     runq hpc status <job_id>          Refresh from disk and show progress
     runq hpc kill <job_id|task_id>    Cancel via your kill template
-    runq hpc rm <job_id>              Remove a completed job from DB
-    runq hpc clean --older-than 7d    Delete old tasks, workspaces, and empty jobs`,
+    runq hpc clean --older-than 7d    Remove tasks matching selectors`,
 }
 
 var hpcInitCmd = &cobra.Command{
@@ -86,25 +85,30 @@ var hpcCollectCmd = &cobra.Command{
 	RunE:  runHPCCollect,
 }
 
-var hpcRmCmd = &cobra.Command{
-	Use:   "rm <job_id>",
-	Short: "Remove a completed job from the DB (does not delete files on disk)",
-	Args:  cobra.ExactArgs(1),
-	RunE:  runHPCRm,
-}
-
 var hpcCleanCmd = &cobra.Command{
 	Use:   "clean",
-	Short: "Remove finished tasks, their workspaces, and empty jobs older than a threshold",
-	Long: `Remove finished tasks (success/failed/killed), their task directories and
+	Short: "Remove tasks and their artifacts based on selectors",
+	Long: `Remove tasks matching the given selectors, their task directories and
 log files, and jobs that have no remaining tasks.
+
+Selectors (at least one required):
+  --older-than <dur>   Tasks finished before this threshold
+  --orphan             Tasks whose workspace directory is missing (DB-only)
+  --archived           Tasks belonging to archived jobs
+  --job <id>           All tasks in a specific job
+  --task <id>          A specific task
+
+Modifiers:
+  --ckpt-only          Only delete checkpoints/ directory
+  --show               Preview what would be deleted
+  --yes                Skip confirmation prompt
 
 Duration format: additive segments like 7d, 1m2w, 2w3d4h
   h = hours, d = days, w = weeks (7d), m = months (30d), y = years (365d)
 
 Examples:
   runq hpc clean --older-than 7d        # older than 7 days
-  runq hpc clean --older-than 1m        # older than 30 days
+  runq hpc clean --orphan               # orphan tasks (no files)
   runq hpc clean --older-than 7d --show # preview what would be deleted`,
 	RunE: runHPCClean,
 }
@@ -122,11 +126,16 @@ func init() {
 		c.Flags().Bool("max", false, "rank by maximum instead of minimum")
 		c.Flags().Bool("json", false, "output raw JSON")
 	}
-	hpcCleanCmd.Flags().String("older-than", "", "Age threshold (required), e.g. 7d, 1m2w, 2w3d4h")
+	hpcCleanCmd.Flags().String("older-than", "", "Age threshold, e.g. 7d, 1m2w, 2w3d4h")
+	hpcCleanCmd.Flags().Bool("orphan", false, "Select orphan tasks (workspace directory missing)")
+	hpcCleanCmd.Flags().Bool("archived", false, "Select tasks from archived jobs")
+	hpcCleanCmd.Flags().String("job", "", "Select all tasks in a specific job")
+	hpcCleanCmd.Flags().String("task", "", "Select a specific task")
+	hpcCleanCmd.Flags().Bool("ckpt-only", false, "Only delete checkpoints/, keep other artifacts and DB records")
 	hpcCleanCmd.Flags().Bool("show", false, "Preview what would be deleted without actually deleting")
-	hpcCleanCmd.MarkFlagRequired("older-than")
+	hpcCleanCmd.Flags().BoolP("yes", "y", false, "Skip confirmation prompt")
 
-	hpcCmd.AddCommand(hpcInitCmd, hpcSubmitCmd, hpcStatusCmd, hpcKillCmd, hpcLsCmd, hpcBestCmd, hpcCollectCmd, hpcRmCmd, hpcCleanCmd)
+	hpcCmd.AddCommand(hpcInitCmd, hpcSubmitCmd, hpcStatusCmd, hpcKillCmd, hpcLsCmd, hpcBestCmd, hpcCollectCmd, hpcCleanCmd)
 	hpcCmd.GroupID = groupCore
 	rootCmd.AddCommand(hpcCmd)
 }
@@ -282,8 +291,12 @@ func runHPCStatus(cmd *cobra.Command, args []string) error {
 			if t.StartedAt != nil {
 				age = time.Since(time.Unix(*t.StartedAt, 0)).Truncate(time.Second).String()
 			}
+			status := utils.StatusColor(t.Status)
+			if t.OrphanAt != nil {
+				status += " [orphan]"
+			}
 			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-				utils.IDColor(t.ID), t.ExternalID, utils.StatusColor(t.Status),
+				utils.IDColor(t.ID), t.ExternalID, status,
 				t.NativeState, t.Queue, t.StatusSource, age)
 		}
 		w.Flush()
@@ -411,46 +424,43 @@ func runHPCCollect(cmd *cobra.Command, args []string) error {
 	})
 }
 
-func runHPCRm(cmd *cobra.Command, args []string) error {
-	return withHPCBackend(func(be backend.Backend) error {
-		if err := be.DeleteJob(context.Background(), args[0]); err != nil {
-			return err
-		}
-		fmt.Printf("removed job %s (DB records only; files on disk are untouched)\n", utils.IDColor(args[0]))
-		return nil
-	})
-}
-
 func runHPCClean(cmd *cobra.Command, args []string) error {
-	olderThan, _ := cmd.Flags().GetString("older-than")
-	showOnly, _ := cmd.Flags().GetBool("show")
-
-	dur, err := utils.ParseHumanDuration(olderThan)
+	opts, err := buildCleanOptions(cmd)
 	if err != nil {
 		return err
 	}
-	cutoff := time.Now().Add(-dur)
 
 	return withHPCBackend(func(be backend.Backend) error {
-		result, err := be.CleanOldTasks(context.Background(), cutoff, showOnly)
+		// Always preview first.
+		previewOpts := opts
+		previewOpts.DryRun = true
+		result, err := be.Clean(cmd.Context(), previewOpts)
 		if err != nil {
 			return err
 		}
 
-		if showOnly {
-			if len(result.Preview) == 0 {
-				fmt.Println("Nothing to clean.")
+		if len(result.Preview) == 0 {
+			fmt.Println("Nothing to clean.")
+			return nil
+		}
+
+		printCleanPreview(result.Preview)
+
+		if opts.DryRun {
+			return nil
+		}
+
+		yes, _ := cmd.Flags().GetBool("yes")
+		if !yes {
+			if !confirmClean(len(result.Preview)) {
+				fmt.Println("Aborted.")
 				return nil
 			}
-			fmt.Printf("Would clean %d tasks (finished before %s):\n", len(result.Preview), cutoff.Format("2006-01-02 15:04"))
-			for _, p := range result.Preview {
-				finished := ""
-				if p.FinishedAt != nil {
-					finished = p.FinishedAt.Format("2006-01-02 15:04")
-				}
-				fmt.Printf("  %s  %-8s  finished=%s  task_dir=%s\n", p.TaskID, p.Status, finished, p.TaskDir)
-			}
-			return nil
+		}
+
+		result, err = be.Clean(cmd.Context(), opts)
+		if err != nil {
+			return err
 		}
 
 		fmt.Printf("Cleaned %d tasks, %d jobs", result.Tasks, result.Jobs)

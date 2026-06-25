@@ -128,17 +128,7 @@ func TestProjectCRUD(t *testing.T) {
 		t.Error("Add with non-existent dir should fail")
 	}
 
-	// Delete
-	w = doRequest(s, "DELETE", "/api/projects/resnet50", nil)
-	if w.Code != http.StatusOK {
-		t.Fatalf("Delete: expected 200, got %d", w.Code)
-	}
-
-	// Verify deleted
-	w = doRequest(s, "GET", "/api/projects/resnet50", nil)
-	if w.Code != http.StatusNotFound {
-		t.Errorf("Get after delete: expected 404, got %d", w.Code)
-	}
+	// Delete endpoint removed in Phase 2F — use clean command instead.
 }
 
 func TestTaskListDefault(t *testing.T) {

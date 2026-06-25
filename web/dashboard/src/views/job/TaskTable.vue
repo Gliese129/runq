@@ -55,7 +55,7 @@
         <tbody>
           <tr
             v-for="task in sortedTasks" :key="task.id"
-            class="cursor-pointer"
+            :class="['cursor-pointer', { 'orphan-row': !!task.orphan_at }]"
             tabindex="0"
             role="link"
             :aria-label="t('a11y.open_task', { id: task.id.slice(0, 8) })"
@@ -63,7 +63,10 @@
             @keydown.enter="$emit('click-task', task.id)"
             @keydown.space.prevent="$emit('click-task', task.id)"
           >
-            <td><StatusDot :status="task.status" /></td>
+            <td>
+              <StatusDot :status="task.status" />
+              <v-chip v-if="task.orphan_at" size="x-small" color="grey" variant="outlined" class="ml-1">orphan</v-chip>
+            </td>
             <td><code>{{ task.id.slice(0, 8) }}</code></td>
             <td v-if="hasHPC" class="text-on-surface-variant"><code>{{ task.external_id || '—' }}</code></td>
             <td v-for="col in shownCols" :key="col" :class="paramColClass(col)">
@@ -228,4 +231,5 @@ function formatDuration(sec: number): string {
 <style scoped>
 .swept-col { color: rgb(var(--v-theme-primary)); font-weight: 500; }
 .metric-col { color: rgb(var(--v-theme-success)); font-weight: 500; }
+.orphan-row { opacity: 0.5; }
 </style>

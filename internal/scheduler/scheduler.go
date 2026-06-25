@@ -134,6 +134,13 @@ func (s *Scheduler) Start() {
 			s.autoThawLoop()
 		}()
 	}
+	if s.cfg.OrphanScanInterval > 0 {
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			s.orphanScanLoop()
+		}()
+	}
 	s.logger.Info("scheduler started",
 		"strategy", s.prioritizer.Name(),
 		"aging_threshold", s.cfg.AgingThreshold.String(),
@@ -203,6 +210,27 @@ func (s *Scheduler) autoThawLoop() {
 					"tasks", result.Thawed,
 					"still_blocked", len(result.Blocked))
 			}
+		}
+	}
+}
+
+// orphanScanLoop periodically scans all task dirs and marks/clears orphan_at.
+// Daemon-mode counterpart of the HPC reconcile-time orphan detection.
+func (s *Scheduler) orphanScanLoop() {
+	ticker := time.NewTicker(s.cfg.OrphanScanInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-ticker.C:
+			tasks, err := s.store.ListTasks(s.ctx, store.TaskFilter{})
+			if err != nil {
+				s.logger.Warn("orphanScan: list tasks", "err", err)
+				continue
+			}
+			s.store.DetectOrphans(s.ctx, tasks)
 		}
 	}
 }

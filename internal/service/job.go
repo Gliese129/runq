@@ -419,18 +419,3 @@ func (s *JobService) ResumeJob(ctx context.Context, jobID string) error {
 	s.Scheduler.RefreshJobStatus(jobID)
 	return nil
 }
-
-// RemoveJob deletes a completed job and its tasks from DB.
-func (s *JobService) RemoveJob(ctx context.Context, jobID string) error {
-	j, err := s.Store.GetJob(ctx, jobID)
-	if err != nil {
-		return err
-	}
-	if j == nil {
-		return fmt.Errorf("job %q not found", jobID)
-	}
-	if j.Status != "done" {
-		return fmt.Errorf("job %q is %s, only completed jobs can be removed", jobID, j.Status)
-	}
-	return s.Store.DeleteJob(ctx, jobID)
-}

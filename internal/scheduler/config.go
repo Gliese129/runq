@@ -31,6 +31,9 @@ type Config struct {
 	TickInterval       time.Duration // how often the scheduler loop runs
 	GPURefreshInterval time.Duration // how often to scan for external GPU usage (0 = disabled)
 
+	// Phase 2F: how often to scan task dirs for orphans (0 = disabled).
+	OrphanScanInterval time.Duration
+
 	// L2-C: disk-freeze tuning. autoThawLoop runs when freeze != nil (no
 	// separate enable flag — the auto-thaw goroutine is part of the
 	// freeze feature, not an opt-in extra).
@@ -44,6 +47,7 @@ func DefaultConfig() Config {
 		BackfillEnabled:    true,
 		TickInterval:       1 * time.Second,
 		GPURefreshInterval: 30 * time.Second,
+		OrphanScanInterval: 5 * time.Minute,
 		Disk: DiskConfig{
 			SafetyFactorPercent:   110, // 10% headroom over raw ckpt size
 			SafetyExtraGB:         0,   // no extra absolute buffer by default
