@@ -211,12 +211,17 @@
 
         <div class="text-caption text-on-surface-variant mb-1">{{ t('submit.cmd_template') }}</div>
         <div class="tmpl-display rounded pa-2 mb-1 cursor-pointer d-flex align-center ga-2" @click="cmdEditorOpen = true">
-          <span class="font-mono flex-grow-1 text-body-2" :class="{ 'opacity-50': !form.cmd }" style="word-break: break-all">
-            {{ form.cmd || 'python train.py {{args\}\}' }}
-          </span>
+          <span
+            class="font-mono flex-grow-1 text-body-2"
+            :class="{ 'opacity-50': !form.cmd }"
+            style="word-break: break-all"
+            v-text="displayCmdTemplate"
+          />
           <v-icon size="14" color="on-surface-variant" class="flex-shrink-0">mdi-pencil-outline</v-icon>
         </div>
-        <div class="text-caption text-on-surface-variant mb-3">{{ '\{\{args\}\}' }} will be replaced with parameters</div>
+        <div class="text-caption text-on-surface-variant mb-3">
+          <span v-text="argsPlaceholder" /> will be replaced with parameters
+        </div>
         <ShellTemplateEditor
           v-model="cmdEditorOpen"
           :value="form.cmd"
@@ -243,8 +248,8 @@
           v-model="form.jobName"
           :label="t('submit.job_name_tmpl')"
           variant="outlined" density="compact" class="mb-3 font-mono"
-          placeholder="rq-{{task_id\}\}"
-          hint="Scheduler job name ({{name\}\} in submit_template) — params + {{project\}\} {{job_id\}\} {{task_id\}\}. Sanitized automatically (never starts with a digit). Each submit can override it."
+          :placeholder="jobNamePlaceholderLiteral"
+          :hint="jobNameHint"
           persistent-hint
         />
 
@@ -474,6 +479,11 @@ const cmdPlaceholders = computed(() => [
   'args',
   ...form.params.map(p => p.name).filter(Boolean),
 ])
+const defaultCmdTemplate = 'python train.py {{args}}'
+const argsPlaceholder = '{{args}}'
+const jobNamePlaceholderLiteral = 'rq-{{task_id}}'
+const jobNameHint = 'Scheduler job name ({{name}} in submit_template) - params + {{project}} {{job_id}} {{task_id}}. Sanitized automatically (never starts with a digit). Each submit can override it.'
+const displayCmdTemplate = computed(() => form.cmd || defaultCmdTemplate)
 
 function onParamsEdited(params: import('@/types/submit').ProjectParam[]) {
   form.params = params

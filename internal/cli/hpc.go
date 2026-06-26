@@ -245,21 +245,6 @@ func runHPCSubmit(cmd *cobra.Command, args []string) error {
 	})
 }
 
-// previewHPCJobConfig is `runq submit --dry` in hpc mode.
-func previewHPCJobConfig(cmd *cobra.Command, jobCfg job.JobConfig, skipPreflight bool) error {
-	return withHPCBackend(func(be backend.Backend) error {
-		if err := ensureProjectRegistered(cmd, be, jobCfg.Project); err != nil {
-			return err
-		}
-		out, err := be.PreviewSubmit(context.Background(), jobCfg, skipPreflight)
-		if err != nil {
-			return err
-		}
-		fmt.Println(out)
-		return nil
-	})
-}
-
 func runHPCStatus(cmd *cobra.Command, args []string) error {
 	return withHPCBackend(func(be backend.Backend) error {
 		ctx := context.Background()

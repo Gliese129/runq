@@ -34,7 +34,7 @@
           v-for="ph in activeChips" :key="ph"
           size="x-small" variant="outlined" class="cursor-pointer font-mono opacity-70"
           @click="insertPlaceholder(ph)"
-        >{{ '{{' + ph + '\}\}' }}</v-chip>
+        ><span v-text="placeholderText(ph)" /></v-chip>
         <v-spacer />
         <span v-if="resolvedNote" class="text-caption text-on-surface-variant font-mono">
           → {{ resolvedNote }}
@@ -245,6 +245,10 @@ const newParamName = ref('')
 const customNames = reactive(new Set<string>())
 const hintDismissed = ref(false)
 let setCounter = 0
+
+function placeholderText(ph: string): string {
+  return `{{${ph}}}`
+}
 
 // ── Row sync: project params (include) → rows, preserving user edits ──
 watch(

@@ -23,7 +23,7 @@
           @click="insertPlaceholder(ph)"
         >
           <v-icon start size="10">{{ ph.startsWith('param.') ? 'mdi-variable' : 'mdi-cog-outline' }}</v-icon>
-          {{ '{{' + ph + '\}\}' }}
+          <span v-text="placeholderText(ph)" />
         </v-chip>
         <span class="text-caption text-on-surface-variant ml-2"><code>{{ '{{' }}</code> {{ t('editor.completion_hint') }}</span>
       </div>
@@ -64,6 +64,10 @@ const { t } = useI18n()
 const theme = useTheme()
 const host = ref<HTMLElement>()
 let view: EditorView | null = null
+
+function placeholderText(ph: string): string {
+  return `{{${ph}}}`
+}
 
 // {{ triggers completion with this field's vocabulary (single source:
 // the list ships from the backend's Placeholders metadata).
