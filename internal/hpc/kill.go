@@ -58,7 +58,7 @@ func (b *Backend) Kill(ctx context.Context, target string) (killed int, err erro
 			problems = append(problems, fmt.Sprintf("%s: render kill_template: %v", tk.ID, rErr))
 			continue
 		}
-		if out, xerr := b.Run(ctx, cmd); xerr != nil {
+		if out, xerr := b.shellRun(ctx, cmd); xerr != nil {
 			opLog("KILL FAIL task=%s ext=%s\ncmd: %s\nerr: %v\noutput: %s", tk.ID, tk.ExternalID, cmd, xerr, out)
 			problems = append(problems, fmt.Sprintf(
 				"%s (ext id %s): cancel failed (may have already finished): %v %s",

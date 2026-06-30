@@ -17,8 +17,11 @@ type JobRow struct {
 	ConfigJSON  string // serialized job.JobConfig (kept for UI to display original sweep config)
 	Status      string // pending / running / paused / done
 	TotalTasks  int
-	CreatedAt   time.Time
-	FinishedAt  *time.Time
+	// Target is the compute target this job was submitted to (e.g. "local",
+	// "tsubame"). Phase 1: MultiBackend routing key.
+	Target     string
+	CreatedAt  time.Time
+	FinishedAt *time.Time
 	// RefreshedAt is the last time this job's state was reconciled from
 	// external sources (HPC mode only — hpc.Refresh is its sole writer).
 	// nil = never refreshed, or not applicable (daemon mode: the daemon IS
@@ -38,22 +41,22 @@ func (s *Store) TouchJobRefreshedAt(ctx context.Context, jobID string, at time.T
 
 // InsertJob inserts a single job row.
 func (s *Store) InsertJob(ctx context.Context, j *JobRow) error {
-	query := `INSERT INTO jobs (id, project_name, description, note, config_json, status, total_tasks, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+	query := `INSERT INTO jobs (id, project_name, description, note, config_json, status, total_tasks, target, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	_, err := s.db.ExecContext(ctx, query,
 		j.ID, j.ProjectName, j.Description, j.Note, j.ConfigJSON,
-		j.Status, j.TotalTasks, j.CreatedAt.Unix(),
+		j.Status, j.TotalTasks, targetOrDefault(j.Target), j.CreatedAt.Unix(),
 	)
 	return err
 }
 
 // InsertJobTx inserts a job row within an existing transaction.
 func (s *Store) InsertJobTx(ctx context.Context, tx *sql.Tx, j *JobRow) error {
-	query := `INSERT INTO jobs (id, project_name, description, note, config_json, status, total_tasks, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+	query := `INSERT INTO jobs (id, project_name, description, note, config_json, status, total_tasks, target, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	_, err := tx.ExecContext(ctx, query,
 		j.ID, j.ProjectName, j.Description, j.Note, j.ConfigJSON,
-		j.Status, j.TotalTasks, j.CreatedAt.Unix(),
+		j.Status, j.TotalTasks, targetOrDefault(j.Target), j.CreatedAt.Unix(),
 	)
 	return err
 }
@@ -110,8 +113,7 @@ func (s *Store) UpdateJobStatus(ctx context.Context, jobID string, status string
 
 // GetJob returns a single job by ID. Returns (nil, nil) if not found.
 func (s *Store) GetJob(ctx context.Context, jobID string) (*JobRow, error) {
-	query := `SELECT id, project_name, description, note, config_json, status, total_tasks, created_at, finished_at, refreshed_at, archived_at
-		FROM jobs WHERE id = ?`
+	query := fmt.Sprintf("SELECT %s FROM jobs WHERE id = ?", allJobColumns)
 	row := s.db.QueryRowContext(ctx, query, jobID)
 
 	j, err := scanJob(row)
@@ -126,8 +128,7 @@ func (s *Store) GetJob(ctx context.Context, jobID string) (*JobRow, error) {
 
 // ListJobs lists jobs, optionally filtered by project name. Empty projectName = no filter.
 func (s *Store) ListJobs(ctx context.Context, projectName string) ([]JobRow, error) {
-	query := `SELECT id, project_name, description, note, config_json, status, total_tasks, created_at, finished_at, refreshed_at, archived_at
-		FROM jobs`
+	query := fmt.Sprintf("SELECT %s FROM jobs", allJobColumns)
 	var args []any
 	if projectName != "" {
 		query += " WHERE project_name = ?"
@@ -175,11 +176,17 @@ func (s *Store) DeleteJob(ctx context.Context, jobID string) error {
 	return tx.Commit()
 }
 
+// allJobColumns lists every column in the jobs table.
+// Defined once so SELECT and Scan stay in sync.
+const allJobColumns = `id, project_name, description, note, config_json, status, total_tasks, target, created_at, finished_at, refreshed_at, archived_at`
+
 // scanJob reads one result row into a JobRow.
+// Column order must match allJobColumns.
 func scanJob(scanner interface{ Scan(dest ...any) error }) (*JobRow, error) {
 	var j JobRow
 	var (
 		note        sql.NullString
+		target      sql.NullString
 		createdAt   int64
 		finishedAt  sql.NullInt64
 		refreshedAt sql.NullInt64
@@ -188,18 +195,30 @@ func scanJob(scanner interface{ Scan(dest ...any) error }) (*JobRow, error) {
 
 	err := scanner.Scan(
 		&j.ID, &j.ProjectName, &j.Description, &note, &j.ConfigJSON,
-		&j.Status, &j.TotalTasks, &createdAt, &finishedAt, &refreshedAt, &archivedAt,
+		&j.Status, &j.TotalTasks, &target, &createdAt, &finishedAt, &refreshedAt, &archivedAt,
 	)
 	if err != nil {
 		return nil, err
 	}
 
 	j.Note = note.String
+	j.Target = target.String
+	if j.Target == "" {
+		j.Target = "local"
+	}
 	j.CreatedAt = time.Unix(createdAt, 0)
 	j.FinishedAt = unixToNullTime(finishedAt)
 	j.RefreshedAt = unixToNullTime(refreshedAt)
 	j.ArchivedAt = unixToNullTime(archivedAt)
 	return &j, nil
+}
+
+// targetOrDefault returns "local" when target is empty.
+func targetOrDefault(target string) string {
+	if target == "" {
+		return "local"
+	}
+	return target
 }
 
 // ActiveStatuses is THE definition of "this job still has live work":
@@ -275,7 +294,7 @@ func (s *Store) UnarchiveJob(ctx context.Context, jobID string) error {
 // Inside an explicit project scope the cascade does not apply — you navigated
 // there on purpose.
 func (s *Store) ListJobsVisible(ctx context.Context, projectName string) ([]JobRow, error) {
-	query := `SELECT j.id, j.project_name, j.description, j.note, j.config_json, j.status, j.total_tasks, j.created_at, j.finished_at, j.refreshed_at, j.archived_at
+	query := `SELECT j.id, j.project_name, j.description, j.note, j.config_json, j.status, j.total_tasks, j.target, j.created_at, j.finished_at, j.refreshed_at, j.archived_at
 		FROM jobs j`
 	var args []any
 	if projectName != "" {
@@ -292,8 +311,7 @@ func (s *Store) ListJobsVisible(ctx context.Context, projectName string) ([]JobR
 // ListJobsArchived returns the explicitly-archived jobs (cascade-hidden jobs
 // of an archived project are NOT included — they come back with the project).
 func (s *Store) ListJobsArchived(ctx context.Context, projectName string) ([]JobRow, error) {
-	query := `SELECT id, project_name, description, note, config_json, status, total_tasks, created_at, finished_at, refreshed_at, archived_at
-		FROM jobs WHERE archived_at IS NOT NULL`
+	query := fmt.Sprintf("SELECT %s FROM jobs WHERE archived_at IS NOT NULL", allJobColumns)
 	var args []any
 	if projectName != "" {
 		query += ` AND project_name = ?`

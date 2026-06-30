@@ -44,14 +44,111 @@ type GlobalConfig struct {
 	// <working_dir>/.runq/ is the real storage location.
 	DataPath string `yaml:"data_path,omitempty"`
 	// Mode selects the default backend for unified CLI/dashboard commands.
-	// Empty is accepted on disk and normalized to daemon when loaded.
+	// DEPRECATED: use DefaultTarget + Targets instead. Kept for backward
+	// compatibility — Load() synthesizes a single target from Mode when
+	// Targets is empty.
 	Mode string `yaml:"mode,omitempty"`
+
+	// DefaultTarget names the target to use when --target is omitted.
+	// Falls back to the first entry in Targets, then "local".
+	DefaultTarget string `yaml:"default_target,omitempty"`
+	// Dashboard configures the embedded dashboard server.
+	Dashboard *DashboardConfig `yaml:"dashboard,omitempty"`
+	// Targets lists the compute backends this instance manages.
+	// Target type is inferred from fields: gpus → local, scheduler → HPC.
+	// SSH section determines filesystem: present → SSHFS, absent → LocalFS.
+	Targets []TargetConfig `yaml:"targets,omitempty"`
 }
 
 const (
 	ModeDaemon = "daemon"
 	ModeHPC    = "hpc"
 )
+
+// ── Target configuration ───────────────────────────────────────────────────
+
+// DashboardConfig controls the embedded dashboard HTTP server.
+type DashboardConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	Listen  string `yaml:"listen,omitempty"` // default "127.0.0.1:8077"
+}
+
+// TargetConfig describes a single compute target. Type is inferred:
+//   - gpus present   → LocalBackend (daemon-managed GPU scheduling)
+//   - scheduler set  → HPCBackend  (cluster job submission)
+//   - ssh present    → SSHFS       (remote filesystem); absent → LocalFS
+type TargetConfig struct {
+	Name      string           `yaml:"name"`
+	GPUs      []int            `yaml:"gpus,omitempty"`
+	Scheduler string           `yaml:"scheduler,omitempty"` // e.g. "slurm", "pbs"
+	Workspace string           `yaml:"workspace,omitempty"` // HPC workspace root on the target
+	SSH       *SSHTargetConfig `yaml:"ssh,omitempty"`
+}
+
+// SSHTargetConfig holds SSH connection parameters for a remote target.
+type SSHTargetConfig struct {
+	Host      string `yaml:"host"`
+	User      string `yaml:"user"`
+	Key       string `yaml:"key,omitempty"`        // path to private key; empty → agent
+	Port      int    `yaml:"port,omitempty"`       // default 22
+	ProxyJump string `yaml:"proxy_jump,omitempty"` // SSH ProxyJump host
+}
+
+// Target type constants.
+const (
+	TargetTypeLocal = "local"
+	TargetTypeHPC   = "hpc"
+)
+
+// Type returns the inferred backend type for this target.
+func (t *TargetConfig) Type() string {
+	if t.Scheduler != "" {
+		return TargetTypeHPC
+	}
+	return TargetTypeLocal
+}
+
+// IsRemote reports whether this target uses SSH (remote filesystem).
+func (t *TargetConfig) IsRemote() bool {
+	return t.SSH != nil
+}
+
+// ResolveTargets returns the configured targets, synthesizing from the
+// deprecated Mode field when Targets is empty (backward compatibility).
+func (cfg *GlobalConfig) ResolveTargets() []TargetConfig {
+	if len(cfg.Targets) > 0 {
+		return cfg.Targets
+	}
+	// Legacy: synthesize a single target from Mode.
+	switch cfg.Mode {
+	case ModeHPC:
+		return []TargetConfig{{Name: "hpc"}}
+	default:
+		return []TargetConfig{{Name: "local"}}
+	}
+}
+
+// ResolveDefaultTarget returns the name of the default target.
+func (cfg *GlobalConfig) ResolveDefaultTarget() string {
+	if cfg.DefaultTarget != "" {
+		return cfg.DefaultTarget
+	}
+	targets := cfg.ResolveTargets()
+	if len(targets) > 0 {
+		return targets[0].Name
+	}
+	return "local"
+}
+
+// FindTarget looks up a target by name. Returns an error if not found.
+func (cfg *GlobalConfig) FindTarget(name string) (*TargetConfig, error) {
+	for i := range cfg.Targets {
+		if cfg.Targets[i].Name == name {
+			return &cfg.Targets[i], nil
+		}
+	}
+	return nil, fmt.Errorf("target %q not found in config", name)
+}
 
 // configFile is the on-disk shape: global keys at the top, plus an opaque hpc
 // section that this package does NOT parse (hpcconfig owns that).
@@ -143,7 +240,7 @@ func ConfigMode(cfg *GlobalConfig) string {
 
 // Keys returns the supported top-level global config keys.
 func Keys() []string {
-	return []string{"mode", "data_path"}
+	return []string{"mode", "data_path", "default_target"}
 }
 
 // GetKey reads one supported global config key.
@@ -157,6 +254,8 @@ func GetKey(key string) (string, error) {
 		return ConfigMode(cfg), nil
 	case "data_path":
 		return cfg.DataPath, nil
+	case "default_target":
+		return cfg.ResolveDefaultTarget(), nil
 	default:
 		return "", fmt.Errorf("unsupported config key %q", key)
 	}
@@ -169,8 +268,9 @@ func ListKeys() (map[string]string, error) {
 		return nil, err
 	}
 	return map[string]string{
-		"mode":      ConfigMode(cfg),
-		"data_path": cfg.DataPath,
+		"mode":           ConfigMode(cfg),
+		"data_path":      cfg.DataPath,
+		"default_target": cfg.ResolveDefaultTarget(),
 	}, nil
 }
 
@@ -188,6 +288,8 @@ func SetKey(key, value string) error {
 		value = mode
 	case "data_path":
 		// No extra validation: users may point at paths not mounted on this host.
+	case "default_target":
+		// Accept any name; actual validation happens when targets are resolved.
 	default:
 		return fmt.Errorf("unsupported config key %q", key)
 	}

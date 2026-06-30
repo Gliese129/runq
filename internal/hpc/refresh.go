@@ -5,12 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/gliese129/runq/internal/ingest"
+	"github.com/gliese129/runq/internal/rfs"
 	"github.com/gliese129/runq/internal/store"
 	"github.com/gliese129/runq/internal/utils"
 )
@@ -23,12 +23,12 @@ type statusFile struct {
 	FinishedAt int64  `json:"finished_at"`
 }
 
-// readStatus reads and parses status.json. A missing or malformed file yields a
-// zero statusFile (WrapperStatus == ""), which Reconcile treats as "no terminal
-// signal yet".
-func readStatus(taskDir string) statusFile {
+// readStatus reads and parses status.json via the given FS. A missing or
+// malformed file yields a zero statusFile (WrapperStatus == ""), which
+// Reconcile treats as "no terminal signal yet".
+func readStatus(fsys rfs.FS, taskDir string) statusFile {
 	var sf statusFile
-	buf, err := os.ReadFile(filepath.Join(taskDir, statusFileName))
+	buf, err := fsys.ReadFile(filepath.Join(taskDir, statusFileName))
 	if err != nil {
 		return sf
 	}
@@ -103,7 +103,7 @@ func (b *Backend) EnsureAllFresh(ctx context.Context, ttl time.Duration) error {
 	}
 
 	// Fallback: shared memoRunner deduplicates identical commands across jobs.
-	sharedRun := memoRunner(b.Run)
+	sharedRun := memoRunner(b.shellRun)
 
 	var firstErr error
 	for _, e := range active {
@@ -161,7 +161,7 @@ func (b *Backend) markBatchProbed() {
 // memoRunner for the single-job case; EnsureAllFresh calls reconcileWith
 // directly with a shared runner.
 func (b *Backend) reconcile(ctx context.Context, jobID string, probe bool) error {
-	return b.reconcileWith(ctx, jobID, probe, memoRunner(b.Run))
+	return b.reconcileWith(ctx, jobID, probe, memoRunner(b.shellRun))
 }
 
 // reconcileWith is the core engine that advances task state. For each task it
@@ -182,10 +182,10 @@ func (b *Backend) reconcile(ctx context.Context, jobID string, probe bool) error
 //
 // The DB is the (lazily-updated) source of truth and this is its only writer.
 //
-// The probeRun argument is a (possibly memo-cached) Runner: EnsureAllFresh
+// The probeRun argument is a (possibly memo-cached) runner: EnsureAllFresh
 // shares one across all jobs so listing-style commands (bare `qstat`) hit
-// the scheduler once; single-job callers pass memoRunner(b.Run).
-func (b *Backend) reconcileWith(ctx context.Context, jobID string, probe bool, probeRun Runner) error {
+// the scheduler once; single-job callers pass memoRunner(b.shellRun).
+func (b *Backend) reconcileWith(ctx context.Context, jobID string, probe bool, probeRun runner) error {
 	tasks, err := b.Store.ListTasks(ctx, store.TaskFilter{JobID: jobID})
 	if err != nil {
 		return err
@@ -207,7 +207,7 @@ func (b *Backend) reconcileWith(ctx context.Context, jobID string, probe bool, p
 			continue
 		}
 
-		sf := readStatus(tk.TaskDir)
+		sf := readStatus(b.FS, tk.TaskDir)
 		var pr ProbeResult
 		if probe {
 			pr = b.probeSchedulerWith(ctx, probeRun, tk.ExternalID)
@@ -296,7 +296,7 @@ func (b *Backend) reconcileWithBatch(ctx context.Context, jobID string, signals 
 			continue
 		}
 
-		sf := readStatus(tk.TaskDir)
+		sf := readStatus(b.FS, tk.TaskDir)
 
 		// Look up pre-computed probe result; absent ext_ids are gone.
 		pr := ProbeResult{Signal: SchedUnknown}
@@ -374,7 +374,7 @@ func (b *Backend) probeBatch(ctx context.Context) (map[string]ProbeResult, error
 	if b.Cfg.StatusListTemplate == "" {
 		return nil, nil
 	}
-	out, runErr := b.Run(ctx, b.Cfg.StatusListTemplate)
+	out, runErr := b.shellRun(ctx, b.Cfg.StatusListTemplate)
 
 	// Command failure is always an error — even when a parser is configured.
 	// The per-job path (probeSchedulerWith) intentionally ignores command
@@ -388,7 +388,7 @@ func (b *Backend) probeBatch(ctx context.Context) (map[string]ProbeResult, error
 	if len(b.Cfg.StatusListParser) > 0 {
 		// Feed raw output through the parser pipeline.
 		pipeline := "printf '%s\\n' " + utils.ShellQuote(out) + " | " + strings.Join(b.Cfg.StatusListParser, " | ")
-		pout, perr := b.Run(ctx, pipeline)
+		pout, perr := b.shellRun(ctx, pipeline)
 		if perr != nil {
 			return nil, fmt.Errorf("status_list_parser: %w", perr)
 		}
@@ -429,10 +429,10 @@ func (b *Backend) probeBatch(ctx context.Context) (map[string]ProbeResult, error
 //   - without a hook → empty output = SchedGone, recognized token = that signal,
 //     present-but-unrecognized = SchedActive (alive)
 func (b *Backend) probeScheduler(ctx context.Context, extID string) ProbeResult {
-	return b.probeSchedulerWith(ctx, b.Run, extID)
+	return b.probeSchedulerWith(ctx, b.shellRun, extID)
 }
 
-func (b *Backend) probeSchedulerWith(ctx context.Context, run Runner, extID string) ProbeResult {
+func (b *Backend) probeSchedulerWith(ctx context.Context, run runner, extID string) ProbeResult {
 	none := ProbeResult{Signal: SchedUnknown}
 	if b.Cfg.StatusTemplate == "" || extID == "" {
 		return none
@@ -499,7 +499,7 @@ func (b *Backend) probeSchedulerWith(ctx context.Context, run Runner, extID stri
 // memoRunner caches command → result for the lifetime of one reconcile pass.
 // Status queries are idempotent reads, so within a pass the same rendered
 // command need not hit the scheduler twice. Sequential use only (no lock).
-func memoRunner(run Runner) Runner {
+func memoRunner(run runner) runner {
 	type result struct {
 		out string
 		err error

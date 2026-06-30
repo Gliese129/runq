@@ -41,6 +41,10 @@ type TaskRow struct {
 	// Created by service.JobService.SubmitJob, read by SDK via RUNQ_TASK_DIR env.
 	TaskDir string
 
+	// Target is the compute target this task was submitted to (e.g. "local",
+	// "tsubame"). Phase 1: MultiBackend routing key.
+	Target string
+
 	// L2-E: HPC scheduler job id (sbatch/qsub). Empty for daemon-managed tasks.
 	// Set by the HPC backend after submit; used by refresh to map a task back to
 	// its cluster job for status/kill.
@@ -73,7 +77,7 @@ const allTaskColumns = `id, job_id, project_name, command, params_json,
 	gpus_needed, gpus, status, retry_count, max_retry,
 	pid, start_time, log_path, working_dir, env_json,
 	resumable, extra_args, uid, timeout,
-	enqueued_at, started_at, finished_at, task_dir, external_id, status_source,
+	enqueued_at, started_at, finished_at, task_dir, target, external_id, status_source,
 	native_state, queue`
 
 // scanTask reads one result row into a TaskRow.
@@ -101,12 +105,13 @@ func scanTask(scanner interface{ Scan(dest ...any) error }) (*TaskRow, error) {
 		queue        sql.NullString
 	)
 
+	var target sql.NullString
 	err := scanner.Scan(
 		&t.ID, &t.JobID, &t.ProjectName, &t.Command, &t.ParamsJSON,
 		&t.GPUsNeeded, &gpus, &t.Status, &t.RetryCount, &t.MaxRetry,
 		&pid, &startTime, &logPath, &workingDir, &envJSON,
 		&resumable, &extraArgs, &uid, &timeout, &enqueuedAt, &startedAt, &finishedAt,
-		&taskDir, &externalID, &statusSource,
+		&taskDir, &target, &externalID, &statusSource,
 		&nativeState, &queue,
 	)
 	if err != nil {
@@ -127,6 +132,10 @@ func scanTask(scanner interface{ Scan(dest ...any) error }) (*TaskRow, error) {
 	t.StartedAt = unixToNullTime(startedAt)
 	t.FinishedAt = unixToNullTime(finishedAt)
 	t.TaskDir = taskDir.String
+	t.Target = target.String
+	if t.Target == "" {
+		t.Target = "local"
+	}
 	t.ExternalID = externalID.String
 	t.StatusSource = statusSource.String
 	t.NativeState = nativeState.String
@@ -142,9 +151,9 @@ func (s *Store) InsertTask(ctx context.Context, t *TaskRow) error {
 		gpus_needed, gpus, status, retry_count, max_retry,
 		pid, start_time, log_path, working_dir, env_json,
 		resumable, extra_args, uid, timeout,
-		enqueued_at, started_at, finished_at, task_dir, external_id, status_source,
+		enqueued_at, started_at, finished_at, task_dir, target, external_id, status_source,
 		native_state, queue
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	resumable := 0
 	if t.Resumable {
@@ -159,7 +168,7 @@ func (s *Store) InsertTask(ctx context.Context, t *TaskRow) error {
 		resumable, t.ExtraArgs, nullInt(t.UID), nullInt(t.Timeout),
 		t.EnqueuedAt.Unix(),
 		nullTimeToUnix(t.StartedAt), nullTimeToUnix(t.FinishedAt),
-		nullString(t.TaskDir), nullString(t.ExternalID), nullString(t.StatusSource),
+		nullString(t.TaskDir), targetOrDefault(t.Target), nullString(t.ExternalID), nullString(t.StatusSource),
 		nullString(t.NativeState), nullString(t.Queue),
 	)
 	return err
@@ -172,9 +181,9 @@ func (s *Store) InsertTaskTx(ctx context.Context, tx *sql.Tx, t *TaskRow) error 
 		gpus_needed, gpus, status, retry_count, max_retry,
 		pid, start_time, log_path, working_dir, env_json,
 		resumable, extra_args, uid, timeout,
-		enqueued_at, started_at, finished_at, task_dir, external_id, status_source,
+		enqueued_at, started_at, finished_at, task_dir, target, external_id, status_source,
 		native_state, queue
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	resumable := 0
 	if t.Resumable {
@@ -189,7 +198,7 @@ func (s *Store) InsertTaskTx(ctx context.Context, tx *sql.Tx, t *TaskRow) error 
 		resumable, t.ExtraArgs, nullInt(t.UID), nullInt(t.Timeout),
 		t.EnqueuedAt.Unix(),
 		nullTimeToUnix(t.StartedAt), nullTimeToUnix(t.FinishedAt),
-		nullString(t.TaskDir), nullString(t.ExternalID), nullString(t.StatusSource),
+		nullString(t.TaskDir), targetOrDefault(t.Target), nullString(t.ExternalID), nullString(t.StatusSource),
 		nullString(t.NativeState), nullString(t.Queue),
 	)
 	return err

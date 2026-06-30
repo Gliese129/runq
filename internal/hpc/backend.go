@@ -41,31 +41,30 @@ package hpc
 
 import (
 	"context"
-	"os/exec"
+	"fmt"
 	"sort"
 	"sync"
 	"time"
 
 	"github.com/gliese129/runq/internal/config"
 	"github.com/gliese129/runq/internal/hpcconfig"
+	"github.com/gliese129/runq/internal/rfs"
 	"github.com/gliese129/runq/internal/store"
 )
 
-// Runner executes a shell command and returns its combined output. It is
-// injectable so tests can stand in a fake cluster without sbatch/squeue.
-type Runner func(ctx context.Context, command string) (string, error)
+// runner executes a shell command and returns its combined output. Internal
+// function type used by memoRunner for caching probe results within a
+// reconcile pass. Derived from FS.Exec by Backend.shellRun.
+type runner func(ctx context.Context, command string) (string, error)
 
-// shellRunner runs the command through `sh -c`, capturing stdout+stderr.
-func shellRunner(ctx context.Context, command string) (string, error) {
-	out, err := exec.CommandContext(ctx, "sh", "-c", command).CombinedOutput()
-	return string(out), err
-}
-
-// Backend bundles the resolved config, the HPC store, and the command runner.
+// Backend bundles the resolved config, the HPC store, and the filesystem.
+// FS handles both file I/O and command execution — LocalFS for same-machine
+// operation, SSHFS for remote clusters. Commands go through shellRun which
+// wraps FS.Exec("sh", "-c", ...).
 type Backend struct {
 	Cfg        *hpcconfig.Config
 	Store      *store.Store
-	Run        Runner
+	FS         rfs.FS
 	StorageCfg *config.GlobalConfig // nil-safe: nil = project_path mode
 
 	// Per-job TTL cache (see refresh.go): tracks when each job's scheduler
@@ -80,9 +79,24 @@ type Backend struct {
 	lastBatchProbe time.Time
 }
 
-// New builds a Backend with the real shell runner.
+// New builds a Backend with a local filesystem (same-machine operation).
 func New(cfg *hpcconfig.Config, st *store.Store, storageCfg *config.GlobalConfig) *Backend {
-	return &Backend{Cfg: cfg, Store: st, Run: shellRunner, StorageCfg: storageCfg}
+	return &Backend{Cfg: cfg, Store: st, FS: rfs.NewLocalFS(), StorageCfg: storageCfg}
+}
+
+// shellRun executes a shell command through the FS layer, returning combined
+// stdout+stderr and any error (including non-zero exit). This is the FS-backed
+// replacement for the old Runner/shellRunner pattern.
+func (b *Backend) shellRun(ctx context.Context, command string) (string, error) {
+	stdout, stderr, code, err := b.FS.Exec(ctx, "sh", "-c", command)
+	combined := string(stdout) + string(stderr)
+	if err != nil {
+		return combined, err
+	}
+	if code != 0 {
+		return combined, fmt.Errorf("exit status %d", code)
+	}
+	return combined, nil
 }
 
 // HPC-local filenames. These are backend artifacts, NOT part of the shared SDK

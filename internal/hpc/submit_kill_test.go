@@ -18,7 +18,7 @@ import (
 	"github.com/gliese129/runq/internal/submitplan"
 )
 
-func newTestBackend(t *testing.T, cfg *hpcconfig.Config, runner Runner) (*Backend, *project.Config, job.JobConfig) {
+func newTestBackend(t *testing.T, cfg *hpcconfig.Config, run func(ctx context.Context, command string) (string, error)) (*Backend, *project.Config, job.JobConfig) {
 	t.Helper()
 	st, err := store.Open(":memory:")
 	if err != nil {
@@ -31,7 +31,7 @@ func newTestBackend(t *testing.T, cfg *hpcconfig.Config, runner Runner) (*Backen
 		Project: "p",
 		Sweep:   []job.SweepBlock{{Method: "grid", Parameters: map[string]job.ParameterSpec{"lr": {Values: []any{0.1}}}}},
 	}
-	return &Backend{Cfg: cfg, Store: st, Run: runner}, proj, jobCfg
+	return &Backend{Cfg: cfg, Store: st, FS: newTestFSFromRunner(run)}, proj, jobCfg
 }
 
 // #1: a submit that succeeds on the cluster but whose id can't be parsed must

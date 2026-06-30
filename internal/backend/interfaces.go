@@ -70,4 +70,5 @@ type Backend interface {
 
 type SubmitOptions struct {
 	SkipPreflight bool
+	Target        string // compute target name; empty = default_target
 }

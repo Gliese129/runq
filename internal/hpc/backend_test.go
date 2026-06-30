@@ -15,7 +15,7 @@ import (
 )
 
 // TestSubmitRefreshKill exercises the full HPC loop against an in-memory store
-// and a fake cluster (the injected Runner stands in for sbatch/scancel).
+// and a fake cluster (the injected FS stands in for sbatch/scancel).
 func TestSubmitRefreshKill(t *testing.T) {
 
 	st, err := store.Open(":memory:")
@@ -47,7 +47,7 @@ func TestSubmitRefreshKill(t *testing.T) {
 		}
 		return "", nil
 	}
-	b := &Backend{Cfg: cfg, Store: st, Run: runner}
+	b := &Backend{Cfg: cfg, Store: st, FS: newTestFSFromRunner(runner)}
 
 	workDir := t.TempDir()
 	proj := &project.Config{

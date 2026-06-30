@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     config_json  TEXT NOT NULL,       -- serialized job.JobConfig as JSON
     status       TEXT NOT NULL DEFAULT 'pending',  -- pending/running/paused/done
     total_tasks  INTEGER NOT NULL DEFAULT 0,
+    target       TEXT NOT NULL DEFAULT 'local',    -- compute target name (Phase 1: MultiBackend routing)
     created_at   INTEGER,             -- Unix timestamp
     finished_at  INTEGER,             -- Unix timestamp, nullable
     refreshed_at INTEGER,             -- Unix timestamp, nullable. Last reconcile from external sources (HPC mode only; hpc.Refresh is the sole writer)
@@ -30,6 +31,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     params_json  TEXT NOT NULL,       -- serialized TaskParams as JSON
     gpus_needed  INTEGER NOT NULL DEFAULT 1,
     gpus         TEXT,                -- comma-separated GPU indices, e.g. "0,1,3"
+    target       TEXT NOT NULL DEFAULT 'local',    -- compute target name (Phase 1: MultiBackend routing)
     status       TEXT NOT NULL DEFAULT 'pending',
     retry_count  INTEGER NOT NULL DEFAULT 0,
     max_retry    INTEGER NOT NULL DEFAULT 0,  -- 0 = unlimited

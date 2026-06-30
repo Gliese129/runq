@@ -54,7 +54,7 @@ func TestRefreshInferredCorrectedByWrapper(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	b := &Backend{Cfg: &hpcconfig.Config{}, Store: st, Run: nopRunner}
+	b := &Backend{Cfg: &hpcconfig.Config{}, Store: st, FS: newTestFSFromRunner(nopRunner)}
 	if err := b.EnsureFresh(context.Background(), jobID, 0); err != nil {
 		t.Fatalf("EnsureFresh: %v", err)
 	}
@@ -86,7 +86,7 @@ func TestIngestErrorDoesNotCacheAsFresh(t *testing.T) {
 	b := &Backend{
 		Cfg:   &hpcconfig.Config{StatusTemplate: "checkstat {{ext_id}}"},
 		Store: st,
-		Run:   runner,
+		FS:    newTestFSFromRunner(runner),
 	}
 
 	// Write an unreadable metrics.jsonl to trigger an ingest error.
@@ -157,7 +157,7 @@ func TestRefreshHardTerminalNotReevaluated(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	b := &Backend{Cfg: &hpcconfig.Config{}, Store: st, Run: nopRunner}
+	b := &Backend{Cfg: &hpcconfig.Config{}, Store: st, FS: newTestFSFromRunner(nopRunner)}
 	if err := b.EnsureFresh(context.Background(), jobID, 0); err != nil {
 		t.Fatalf("EnsureFresh: %v", err)
 	}

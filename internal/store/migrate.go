@@ -64,6 +64,15 @@ func (s *Store) addMissingColumns(ctx context.Context) error {
 	if err := addColumnIfMissing(ctx, s.db, "projects", "archived_at", "INTEGER"); err != nil {
 		return fmt.Errorf("add projects.archived_at: %w", err)
 	}
+	// Phase 1: target column for MultiBackend routing. Every job and task
+	// records which compute target it was submitted to (e.g. "local",
+	// "tsubame"). Defaults to "local" for pre-Phase-1 rows.
+	if err := addColumnIfMissing(ctx, s.db, "jobs", "target", "TEXT NOT NULL DEFAULT 'local'"); err != nil {
+		return fmt.Errorf("add jobs.target: %w", err)
+	}
+	if err := addColumnIfMissing(ctx, s.db, "tasks", "target", "TEXT NOT NULL DEFAULT 'local'"); err != nil {
+		return fmt.Errorf("add tasks.target: %w", err)
+	}
 	// Phase 2D: HPC scheduler native state (e.g. Slurm CONFIGURING, COMPLETING).
 	// Preserved from probe output before ParseSignal collapses it to a signal enum.
 	if err := addColumnIfMissing(ctx, s.db, "tasks", "native_state", "TEXT"); err != nil {

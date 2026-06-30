@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -218,7 +217,7 @@ func (b *Backend) Submit(ctx context.Context, jobCfg job.JobConfig, proj *projec
 			return plan.JobID, submitted, fmt.Errorf("prepare workspace for %s: %w", t.TaskID, err)
 		}
 		runsh := filepath.Join(t.TaskDir, runScriptName)
-		if err := os.WriteFile(runsh, []byte(b.buildRunScript(t, plan)), 0o755); err != nil {
+		if err := b.FS.WriteFile(runsh, []byte(b.buildRunScript(t, plan)), 0o755); err != nil {
 			return plan.JobID, submitted, fmt.Errorf("write run.sh for %s: %w", t.TaskID, err)
 		}
 		cmd, err := renderSubmitCmd(b.Cfg.SubmitTemplate, t, plan, runsh)
@@ -236,7 +235,7 @@ func (b *Backend) Submit(ctx context.Context, jobCfg job.JobConfig, proj *projec
 		}
 
 		fullCmd := submitEnvPrefix(proj.Environment) + cmd
-		out, err := b.Run(ctx, fullCmd)
+		out, err := b.shellRun(ctx, fullCmd)
 		if err != nil {
 			// sbatch itself errored → no cluster job exists → truly terminal.
 			opLog("SUBMIT FAIL task=%s job=%s\ncmd: %s\nerr: %v\noutput: %s", t.TaskID, plan.JobID, fullCmd, err, out)

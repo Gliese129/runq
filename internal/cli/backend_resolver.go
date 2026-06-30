@@ -19,6 +19,8 @@ func loadModeConfig() (*config.GlobalConfig, string, error) {
 
 // newBackend creates a mode-aware backend. Callers must invoke the returned
 // closer when done (HPC opens a DB handle; daemon is stateless).
+//
+// DEPRECATED: use newMultiBackend for targets[]-aware routing.
 func newBackend(mode string) (backend.Backend, func(), error) {
 	switch mode {
 	case config.ModeHPC:
@@ -30,15 +32,19 @@ func newBackend(mode string) (backend.Backend, func(), error) {
 	}
 }
 
+// newMultiBackend creates a Backend from the targets[] config (Phase 1).
+// Falls back to legacy mode-based construction when targets[] is absent.
+func newMultiBackend() (backend.Backend, func(), error) {
+	return backend.NewMultiBackendFromConfig(api.NewClient(getSocketPath()))
+}
+
 // withBackend resolves the configured mode, opens the mode-aware Backend, runs
 // fn, and tears the backend down. This is the single read/control entry point
 // user-facing CLI commands should use so daemon and HPC behave identically.
+//
+// Phase 1: uses newMultiBackend which handles both legacy mode and targets[].
 func withBackend(fn func(backend.Backend) error) error {
-	_, mode, err := loadModeConfig()
-	if err != nil {
-		return err
-	}
-	be, closeBackend, err := newBackend(mode)
+	be, closeBackend, err := newMultiBackend()
 	if err != nil {
 		return err
 	}

@@ -6,46 +6,47 @@ import (
 	"testing"
 
 	"github.com/gliese129/runq/internal/hpcconfig"
+	"github.com/gliese129/runq/internal/rfs"
 )
 
 func TestProbeScheduler(t *testing.T) {
 	ctx := context.Background()
 
-	// constRunner returns the same output for any command.
-	constRunner := func(out string, err error) Runner {
-		return func(ctx context.Context, command string) (string, error) { return out, err }
+	// constRunner returns an FS whose exec always produces the given output.
+	constFS := func(out string, err error) *testFS {
+		return newTestFSFromRunner(func(ctx context.Context, command string) (string, error) { return out, err })
 	}
 
 	t.Run("no status_template", func(t *testing.T) {
-		b := &Backend{Cfg: &hpcconfig.Config{}, Run: constRunner("RUNNING", nil)}
+		b := &Backend{Cfg: &hpcconfig.Config{}, FS: constFS("RUNNING", nil)}
 		if got := b.probeScheduler(ctx, "1"); got.Signal != SchedUnknown {
 			t.Fatalf("got %q, want unknown", got.Signal)
 		}
 	})
 
 	t.Run("no ext id", func(t *testing.T) {
-		b := &Backend{Cfg: &hpcconfig.Config{StatusTemplate: "squeue {{ext_id}}"}, Run: constRunner("RUNNING", nil)}
+		b := &Backend{Cfg: &hpcconfig.Config{StatusTemplate: "squeue {{ext_id}}"}, FS: constFS("RUNNING", nil)}
 		if got := b.probeScheduler(ctx, ""); got.Signal != SchedUnknown {
 			t.Fatalf("got %q, want unknown", got.Signal)
 		}
 	})
 
 	t.Run("probe error", func(t *testing.T) {
-		b := &Backend{Cfg: &hpcconfig.Config{StatusTemplate: "squeue {{ext_id}}"}, Run: constRunner("", fmt.Errorf("boom"))}
+		b := &Backend{Cfg: &hpcconfig.Config{StatusTemplate: "squeue {{ext_id}}"}, FS: constFS("", fmt.Errorf("boom"))}
 		if got := b.probeScheduler(ctx, "1"); got.Signal != SchedUnknown {
 			t.Fatalf("got %q, want unknown", got.Signal)
 		}
 	})
 
 	t.Run("empty output is gone", func(t *testing.T) {
-		b := &Backend{Cfg: &hpcconfig.Config{StatusTemplate: "squeue {{ext_id}}"}, Run: constRunner("", nil)}
+		b := &Backend{Cfg: &hpcconfig.Config{StatusTemplate: "squeue {{ext_id}}"}, FS: constFS("", nil)}
 		if got := b.probeScheduler(ctx, "1"); got.Signal != SchedGone {
 			t.Fatalf("got %q, want gone", got.Signal)
 		}
 	})
 
 	t.Run("recognized token", func(t *testing.T) {
-		b := &Backend{Cfg: &hpcconfig.Config{StatusTemplate: "sacct {{ext_id}}"}, Run: constRunner("FAILED\n", nil)}
+		b := &Backend{Cfg: &hpcconfig.Config{StatusTemplate: "sacct {{ext_id}}"}, FS: constFS("FAILED\n", nil)}
 		got := b.probeScheduler(ctx, "1")
 		if got.Signal != SchedFailed {
 			t.Fatalf("got signal %q, want failed", got.Signal)
@@ -56,7 +57,7 @@ func TestProbeScheduler(t *testing.T) {
 	})
 
 	t.Run("present but unrecognized is active", func(t *testing.T) {
-		b := &Backend{Cfg: &hpcconfig.Config{StatusTemplate: "qstat {{ext_id}}"}, Run: constRunner("R", nil)}
+		b := &Backend{Cfg: &hpcconfig.Config{StatusTemplate: "qstat {{ext_id}}"}, FS: constFS("R", nil)}
 		got := b.probeScheduler(ctx, "1")
 		if got.Signal != SchedActive {
 			t.Fatalf("got %q, want active", got.Signal)
@@ -73,7 +74,7 @@ func TestProbeScheduler(t *testing.T) {
 		b := &Backend{Cfg: &hpcconfig.Config{
 			StatusTemplate: "echo R",
 			StatusParser:   []string{"sed s/R/running/"},
-		}, Run: shellRunner}
+		}, FS: rfs.NewLocalFS()}
 		if got := b.probeScheduler(ctx, "1"); got.Signal != SchedRunning {
 			t.Fatalf("got %q, want running", got.Signal)
 		}
@@ -87,7 +88,7 @@ func TestProbeScheduler(t *testing.T) {
 				"awk '{print $3}'",
 				"sed s/R/running/",
 			},
-		}, Run: shellRunner}
+		}, FS: rfs.NewLocalFS()}
 		if got := b.probeScheduler(ctx, "1"); got.Signal != SchedRunning {
 			t.Fatalf("got %q, want running", got.Signal)
 		}
@@ -98,7 +99,7 @@ func TestProbeScheduler(t *testing.T) {
 		b := &Backend{Cfg: &hpcconfig.Config{
 			StatusTemplate: "echo ignored",
 			StatusParser:   []string{"grep -q {{ext_id}} && echo running || echo gone"},
-		}, Run: shellRunner}
+		}, FS: rfs.NewLocalFS()}
 		if got := b.probeScheduler(ctx, "ignored"); got.Signal != SchedRunning {
 			t.Fatalf("got %q, want running", got.Signal)
 		}
@@ -110,7 +111,7 @@ func TestProbeScheduler(t *testing.T) {
 		b := &Backend{Cfg: &hpcconfig.Config{
 			StatusTemplate: "echo R",
 			StatusParser:   []string{"awk '/NOPE/{print}'"}, // matches nothing, exit 0, empty
-		}, Run: shellRunner}
+		}, FS: rfs.NewLocalFS()}
 		if got := b.probeScheduler(ctx, "1"); got.Signal != SchedGone {
 			t.Fatalf("got %q, want gone", got.Signal)
 		}
@@ -120,7 +121,7 @@ func TestProbeScheduler(t *testing.T) {
 		b := &Backend{Cfg: &hpcconfig.Config{
 			StatusTemplate: "echo {{ext_id}}",
 			SignalMap:      map[string]string{"CONFIGURING": "pending"},
-		}, Run: constRunner("CONFIGURING", nil)}
+		}, FS: constFS("CONFIGURING", nil)}
 		got := b.probeScheduler(ctx, "1")
 		if got.Signal != SchedPending {
 			t.Fatalf("got signal %q, want pending", got.Signal)
@@ -137,9 +138,9 @@ func TestProbeBatch(t *testing.T) {
 	t.Run("parses queue column", func(t *testing.T) {
 		b := &Backend{
 			Cfg: &hpcconfig.Config{StatusListTemplate: "squeue"},
-			Run: func(ctx context.Context, cmd string) (string, error) {
+			FS: newTestFSFromRunner(func(ctx context.Context, cmd string) (string, error) {
 				return "12345 RUNNING gpu-a100\n67890 PENDING cpu-batch\n", nil
-			},
+			}),
 		}
 		result, err := b.probeBatch(ctx)
 		if err != nil {
@@ -161,9 +162,9 @@ func TestProbeBatch(t *testing.T) {
 	t.Run("two columns no queue", func(t *testing.T) {
 		b := &Backend{
 			Cfg: &hpcconfig.Config{StatusListTemplate: "squeue"},
-			Run: func(ctx context.Context, cmd string) (string, error) {
+			FS: newTestFSFromRunner(func(ctx context.Context, cmd string) (string, error) {
 				return "12345 RUNNING\n", nil
-			},
+			}),
 		}
 		result, err := b.probeBatch(ctx)
 		if err != nil {
@@ -181,9 +182,9 @@ func TestProbeBatch(t *testing.T) {
 				StatusListTemplate: "squeue",
 				SignalMap:          map[string]string{"COMPLETING": "running"},
 			},
-			Run: func(ctx context.Context, cmd string) (string, error) {
+			FS: newTestFSFromRunner(func(ctx context.Context, cmd string) (string, error) {
 				return "12345 COMPLETING gpu\n", nil
-			},
+			}),
 		}
 		result, err := b.probeBatch(ctx)
 		if err != nil {
