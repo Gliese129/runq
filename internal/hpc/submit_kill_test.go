@@ -185,7 +185,7 @@ func TestSetupCommandFailureAborts(t *testing.T) {
 	if submitCalls != 0 {
 		t.Errorf("cluster submit ran despite setup failure (%d calls)", submitCalls)
 	}
-	jobs, _ := b.Store.ListJobs(context.Background(), "")
+	jobs, _ := b.Store.ListJobs(context.Background(), "", "")
 	if len(jobs) != 0 {
 		t.Errorf("job row persisted despite setup failure: %d rows", len(jobs))
 	}

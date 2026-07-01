@@ -20,7 +20,7 @@ func runKill(cmd *cobra.Command, args []string) error {
 	id := args[0]
 	jsonOut, _ := cmd.Flags().GetBool("json")
 
-	return withBackend(func(be backend.Backend) error {
+	return withBackend(cmd, func(be backend.Backend) error {
 		ctx := cmd.Context()
 
 		// Try task kill first.
@@ -51,6 +51,7 @@ func runKill(cmd *cobra.Command, args []string) error {
 
 func init() {
 	killCmd.Flags().Bool("json", false, "output raw JSON")
+	killCmd.Flags().StringP("target", "t", "", "Compute target (for target-scoped resolution)")
 
 	killCmd.GroupID = groupCore
 	rootCmd.AddCommand(killCmd)

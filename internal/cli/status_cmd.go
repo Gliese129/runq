@@ -18,11 +18,12 @@ var statusCmd = &cobra.Command{
 
 func runStatus(cmd *cobra.Command, args []string) error {
 	jsonOut, _ := cmd.Flags().GetBool("json")
+	target := resolveTarget(cmd)
 
-	return withBackend(func(be backend.Backend) error {
+	return withBackend(cmd, func(be backend.Backend) error {
 		ctx := cmd.Context()
 
-		// With a job_id argument: show that job's details.
+		// With a job_id argument: show that job's details (ID-based, no target filter).
 		if len(args) == 1 {
 			detail, err := be.GetJob(ctx, args[0])
 			if err != nil {
@@ -47,33 +48,46 @@ func runStatus(cmd *cobra.Command, args []string) error {
 			pending += j.Tasks.Pending
 		}
 
-		gpusFree := 0
-		if gpus, gerr := be.GPUStatus(ctx); gerr == nil {
-			for _, g := range gpus {
-				if g.TaskID == "" {
-					gpusFree++
+		// GPU pool is daemon-local. When a target filter is active the
+		// pool counts belong to whatever local targets the daemon manages
+		// and would be misleading for a remote HPC target. Only show GPU
+		// info when no explicit target filter is set (aggregate view).
+		gpusFree := -1 // sentinel: omit from output
+		if target == "" {
+			gpusFree = 0
+			if gpus, gerr := be.GPUStatus(ctx); gerr == nil {
+				for _, g := range gpus {
+					if g.TaskID == "" {
+						gpusFree++
+					}
 				}
 			}
 		}
 
 		if jsonOut {
-			printJSON(map[string]int{
-				"running":   running,
-				"pending":   pending,
-				"gpus_free": gpusFree,
-			})
+			out := map[string]int{
+				"running": running,
+				"pending": pending,
+			}
+			if gpusFree >= 0 {
+				out["gpus_free"] = gpusFree
+			}
+			printJSON(out)
 			return nil
 		}
 
 		fmt.Printf("Running:   %d\n", running)
 		fmt.Printf("Pending:   %d\n", pending)
-		fmt.Printf("GPUs free: %d\n", gpusFree)
+		if gpusFree >= 0 {
+			fmt.Printf("GPUs free: %d\n", gpusFree)
+		}
 		return nil
 	})
 }
 
 func init() {
 	statusCmd.Flags().Bool("json", false, "output raw JSON")
+	statusCmd.Flags().StringP("target", "t", "", "Filter by compute target")
 
 	statusCmd.GroupID = groupDiag
 	rootCmd.AddCommand(statusCmd)

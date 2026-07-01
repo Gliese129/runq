@@ -53,6 +53,7 @@ func init() {
 	cleanCmd.Flags().Bool("ckpt-only", false, "Only delete checkpoints/, keep other artifacts and DB records")
 	cleanCmd.Flags().Bool("show", false, "Preview what would be deleted without actually deleting")
 	cleanCmd.Flags().BoolP("yes", "y", false, "Skip confirmation prompt")
+	cleanCmd.Flags().StringP("target", "t", "", "Scope clean to a specific compute target")
 
 	cleanCmd.GroupID = groupDiag
 	rootCmd.AddCommand(cleanCmd)
@@ -93,7 +94,7 @@ func runClean(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	return withBackend(func(be backend.Backend) error {
+	return withBackend(cmd, func(be backend.Backend) error {
 		// Always preview first to show the user what will be cleaned.
 		previewOpts := opts
 		previewOpts.DryRun = true

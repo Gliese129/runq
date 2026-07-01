@@ -62,7 +62,7 @@ func (b *Backend) EnsureFresh(ctx context.Context, jobID string, ttl time.Durati
 // every active job. Without it, a shared memoRunner still deduplicates
 // listing-style per-job commands (e.g. SGE/UGE bare `qstat`) across jobs.
 func (b *Backend) EnsureAllFresh(ctx context.Context, ttl time.Duration) error {
-	jobs, err := b.Store.ListJobs(ctx, "")
+	jobs, err := b.Store.ListJobs(ctx, "", b.Cfg.Name)
 	if err != nil {
 		return err
 	}

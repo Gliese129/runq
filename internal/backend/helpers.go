@@ -14,6 +14,7 @@ import (
 	"github.com/gliese129/runq/internal/config"
 	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/project"
+	"github.com/gliese129/runq/internal/scheduler"
 	"github.com/gliese129/runq/internal/store"
 	"github.com/gliese129/runq/internal/workspace"
 )
@@ -65,6 +66,7 @@ func BuildJobSummary(job store.JobRow, tasks []store.TaskRow) JobSummary {
 		Project:     job.ProjectName,
 		Note:        job.Note,
 		Status:      job.Status,
+		Target:      job.Target,
 		Archived:    job.ArchivedAt != nil,
 		CreatedAt:   job.CreatedAt.Unix(),
 		Tasks:       counts,
@@ -171,9 +173,9 @@ func BuildCompareRows(tasks []store.TaskRow, key string, desc bool) []CompareRow
 	return rows
 }
 
-// buildDryRunResult expands tasks and adds best-effort preview info.
+// BuildDryRunResult expands tasks and adds best-effort preview info.
 // getProject is the backend-specific project lookup.
-func buildDryRunResult(cfg job.JobConfig, getProject func(string) (*project.Config, error)) (*DryRunResult, error) {
+func BuildDryRunResult(cfg job.JobConfig, getProject func(string) (*project.Config, error)) (*DryRunResult, error) {
 	tasks, err := job.Expand(&cfg)
 	if err != nil {
 		return nil, err
@@ -376,8 +378,92 @@ func numericFloat(value any) (float64, bool) {
 	}
 }
 
-// readMetricPoints reads metrics.jsonl and returns all metric points (excluding internal keys).
-func readMetricPoints(taskDir string) []MetricPoint {
+// TaskRowToSchedulerTask converts a store.TaskRow to a scheduler.Task.
+// Maps all fields including status, PID, GPUs, and timestamps.
+// JSON fields (params, env) are decoded back to maps.
+func TaskRowToSchedulerTask(row *store.TaskRow) *scheduler.Task {
+	var params map[string]any
+	if row.ParamsJSON != "" {
+		_ = json.Unmarshal([]byte(row.ParamsJSON), &params)
+	}
+	var env map[string]string
+	if row.EnvJSON != "" {
+		_ = json.Unmarshal([]byte(row.EnvJSON), &env)
+	}
+	// CheckpointDir is derived from TaskDir rather than stored separately —
+	// keeps the schema simple, and the value never diverges from
+	// RUNQ_CHECKPOINT_DIR (computed the same way in buildTaskEnv).
+	var ckptDir string
+	if row.TaskDir != "" {
+		ckptDir = filepath.Join(row.TaskDir, "checkpoints")
+	}
+	return &scheduler.Task{
+		ID:            row.ID,
+		JobID:         row.JobID,
+		ProjectName:   row.ProjectName,
+		Command:       row.Command,
+		Params:        params,
+		GPUsNeeded:    row.GPUsNeeded,
+		GPUs:          parseGPUIndices(row.GPUs),
+		Status:        mapTaskStatus(row.Status),
+		RetryCount:    row.RetryCount,
+		MaxRetry:      row.MaxRetry,
+		PID:           row.PID,
+		StartTime:     time.Unix(row.StartTime, 0),
+		LogPath:       row.LogPath,
+		WorkingDir:    row.WorkingDir,
+		Env:           env,
+		EnqueuedAt:    row.EnqueuedAt,
+		StartedAt:     row.StartedAt,
+		FinishedAt:    row.FinishedAt,
+		Resumable:     row.Resumable,
+		ExtraArgs:     row.ExtraArgs,
+		Timeout:       row.Timeout,
+		UID:           row.UID,
+		TaskDir:       row.TaskDir,
+		CheckpointDir: ckptDir,
+	}
+}
+
+// mapTaskStatus converts a DB status string to scheduler.TaskStatus.
+func mapTaskStatus(s string) scheduler.TaskStatus {
+	switch s {
+	case "running":
+		return scheduler.StatusRunning
+	case "success":
+		return scheduler.StatusSuccess
+	case "failed":
+		return scheduler.StatusFailed
+	case "killed":
+		return scheduler.StatusKilled
+	default:
+		return scheduler.StatusPending
+	}
+}
+
+// parseGPUIndices converts a comma-separated GPU string (e.g. "0,1,3") to []int.
+func parseGPUIndices(s string) []int {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	indices := make([]int, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		v, err := strconv.Atoi(p)
+		if err != nil {
+			continue
+		}
+		indices = append(indices, v)
+	}
+	return indices
+}
+
+// ReadMetricPoints reads metrics.jsonl and returns all metric points (excluding internal keys).
+func ReadMetricPoints(taskDir string) []MetricPoint {
 	if taskDir == "" {
 		return nil
 	}

@@ -29,7 +29,7 @@ import (
 //     a full scheduler probe for the job.
 //   - status.json: written by run.sh on compute nodes, read by daemon via SSH.
 type SSHBackend struct {
-	storeBackend // embeds store, reg, and shared project/clean/thaw/dryrun methods
+	storeQueries // embeds store, reg, and shared project/clean/thaw/dryrun methods
 	backend      *hpc.Backend
 	sshFS        *rfs.SSHFS // held for Close()
 }
@@ -75,7 +75,7 @@ func NewSSHBackend(cfg SSHBackendConfig) (*SSHBackend, error) {
 	hpcBe := hpc.NewWithFS(&cfg.Target, cfg.Store, cfg.GlobalCfg, sshFS)
 
 	return &SSHBackend{
-		storeBackend: storeBackend{
+		storeQueries: storeQueries{
 			store: cfg.Store,
 			reg:   project.NewRegistry(cfg.Store.DB()),
 		},
@@ -118,7 +118,8 @@ func (b *SSHBackend) ReconcileAll(ctx context.Context) error {
 // ── Job operations ────────────────────────────────────────────────────────
 
 func (b *SSHBackend) ListJobs(ctx context.Context, projectScope string) ([]JobSummary, error) {
-	jobs, err := b.store.ListJobsVisible(ctx, projectScope)
+	target := b.backend.Cfg.Name
+	jobs, err := b.store.ListJobsVisible(ctx, projectScope, target)
 	if err != nil {
 		return nil, err
 	}
@@ -128,7 +129,7 @@ func (b *SSHBackend) ListJobs(ctx context.Context, projectScope string) ([]JobSu
 		}
 	}
 	// Re-query after reconcile.
-	jobs, err = b.store.ListJobsVisible(ctx, projectScope)
+	jobs, err = b.store.ListJobsVisible(ctx, projectScope, target)
 	if err != nil {
 		return nil, err
 	}
@@ -213,7 +214,7 @@ func (b *SSHBackend) TaskMetrics(ctx context.Context, taskID string) ([]MetricPo
 		return nil, fmt.Errorf("task %q: %w", taskID, ErrNotFound)
 	}
 	task = b.reconcileTask(ctx, taskID, task)
-	return readMetricPoints(task.TaskDir), nil
+	return ReadMetricPoints(task.TaskDir), nil
 }
 
 func (b *SSHBackend) reconcileTask(ctx context.Context, taskID string, fallback *store.TaskRow) *store.TaskRow {
@@ -287,7 +288,7 @@ func (b *SSHBackend) PreviewSubmit(ctx context.Context, cfg job.JobConfig, skipP
 }
 
 func (b *SSHBackend) ResolveNote(ctx context.Context, cfg job.JobConfig) (string, error) {
-	rows, err := b.store.ListJobs(ctx, cfg.Project)
+	rows, err := b.store.ListJobs(ctx, cfg.Project, "")
 	if err != nil {
 		return "", err
 	}
@@ -303,7 +304,7 @@ func (b *SSHBackend) ResolveNote(ctx context.Context, cfg job.JobConfig) (string
 // ── Archive ───────────────────────────────────────────────────────────────
 
 func (b *SSHBackend) ListArchivedJobs(ctx context.Context) ([]JobSummary, error) {
-	jobs, err := b.store.ListJobsArchived(ctx, "")
+	jobs, err := b.store.ListJobsArchived(ctx, "", b.backend.Cfg.Name)
 	if err != nil {
 		return nil, err
 	}

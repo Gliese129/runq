@@ -69,6 +69,7 @@ type TaskRow struct {
 type TaskFilter struct {
 	Status string // filter by status; empty = no filter
 	JobID  string // filter by job; empty = no filter
+	Target string // filter by target; empty = no filter
 }
 
 // allTaskColumns lists every column in the tasks table.
@@ -288,6 +289,10 @@ func (s *Store) ListTasks(ctx context.Context, filter TaskFilter) ([]TaskRow, er
 	if filter.JobID != "" {
 		where = append(where, "job_id = ?")
 		args = append(args, filter.JobID)
+	}
+	if filter.Target != "" {
+		where = append(where, "target = ?")
+		args = append(args, filter.Target)
 	}
 
 	query := fmt.Sprintf("SELECT %s FROM tasks", allTaskColumns)

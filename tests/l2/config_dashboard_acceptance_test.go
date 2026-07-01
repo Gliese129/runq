@@ -51,10 +51,7 @@ func TestConfigModeDefaultsAndRoundTrips(t *testing.T) {
 
 func TestConfigSetKeepsExistingHPCSection(t *testing.T) {
 	fx := newCLIFixture(t)
-	configPath := fx.dashboardConfig().ConfigPath
-	if configPath == "" {
-		t.Fatal("dashboard config response did not include config_path")
-	}
+	configPath := fx.configPath()
 
 	initial := strings.Join([]string{
 		"mode: daemon",
@@ -86,31 +83,15 @@ func TestConfigSetKeepsExistingHPCSection(t *testing.T) {
 func TestDashboardConfigAPIUsesDashboardNamespace(t *testing.T) {
 	fx := newCLIFixture(t)
 	dataPath := filepath.Join(fx.dataDir, "configured-data")
-	configPath := fx.dashboardConfig().ConfigPath
-	writeConfig(t, configPath, "hpc", dataPath)
+	port := freePort(t)
+	configPath := fx.configPath()
+	writeConfig(t, configPath, "hpc", dataPath, port)
 	if got := strings.TrimSpace(fx.run("config", "get", "mode")); got != "hpc" {
 		t.Fatalf("config get mode = %q, want hpc", got)
 	}
 
-	port := freePort(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	cmd := exec.CommandContext(ctx, fx.bin, "dashboard", "--host", "127.0.0.1", "--port", fmt.Sprint(port))
-	cmd.Dir = fx.root
-	cmd.Env = fx.env
-	output := &bytes.Buffer{}
-	cmd.Stdout = output
-	cmd.Stderr = output
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start dashboard: %v", err)
-	}
-	exited := make(chan error, 1)
-	go func() { exited <- cmd.Wait() }()
-	defer func() {
-		cancel()
-		<-exited
-	}()
-
+	exited, output, stop := fx.startDaemon()
+	defer stop()
 	baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
 	cfg := waitForDashboardConfig(t, baseURL, exited, output)
 	if cfg.Mode != "hpc" {
@@ -173,13 +154,18 @@ func newCLIFixture(t *testing.T) cliFixture {
 		t.Fatalf("build runq: %v\n%s", err, out)
 	}
 
-	dataDir := filepath.Join(tmp, "runq-data")
-	home := filepath.Join(tmp, "home")
+	shortRoot, err := os.MkdirTemp("/tmp", "runq-l2-")
+	if err != nil {
+		t.Fatalf("create short temp dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(shortRoot) })
+	dataDir := filepath.Join(shortRoot, "runq-data")
+	home := filepath.Join(shortRoot, "home")
 	env := append(os.Environ(),
 		"RUNQ_DATA_DIR="+dataDir,
 		"HOME="+home,
-		"XDG_CONFIG_HOME="+filepath.Join(tmp, "xdg-config"),
-		"XDG_DATA_HOME="+filepath.Join(tmp, "xdg-data"),
+		"XDG_CONFIG_HOME="+filepath.Join(shortRoot, "xdg-config"),
+		"XDG_DATA_HOME="+filepath.Join(shortRoot, "xdg-data"),
 	)
 	return cliFixture{t: t, bin: bin, root: root, dataDir: dataDir, env: env}
 }
@@ -196,12 +182,14 @@ func (fx cliFixture) run(args ...string) string {
 	return string(out)
 }
 
-func (fx cliFixture) dashboardConfig() dashboardConfig {
+func (fx cliFixture) configPath() string {
+	return filepath.Join(fx.dataDir, "config.yaml")
+}
+
+func (fx cliFixture) startDaemon() (chan error, *bytes.Buffer, func()) {
 	fx.t.Helper()
-	port := freePort(fx.t)
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	cmd := exec.CommandContext(ctx, fx.bin, "dashboard", "--host", "127.0.0.1", "--port", fmt.Sprint(port))
+	cmd := exec.CommandContext(ctx, fx.bin, "daemon", "start")
 	cmd.Dir = fx.root
 	cmd.Env = fx.env
 	output := &bytes.Buffer{}
@@ -212,11 +200,11 @@ func (fx cliFixture) dashboardConfig() dashboardConfig {
 	}
 	exited := make(chan error, 1)
 	go func() { exited <- cmd.Wait() }()
-	defer func() {
+	stop := func() {
 		cancel()
 		<-exited
-	}()
-	return waitForDashboardConfig(fx.t, fmt.Sprintf("http://127.0.0.1:%d", port), exited, output)
+	}
+	return exited, output, stop
 }
 
 type dashboardConfig struct {
@@ -278,11 +266,14 @@ func freePort(t *testing.T) int {
 	return ln.Addr().(*net.TCPAddr).Port
 }
 
-func writeConfig(t *testing.T, configPath, mode, dataPath string) {
+func writeConfig(t *testing.T, configPath, mode, dataPath string, dashboardPort int) {
 	t.Helper()
 	contents := strings.Join([]string{
 		"mode: " + mode,
 		"data_path: " + filepath.ToSlash(dataPath),
+		"dashboard:",
+		"  enabled: true",
+		fmt.Sprintf("  listen: 127.0.0.1:%d", dashboardPort),
 		"hpc:",
 		"  submit_template: sbatch --wrap '{{cmd}}'",
 		"",

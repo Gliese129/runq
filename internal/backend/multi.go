@@ -112,6 +112,24 @@ func (m *MultiBackend) ListJobs(ctx context.Context, projectScope string) ([]Job
 	return all, nil
 }
 
+// ListJobsForTarget returns jobs from a single target backend.
+func (m *MultiBackend) ListJobsForTarget(ctx context.Context, target, projectScope string) ([]JobSummary, error) {
+	be, err := m.resolve(target)
+	if err != nil {
+		return nil, err
+	}
+	return be.ListJobs(ctx, projectScope)
+}
+
+// ListArchivedJobsForTarget returns archived jobs from a single target backend.
+func (m *MultiBackend) ListArchivedJobsForTarget(ctx context.Context, target string) ([]JobSummary, error) {
+	be, err := m.resolve(target)
+	if err != nil {
+		return nil, err
+	}
+	return be.ListArchivedJobs(ctx)
+}
+
 func (m *MultiBackend) GetJob(ctx context.Context, jobID string) (*JobDetail, error) {
 	be, err := m.resolveJob(ctx, jobID)
 	if err != nil {
@@ -213,6 +231,26 @@ func (m *MultiBackend) DryRun(ctx context.Context, cfg job.JobConfig) (*DryRunRe
 
 func (m *MultiBackend) PreviewSubmit(ctx context.Context, cfg job.JobConfig, skipPreflight bool) (string, error) {
 	return m.defaultBackend().PreviewSubmit(ctx, cfg, skipPreflight)
+}
+
+// PreviewSubmitForTarget routes submit preview to the named target backend.
+// Used by the API handler to give `submit --dry-run --target <hpc>` access
+// to the HPC backend's full run.sh + submit-command rendering.
+func (m *MultiBackend) PreviewSubmitForTarget(ctx context.Context, target string, cfg job.JobConfig, skipPreflight bool) (string, error) {
+	be, err := m.resolve(target)
+	if err != nil {
+		return "", err
+	}
+	return be.PreviewSubmit(ctx, cfg, skipPreflight)
+}
+
+// DryRunForTarget routes dry-run expansion to the named target backend.
+func (m *MultiBackend) DryRunForTarget(ctx context.Context, target string, cfg job.JobConfig) (*DryRunResult, error) {
+	be, err := m.resolve(target)
+	if err != nil {
+		return nil, err
+	}
+	return be.DryRun(ctx, cfg)
 }
 
 func (m *MultiBackend) ListArchivedJobs(ctx context.Context) ([]JobSummary, error) {

@@ -37,7 +37,7 @@ will likely re-trigger the freeze immediately if disk hasn't recovered —
 use this only when you know what you're doing (or want to kill the task
 afterward with 'runq kill').`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return withBackend(func(be backend.Backend) error {
+		return withBackend(cmd, func(be backend.Backend) error {
 			result, err := be.ThawTasks(cmd.Context(), os.Getuid(), thawForce)
 			if err != nil {
 				return err

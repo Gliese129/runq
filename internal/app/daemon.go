@@ -20,7 +20,6 @@ import (
 	"github.com/gliese129/runq/internal/project"
 	"github.com/gliese129/runq/internal/resource"
 	"github.com/gliese129/runq/internal/scheduler"
-	"github.com/gliese129/runq/internal/service"
 	"github.com/gliese129/runq/internal/store"
 	"github.com/gliese129/runq/internal/utils"
 )
@@ -43,6 +42,11 @@ type Daemon struct {
 
 	// sshBackends holds SSHBackend references for cleanup on shutdown.
 	sshBackends []*backend.SSHBackend
+
+	// localTargetNames are the routing keys for local GPU targets. Used by
+	// restore paths to avoid loading remote tasks into the local queue.
+	// nil means legacy/test mode: restore all local-store rows.
+	localTargetNames []string
 }
 
 // NewDaemon creates and wires all daemon components.
@@ -93,54 +97,11 @@ func NewDaemon() (*Daemon, error) {
 		paths.SocketPath, freeze,
 	)
 
-	// Build service layer.
 	storageCfg, err := config.Load()
 	if err != nil {
 		return nil, fmt.Errorf("load global config: %w", err)
 	}
 	reg := project.NewRegistry(st.DB())
-	jobSvc := &service.JobService{
-		Store: st, Queue: queue, Scheduler: sched, Exec: exec, Registry: reg, Pool: pool,
-		StorageCfg: storageCfg,
-	}
-	taskSvc := &service.TaskService{
-		Store: st, Queue: queue, Exec: exec, Scheduler: sched,
-	}
-
-	deps := api.Deps{
-		Store:       st,
-		Registry:    reg,
-		Scheduler:   sched,
-		Queue:       queue,
-		Pool:        pool,
-		Executor:    exec,
-		Logger:      logger,
-		JobService:  jobSvc,
-		TaskService: taskSvc,
-		Freeze:      freeze,
-	}
-
-	server := api.NewServer(deps, paths.SocketPath, paths.PIDPath)
-
-	d := &Daemon{
-		Store:     st,
-		Server:    server,
-		Scheduler: sched,
-		Logger:    logger,
-		Executor:  exec,
-		Queue:     queue,
-		Pool:      pool,
-	}
-
-	// Build LocalBackend for the embedded dashboard. The dashboard talks
-	// to the daemon's service layer directly — no HTTP proxy.
-	localBe := backend.NewLocalBackend(backend.LocalBackendDeps{
-		Store:   st,
-		JobSvc:  jobSvc,
-		TaskSvc: taskSvc,
-		Pool:    pool,
-		Reg:     reg,
-	})
 
 	// Determine the mode string for dashboard config response. With
 	// targets[], the concept of a single mode is legacy; use "daemon" for
@@ -150,9 +111,26 @@ func NewDaemon() (*Daemon, error) {
 	// Build per-target backends. The local target always exists (daemon's
 	// GPU pool); scheduler-type targets get SSHBackend wrappers.
 	defaultTarget := storageCfg.ResolveDefaultTarget()
-	targets := make(map[string]backend.Backend)
 
-	for _, tc := range storageCfg.ResolveTargets() {
+	resolvedTargets := storageCfg.ResolveTargets()
+	makeLocalBackend := func(targetName string) *backend.LocalBackend {
+		return backend.NewLocalBackend(backend.LocalBackendDeps{
+			Store:      st,
+			Reg:        reg,
+			Queue:      queue,
+			Scheduler:  sched,
+			Exec:       exec,
+			Pool:       pool,
+			StorageCfg: storageCfg,
+			TargetName: targetName,
+		})
+	}
+
+	targets := make(map[string]backend.Backend)
+	var sshBackends []*backend.SSHBackend
+	var localTargetNames []string
+	var localBe *backend.LocalBackend
+	for _, tc := range resolvedTargets {
 		if tc.Type() == config.TargetTypeHPC {
 			sshBe, err := backend.NewSSHBackend(backend.SSHBackendConfig{
 				Target:    tc,
@@ -163,22 +141,55 @@ func NewDaemon() (*Daemon, error) {
 				return nil, fmt.Errorf("build SSH backend for target %q: %w", tc.Name, err)
 			}
 			targets[tc.Name] = sshBe
-			d.sshBackends = append(d.sshBackends, sshBe)
+			sshBackends = append(sshBackends, sshBe)
 			logger.Info("SSH backend registered", "target", tc.Name, "host", tc.SSH.Host)
 		} else {
-			// Local-type target: use the shared LocalBackend.
-			targets[tc.Name] = localBe
+			// Local-type targets share daemon runtime components but keep separate
+			// routing keys so DB target filters remain correct.
+			be := makeLocalBackend(tc.Name)
+			targets[tc.Name] = be
+			localTargetNames = append(localTargetNames, tc.Name)
+			if localBe == nil {
+				localBe = be
+			}
 		}
 	}
-	// Ensure the default target is always present (backward compat: if no
-	// targets[] are configured, ResolveTargets returns a synthetic "local").
-	if _, ok := targets[defaultTarget]; !ok {
-		targets[defaultTarget] = localBe
+	if localBe == nil {
+		// HPC-only configs still need a LocalBackend for store/registry helpers
+		// used by API endpoints such as note resolution. It is not registered
+		// as a routable target.
+		localBe = makeLocalBackend("local")
 	}
 
-	dashBe, err := backend.NewMultiBackend(targets, st, defaultTarget)
+	multiBe, err := backend.NewMultiBackend(targets, st, defaultTarget)
 	if err != nil {
 		return nil, fmt.Errorf("build multi-backend: %w", err)
+	}
+
+	// API server — serves CLI over Unix socket. MultiBackend routes
+	// target-aware operations (submit, kill, list, etc.).
+	deps := api.Deps{
+		Store:    st,
+		Registry: reg,
+		Queue:    queue,
+		Pool:     pool,
+		Logger:   logger,
+		Local:    localBe,
+		Multi:    multiBe,
+		Freeze:   freeze,
+	}
+	server := api.NewServer(deps, paths.SocketPath, paths.PIDPath)
+
+	d := &Daemon{
+		Store:            st,
+		Server:           server,
+		Scheduler:        sched,
+		Logger:           logger,
+		Executor:         exec,
+		Queue:            queue,
+		Pool:             pool,
+		sshBackends:      sshBackends,
+		localTargetNames: localTargetNames,
 	}
 
 	// Embedded dashboard: start only when enabled in config.
@@ -188,7 +199,7 @@ func NewDaemon() (*Daemon, error) {
 		if dashCfg != nil && dashCfg.Listen != "" {
 			listen = dashCfg.Listen
 		}
-		d.Dashboard = dashboard.NewServer(dashBe, mode, storageCfg)
+		d.Dashboard = dashboard.NewServer(multiBe, mode, storageCfg)
 		d.dashboardListen = listen
 		logger.Info("dashboard enabled", "listen", listen)
 	}
@@ -256,21 +267,27 @@ func (d *Daemon) restoreRuntimeState() error {
 	// Reclaimer checks if their processes are still alive and updates DB accordingly.
 	// Alive tasks get reattached (monitored via signal 0 polling).
 	// Dead tasks get their DB status set to pending (retry) or failed.
-	reclaimer := &executor.Reclaimer{
-		Store:  d.Store,
-		Exec:   d.Executor,
-		Logger: d.Logger,
-	}
-	aliveTasks, err := reclaimer.Reclaim(context.Background())
-	if err != nil {
-		d.Logger.Error("reclaim failed", "error", err)
+	var aliveTasks []executor.AliveTask
+	for _, targetName := range d.localRestoreTargets() {
+		reclaimer := &executor.Reclaimer{
+			Store:        d.Store,
+			Exec:         d.Executor,
+			Logger:       d.Logger,
+			TargetFilter: targetName,
+		}
+		reclaimed, err := reclaimer.Reclaim(context.Background())
+		if err != nil {
+			d.Logger.Error("reclaim failed", "target", targetName, "error", err)
+			continue
+		}
+		aliveTasks = append(aliveTasks, reclaimed...)
 	}
 
 	// Phase 2: Reserve GPUs, register alive tasks in Queue, and hand their
 	// monitoring channels to the scheduler. The scheduler owns the lifecycle
 	// from here — same cleanup path as normally dispatched tasks.
 	for _, at := range aliveTasks {
-		task := service.TaskRowToSchedulerTask(&at.Row)
+		task := backend.TaskRowToSchedulerTask(&at.Row)
 		if len(task.GPUs) == 0 {
 			continue
 		}
@@ -286,10 +303,12 @@ func (d *Daemon) restoreRuntimeState() error {
 	}
 
 	// Restore paused job set from DB so pause semantics survive daemon restart.
-	pausedJobs, err := d.Store.ListJobs(context.Background(), "")
-	if err != nil {
-		d.Logger.Warn("failed to load jobs for pause restore", "error", err)
-	} else {
+	for _, targetName := range d.localRestoreTargets() {
+		pausedJobs, err := d.Store.ListJobs(context.Background(), "", targetName)
+		if err != nil {
+			d.Logger.Warn("failed to load jobs for pause restore", "target", targetName, "error", err)
+			continue
+		}
 		for _, j := range pausedJobs {
 			if j.Status == "paused" {
 				d.Scheduler.PauseJob(j.ID)
@@ -300,18 +319,29 @@ func (d *Daemon) restoreRuntimeState() error {
 	// Restore pending tasks from DB into the in-memory Queue.
 	// This includes tasks that were originally pending AND dead tasks that
 	// Reclaimer just set back to pending (resumable retry).
-	pendingTasks, err := d.Store.ListTasks(context.Background(), store.TaskFilter{Status: "pending"})
-	if err != nil {
-		return fmt.Errorf("load pending tasks from DB: %w", err)
+	var pendingCount int
+	for _, targetName := range d.localRestoreTargets() {
+		pendingTasks, err := d.Store.ListTasks(context.Background(), store.TaskFilter{Status: "pending", Target: targetName})
+		if err != nil {
+			return fmt.Errorf("load pending tasks for target %q from DB: %w", targetName, err)
+		}
+		for _, row := range pendingTasks {
+			task := backend.TaskRowToSchedulerTask(&row)
+			d.Queue.Restore(task)
+		}
+		pendingCount += len(pendingTasks)
 	}
-	for _, row := range pendingTasks {
-		task := service.TaskRowToSchedulerTask(&row)
-		d.Queue.Restore(task)
-	}
-	if len(pendingTasks) > 0 {
-		d.Logger.Info("restored pending tasks", "count", len(pendingTasks))
+	if pendingCount > 0 {
+		d.Logger.Info("restored pending tasks", "count", pendingCount)
 	}
 	return nil
+}
+
+func (d *Daemon) localRestoreTargets() []string {
+	if d.localTargetNames == nil {
+		return []string{""}
+	}
+	return d.localTargetNames
 }
 
 // Shutdown gracefully stops all daemon components.

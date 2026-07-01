@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"context"
 	"fmt"
 
 	"github.com/gliese129/runq/internal/backend"
@@ -25,7 +24,7 @@ var jobLsCmd = &cobra.Command{
 // the same path the WebUI and `runq ps` use — so the list reconciles and
 // projects identically regardless of mode.
 func runJobLs(cmd *cobra.Command, args []string) error {
-	return withBackend(func(b backend.Backend) error {
+	return withBackend(cmd, func(b backend.Backend) error {
 		jobs, err := b.ListJobs(cmd.Context(), "")
 		if err != nil {
 			return err
@@ -42,7 +41,7 @@ var jobShowCmd = &cobra.Command{
 }
 
 func runJobShow(cmd *cobra.Command, args []string) error {
-	return withBackend(func(b backend.Backend) error {
+	return withBackend(cmd, func(b backend.Backend) error {
 		detail, err := b.GetJob(cmd.Context(), args[0])
 		if err != nil {
 			return err
@@ -61,7 +60,7 @@ var jobKillCmd = &cobra.Command{
 
 func runJobKill(cmd *cobra.Command, args []string) error {
 	jobID := args[0]
-	return withBackend(func(b backend.Backend) error {
+	return withBackend(cmd, func(b backend.Backend) error {
 		if err := b.KillJob(cmd.Context(), jobID); err != nil {
 			return err
 		}
@@ -79,7 +78,7 @@ var jobPauseCmd = &cobra.Command{
 
 func runJobPause(cmd *cobra.Command, args []string) error {
 	jobID := args[0]
-	return withBackend(func(b backend.Backend) error {
+	return withBackend(cmd, func(b backend.Backend) error {
 		if err := b.PauseJob(cmd.Context(), jobID); err != nil {
 			return err
 		}
@@ -97,7 +96,7 @@ var jobResumeCmd = &cobra.Command{
 
 func runJobResume(cmd *cobra.Command, args []string) error {
 	jobID := args[0]
-	return withBackend(func(b backend.Backend) error {
+	return withBackend(cmd, func(b backend.Backend) error {
 		if err := b.ResumeJob(cmd.Context(), jobID); err != nil {
 			return err
 		}
@@ -107,6 +106,7 @@ func runJobResume(cmd *cobra.Command, args []string) error {
 }
 
 func init() {
+	jobLsCmd.Flags().StringP("target", "t", "", "Filter jobs by compute target")
 	jobCmd.AddCommand(jobLsCmd)
 	jobCmd.AddCommand(jobShowCmd)
 	jobCmd.AddCommand(jobKillCmd)
@@ -125,7 +125,7 @@ var jobArchiveCmd = &cobra.Command{
 	Short: "Hide a job from default lists (data and workspace untouched; reversible)",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return runJobArchive(cmd.Context(), args[0], true)
+		return runJobArchive(cmd, args[0], true)
 	},
 }
 
@@ -134,21 +134,21 @@ var jobUnarchiveCmd = &cobra.Command{
 	Short: "Bring an archived job back to the default lists",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return runJobArchive(cmd.Context(), args[0], false)
+		return runJobArchive(cmd, args[0], false)
 	},
 }
 
-func runJobArchive(ctx context.Context, jobID string, archive bool) error {
+func runJobArchive(cmd *cobra.Command, jobID string, archive bool) error {
 	verb := "archived"
 	if !archive {
 		verb = "unarchived"
 	}
-	return withBackend(func(be backend.Backend) error {
+	return withBackend(cmd, func(be backend.Backend) error {
 		var err error
 		if archive {
-			err = be.ArchiveJob(ctx, jobID)
+			err = be.ArchiveJob(cmd.Context(), jobID)
 		} else {
-			err = be.UnarchiveJob(ctx, jobID)
+			err = be.UnarchiveJob(cmd.Context(), jobID)
 		}
 		if err != nil {
 			return err

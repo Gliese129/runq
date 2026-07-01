@@ -20,7 +20,7 @@ var taskShowCmd = &cobra.Command{
 }
 
 func runTaskShow(cmd *cobra.Command, args []string) error {
-	return withBackend(func(b backend.Backend) error {
+	return withBackend(cmd, func(b backend.Backend) error {
 		view, err := b.GetTask(cmd.Context(), args[0])
 		if err != nil {
 			return err
@@ -39,7 +39,7 @@ var taskRetryCmd = &cobra.Command{
 
 func runTaskRetry(cmd *cobra.Command, args []string) error {
 	id := args[0]
-	return withBackend(func(b backend.Backend) error {
+	return withBackend(cmd, func(b backend.Backend) error {
 		if err := b.RetryTask(cmd.Context(), id); err != nil {
 			return err
 		}

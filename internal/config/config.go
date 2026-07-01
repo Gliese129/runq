@@ -180,6 +180,41 @@ type configFile struct {
 	GlobalConfig `yaml:",inline"`
 }
 
+// SaveGlobal writes the entire GlobalConfig back to config.yaml, preserving
+// the hpc: section if present.
+func SaveGlobal(cfg *GlobalConfig) error {
+	path := ConfigPath()
+	// Preserve unmanaged YAML sections (e.g. hpc:) by reading the existing
+	// file as a generic map, then overlaying our fields.
+	doc := map[string]any{}
+	if buf, err := os.ReadFile(path); err == nil {
+		_ = yaml.Unmarshal(buf, &doc)
+	}
+	if cfg.DefaultTarget != "" {
+		doc["default_target"] = cfg.DefaultTarget
+	}
+	if cfg.Mode != "" {
+		doc["mode"] = cfg.Mode
+	}
+	if cfg.DataPath != "" {
+		doc["data_path"] = cfg.DataPath
+	}
+	if cfg.Dashboard != nil {
+		doc["dashboard"] = cfg.Dashboard
+	}
+	if len(cfg.Targets) > 0 {
+		doc["targets"] = cfg.Targets
+	}
+	out, err := yaml.Marshal(doc)
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+	if err := os.MkdirAll(ConfigDir(), 0o755); err != nil {
+		return fmt.Errorf("create config dir: %w", err)
+	}
+	return os.WriteFile(path, out, 0o644)
+}
+
 // ConfigDir resolves the directory that holds config.yaml (and, for HPC, the
 // DB and job workspaces). RUNQ_DATA_DIR overrides; default is ~/.runq.
 func ConfigDir() string {

@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -77,7 +76,7 @@ is also provided on the command line (CLI takes priority).`,
 			cfg.CmdTemplate = cmdTpl
 		}
 
-		return withBackend(func(be backend.Backend) error {
+		return withBackend(cmd, func(be backend.Backend) error {
 			if err := be.CreateProject(cmd.Context(), cfg); err != nil {
 				return err
 			}
@@ -95,7 +94,7 @@ var projectLsCmd = &cobra.Command{
 }
 
 func runProjectLs(cmd *cobra.Command, args []string) error {
-	return withBackend(func(be backend.Backend) error {
+	return withBackend(cmd, func(be backend.Backend) error {
 		ctx := cmd.Context()
 		summaries, err := be.ListProjects(ctx)
 		if err != nil {
@@ -135,7 +134,7 @@ var projectShowCmd = &cobra.Command{
 }
 
 func runProjectShow(cmd *cobra.Command, args []string) error {
-	return withBackend(func(be backend.Backend) error {
+	return withBackend(cmd, func(be backend.Backend) error {
 		cfg, err := be.GetProject(cmd.Context(), args[0])
 		if err != nil {
 			return err
@@ -150,7 +149,7 @@ var projectEditCmd = &cobra.Command{
 	Short: "Edit project config in $EDITOR",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return withBackend(func(be backend.Backend) error {
+		return withBackend(cmd, func(be backend.Backend) error {
 			ctx := cmd.Context()
 			name := args[0]
 			cfg, err := be.GetProject(ctx, name)
@@ -217,27 +216,27 @@ var projectArchiveCmd = &cobra.Command{
 	Use:   "archive <name>",
 	Short: "Hide a project (and its jobs in global lists) from default views; reversible",
 	Args:  cobra.ExactArgs(1),
-	RunE:  func(cmd *cobra.Command, args []string) error { return runProjectArchive(cmd.Context(), args[0], true) },
+	RunE:  func(cmd *cobra.Command, args []string) error { return runProjectArchive(cmd, args[0], true) },
 }
 
 var projectUnarchiveCmd = &cobra.Command{
 	Use:   "unarchive <name>",
 	Short: "Bring an archived project back",
 	Args:  cobra.ExactArgs(1),
-	RunE:  func(cmd *cobra.Command, args []string) error { return runProjectArchive(cmd.Context(), args[0], false) },
+	RunE:  func(cmd *cobra.Command, args []string) error { return runProjectArchive(cmd, args[0], false) },
 }
 
-func runProjectArchive(ctx context.Context, name string, archive bool) error {
+func runProjectArchive(cmd *cobra.Command, name string, archive bool) error {
 	verb := "archived"
 	if !archive {
 		verb = "unarchived"
 	}
-	return withBackend(func(be backend.Backend) error {
+	return withBackend(cmd, func(be backend.Backend) error {
 		var err error
 		if archive {
-			err = be.ArchiveProject(ctx, name)
+			err = be.ArchiveProject(cmd.Context(), name)
 		} else {
-			err = be.UnarchiveProject(ctx, name)
+			err = be.UnarchiveProject(cmd.Context(), name)
 		}
 		if err != nil {
 			return err

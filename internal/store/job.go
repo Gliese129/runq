@@ -126,13 +126,22 @@ func (s *Store) GetJob(ctx context.Context, jobID string) (*JobRow, error) {
 	return j, nil
 }
 
-// ListJobs lists jobs, optionally filtered by project name. Empty projectName = no filter.
-func (s *Store) ListJobs(ctx context.Context, projectName string) ([]JobRow, error) {
+// ListJobs lists jobs, optionally filtered by project name and/or target.
+// Empty strings = no filter for that field.
+func (s *Store) ListJobs(ctx context.Context, projectName, target string) ([]JobRow, error) {
 	query := fmt.Sprintf("SELECT %s FROM jobs", allJobColumns)
+	var where []string
 	var args []any
 	if projectName != "" {
-		query += " WHERE project_name = ?"
+		where = append(where, "project_name = ?")
 		args = append(args, projectName)
+	}
+	if target != "" {
+		where = append(where, "target = ?")
+		args = append(args, target)
+	}
+	if len(where) > 0 {
+		query += " WHERE " + strings.Join(where, " AND ")
 	}
 	query += " ORDER BY created_at DESC"
 
@@ -292,30 +301,43 @@ func (s *Store) UnarchiveJob(ctx context.Context, jobID string) error {
 // ListJobsVisible is the default listing: directly-archived jobs are hidden;
 // with no project scope, jobs of archived projects are hidden too (cascade).
 // Inside an explicit project scope the cascade does not apply — you navigated
-// there on purpose.
-func (s *Store) ListJobsVisible(ctx context.Context, projectName string) ([]JobRow, error) {
+// there on purpose. target filters by compute target; empty = no filter.
+func (s *Store) ListJobsVisible(ctx context.Context, projectName, target string) ([]JobRow, error) {
 	query := `SELECT j.id, j.project_name, j.description, j.note, j.config_json, j.status, j.total_tasks, j.target, j.created_at, j.finished_at, j.refreshed_at, j.archived_at
 		FROM jobs j`
+	var where []string
 	var args []any
 	if projectName != "" {
-		query += ` WHERE j.project_name = ? AND j.archived_at IS NULL`
+		where = append(where, "j.project_name = ?")
 		args = append(args, projectName)
-	} else {
-		query += ` JOIN projects p ON p.name = j.project_name
-			WHERE j.archived_at IS NULL AND p.archived_at IS NULL`
 	}
+	where = append(where, "j.archived_at IS NULL")
+	if target != "" {
+		where = append(where, "j.target = ?")
+		args = append(args, target)
+	}
+	if projectName == "" {
+		query += ` JOIN projects p ON p.name = j.project_name`
+		where = append(where, "p.archived_at IS NULL")
+	}
+	query += " WHERE " + strings.Join(where, " AND ")
 	query += " ORDER BY j.created_at DESC"
 	return s.queryJobs(ctx, query, args...)
 }
 
 // ListJobsArchived returns the explicitly-archived jobs (cascade-hidden jobs
 // of an archived project are NOT included — they come back with the project).
-func (s *Store) ListJobsArchived(ctx context.Context, projectName string) ([]JobRow, error) {
+// target filters by compute target; empty = no filter.
+func (s *Store) ListJobsArchived(ctx context.Context, projectName, target string) ([]JobRow, error) {
 	query := fmt.Sprintf("SELECT %s FROM jobs WHERE archived_at IS NOT NULL", allJobColumns)
 	var args []any
 	if projectName != "" {
 		query += ` AND project_name = ?`
 		args = append(args, projectName)
+	}
+	if target != "" {
+		query += ` AND target = ?`
+		args = append(args, target)
 	}
 	query += " ORDER BY created_at DESC"
 	return s.queryJobs(ctx, query, args...)

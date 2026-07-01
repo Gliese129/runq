@@ -402,6 +402,7 @@ func (s *Server) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
 	}
 	opts := backend.SubmitOptions{
 		SkipPreflight: r.URL.Query().Get("no_preflight") == "1",
+		Target:        r.URL.Query().Get("target"),
 	}
 	jobID, total, err := s.backend.SubmitJob(r.Context(), cfg, opts)
 	if err != nil {

@@ -2,6 +2,7 @@ package backend
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"log/slog"
 	"os"
@@ -121,8 +122,18 @@ func PerformClean(ctx context.Context, st *store.Store, opts CleanOptions) (*Cle
 	// Delete orphan jobs (done jobs with no remaining tasks) within the same tx.
 	// The status='done' guard mirrors store.DeleteOrphanJobs — never remove
 	// pending/running/paused jobs that just haven't spawned tasks yet.
-	res, _ := tx.ExecContext(ctx,
-		"DELETE FROM jobs WHERE status = 'done' AND id NOT IN (SELECT DISTINCT job_id FROM tasks)")
+	// When a target filter is active, only delete orphan jobs matching that
+	// target so `clean --target X` can't accidentally remove another target's
+	// empty done jobs.
+	var res sql.Result
+	if opts.Target != "" {
+		res, _ = tx.ExecContext(ctx,
+			"DELETE FROM jobs WHERE status = 'done' AND target = ? AND id NOT IN (SELECT DISTINCT job_id FROM tasks)",
+			opts.Target)
+	} else {
+		res, _ = tx.ExecContext(ctx,
+			"DELETE FROM jobs WHERE status = 'done' AND id NOT IN (SELECT DISTINCT job_id FROM tasks)")
+	}
 	deletedJobs := int64(0)
 	if res != nil {
 		deletedJobs, _ = res.RowsAffected()
@@ -230,6 +241,22 @@ func collectCleanTargets(ctx context.Context, st *store.Store, opts CleanOptions
 		}
 		// Clear OlderThan so the caller doesn't double-filter.
 		opts.OlderThan = nil
+	}
+
+	// Filter by target when specified — only keep tasks belonging to the
+	// requested compute target so `clean --target X` cannot accidentally
+	// delete tasks from other targets.
+	if opts.Target != "" {
+		var filtered []store.TaskRow
+		var filteredReasons []string
+		for i, t := range tasks {
+			if t.Target == opts.Target {
+				filtered = append(filtered, t)
+				filteredReasons = append(filteredReasons, reasons[i])
+			}
+		}
+		tasks = filtered
+		reasons = filteredReasons
 	}
 
 	return tasks, reasons, nil

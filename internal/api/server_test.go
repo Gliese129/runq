@@ -20,7 +20,6 @@ import (
 	"github.com/gliese129/runq/internal/project"
 	"github.com/gliese129/runq/internal/resource"
 	"github.com/gliese129/runq/internal/scheduler"
-	"github.com/gliese129/runq/internal/service"
 	"github.com/gliese129/runq/internal/store"
 )
 
@@ -43,19 +42,21 @@ func setupTestServer(t *testing.T) *Server {
 	exec := executor.New()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
+	localBe := backend.NewLocalBackend(backend.LocalBackendDeps{
+		Store: st,
+		Reg:   reg,
+		Queue: q,
+		Exec:  exec,
+		Pool:  pool,
+	})
+
 	deps := Deps{
 		Store:    st,
 		Registry: reg,
 		Queue:    q,
 		Pool:     pool,
-		Executor: exec,
 		Logger:   logger,
-		JobService: &service.JobService{
-			Store: st, Queue: q, Exec: exec, Registry: reg,
-		},
-		TaskService: &service.TaskService{
-			Store: st, Queue: q, Exec: exec, Scheduler: nil,
-		},
+		Local:    localBe,
 	}
 
 	return NewServer(deps, "", "")

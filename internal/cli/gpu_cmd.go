@@ -16,7 +16,7 @@ var gpuCmd = &cobra.Command{
 }
 
 func runGPU(cmd *cobra.Command, args []string) error {
-	return withBackend(func(be backend.Backend) error {
+	return withBackend(cmd, func(be backend.Backend) error {
 		gpus, err := be.GPUStatus(cmd.Context())
 		if err != nil {
 			return err

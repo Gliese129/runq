@@ -113,7 +113,7 @@ func printPreflight(r preflight.Report) {
 // resolveNote renders note placeholders against this project's existing
 // job notes ({{version}} family scan needs them).
 func resolveNote(ctx context.Context, st *store.Store, cfg job.JobConfig) (string, error) {
-	rows, err := st.ListJobs(ctx, cfg.Project)
+	rows, err := st.ListJobs(ctx, cfg.Project, "")
 	if err != nil {
 		return "", fmt.Errorf("list jobs for note rendering: %w", err)
 	}
@@ -203,7 +203,8 @@ func (b *Backend) Submit(ctx context.Context, jobCfg job.JobConfig, proj *projec
 	}
 	jobRow := store.JobRow{
 		ID: plan.JobID, ProjectName: plan.Project, Description: plan.Description,
-		Note: plan.Note, ConfigJSON: string(cfgJSON), Status: "pending", TotalTasks: len(plan.Tasks), CreatedAt: now,
+		Note: plan.Note, ConfigJSON: string(cfgJSON), Status: "pending",
+		TotalTasks: len(plan.Tasks), Target: b.Cfg.Name, CreatedAt: now,
 	}
 	if err := b.Store.InsertJob(ctx, &jobRow); err != nil {
 		return "", 0, fmt.Errorf("persist job: %w", err)
@@ -228,7 +229,7 @@ func (b *Backend) Submit(ctx context.Context, jobCfg job.JobConfig, proj *projec
 		// external_id yet). A sbatch that succeeds but whose id we then fail to
 		// parse/persist must NOT become an invisible orphan — the row already
 		// exists and status/kill/collect can see it.
-		row := planToTaskRow(t, plan, now, "")
+		row := planToTaskRow(t, plan, now, "", b.Cfg.Name)
 		if err := b.Store.InsertTask(ctx, &row); err != nil {
 			return plan.JobID, submitted, fmt.Errorf("persist task %s: %w", t.TaskID, err)
 		}
@@ -354,7 +355,7 @@ func (b *Backend) buildRunScript(t submitplan.PlannedTask, plan submitplan.Plan)
 // planToTaskRow maps a PlannedTask to a store.TaskRow for the HPC store. Status
 // starts "pending"; refresh advances it. EnvJSON holds the user/project env
 // (not RUNQ_*, which live in run.sh) to mirror the daemon's persisted shape.
-func planToTaskRow(t submitplan.PlannedTask, plan submitplan.Plan, now time.Time, extID string) store.TaskRow {
+func planToTaskRow(t submitplan.PlannedTask, plan submitplan.Plan, now time.Time, extID, target string) store.TaskRow {
 	paramsJSON, _ := json.Marshal(t.Params)
 	envJSON, _ := json.Marshal(t.Env)
 	return store.TaskRow{
@@ -364,6 +365,6 @@ func planToTaskRow(t submitplan.PlannedTask, plan submitplan.Plan, now time.Time
 		WorkingDir: t.WorkingDir, EnvJSON: string(envJSON),
 		Resumable: t.Resumable, ExtraArgs: t.ExtraArgs,
 		UID: t.UID, Timeout: t.Timeout, EnqueuedAt: now,
-		TaskDir: t.TaskDir, ExternalID: extID,
+		TaskDir: t.TaskDir, ExternalID: extID, Target: target,
 	}
 }

@@ -25,7 +25,7 @@ var logsCmd = &cobra.Command{
 		id := args[0]
 		noFollow, _ := cmd.Flags().GetBool("no-follow")
 
-		return withBackend(func(be backend.Backend) error {
+		return withBackend(cmd, func(be backend.Backend) error {
 			view, err := be.GetTask(cmd.Context(), id)
 			if err != nil {
 				return err

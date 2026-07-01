@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,7 +16,6 @@ import (
 	"github.com/gliese129/runq/internal/logfile"
 	"github.com/gliese129/runq/internal/project"
 	"github.com/gliese129/runq/internal/scheduler"
-	"github.com/gliese129/runq/internal/service"
 	"github.com/gliese129/runq/internal/store"
 	"gopkg.in/yaml.v3"
 )
@@ -45,6 +45,7 @@ func (s *Server) registerRoutes() {
 	jobs := api.Group("/jobs")
 	{
 		jobs.POST("", s.handleJobSubmit)
+		jobs.POST("/preview", s.handleJobPreview)
 		jobs.POST("/resolve-note", s.handleResolveNote)
 		jobs.GET("", s.handleJobList)
 		jobs.GET("/:id", s.handleJobShow)
@@ -189,7 +190,7 @@ func (s *Server) handleResolveNote(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	resolved, err := s.deps.JobService.ResolveNote(c.Request.Context(), jobCfg)
+	resolved, err := s.deps.Local.ResolveNote(c.Request.Context(), jobCfg)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -234,16 +235,20 @@ func (s *Server) handleJobSubmit(c *gin.Context) {
 
 	// F8 preflight bypass — CLI's --no-preflight propagates as the
 	// ``no_preflight`` query parameter on POST /api/jobs.
-	opts := service.SubmitJobOpts{
-		SkipPreflight: c.Query("no_preflight") == "1",
+	skipPreflight := c.Query("no_preflight") == "1"
+	target := c.Query("target") // empty = default target
+
+	opts := backend.SubmitOptions{
+		SkipPreflight: skipPreflight,
+		Target:        target,
 	}
-	jobID, taskCount, err := s.deps.JobService.SubmitJobWithOpts(c.Request.Context(), jobCfg, opts)
+	jobID, taskCount, err := s.deps.Multi.SubmitJob(c.Request.Context(), jobCfg, opts)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	s.logger.Info("job submitted", "job_id", jobID, "tasks", taskCount)
+	s.logger.Info("job submitted", "job_id", jobID, "tasks", taskCount, "target", target)
 
 	resp := gin.H{"job_id": jobID, "total_tasks": taskCount}
 	if s.deps.Pool != nil {
@@ -253,28 +258,85 @@ func (s *Server) handleJobSubmit(c *gin.Context) {
 	c.JSON(http.StatusCreated, resp)
 }
 
+// handleJobPreview renders what `submit --dry-run` would produce, routed
+// to the correct target backend. HPC targets return a full preview
+// (run.sh + submit command); local targets return ErrNotSupported and the
+// handler falls back to task-expansion dry-run.
+//
+// POST /api/jobs/preview?target=X&no_preflight=1
+func (s *Server) handleJobPreview(c *gin.Context) {
+	body, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "failed to read body"})
+		return
+	}
+	var jobCfg job.JobConfig
+	if err := json.Unmarshal(body, &jobCfg); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	target := c.Query("target")
+	skipPreflight := c.Query("no_preflight") == "1"
+
+	// Try HPC-style full preview first.
+	preview, err := s.deps.Multi.PreviewSubmitForTarget(c.Request.Context(), target, jobCfg, skipPreflight)
+	if err == nil {
+		c.JSON(http.StatusOK, gin.H{"supported": true, "preview": preview})
+		return
+	}
+	if !errors.Is(err, backend.ErrNotSupported) {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Fall back to task expansion dry-run.
+	result, err := s.deps.Multi.DryRunForTarget(c.Request.Context(), target, jobCfg)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"supported": false, "dry_run": result})
+}
+
 func (s *Server) handleJobList(c *gin.Context) {
-	var jobs []store.JobRow
+	ctx := c.Request.Context()
+	var results []backend.JobSummary
 	var err error
+	projectScope := c.Query("project")
+	targetScope := c.Query("target")
+
 	if c.Query("archived") == "1" {
-		jobs, err = s.deps.JobService.ListArchivedJobs(c.Request.Context(), c.Query("project"))
+		if targetScope != "" {
+			results, err = s.deps.Multi.ListArchivedJobsForTarget(ctx, targetScope)
+		} else {
+			results, err = s.deps.Multi.ListArchivedJobs(ctx)
+		}
+		// Post-filter by project — the Backend interface doesn't accept a
+		// project parameter for archived listings.
+		if err == nil && projectScope != "" {
+			filtered := results[:0]
+			for _, j := range results {
+				if j.Project == projectScope {
+					filtered = append(filtered, j)
+				}
+			}
+			results = filtered
+		}
+	} else if targetScope != "" {
+		results, err = s.deps.Multi.ListJobsForTarget(ctx, targetScope, projectScope)
 	} else {
-		jobs, err = s.deps.JobService.ListJobs(c.Request.Context(), c.Query("project"))
+		results, err = s.deps.Multi.ListJobs(ctx, projectScope)
 	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	results := make([]backend.JobSummary, 0, len(jobs))
-	for _, j := range jobs {
-		tasks, _ := s.deps.Store.ListTasks(c.Request.Context(), store.TaskFilter{JobID: j.ID})
-		results = append(results, backend.BuildJobSummary(j, tasks))
-	}
 	c.JSON(http.StatusOK, results)
 }
 
 func (s *Server) handleJobArchive(c *gin.Context) {
-	if err := s.deps.JobService.ArchiveJob(c.Request.Context(), c.Param("id")); err != nil {
+	if err := s.deps.Multi.ArchiveJob(c.Request.Context(), c.Param("id")); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -282,7 +344,7 @@ func (s *Server) handleJobArchive(c *gin.Context) {
 }
 
 func (s *Server) handleJobUnarchive(c *gin.Context) {
-	if err := s.deps.JobService.UnarchiveJob(c.Request.Context(), c.Param("id")); err != nil {
+	if err := s.deps.Multi.UnarchiveJob(c.Request.Context(), c.Param("id")); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -293,7 +355,7 @@ func (s *Server) handleJobUnarchive(c *gin.Context) {
 // (job_count + archived). /api/projects stays plain []project.Config
 // (yaml-truth material) for the CLI; this is the dashboard's listing.
 func (s *Server) handleProjectSummaries(c *gin.Context) {
-	out, err := s.deps.JobService.ProjectSummaries(c.Request.Context())
+	out, err := s.deps.Multi.ListProjects(c.Request.Context())
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -318,33 +380,24 @@ func (s *Server) handleProjectUnarchive(c *gin.Context) {
 }
 
 func (s *Server) handleJobShow(c *gin.Context) {
-	j, tasks, err := s.deps.JobService.ShowJob(c.Request.Context(), c.Param("id"))
+	detail, err := s.deps.Multi.GetJob(c.Request.Context(), c.Param("id"))
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 		return
-	}
-	detail := backend.BuildJobDetail(*j, tasks)
-	if cfg, err := s.deps.Registry.Get(c.Request.Context(), j.ProjectName); err == nil && cfg.Wandb != nil {
-		detail.Wandb = &backend.WandbInfo{
-			Entity:  cfg.Wandb.Entity,
-			Project: cfg.Wandb.Project,
-			BaseURL: backend.WandbBaseURL(cfg.Wandb.Entity, cfg.Wandb.Project),
-		}
 	}
 	c.JSON(http.StatusOK, detail)
 }
 
 func (s *Server) handleJobKill(c *gin.Context) {
-	killed, err := s.deps.JobService.KillJob(c.Request.Context(), c.Param("id"))
-	if err != nil {
+	if err := s.deps.Multi.KillJob(c.Request.Context(), c.Param("id")); err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"job_id": c.Param("id"), "tasks_killed": killed})
+	c.JSON(http.StatusOK, gin.H{"job_id": c.Param("id")})
 }
 
 func (s *Server) handleJobPause(c *gin.Context) {
-	if err := s.deps.JobService.PauseJob(c.Request.Context(), c.Param("id")); err != nil {
+	if err := s.deps.Multi.PauseJob(c.Request.Context(), c.Param("id")); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -352,7 +405,7 @@ func (s *Server) handleJobPause(c *gin.Context) {
 }
 
 func (s *Server) handleJobResume(c *gin.Context) {
-	if err := s.deps.JobService.ResumeJob(c.Request.Context(), c.Param("id")); err != nil {
+	if err := s.deps.Multi.ResumeJob(c.Request.Context(), c.Param("id")); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -512,7 +565,7 @@ func (s *Server) handleTaskLogStream(c *gin.Context) {
 }
 
 func (s *Server) handleTaskKill(c *gin.Context) {
-	if err := s.deps.TaskService.KillTask(c.Request.Context(), c.Param("id")); err != nil {
+	if err := s.deps.Multi.KillTask(c.Request.Context(), c.Param("id")); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -520,7 +573,7 @@ func (s *Server) handleTaskKill(c *gin.Context) {
 }
 
 func (s *Server) handleTaskRetry(c *gin.Context) {
-	if err := s.deps.TaskService.RetryTask(c.Request.Context(), c.Param("id")); err != nil {
+	if err := s.deps.Multi.RetryTask(c.Request.Context(), c.Param("id")); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -582,7 +635,7 @@ func (s *Server) handleStatus(c *gin.Context) {
 }
 
 // handleClean invokes PerformClean directly (not via a Backend method) because
-// the daemon IS the store owner. The CLI's DaemonBackend proxies to this
+// the daemon IS the store owner. The CLI's api.Proxy forwards to this
 // handler over the Unix socket — inserting a service layer would just add
 // indirection.
 func (s *Server) handleClean(c *gin.Context) {
@@ -592,6 +645,7 @@ func (s *Server) handleClean(c *gin.Context) {
 		Archived: c.Query("archived") == "true",
 		JobID:    c.Query("job"),
 		TaskID:   c.Query("task"),
+		Target:   c.Query("target"),
 		CkptOnly: c.Query("ckpt_only") == "true",
 	}
 

@@ -42,6 +42,7 @@ func init() {
 	sweepCmd.Flags().StringP("note", "n", "", "Experiment note")
 	sweepCmd.Flags().Bool("list", false, "Use list (zip) mode instead of grid")
 	sweepCmd.Flags().Bool("dry", false, "Expand sweep and print tasks without submitting")
+	sweepCmd.Flags().StringP("target", "t", "", "Compute target to submit to (default: config default_target)")
 
 	sweepCmd.GroupID = groupCore
 	rootCmd.AddCommand(sweepCmd)
@@ -103,7 +104,6 @@ func runSweep(cmd *cobra.Command, args []string) error {
 	note, _ := cmd.Flags().GetString("note")
 	listMode, _ := cmd.Flags().GetBool("list")
 	dryRun, _ := cmd.Flags().GetBool("dry")
-
 	method := "grid"
 	if listMode {
 		method = "list"
@@ -126,7 +126,7 @@ func runSweep(cmd *cobra.Command, args []string) error {
 	}
 
 	// Submit requires a backend for project detection and job submission.
-	return withBackend(func(be backend.Backend) error {
+	return withBackend(cmd, func(be backend.Backend) error {
 		ctx := cmd.Context()
 
 		// Auto-detect project from current directory.

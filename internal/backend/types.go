@@ -15,6 +15,7 @@ type JobSummary struct {
 	Project   string         `json:"project"`
 	Note      string         `json:"note"`
 	Status    string         `json:"status"`
+	Target    string         `json:"target"`
 	Archived  bool           `json:"archived"`
 	CreatedAt int64          `json:"created_at"`
 	Tasks     TaskCountGroup `json:"tasks"`
@@ -150,6 +151,8 @@ type CleanOptions struct {
 	Archived bool   `json:"archived"` // tasks belonging to archived jobs
 	JobID    string `json:"job_id"`   // specific job
 	TaskID   string `json:"task_id"`  // specific task
+	// Target scopes the clean to a single compute target. Empty = all targets.
+	Target string `json:"target,omitempty"`
 	// Time filter — optional when other selectors are present.
 	OlderThan *time.Time `json:"older_than,omitempty"` // only tasks finished before this time
 	// Partial cleanup: only delete checkpoints/, keep DB + other artifacts.

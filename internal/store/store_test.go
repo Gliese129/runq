@@ -101,7 +101,7 @@ func TestArchiveJobGuardAndVisibility(t *testing.T) {
 		t.Fatalf("archive done job: %v", err)
 	}
 
-	vis, err := s.ListJobsVisible(ctx, "")
+	vis, err := s.ListJobsVisible(ctx, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,17 +111,17 @@ func TestArchiveJobGuardAndVisibility(t *testing.T) {
 
 	// cascade: archive project q → jb3 vanishes from the GLOBAL list...
 	mustExec(`UPDATE projects SET archived_at = 1 WHERE name = 'q'`)
-	vis, _ = s.ListJobsVisible(ctx, "")
+	vis, _ = s.ListJobsVisible(ctx, "", "")
 	if len(vis) != 1 || vis[0].ID != "jb1" {
 		t.Fatalf("cascade: want only jb1, got %v", vis)
 	}
 	// ...but stays visible inside its explicit project scope
-	scoped, _ := s.ListJobsVisible(ctx, "q")
+	scoped, _ := s.ListJobsVisible(ctx, "q", "")
 	if len(scoped) != 1 || scoped[0].ID != "jb3" {
 		t.Fatalf("scoped: want jb3, got %v", scoped)
 	}
 	// archived listing shows only the explicitly archived job
-	arch, _ := s.ListJobsArchived(ctx, "")
+	arch, _ := s.ListJobsArchived(ctx, "", "")
 	if len(arch) != 1 || arch[0].ID != "jb2" {
 		t.Fatalf("archived: want jb2 only, got %v", arch)
 	}
@@ -130,7 +130,7 @@ func TestArchiveJobGuardAndVisibility(t *testing.T) {
 	if err := s.UnarchiveJob(ctx, "jb2"); err != nil {
 		t.Fatal(err)
 	}
-	all, _ := s.ListJobs(ctx, "")
+	all, _ := s.ListJobs(ctx, "", "")
 	if len(all) != 3 {
 		t.Fatalf("ListJobs must always return all rows, got %d", len(all))
 	}

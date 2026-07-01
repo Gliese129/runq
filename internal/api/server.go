@@ -18,12 +18,10 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/gliese129/runq/internal/executor"
-	"github.com/gliese129/runq/internal/job"
+	"github.com/gliese129/runq/internal/backend"
 	"github.com/gliese129/runq/internal/project"
 	"github.com/gliese129/runq/internal/resource"
 	"github.com/gliese129/runq/internal/scheduler"
-	"github.com/gliese129/runq/internal/service"
 	"github.com/gliese129/runq/internal/store"
 	"github.com/gliese129/runq/internal/utils"
 )
@@ -42,33 +40,20 @@ func DefaultPIDPath() string { return DefaultPaths().PIDPath }
 
 // Deps holds all dependencies the API handlers need.
 type Deps struct {
-	Store     *store.Store
-	Registry  *project.Registry
-	Scheduler *scheduler.Scheduler
-	Queue     *scheduler.Queue
-	Pool      resource.Allocator
-	Executor  *executor.Executor
-	Logger    *slog.Logger
+	Store    *store.Store
+	Registry *project.Registry
+	Queue    *scheduler.Queue
+	Pool     resource.Allocator
+	Logger   *slog.Logger
 
-	// Service layer — handlers delegate business logic here.
-	JobService interface {
-		SubmitJob(ctx context.Context, jobCfg job.JobConfig) (string, int, error)
-		SubmitJobWithOpts(ctx context.Context, jobCfg job.JobConfig, opts service.SubmitJobOpts) (string, int, error)
-		ResolveNote(ctx context.Context, jobCfg job.JobConfig) (string, error)
-		ListJobs(ctx context.Context, project string) ([]store.JobRow, error)
-		ListArchivedJobs(ctx context.Context, project string) ([]store.JobRow, error)
-		ProjectSummaries(ctx context.Context) ([]service.ProjectSummary, error)
-		ArchiveJob(ctx context.Context, jobID string) error
-		UnarchiveJob(ctx context.Context, jobID string) error
-		ShowJob(ctx context.Context, jobID string) (*store.JobRow, []store.TaskRow, error)
-		KillJob(ctx context.Context, jobID string) (int, error)
-		PauseJob(ctx context.Context, jobID string) error
-		ResumeJob(ctx context.Context, jobID string) error
-	}
-	TaskService interface {
-		KillTask(ctx context.Context, taskID string) error
-		RetryTask(ctx context.Context, taskID string) error
-	}
+	// LocalBackend — handlers delegate business logic here. Holds the
+	// daemon's queue, scheduler, executor, and pool directly (no
+	// intermediate service layer).
+	Local *backend.LocalBackend
+
+	// Multi routes operations across all configured targets (local + SSH).
+	// Used by handlers that must be target-aware (submit, list, kill, etc.).
+	Multi *backend.MultiBackend
 
 	// L2-C: optional FreezeState wired by the daemon. nil disables the
 	// thaw endpoint (returns 503). Same instance lives on Scheduler.

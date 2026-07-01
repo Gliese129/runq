@@ -1,4 +1,4 @@
-package service
+package backend
 
 import (
 	"context"
@@ -25,11 +25,11 @@ func TestKillJobRefreshesAggregateStatusForPendingTasks(t *testing.T) {
 	t.Cleanup(func() { st.Close() })
 
 	q := scheduler.NewQueue()
-	svc := &JobService{
+	be := NewLocalBackend(LocalBackendDeps{
 		Store: st,
 		Queue: q,
 		Exec:  executor.New(),
-	}
+	})
 
 	now := time.Now()
 	if _, err := st.DB().Exec(`INSERT INTO projects (name, config_json) VALUES ('test', '{}')`); err != nil {
@@ -57,7 +57,7 @@ func TestKillJobRefreshesAggregateStatusForPendingTasks(t *testing.T) {
 	}
 	q.PushBatch(tasks)
 
-	killed, err := svc.KillJob(ctx, "j1")
+	killed, err := be.KillJobRaw(ctx, "j1")
 	if err != nil {
 		t.Fatalf("KillJob: %v", err)
 	}
@@ -65,14 +65,14 @@ func TestKillJobRefreshesAggregateStatusForPendingTasks(t *testing.T) {
 		t.Fatalf("expected 2 killed tasks, got %d", killed)
 	}
 
-	job, err := st.GetJob(ctx, "j1")
+	j, err := st.GetJob(ctx, "j1")
 	if err != nil {
 		t.Fatalf("get job: %v", err)
 	}
-	if job.Status != "done" {
-		t.Fatalf("expected job status done, got %q", job.Status)
+	if j.Status != "done" {
+		t.Fatalf("expected job status done, got %q", j.Status)
 	}
-	if job.FinishedAt == nil {
+	if j.FinishedAt == nil {
 		t.Fatalf("expected finished_at to be set")
 	}
 
@@ -87,10 +87,9 @@ func TestKillJobRefreshesAggregateStatusForPendingTasks(t *testing.T) {
 	}
 }
 
-// setupSubmitJobTest spins up the minimum dependencies for SubmitJob: store,
-// registry with one project, queue, mock allocator. Project working_dir is
-// the supplied tempDir so test can inspect the .runq/<job_id>/<task_id>/ layout.
-func setupSubmitJobTest(t *testing.T, workDir string, wandb *project.WandbConfig) (*JobService, job.JobConfig) {
+// setupSubmitTest spins up the minimum dependencies for submitJob: store,
+// registry with one project, queue, mock allocator.
+func setupSubmitTest(t *testing.T, workDir string, wandb *project.WandbConfig) (*LocalBackend, job.JobConfig) {
 	t.Helper()
 	ctx := context.Background()
 
@@ -112,12 +111,12 @@ func setupSubmitJobTest(t *testing.T, workDir string, wandb *project.WandbConfig
 	}
 
 	q := scheduler.NewQueue()
-	svc := &JobService{
-		Store:    st,
-		Queue:    q,
-		Exec:     executor.New(),
-		Registry: reg,
-	}
+	be := NewLocalBackend(LocalBackendDeps{
+		Store: st,
+		Reg:   reg,
+		Queue: q,
+		Exec:  executor.New(),
+	})
 	_ = ctx
 
 	jobCfg := job.JobConfig{
@@ -131,7 +130,7 @@ func setupSubmitJobTest(t *testing.T, workDir string, wandb *project.WandbConfig
 			},
 		},
 	}
-	return svc, jobCfg
+	return be, jobCfg
 }
 
 func TestSubmitJobCreatesTaskDir(t *testing.T) {
@@ -141,13 +140,9 @@ func TestSubmitJobCreatesTaskDir(t *testing.T) {
 		Entity:  "me",
 		Tags:    []string{"baseline"},
 	}
-	svc, jobCfg := setupSubmitJobTest(t, workDir, wandb)
+	be, jobCfg := setupSubmitTest(t, workDir, wandb)
 
-	jobID, n, err := svc.SubmitJobWithOpts(
-		context.Background(),
-		jobCfg,
-		SubmitJobOpts{SkipPreflight: true},
-	)
+	jobID, n, err := be.SubmitJobRaw(context.Background(), jobCfg, true)
 	if err != nil {
 		t.Fatalf("SubmitJob: %v", err)
 	}
@@ -155,7 +150,7 @@ func TestSubmitJobCreatesTaskDir(t *testing.T) {
 		t.Fatalf("expected 2 tasks expanded, got %d", n)
 	}
 
-	tasks, err := svc.Store.ListTasks(context.Background(), store.TaskFilter{JobID: jobID})
+	tasks, err := be.store.ListTasks(context.Background(), store.TaskFilter{JobID: jobID})
 	if err != nil {
 		t.Fatalf("list tasks: %v", err)
 	}
@@ -171,7 +166,6 @@ func TestSubmitJobCreatesTaskDir(t *testing.T) {
 		assertDirExists(t, taskDir)
 		assertDirExists(t, filepath.Join(taskDir, "checkpoints"))
 
-		// params.json content matches the sweep-expanded params.
 		paramsBytes, err := os.ReadFile(filepath.Join(taskDir, "params.json"))
 		if err != nil {
 			t.Fatalf("read params.json: %v", err)
@@ -184,7 +178,6 @@ func TestSubmitJobCreatesTaskDir(t *testing.T) {
 			t.Errorf("params.json missing 'lr', got %v", params)
 		}
 
-		// wandb_config.json present and contains user's project name.
 		wcBytes, err := os.ReadFile(filepath.Join(taskDir, "wandb_config.json"))
 		if err != nil {
 			t.Fatalf("read wandb_config.json: %v", err)
@@ -199,19 +192,55 @@ func TestSubmitJobCreatesTaskDir(t *testing.T) {
 	}
 }
 
-func TestSubmitJobNoWandb(t *testing.T) {
+func TestSubmitJobPersistsConfiguredLocalTarget(t *testing.T) {
+	ctx := context.Background()
 	workDir := t.TempDir()
-	svc, jobCfg := setupSubmitJobTest(t, workDir, nil)
+	be, jobCfg := setupSubmitTest(t, workDir, nil)
+	be.targetName = "workstation"
 
-	jobID, _, err := svc.SubmitJobWithOpts(
-		context.Background(),
-		jobCfg,
-		SubmitJobOpts{SkipPreflight: true},
-	)
+	jobID, _, err := be.SubmitJob(ctx, jobCfg, SubmitOptions{SkipPreflight: true})
 	if err != nil {
 		t.Fatalf("SubmitJob: %v", err)
 	}
-	tasks, _ := svc.Store.ListTasks(context.Background(), store.TaskFilter{JobID: jobID})
+
+	j, err := be.store.GetJob(ctx, jobID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	if j.Target != "workstation" {
+		t.Fatalf("JobRow.Target = %q, want workstation", j.Target)
+	}
+	tasks, err := be.store.ListTasks(ctx, store.TaskFilter{JobID: jobID})
+	if err != nil {
+		t.Fatalf("list tasks: %v", err)
+	}
+	for _, task := range tasks {
+		if task.Target != "workstation" {
+			t.Fatalf("TaskRow.Target for %s = %q, want workstation", task.ID, task.Target)
+		}
+	}
+
+	multi, err := NewMultiBackend(map[string]Backend{"workstation": be}, be.store, "workstation")
+	if err != nil {
+		t.Fatalf("NewMultiBackend: %v", err)
+	}
+	if _, err := multi.GetJob(ctx, jobID); err != nil {
+		t.Fatalf("GetJob via MultiBackend: %v", err)
+	}
+	if err := multi.KillJob(ctx, jobID); err != nil {
+		t.Fatalf("KillJob via MultiBackend: %v", err)
+	}
+}
+
+func TestSubmitJobNoWandb(t *testing.T) {
+	workDir := t.TempDir()
+	be, jobCfg := setupSubmitTest(t, workDir, nil)
+
+	jobID, _, err := be.SubmitJobRaw(context.Background(), jobCfg, true)
+	if err != nil {
+		t.Fatalf("SubmitJob: %v", err)
+	}
+	tasks, _ := be.store.ListTasks(context.Background(), store.TaskFilter{JobID: jobID})
 	for _, tr := range tasks {
 		path := filepath.Join(workDir, ".runq", jobID, tr.ID, "wandb_config.json")
 		if _, err := os.Stat(path); !os.IsNotExist(err) {
@@ -222,20 +251,74 @@ func TestSubmitJobNoWandb(t *testing.T) {
 
 func TestSubmitJobMissingWorkingDir(t *testing.T) {
 	workDir := t.TempDir()
-	svc, jobCfg := setupSubmitJobTest(t, workDir, nil)
+	be, jobCfg := setupSubmitTest(t, workDir, nil)
 	if err := os.RemoveAll(workDir); err != nil {
 		t.Fatalf("remove working_dir: %v", err)
 	}
-	_, _, err := svc.SubmitJobWithOpts(
-		context.Background(),
-		jobCfg,
-		SubmitJobOpts{SkipPreflight: true},
-	)
+	_, _, err := be.SubmitJobRaw(context.Background(), jobCfg, true)
 	if err == nil {
 		t.Fatal("expected error for missing working_dir, got nil")
 	}
 	if !strings.Contains(err.Error(), "working_dir") {
 		t.Errorf("error should mention working_dir, got: %v", err)
+	}
+}
+
+func TestRetryTaskUpdatesExistingQueueEntry(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+
+	if _, err := st.DB().Exec(`INSERT INTO projects (name, config_json) VALUES ('test', '{}')`); err != nil {
+		t.Fatalf("insert project: %v", err)
+	}
+	if err := st.InsertJob(ctx, &store.JobRow{
+		ID: "j1", ProjectName: "test", ConfigJSON: "{}",
+		Status: "done", TotalTasks: 1, CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("insert job: %v", err)
+	}
+	if err := st.InsertTask(ctx, &store.TaskRow{
+		ID: "t1", JobID: "j1", ProjectName: "test",
+		Command: "echo ok", ParamsJSON: "{}", GPUsNeeded: 1,
+		Status: "failed", RetryCount: 1, MaxRetry: 3,
+		EnqueuedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("insert task: %v", err)
+	}
+
+	q := scheduler.NewQueue()
+	q.Push(&scheduler.Task{
+		ID: "t1", JobID: "j1", ProjectName: "test",
+		Command: "echo ok", GPUsNeeded: 1,
+		Status: scheduler.StatusFailed, RetryCount: 1, MaxRetry: 3,
+	})
+	if err := q.MarkRunning("t1"); err != nil {
+		t.Fatalf("mark running: %v", err)
+	}
+	if err := q.Complete("t1", scheduler.StatusFailed); err != nil {
+		t.Fatalf("complete failed: %v", err)
+	}
+
+	be := NewLocalBackend(LocalBackendDeps{
+		Store: st,
+		Queue: q,
+		Exec:  executor.New(),
+	})
+	if err := be.RetryTask(ctx, "t1"); err != nil {
+		t.Fatalf("RetryTask: %v", err)
+	}
+	if q.Len() != 1 {
+		t.Fatalf("expected queue length 1, got %d", q.Len())
+	}
+	if got := q.Get("t1"); got.Status != scheduler.StatusPending {
+		t.Fatalf("expected retried task pending, got %s", got.Status)
+	}
+	if err := q.MarkRunning("t1"); err != nil {
+		t.Fatalf("retried task should be markable running: %v", err)
 	}
 }
 
