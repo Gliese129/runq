@@ -10,7 +10,6 @@ import (
 
 	"github.com/gliese129/runq/internal/api"
 	"github.com/gliese129/runq/internal/config"
-	"github.com/gliese129/runq/internal/hpcconfig"
 	"github.com/gliese129/runq/internal/utils"
 
 	"github.com/spf13/cobra"
@@ -92,7 +91,7 @@ func runDoctorHPC(d *doctorChecks) {
 	}
 
 	fmt.Println("HPC config:")
-	hpcCfg, err := hpcconfig.Load()
+	hpcCfg, err := config.LoadHPCConfig()
 	if err != nil {
 		d.check(false, "", fmt.Sprintf("%s: %v — run `runq hpc init`", config.ConfigPath(), err))
 	} else {
@@ -128,13 +127,13 @@ func runDoctorHPC(d *doctorChecks) {
 	d.skip("hpc mode — the cluster scheduler runs the tasks")
 
 	fmt.Println("Logs:")
-	logDir := hpcconfig.LogDir()
+	logDir := config.HPCLogDir()
 	if info, err := os.Stat(logDir); os.IsNotExist(err) {
 		d.skip(fmt.Sprintf("%s does not exist yet — created on first submit", logDir))
 	} else if err != nil {
 		d.check(false, "", fmt.Sprintf("%s: %v", logDir, err))
 	} else {
-		d.check(true, fmt.Sprintf("%s (%s) — operation log: %s", logDir, info.Mode(), hpcconfig.OpLogPath()), "")
+		d.check(true, fmt.Sprintf("%s (%s) — operation log: %s", logDir, info.Mode(), config.HPCOpLogPath()), "")
 	}
 }
 
@@ -203,7 +202,7 @@ func checkModeConsistency(d *doctorChecks) {
 		return
 	}
 	mode := config.ConfigMode(cfg)
-	_, hpcErr := hpcconfig.Load()
+	_, hpcErr := config.LoadHPCConfig()
 	hpcConfigured := hpcErr == nil
 	switch {
 	case hpcConfigured && mode != config.ModeHPC:

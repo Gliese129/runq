@@ -254,16 +254,21 @@ func (s *Server) handleJobSubmit(c *gin.Context) {
 }
 
 func (s *Server) handleJobList(c *gin.Context) {
-	var results []backend.JobSummary
+	var jobs []store.JobRow
 	var err error
 	if c.Query("archived") == "1" {
-		results, err = s.deps.JobService.ListArchivedJobs(c.Request.Context(), c.Query("project"))
+		jobs, err = s.deps.JobService.ListArchivedJobs(c.Request.Context(), c.Query("project"))
 	} else {
-		results, err = s.deps.JobService.ListJobs(c.Request.Context(), c.Query("project"))
+		jobs, err = s.deps.JobService.ListJobs(c.Request.Context(), c.Query("project"))
 	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
+	}
+	results := make([]backend.JobSummary, 0, len(jobs))
+	for _, j := range jobs {
+		tasks, _ := s.deps.Store.ListTasks(c.Request.Context(), store.TaskFilter{JobID: j.ID})
+		results = append(results, backend.BuildJobSummary(j, tasks))
 	}
 	c.JSON(http.StatusOK, results)
 }
@@ -313,10 +318,18 @@ func (s *Server) handleProjectUnarchive(c *gin.Context) {
 }
 
 func (s *Server) handleJobShow(c *gin.Context) {
-	detail, err := s.deps.JobService.ShowJob(c.Request.Context(), c.Param("id"))
+	j, tasks, err := s.deps.JobService.ShowJob(c.Request.Context(), c.Param("id"))
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 		return
+	}
+	detail := backend.BuildJobDetail(*j, tasks)
+	if cfg, err := s.deps.Registry.Get(c.Request.Context(), j.ProjectName); err == nil && cfg.Wandb != nil {
+		detail.Wandb = &backend.WandbInfo{
+			Entity:  cfg.Wandb.Entity,
+			Project: cfg.Wandb.Project,
+			BaseURL: backend.WandbBaseURL(cfg.Wandb.Entity, cfg.Wandb.Project),
+		}
 	}
 	c.JSON(http.StatusOK, detail)
 }
@@ -569,8 +582,9 @@ func (s *Server) handleStatus(c *gin.Context) {
 }
 
 // handleClean invokes PerformClean directly (not via a Backend method) because
-// the daemon IS the store owner. DaemonBackend.Clean() proxies to this handler
-// over HTTP — inserting a service layer would just add indirection.
+// the daemon IS the store owner. The CLI's DaemonBackend proxies to this
+// handler over the Unix socket — inserting a service layer would just add
+// indirection.
 func (s *Server) handleClean(c *gin.Context) {
 	opts := backend.CleanOptions{
 		DryRun:   c.Query("dry_run") == "true",

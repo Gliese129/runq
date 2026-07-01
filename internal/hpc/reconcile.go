@@ -5,7 +5,7 @@ package hpc
 import (
 	"strings"
 
-	"github.com/gliese129/runq/internal/hpcconfig"
+	"github.com/gliese129/runq/internal/config"
 )
 
 // SchedulerSignal is the semantic verdict about a task derived from the
@@ -35,7 +35,7 @@ type ProbeResult struct {
 // SignalMap first (user-configurable, case-insensitive), then falls back to
 // the hardcoded ParseSignal. This keeps scheduler-specific knowledge in
 // config presets rather than Go code.
-func MapSignal(cfg *hpcconfig.Config, token string) SchedulerSignal {
+func MapSignal(cfg *config.TargetConfig, token string) SchedulerSignal {
 	if cfg != nil && len(cfg.SignalMap) > 0 {
 		upper := strings.ToUpper(strings.TrimSpace(token))
 		for k, v := range cfg.SignalMap {

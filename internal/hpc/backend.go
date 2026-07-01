@@ -47,7 +47,6 @@ import (
 	"time"
 
 	"github.com/gliese129/runq/internal/config"
-	"github.com/gliese129/runq/internal/hpcconfig"
 	"github.com/gliese129/runq/internal/rfs"
 	"github.com/gliese129/runq/internal/store"
 )
@@ -62,7 +61,7 @@ type runner func(ctx context.Context, command string) (string, error)
 // operation, SSHFS for remote clusters. Commands go through shellRun which
 // wraps FS.Exec("sh", "-c", ...).
 type Backend struct {
-	Cfg        *hpcconfig.Config
+	Cfg        *config.TargetConfig
 	Store      *store.Store
 	FS         rfs.FS
 	StorageCfg *config.GlobalConfig // nil-safe: nil = project_path mode
@@ -80,8 +79,14 @@ type Backend struct {
 }
 
 // New builds a Backend with a local filesystem (same-machine operation).
-func New(cfg *hpcconfig.Config, st *store.Store, storageCfg *config.GlobalConfig) *Backend {
+func New(cfg *config.TargetConfig, st *store.Store, storageCfg *config.GlobalConfig) *Backend {
 	return &Backend{Cfg: cfg, Store: st, FS: rfs.NewLocalFS(), StorageCfg: storageCfg}
+}
+
+// NewWithFS builds a Backend with an explicit filesystem — used by SSHBackend
+// to inject an rfs.SSHFS for remote cluster operation.
+func NewWithFS(cfg *config.TargetConfig, st *store.Store, storageCfg *config.GlobalConfig, fsys rfs.FS) *Backend {
+	return &Backend{Cfg: cfg, Store: st, FS: fsys, StorageCfg: storageCfg}
 }
 
 // shellRun executes a shell command through the FS layer, returning combined

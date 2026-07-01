@@ -6,7 +6,6 @@ import (
 	"os/exec"
 
 	"github.com/gliese129/runq/internal/config"
-	"github.com/gliese129/runq/internal/hpcconfig"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )
@@ -46,11 +45,11 @@ func init() {
 }
 
 func runHPCConfigShow(cmd *cobra.Command, args []string) error {
-	cfg, err := hpcconfig.Load()
+	cfg, err := config.LoadHPCConfig()
 	if err != nil {
 		return err
 	}
-	out, err := yaml.Marshal(map[string]*hpcconfig.Config{"hpc": cfg})
+	out, err := yaml.Marshal(map[string]*config.TargetConfig{"hpc": cfg})
 	if err != nil {
 		return err
 	}
@@ -82,12 +81,12 @@ func runHPCConfigEdit(cmd *cobra.Command, args []string) error {
 }
 
 func runHPCConfigCheck(cmd *cobra.Command, args []string) error {
-	cfg, err := hpcconfig.Load()
+	cfg, err := config.LoadHPCConfig()
 	if err != nil {
 		return err
 	}
 	failed := 0
-	for _, r := range cfg.Check() {
+	for _, r := range cfg.CheckHPC() {
 		var mark string
 		switch r.Status {
 		case "ok":

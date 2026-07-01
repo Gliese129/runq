@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gliese129/runq/internal/hpcconfig"
+	"github.com/gliese129/runq/internal/config"
 )
 
 // opLog appends one timestamped entry to the HPC operation log
@@ -18,10 +18,10 @@ import (
 // swallowed. Multi-line output is indented to keep entries grep-able by
 // prefix.
 func opLog(format string, args ...any) {
-	if err := os.MkdirAll(hpcconfig.LogDir(), 0o755); err != nil {
+	if err := os.MkdirAll(config.HPCLogDir(), 0o755); err != nil {
 		return
 	}
-	f, err := os.OpenFile(hpcconfig.OpLogPath(), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(config.HPCOpLogPath(), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
 		return
 	}

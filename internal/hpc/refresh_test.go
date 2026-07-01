@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gliese129/runq/internal/hpcconfig"
+	"github.com/gliese129/runq/internal/config"
 	"github.com/gliese129/runq/internal/store"
 )
 
@@ -54,7 +54,7 @@ func TestRefreshInferredCorrectedByWrapper(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	b := &Backend{Cfg: &hpcconfig.Config{}, Store: st, FS: newTestFSFromRunner(nopRunner)}
+	b := &Backend{Cfg: &config.TargetConfig{}, Store: st, FS: newTestFSFromRunner(nopRunner)}
 	if err := b.EnsureFresh(context.Background(), jobID, 0); err != nil {
 		t.Fatalf("EnsureFresh: %v", err)
 	}
@@ -84,7 +84,7 @@ func TestIngestErrorDoesNotCacheAsFresh(t *testing.T) {
 		return "RUNNING", nil
 	}
 	b := &Backend{
-		Cfg:   &hpcconfig.Config{StatusTemplate: "checkstat {{ext_id}}"},
+		Cfg:   &config.TargetConfig{StatusTemplate: "checkstat {{ext_id}}"},
 		Store: st,
 		FS:    newTestFSFromRunner(runner),
 	}
@@ -157,7 +157,7 @@ func TestRefreshHardTerminalNotReevaluated(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	b := &Backend{Cfg: &hpcconfig.Config{}, Store: st, FS: newTestFSFromRunner(nopRunner)}
+	b := &Backend{Cfg: &config.TargetConfig{}, Store: st, FS: newTestFSFromRunner(nopRunner)}
 	if err := b.EnsureFresh(context.Background(), jobID, 0); err != nil {
 		t.Fatalf("EnsureFresh: %v", err)
 	}

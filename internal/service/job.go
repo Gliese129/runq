@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/gliese129/runq/internal/backend"
 	"github.com/gliese129/runq/internal/config"
 	"github.com/gliese129/runq/internal/executor"
 	"github.com/gliese129/runq/internal/job"
@@ -62,10 +61,9 @@ func resolveNote(ctx context.Context, st *store.Store, cfg job.JobConfig) (strin
 	})
 }
 
-// JobSummary and JobDetail were previously defined here as service-layer
-// wire types. They are now unified with backend.JobSummary / backend.JobDetail
-// to eliminate the triple-mapping that lost information (ETA, structured
-// task counts) on the daemon path. See Phase 1B.
+// JobSummary and JobDetail previously lived here. They are now in backend
+// (backend.JobSummary / backend.JobDetail). Service methods return raw store
+// types to avoid a backend↔service import cycle; the backend layer converts.
 
 // SubmitJob validates, expands, persists, and enqueues a job.
 // Returns the job ID and total task count.
@@ -250,15 +248,14 @@ func (s *JobService) ProjectSummaries(ctx context.Context) ([]ProjectSummary, er
 	return out, nil
 }
 
-// ListJobs returns a summary of all VISIBLE jobs with task status breakdown.
-// Archived jobs (and, globally, jobs of archived projects) are hidden by
-// default; pass archived=true to list the explicitly archived ones instead.
-func (s *JobService) ListJobs(ctx context.Context, projectFilter string) ([]backend.JobSummary, error) {
-	return s.listJobs(ctx, projectFilter, false)
+// ListJobs returns visible jobs (not archived). The caller is responsible for
+// converting to view types (e.g. backend.BuildJobSummary).
+func (s *JobService) ListJobs(ctx context.Context, projectFilter string) ([]store.JobRow, error) {
+	return s.Store.ListJobsVisible(ctx, projectFilter)
 }
 
-func (s *JobService) ListArchivedJobs(ctx context.Context, projectFilter string) ([]backend.JobSummary, error) {
-	return s.listJobs(ctx, projectFilter, true)
+func (s *JobService) ListArchivedJobs(ctx context.Context, projectFilter string) ([]store.JobRow, error) {
+	return s.Store.ListJobsArchived(ctx, projectFilter)
 }
 
 func (s *JobService) ArchiveJob(ctx context.Context, jobID string) error {
@@ -269,51 +266,21 @@ func (s *JobService) UnarchiveJob(ctx context.Context, jobID string) error {
 	return s.Store.UnarchiveJob(ctx, jobID)
 }
 
-func (s *JobService) listJobs(ctx context.Context, projectFilter string, archived bool) ([]backend.JobSummary, error) {
-	var jobs []store.JobRow
-	var err error
-	if archived {
-		jobs, err = s.Store.ListJobsArchived(ctx, projectFilter)
-	} else {
-		jobs, err = s.Store.ListJobsVisible(ctx, projectFilter)
-	}
-	if err != nil {
-		return nil, err
-	}
-
-	results := make([]backend.JobSummary, 0, len(jobs))
-	for _, j := range jobs {
-		tasks, _ := s.Store.ListTasks(ctx, store.TaskFilter{JobID: j.ID})
-		results = append(results, backend.BuildJobSummary(j, tasks))
-	}
-	return results, nil
-}
-
-// ShowJob returns full job details with all tasks, built via the shared
-// backend.BuildJobDetail builder so daemon and HPC paths produce
-// identical view types.
-func (s *JobService) ShowJob(ctx context.Context, jobID string) (*backend.JobDetail, error) {
+// ShowJob returns the raw job row and its tasks. The caller converts to
+// backend.JobDetail and attaches W&B info.
+func (s *JobService) ShowJob(ctx context.Context, jobID string) (*store.JobRow, []store.TaskRow, error) {
 	j, err := s.Store.GetJob(ctx, jobID)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if j == nil {
-		return nil, fmt.Errorf("job %q not found", jobID)
+		return nil, nil, fmt.Errorf("job %q not found", jobID)
 	}
 	tasks, err := s.Store.ListTasks(ctx, store.TaskFilter{JobID: jobID})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	detail := backend.BuildJobDetail(*j, tasks)
-	// Attach W&B info from project config (same logic as HPCBackend.GetJob).
-	if cfg, err := s.Registry.Get(ctx, j.ProjectName); err == nil && cfg.Wandb != nil {
-		detail.Wandb = &backend.WandbInfo{
-			Entity:  cfg.Wandb.Entity,
-			Project: cfg.Wandb.Project,
-			BaseURL: backend.WandbBaseURL(cfg.Wandb.Entity, cfg.Wandb.Project),
-		}
-	}
-	return &detail, nil
+	return j, tasks, nil
 }
 
 // KillJob kills all running/pending tasks in a job. Returns count of affected tasks.

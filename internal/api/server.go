@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/gliese129/runq/internal/backend"
 	"github.com/gliese129/runq/internal/executor"
 	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/project"
@@ -56,12 +55,12 @@ type Deps struct {
 		SubmitJob(ctx context.Context, jobCfg job.JobConfig) (string, int, error)
 		SubmitJobWithOpts(ctx context.Context, jobCfg job.JobConfig, opts service.SubmitJobOpts) (string, int, error)
 		ResolveNote(ctx context.Context, jobCfg job.JobConfig) (string, error)
-		ListJobs(ctx context.Context, project string) ([]backend.JobSummary, error)
-		ListArchivedJobs(ctx context.Context, project string) ([]backend.JobSummary, error)
+		ListJobs(ctx context.Context, project string) ([]store.JobRow, error)
+		ListArchivedJobs(ctx context.Context, project string) ([]store.JobRow, error)
 		ProjectSummaries(ctx context.Context) ([]service.ProjectSummary, error)
 		ArchiveJob(ctx context.Context, jobID string) error
 		UnarchiveJob(ctx context.Context, jobID string) error
-		ShowJob(ctx context.Context, jobID string) (*backend.JobDetail, error)
+		ShowJob(ctx context.Context, jobID string) (*store.JobRow, []store.TaskRow, error)
 		KillJob(ctx context.Context, jobID string) (int, error)
 		PauseJob(ctx context.Context, jobID string) error
 		ResumeJob(ctx context.Context, jobID string) error

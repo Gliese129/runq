@@ -75,14 +75,37 @@ type DashboardConfig struct {
 
 // TargetConfig describes a single compute target. Type is inferred:
 //   - gpus present   → LocalBackend (daemon-managed GPU scheduling)
-//   - scheduler set  → HPCBackend  (cluster job submission)
-//   - ssh present    → SSHFS       (remote filesystem); absent → LocalFS
+//   - scheduler set  → SSHBackend   (cluster job submission via SSH)
+//   - ssh present    → SSHFS        (remote filesystem); absent → LocalFS
 type TargetConfig struct {
 	Name      string           `yaml:"name"`
 	GPUs      []int            `yaml:"gpus,omitempty"`
 	Scheduler string           `yaml:"scheduler,omitempty"` // e.g. "slurm", "pbs"
 	Workspace string           `yaml:"workspace,omitempty"` // HPC workspace root on the target
 	SSH       *SSHTargetConfig `yaml:"ssh,omitempty"`
+
+	// ── HPC scheduler templates (scheduler-type targets only) ──────────────
+
+	// SubmitTemplate is the shell command that queues a task.
+	// Vars: {{run_sh}} {{gpus}} {{job_id}} {{task_id}} {{task_dir}} {{name}} {{param.*}}.
+	SubmitTemplate string `yaml:"submit_template,omitempty" json:"submit_template,omitempty"`
+	// SubmitIDRegex extracts the external job ID from submit output.
+	// Must contain exactly one capture group.
+	SubmitIDRegex string `yaml:"submit_id_regex,omitempty" json:"submit_id_regex,omitempty"`
+	// StatusTemplate probes a single task's scheduler state. Var: {{ext_id}}.
+	StatusTemplate string `yaml:"status_template,omitempty" json:"status_template,omitempty"`
+	// StatusParser is an optional pipeline that normalizes status_template output.
+	StatusParser []string `yaml:"status_parser,omitempty" json:"status_parser,omitempty"`
+	// StatusListTemplate is a batch probe returning ALL user jobs at once.
+	StatusListTemplate string `yaml:"status_list_template,omitempty" json:"status_list_template,omitempty"`
+	// StatusListParser normalizes batch probe output into "ext_id signal" lines.
+	StatusListParser []string `yaml:"status_list_parser,omitempty" json:"status_list_parser,omitempty"`
+	// SignalMap maps scheduler-native tokens to canonical signals.
+	SignalMap map[string]string `yaml:"signal_map,omitempty" json:"signal_map,omitempty"`
+	// KillTemplate cancels a queued/running job. Var: {{ext_id}}.
+	KillTemplate string `yaml:"kill_template,omitempty" json:"kill_template,omitempty"`
+	// PreflightLocal controls whether local preflight checks run on the submit node.
+	PreflightLocal *bool `yaml:"preflight_local,omitempty" json:"preflight_local,omitempty"`
 }
 
 // SSHTargetConfig holds SSH connection parameters for a remote target.
@@ -112,6 +135,7 @@ func (t *TargetConfig) Type() string {
 func (t *TargetConfig) IsRemote() bool {
 	return t.SSH != nil
 }
+
 
 // ResolveTargets returns the configured targets, synthesizing from the
 // deprecated Mode field when Targets is empty (backward compatibility).

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gliese129/runq/internal/hpcconfig"
+	"github.com/gliese129/runq/internal/config"
 	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/project"
 	"github.com/gliese129/runq/internal/store"
@@ -27,7 +27,7 @@ func TestSubmitRefreshKill(t *testing.T) {
 	dataDir := t.TempDir()
 	t.Setenv("RUNQ_DATA_DIR", dataDir) // config.ConfigDir() reads this
 
-	cfg := &hpcconfig.Config{
+	cfg := &config.TargetConfig{
 		SubmitTemplate: "submit {{run_sh}} gpus={{gpus}}",
 		SubmitIDRegex:  `job ([0-9]+)`,
 		KillTemplate:   "cancel {{ext_id}}",

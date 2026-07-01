@@ -9,7 +9,6 @@ import (
 
 	"github.com/gliese129/runq/internal/backend"
 	"github.com/gliese129/runq/internal/config"
-	"github.com/gliese129/runq/internal/hpcconfig"
 	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/project"
 	"github.com/gliese129/runq/internal/utils"
@@ -140,16 +139,6 @@ func init() {
 	rootCmd.AddCommand(hpcCmd)
 }
 
-// withHPCBackend opens an HPC backend via the factory and runs fn.
-func withHPCBackend(fn func(backend.Backend) error) error {
-	be, closer, err := backend.NewHPCBackendFromConfig()
-	if err != nil {
-		return err
-	}
-	defer closer()
-	return fn(be)
-}
-
 // ensureProjectRegistered registers a project from --project-file if provided.
 // The project is registered in the DB so SubmitJob can find it by name.
 func ensureProjectRegistered(cmd *cobra.Command, be backend.Backend, jobProject string) error {
@@ -177,7 +166,7 @@ func ensureProjectRegistered(cmd *cobra.Command, be backend.Backend, jobProject 
 
 func runHPCInit(cmd *cobra.Command, args []string) error {
 	scheduler, _ := cmd.Flags().GetString("scheduler")
-	path, created, err := hpcconfig.WriteTemplate(scheduler)
+	path, created, err := config.WriteHPCTemplate(scheduler)
 	if err != nil {
 		return err
 	}
@@ -219,7 +208,7 @@ func runHPCSubmit(cmd *cobra.Command, args []string) error {
 	skip, _ := cmd.Flags().GetBool("no-preflight")
 
 	if dry, _ := cmd.Flags().GetBool("dry-run"); dry {
-		return withHPCBackend(func(be backend.Backend) error {
+		return withBackend(func(be backend.Backend) error {
 			if err := ensureProjectRegistered(cmd, be, jobCfg.Project); err != nil {
 				return err
 			}
@@ -232,7 +221,7 @@ func runHPCSubmit(cmd *cobra.Command, args []string) error {
 		})
 	}
 
-	return withHPCBackend(func(be backend.Backend) error {
+	return withBackend(func(be backend.Backend) error {
 		if err := ensureProjectRegistered(cmd, be, jobCfg.Project); err != nil {
 			return err
 		}
@@ -246,7 +235,7 @@ func runHPCSubmit(cmd *cobra.Command, args []string) error {
 }
 
 func runHPCStatus(cmd *cobra.Command, args []string) error {
-	return withHPCBackend(func(be backend.Backend) error {
+	return withBackend(func(be backend.Backend) error {
 		ctx := context.Background()
 		if err := be.RefreshJob(ctx, args[0]); err != nil {
 			return err
@@ -287,7 +276,7 @@ func runHPCStatus(cmd *cobra.Command, args []string) error {
 }
 
 func runHPCKill(cmd *cobra.Command, args []string) error {
-	return withHPCBackend(func(be backend.Backend) error {
+	return withBackend(func(be backend.Backend) error {
 		// Try as job first, then as task.
 		if err := be.KillJob(context.Background(), args[0]); err != nil {
 			if err2 := be.KillTask(context.Background(), args[0]); err2 != nil {
@@ -302,7 +291,7 @@ func runHPCKill(cmd *cobra.Command, args []string) error {
 }
 
 func runHPCLs(cmd *cobra.Command, args []string) error {
-	return withHPCBackend(func(be backend.Backend) error {
+	return withBackend(func(be backend.Backend) error {
 		jobs, err := be.ListJobs(context.Background(), "")
 		if err != nil {
 			return err
@@ -334,7 +323,7 @@ func runHPCBest(cmd *cobra.Command, args []string) error {
 	}
 	maximize, _ := cmd.Flags().GetBool("max")
 
-	return withHPCBackend(func(be backend.Backend) error {
+	return withBackend(func(be backend.Backend) error {
 		ctx := context.Background()
 		if err := be.RefreshJob(ctx, args[0]); err != nil {
 			return err
@@ -373,7 +362,7 @@ func runHPCCollect(cmd *cobra.Command, args []string) error {
 	}
 	maximize, _ := cmd.Flags().GetBool("max")
 
-	return withHPCBackend(func(be backend.Backend) error {
+	return withBackend(func(be backend.Backend) error {
 		ctx := context.Background()
 		if err := be.RefreshJob(ctx, args[0]); err != nil {
 			return err
@@ -412,7 +401,7 @@ func runHPCClean(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	return withHPCBackend(func(be backend.Backend) error {
+	return withBackend(func(be backend.Backend) error {
 		// Always preview first.
 		previewOpts := opts
 		previewOpts.DryRun = true

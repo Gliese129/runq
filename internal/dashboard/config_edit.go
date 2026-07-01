@@ -6,39 +6,38 @@ import (
 
 	"github.com/gliese129/runq/internal/backend"
 	"github.com/gliese129/runq/internal/config"
-	"github.com/gliese129/runq/internal/hpcconfig"
 	"github.com/gliese129/runq/internal/job"
 )
 
 // Config editing endpoints. The GUI form is SCHEMA-DRIVEN: every field is
 // always rendered (registered) whether or not it exists in the file, and the
-// placeholder vocabulary ships from hpcconfig.Placeholders — single source
+// placeholder vocabulary ships from config.HPCPlaceholders — single source
 // of truth, completion can never drift from the backend contract (C3).
 // The CLI persona gets none of this hand-holding: `runq hpc config edit`.
 
 type hpcConfigResponse struct {
 	Exists       bool                `json:"exists"` // hpc: section present in file
-	Config       hpcconfig.Config    `json:"config"`
+	Config       config.TargetConfig `json:"config"`
 	Placeholders map[string][]string `json:"placeholders"`
 	Path         string              `json:"path"`
 }
 
 type hpcCheckResponse struct {
-	Results []hpcconfig.CheckResult `json:"results"`
+	Results []config.HPCCheckResult `json:"results"`
 }
 
 type hpcPresetsResponse struct {
 	// Names preserves the canonical order (maps don't).
-	Names   []string                    `json:"names"`
-	Presets map[string]hpcconfig.Config `json:"presets"`
+	Names   []string                       `json:"names"`
+	Presets map[string]config.TargetConfig `json:"presets"`
 }
 
 // handleHPCPresets serves the same starter templates `hpc init --scheduler`
 // writes — one source, both personas (C3).
 func (s *Server) handleHPCPresets(w http.ResponseWriter, r *http.Request) {
-	resp := hpcPresetsResponse{Names: hpcconfig.Presets(), Presets: map[string]hpcconfig.Config{}}
+	resp := hpcPresetsResponse{Names: config.HPCPresets(), Presets: map[string]config.TargetConfig{}}
 	for _, name := range resp.Names {
-		if cfg, err := hpcconfig.Preset(name); err == nil {
+		if cfg, err := config.HPCPreset(name); err == nil {
 			resp.Presets[name] = *cfg
 		}
 	}
@@ -47,10 +46,10 @@ func (s *Server) handleHPCPresets(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleGetHPCConfig(w http.ResponseWriter, r *http.Request) {
 	resp := hpcConfigResponse{
-		Placeholders: hpcconfig.Placeholders,
+		Placeholders: config.HPCPlaceholders,
 		Path:         config.ConfigPath(),
 	}
-	if cfg, err := hpcconfig.Load(); err == nil {
+	if cfg, err := config.LoadHPCConfig(); err == nil {
 		resp.Exists = true
 		resp.Config = *cfg
 	}
@@ -60,21 +59,21 @@ func (s *Server) handleGetHPCConfig(w http.ResponseWriter, r *http.Request) {
 // handleCheckHPCConfig validates the PROVIDED config without saving —
 // preview is truth: the user sees exactly what check will say before commit.
 func (s *Server) handleCheckHPCConfig(w http.ResponseWriter, r *http.Request) {
-	var cfg hpcconfig.Config
+	var cfg config.TargetConfig
 	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
 		writeErrorStatus(w, http.StatusBadRequest, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, hpcCheckResponse{Results: cfg.Check()})
+	writeJSON(w, http.StatusOK, hpcCheckResponse{Results: cfg.CheckHPC()})
 }
 
 func (s *Server) handlePutHPCConfig(w http.ResponseWriter, r *http.Request) {
-	var cfg hpcconfig.Config
+	var cfg config.TargetConfig
 	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
 		writeErrorStatus(w, http.StatusBadRequest, err)
 		return
 	}
-	if err := hpcconfig.Save(&cfg); err != nil {
+	if err := config.SaveHPCConfig(&cfg); err != nil {
 		writeErrorStatus(w, http.StatusBadRequest, err)
 		return
 	}

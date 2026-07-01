@@ -11,14 +11,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gliese129/runq/internal/hpcconfig"
+	"github.com/gliese129/runq/internal/config"
 	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/project"
 	"github.com/gliese129/runq/internal/store"
 	"github.com/gliese129/runq/internal/submitplan"
 )
 
-func newTestBackend(t *testing.T, cfg *hpcconfig.Config, run func(ctx context.Context, command string) (string, error)) (*Backend, *project.Config, job.JobConfig) {
+func newTestBackend(t *testing.T, cfg *config.TargetConfig, run func(ctx context.Context, command string) (string, error)) (*Backend, *project.Config, job.JobConfig) {
 	t.Helper()
 	st, err := store.Open(":memory:")
 	if err != nil {
@@ -40,7 +40,7 @@ func newTestBackend(t *testing.T, cfg *hpcconfig.Config, run func(ctx context.Co
 // pending is non-terminal so reconcile won't stamp a bogus finished_at.
 func TestSubmitUnparseableIDLeavesVisibleTask(t *testing.T) {
 
-	cfg := &hpcconfig.Config{SubmitTemplate: "submit {{run_sh}}", SubmitIDRegex: `job ([0-9]+)`, KillTemplate: "cancel {{ext_id}}"}
+	cfg := &config.TargetConfig{SubmitTemplate: "submit {{run_sh}}", SubmitIDRegex: `job ([0-9]+)`, KillTemplate: "cancel {{ext_id}}"}
 	runner := func(ctx context.Context, command string) (string, error) {
 		if strings.HasPrefix(command, "submit") {
 			return "GARBAGE no id here", nil // sbatch "succeeded" but no parseable id
@@ -73,7 +73,7 @@ func TestSubmitUnparseableIDLeavesVisibleTask(t *testing.T) {
 // the DB says killed while the cluster job keeps running).
 func TestKillFailureLeavesTaskUnkilled(t *testing.T) {
 
-	cfg := &hpcconfig.Config{SubmitTemplate: "submit {{run_sh}}", SubmitIDRegex: `job ([0-9]+)`, KillTemplate: "cancel {{ext_id}}"}
+	cfg := &config.TargetConfig{SubmitTemplate: "submit {{run_sh}}", SubmitIDRegex: `job ([0-9]+)`, KillTemplate: "cancel {{ext_id}}"}
 	runner := func(ctx context.Context, command string) (string, error) {
 		switch {
 		case strings.HasPrefix(command, "submit"):
@@ -105,7 +105,7 @@ func TestKillFailureLeavesTaskUnkilled(t *testing.T) {
 // untracked; recording killed would be a lie about what runq did).
 func TestKillNoExternalIDRefuses(t *testing.T) {
 
-	cfg := &hpcconfig.Config{SubmitTemplate: "submit {{run_sh}}", SubmitIDRegex: `job ([0-9]+)`, KillTemplate: "cancel {{ext_id}}"}
+	cfg := &config.TargetConfig{SubmitTemplate: "submit {{run_sh}}", SubmitIDRegex: `job ([0-9]+)`, KillTemplate: "cancel {{ext_id}}"}
 	runner := func(ctx context.Context, command string) (string, error) {
 		if strings.HasPrefix(command, "submit") {
 			return "GARBAGE", nil // id unparseable → task left pending, no external_id
@@ -138,7 +138,7 @@ func TestKillNoExternalIDRefuses(t *testing.T) {
 // scheduler knobs (walltime, queue, job name) can live in the sweep.
 func TestSubmitTemplateParamNamespace(t *testing.T) {
 
-	cfg := &hpcconfig.Config{
+	cfg := &config.TargetConfig{
 		SubmitTemplate: "qsub -l h_rt={{param.h_rt}} -N {{param.lr}} {{run_sh}}",
 		SubmitIDRegex:  `job ([0-9]+)`,
 		KillTemplate:   "cancel {{ext_id}}",
@@ -169,7 +169,7 @@ func TestSubmitTemplateParamNamespace(t *testing.T) {
 // F2: a failing setup_command aborts before anything is persisted/submitted.
 func TestSetupCommandFailureAborts(t *testing.T) {
 
-	cfg := &hpcconfig.Config{SubmitTemplate: "submit {{run_sh}}", SubmitIDRegex: `job ([0-9]+)`, KillTemplate: "cancel {{ext_id}}"}
+	cfg := &config.TargetConfig{SubmitTemplate: "submit {{run_sh}}", SubmitIDRegex: `job ([0-9]+)`, KillTemplate: "cancel {{ext_id}}"}
 	submitCalls := 0
 	runner := func(ctx context.Context, command string) (string, error) {
 		submitCalls++
@@ -196,7 +196,7 @@ func TestSetupCommandFailureAborts(t *testing.T) {
 // workarounds needed.
 func TestSchedulerParamsExemptFromCommand(t *testing.T) {
 
-	cfg := &hpcconfig.Config{
+	cfg := &config.TargetConfig{
 		SubmitTemplate: "qsub -l h_rt={{param.h_rt}} {{run_sh}}",
 		SubmitIDRegex:  `job ([0-9]+)`,
 		KillTemplate:   "cancel {{ext_id}}",
@@ -244,7 +244,7 @@ func TestSubmitEnvPrefixResolvesSameLineReferences(t *testing.T) {
 // template.
 func TestSubmitCommandReceivesRenderedJobName(t *testing.T) {
 
-	cfg := &hpcconfig.Config{
+	cfg := &config.TargetConfig{
 		SubmitTemplate: "qsub -N {{name}} {{run_sh}}",
 		SubmitIDRegex:  `job ([0-9]+)`,
 		KillTemplate:   "cancel {{ext_id}}",
@@ -284,7 +284,7 @@ func TestSubmitCommandReceivesRenderedJobName(t *testing.T) {
 // without the exec redirect the DB's log_path never receives a byte (output
 // only went wherever -o/-e pointed).
 func TestRunScriptCdsAndRedirects(t *testing.T) {
-	b := &Backend{Cfg: &hpcconfig.Config{}}
+	b := &Backend{Cfg: &config.TargetConfig{}}
 	script := b.buildRunScript(submitplan.PlannedTask{
 		TaskID: "tk1", TaskDir: "/ws/jb1/tk1", LogPath: "/ws/jb1/tk1.log",
 		WorkingDir: "/home/u/proj", Command: "bash scripts/run.sh",
@@ -331,7 +331,7 @@ func TestRunScriptCdsAndRedirects(t *testing.T) {
 // process group mid-run, and assert the wrapper wrote the killed status.
 func TestRunScriptTrapWritesKilledOnTerm(t *testing.T) {
 	dir := t.TempDir()
-	b := &Backend{Cfg: &hpcconfig.Config{}}
+	b := &Backend{Cfg: &config.TargetConfig{}}
 	script := b.buildRunScript(submitplan.PlannedTask{
 		TaskID: "tk1", TaskDir: dir, LogPath: filepath.Join(dir, "tk1.log"),
 		WorkingDir: dir, Command: "sleep 30",
@@ -374,7 +374,7 @@ func TestRunScriptTrapWritesKilledOnTerm(t *testing.T) {
 // A zero TTL always forces a full reconcile including the probe.
 func TestEnsureFreshTTLThrottle(t *testing.T) {
 
-	cfg := &hpcconfig.Config{
+	cfg := &config.TargetConfig{
 		SubmitTemplate: "qsub {{run_sh}}",
 		SubmitIDRegex:  `job ([0-9]+)`,
 		KillTemplate:   "cancel {{ext_id}}",
@@ -440,7 +440,7 @@ func TestEnsureFreshTTLThrottle(t *testing.T) {
 // refresh pass regardless of task count.
 func TestListingStatusTemplateBatchesPerPass(t *testing.T) {
 
-	cfg := &hpcconfig.Config{
+	cfg := &config.TargetConfig{
 		SubmitTemplate: "qsub {{run_sh}}",
 		SubmitIDRegex:  `job ([0-9]+)`,
 		KillTemplate:   "cancel {{ext_id}}",
@@ -491,7 +491,7 @@ func TestListingStatusTemplateBatchesPerPass(t *testing.T) {
 // --project-file all pass through here).
 func TestSubmitRefusesArchivedProject(t *testing.T) {
 
-	cfg := &hpcconfig.Config{
+	cfg := &config.TargetConfig{
 		SubmitTemplate: "qsub {{run_sh}}",
 		SubmitIDRegex:  `job ([0-9]+)`,
 		KillTemplate:   "cancel {{ext_id}}",
