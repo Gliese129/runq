@@ -49,9 +49,25 @@ type Daemon struct {
 	localTargetNames []string
 }
 
-// NewDaemon creates and wires all daemon components.
-// Does NOT start them — call Run() for that.
+// DaemonOptions selects which surfaces a daemon exposes.
+type DaemonOptions struct {
+	// Headless is the server deployment (`runq-server` on a lab GPU box):
+	// scheduler + executor + store + socket API only. It forces the
+	// dashboard off and REFUSES ssh targets — a server manages exactly its
+	// own hardware; routing to other machines is the client's job. Keeping
+	// this fail-closed prevents a second control plane growing on a shared
+	// machine by accident.
+	Headless bool
+}
+
+// NewDaemon creates and wires all daemon components (client deployment:
+// all configured targets + dashboard). Does NOT start them — call Run().
 func NewDaemon() (*Daemon, error) {
+	return NewDaemonWith(DaemonOptions{})
+}
+
+// NewDaemonWith creates a daemon with explicit surface options.
+func NewDaemonWith(opts DaemonOptions) (*Daemon, error) {
 	_, dataDir := utils.ResolveDataDir()
 	paths := utils.PathsFromDataDir(dataDir)
 
@@ -132,6 +148,10 @@ func NewDaemon() (*Daemon, error) {
 	var localBe *backend.LocalBackend
 	for _, tc := range resolvedTargets {
 		if tc.Type() == config.TargetTypeHPC {
+			if opts.Headless {
+				return nil, fmt.Errorf(
+					"target %q: ssh targets are not supported in server mode — configure remote targets on the client, the server only manages its own hardware", tc.Name)
+			}
 			sshBe, err := backend.NewSSHBackend(backend.SSHBackendConfig{
 				Target:    tc,
 				Store:     st,
@@ -193,9 +213,12 @@ func NewDaemon() (*Daemon, error) {
 		localTargetNames: localTargetNames,
 	}
 
-	// Embedded dashboard: start only when enabled in config.
+	// Embedded dashboard: client deployments only, and only when enabled in
+	// config. The server stays headless — a server-side web UI would need
+	// its own auth story (who sees whose jobs), which violates the
+	// "SSH is the auth boundary" principle.
 	dashCfg := storageCfg.Dashboard
-	if dashCfg == nil || dashCfg.Enabled {
+	if !opts.Headless && (dashCfg == nil || dashCfg.Enabled) {
 		listen := "127.0.0.1:8077"
 		if dashCfg != nil && dashCfg.Listen != "" {
 			listen = dashCfg.Listen
