@@ -60,73 +60,68 @@ func (s *Scheduler) runTask(task *Task) {
 		s.pool.Release(task.ID)
 	}()
 
-	spec := executor.RunSpec{
-		TaskID:     task.ID,
-		Command:    task.Command,
-		WorkingDir: task.WorkingDir,
-		Env:        s.buildTaskEnv(task),
-		GPUs:       task.GPUs,
-		LogPath:    task.LogPath,
-		TaskDir:    task.TaskDir,
-		OnStart: func(result executor.Result) {
-			task.PID = result.PID
-			task.StartTime = result.StartTime
-			fields := map[string]any{"pid": result.PID}
-			if result.StartTime.IsZero() {
-				fields["start_time"] = nil
-			} else {
-				fields["start_time"] = result.StartTime.Unix()
-			}
-			s.persistFields(task.ID, fields)
-		},
-	}
-
 	ctx := s.ctx
 	var cancel context.CancelFunc
 	if task.Timeout > 0 {
 		ctx, cancel = context.WithTimeout(s.ctx, time.Second*time.Duration(task.Timeout))
 		defer cancel()
 	}
-	result, err := s.exec.Start(ctx, spec)
+	result, err := s.launcher.Launch(ctx, task, s.buildTaskEnv(task), func(si StartInfo) {
+		task.PID = si.PID
+		task.StartTime = si.StartTime
+		fields := map[string]any{"pid": si.PID}
+		if si.StartTime.IsZero() {
+			fields["start_time"] = nil
+		} else {
+			fields["start_time"] = si.StartTime.Unix()
+		}
+		s.persistFields(task.ID, fields)
+	})
 	if err != nil {
 		s.logger.Error("task start failed", "task", task.ID, "error", err)
-		s.handleFailure(task)
+		s.FinishTask(task, StatusFailed)
 		return
 	}
 
-	// Check user-kill flag FIRST — even exit 0 after kill is treated as killed.
-	if s.consumeKillRequest(task.ID) {
-		s.completeTask(task, StatusKilled)
-		s.RefreshJobStatus(task.JobID)
+	// Verdict order matters: user-kill flag FIRST — even exit 0 after kill is
+	// treated as killed.
+	switch {
+	case s.consumeKillRequest(task.ID):
+		s.FinishTask(task, StatusKilled)
 		s.logger.Info("task killed by user", "task", task.ID)
-		return
-	}
-
-	if result.ExitCode == 0 {
-		s.completeTask(task, StatusSuccess)
-		s.RefreshJobStatus(task.JobID)
+	case result.ExitCode == 0:
+		s.FinishTask(task, StatusSuccess)
 		s.logger.Info("task completed", "task", task.ID, "job", task.JobID)
-		return
-	}
-
-	if task.Timeout > 0 && errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		s.completeTask(task, StatusKilled)
-		s.RefreshJobStatus(task.JobID)
+	case task.Timeout > 0 && errors.Is(ctx.Err(), context.DeadlineExceeded):
+		s.FinishTask(task, StatusKilled)
 		s.logger.Warn("task timed out", "task", task.ID, "timeout", task.Timeout)
-		return
-	}
-
-	// Global shutdown — mark remaining running tasks as killed.
-	if s.ctx.Err() != nil {
-		s.completeTask(task, StatusKilled)
-		s.RefreshJobStatus(task.JobID)
+	case s.ctx.Err() != nil:
+		// Global shutdown — mark remaining running tasks as killed.
+		s.FinishTask(task, StatusKilled)
 		s.logger.Warn("task killed by shutdown", "task", task.ID)
-		return
+	default:
+		s.logger.Warn("task failed", "task", task.ID, "exit_code", result.ExitCode,
+			"retry", task.RetryCount, "max_retry", task.MaxRetry)
+		s.FinishTask(task, StatusFailed)
 	}
+}
 
-	s.logger.Warn("task failed", "task", task.ID, "exit_code", result.ExitCode,
-		"retry", task.RetryCount, "max_retry", task.MaxRetry)
-	s.handleFailure(task)
+// FinishTask drives a task to a terminal state through the shared lifecycle.
+// StatusSuccess / StatusKilled persist immediately; StatusFailed goes through
+// handleFailure, which requeues (retry) or permanently fails the task.
+//
+// This is the single funnel for task completion: supervised launchers reach it
+// from runTask after the process exits; unsupervised launchers (Step 2) will
+// have reconcile call it when a terminal signal arrives from the remote
+// scheduler (.done marker / probe).
+func (s *Scheduler) FinishTask(task *Task, status TaskStatus) {
+	switch status {
+	case StatusSuccess, StatusKilled:
+		s.completeTask(task, status)
+		s.RefreshJobStatus(task.JobID)
+	default:
+		s.handleFailure(task)
+	}
 }
 
 // completeTask persists a terminal status to DB, then updates the queue.

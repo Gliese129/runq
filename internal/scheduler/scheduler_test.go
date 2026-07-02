@@ -122,7 +122,7 @@ func TestFrozenJobSkipInTick(t *testing.T) {
 		t.Fatal("setup: freeze didn't take")
 	}
 
-	s := New(cfg, q, pool, exec, st, logger, nil, "", freeze)
+	s := New(cfg, q, pool, NewLocalLauncher(exec), st, logger, nil, "", freeze)
 	defer s.Shutdown() // cancels runTask goroutines + reaps sleep 30
 
 	// Tick once — t2 should be skipped because j1 has a frozen sibling.
@@ -198,7 +198,7 @@ func TestBackfillRespectsFreeze(t *testing.T) {
 			"phantom": {PID: cmd.Process.Pid, Mount: "/tmp", JobID: "j2", NeededBytes: 1 << 30},
 		})
 
-	s := New(cfg, q, pool, exec, st, logger, nil, "", freeze)
+	s := New(cfg, q, pool, NewLocalLauncher(exec), st, logger, nil, "", freeze)
 	defer s.Shutdown()
 
 	s.tick()
@@ -265,7 +265,7 @@ func TestFrozenMountSkipInTick(t *testing.T) {
 			"phantom": {PID: cmd.Process.Pid, Mount: mount, JobID: "j-frozen", NeededBytes: 1 << 30},
 		})
 
-	s := New(DefaultConfig(), q, pool, exec, st, logger, nil, "", freeze)
+	s := New(DefaultConfig(), q, pool, NewLocalLauncher(exec), st, logger, nil, "", freeze)
 	defer s.Shutdown()
 
 	s.tick()
@@ -303,7 +303,7 @@ func TestSchedulerDispatchSingle(t *testing.T) {
 	seedJob(t, st, "j1", "test", 1)
 	seedTask(t, st, task)
 
-	s := New(cfg, q, pool, exec, st, logger, nil, "", nil)
+	s := New(cfg, q, pool, NewLocalLauncher(exec), st, logger, nil, "", nil)
 	s.Start()
 	q.Push(task)
 
@@ -338,7 +338,7 @@ func TestSchedulerRetry(t *testing.T) {
 	seedJob(t, st, "j1", "test", 1)
 	seedTask(t, st, task)
 
-	s := New(cfg, q, pool, exec, st, logger, nil, "", nil)
+	s := New(cfg, q, pool, NewLocalLauncher(exec), st, logger, nil, "", nil)
 	s.Start()
 	q.Push(task)
 
@@ -368,7 +368,7 @@ func TestHandleFailureLogsNextRetryOnce(t *testing.T) {
 	seedTask(t, st, task)
 	q.Push(task)
 
-	s := New(DefaultConfig(), q, testPool(1), executor.New(), st, logger, nil, "", nil)
+	s := New(DefaultConfig(), q, testPool(1), NewLocalLauncher(executor.New()), st, logger, nil, "", nil)
 	s.handleFailure(task)
 
 	logs := buf.String()
@@ -418,7 +418,7 @@ func TestSchedulerBackfill(t *testing.T) {
 	seedTask(t, st, big)
 	seedTask(t, st, small)
 
-	s := New(cfg, q, pool, exec, st, logger, nil, "", nil)
+	s := New(cfg, q, pool, NewLocalLauncher(exec), st, logger, nil, "", nil)
 	s.Start()
 	q.Push(big)
 	q.Push(small)
@@ -466,7 +466,7 @@ func TestSchedulerReservation(t *testing.T) {
 	// Occupy 2 GPUs so big task can't fit.
 	pool.Allocate(2, "external-task")
 
-	s := New(cfg, q, pool, exec, st, logger, nil, "", nil)
+	s := New(cfg, q, pool, NewLocalLauncher(exec), st, logger, nil, "", nil)
 	s.Start()
 	q.Push(big)
 	q.Push(small)

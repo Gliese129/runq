@@ -53,7 +53,7 @@ func TestRestoreRuntimeStateRestoresPausedJobsBeforeScheduling(t *testing.T) {
 		cfg,
 		queue,
 		resource.NewMockAllocator(1),
-		exec,
+		scheduler.NewLocalLauncher(exec),
 		st,
 		slog.New(slog.NewTextHandler(os.Stderr, nil)),
 		nil, // FIFO prioritizer
@@ -196,7 +196,7 @@ func TestL2CStage1EndToEnd(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	freeze := scheduler.NewFreezeState()
 	sched := scheduler.New(
-		cfg, queue, pool, exec, st, logger, nil,
+		cfg, queue, pool, scheduler.NewLocalLauncher(exec), st, logger, nil,
 		"/tmp/runq-test.sock", freeze,
 	)
 

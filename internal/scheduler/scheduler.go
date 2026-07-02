@@ -21,20 +21,20 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gliese129/runq/internal/executor"
 	"github.com/gliese129/runq/internal/resource"
 	"github.com/gliese129/runq/internal/store"
 	"github.com/shirou/gopsutil/v4/disk"
 )
 
 // Scheduler is the core scheduling loop.
-// It pulls tasks from the queue, allocates GPUs, and dispatches to the executor.
+// It pulls tasks from the queue, allocates resources, and dispatches to the
+// launcher (local process fork or remote submit — see Launcher).
 // All state transitions are persisted to store BEFORE updating the in-memory queue.
 type Scheduler struct {
 	cfg         Config
 	queue       *Queue
 	pool        resource.Allocator
-	exec        *executor.Executor
+	launcher    Launcher
 	store       *store.Store
 	logger      *slog.Logger
 	prioritizer Prioritizer
@@ -76,7 +76,7 @@ func New(
 	cfg Config,
 	queue *Queue,
 	pool resource.Allocator,
-	exec *executor.Executor,
+	launcher Launcher,
 	st *store.Store,
 	logger *slog.Logger,
 	prioritizer Prioritizer,
@@ -91,7 +91,7 @@ func New(
 		cfg:           cfg,
 		queue:         queue,
 		pool:          pool,
-		exec:          exec,
+		launcher:      launcher,
 		store:         st,
 		logger:        logger,
 		prioritizer:   prioritizer,

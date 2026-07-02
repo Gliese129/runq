@@ -93,7 +93,7 @@ func NewDaemon() (*Daemon, error) {
 	freeze := scheduler.NewFreezeState()
 	sched := scheduler.New(
 		scheduler.DefaultConfig(),
-		queue, pool, exec, st, logger, prioritizer,
+		queue, pool, scheduler.NewLocalLauncher(exec), st, logger, prioritizer,
 		paths.SocketPath, freeze,
 	)
 

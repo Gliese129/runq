@@ -41,7 +41,9 @@ func (s *Scheduler) IsJobPaused(jobID string) bool {
 
 // ── Kill request tracking ─────────────────────────────────────────────────
 
-// RequestKill marks a task as user-killed. Call before Executor.Stop().
+// RequestKill marks a task as user-killed. Call before Launcher.Kill()
+// (currently executor.Stop at the call sites; consolidating both into one
+// Scheduler.KillTask is planned for Step 3 of the scheduler unification).
 // runTask checks this flag to decide killed vs retry.
 func (s *Scheduler) RequestKill(taskID string) {
 	s.killMu.Lock()
