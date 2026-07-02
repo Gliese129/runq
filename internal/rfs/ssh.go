@@ -14,11 +14,16 @@ import (
 
 // SSHFS implements FS over an SSH connection. File operations go through sftp;
 // command execution opens SSH sessions. The underlying *sshConn is lazy — no
-// network traffic until the first call.
+// network traffic until the first call — and self-healing: dead connections
+// are detected and redialed transparently (see sshConn.getConn).
 //
 // Thread safety: safe for concurrent use. sshConn serializes dial/reconnect;
 // sftp.Client is documented as safe for concurrent use; SSH sessions are
 // bounded by the semaphore in sshConn.
+//
+// Every operation is bracketed by beginOp/endOp so the idle watcher never
+// tears down a connection with work in flight; for handle-returning calls
+// (Open, ExecStream) the bracket extends until the handle is closed.
 type SSHFS struct {
 	conn *sshConn
 }
@@ -35,9 +40,10 @@ func (s *SSHFS) Close() error {
 
 // ── Read ────────────────────────────────────────────────────────────────────
 
-// Stat conn.getSFTP() → sc.Stat(path)
-// sftp.Client.Stat already returns os.FileInfo (satisfies fs.FileInfo).
+// Stat returns file info via sftp.
 func (s *SSHFS) Stat(path string) (fs.FileInfo, error) {
+	s.conn.beginOp()
+	defer s.conn.endOp()
 	sc, err := s.conn.getSFTP()
 	if err != nil {
 		return nil, err
@@ -45,8 +51,10 @@ func (s *SSHFS) Stat(path string) (fs.FileInfo, error) {
 	return sc.Stat(path)
 }
 
-// ReadFile conn.getSFTP() → sc.Open(path) → io.ReadAll(f) → f.Close()
+// ReadFile reads a whole remote file via sftp.
 func (s *SSHFS) ReadFile(path string) ([]byte, error) {
+	s.conn.beginOp()
+	defer s.conn.endOp()
 	sc, err := s.conn.getSFTP()
 	if err != nil {
 		return nil, err
@@ -59,22 +67,28 @@ func (s *SSHFS) ReadFile(path string) ([]byte, error) {
 	return io.ReadAll(f)
 }
 
-// Open conn.getSFTP() → sc.Open(path), wrap result in &sshFile{f}.
+// Open returns a seekable remote file handle. The connection counts as busy
+// until the returned File is closed — long incremental reads are never cut
+// by the idle watcher.
 func (s *SSHFS) Open(path string) (File, error) {
+	s.conn.beginOp()
 	sc, err := s.conn.getSFTP()
 	if err != nil {
+		s.conn.endOp()
 		return nil, err
 	}
 	f, err := sc.Open(path)
 	if err != nil {
+		s.conn.endOp()
 		return nil, err
 	}
-	return &sshFile{f}, nil
+	return &sshFile{f: f, release: s.conn.endOp}, nil
 }
 
-// ReadDir conn.getSFTP() → sc.ReadDir(path)
-// ⚠ sftp.ReadDir returns []os.FileInfo, need fs.FileInfoToDirEntry() per element.
+// ReadDir lists a remote directory via sftp.
 func (s *SSHFS) ReadDir(path string) ([]fs.DirEntry, error) {
+	s.conn.beginOp()
+	defer s.conn.endOp()
 	sc, err := s.conn.getSFTP()
 	if err != nil {
 		return nil, err
@@ -85,20 +99,18 @@ func (s *SSHFS) ReadDir(path string) ([]fs.DirEntry, error) {
 	}
 	entries := make([]fs.DirEntry, 0, len(fis))
 	for _, fi := range fis {
-		de := fs.FileInfoToDirEntry(fi)
-		entries = append(entries, de)
+		entries = append(entries, fs.FileInfoToDirEntry(fi))
 	}
 	return entries, nil
 }
 
 // ── Write ───────────────────────────────────────────────────────────────────
 
-// WriteFile conn.getSFTP() → sc.OpenFile(path, O_WRONLY|O_CREATE|O_TRUNC) →
-//
-//	f.Write(data) → f.Close() → sc.Chmod(path, perm)
-//
+// WriteFile writes data to a remote file (create/truncate), then chmods it.
 // sftp has no atomic write; temp+rename is a future TODO.
 func (s *SSHFS) WriteFile(path string, data []byte, perm os.FileMode) error {
+	s.conn.beginOp()
+	defer s.conn.endOp()
 	sc, err := s.conn.getSFTP()
 	if err != nil {
 		return err
@@ -107,8 +119,8 @@ func (s *SSHFS) WriteFile(path string, data []byte, perm os.FileMode) error {
 	if err != nil {
 		return err
 	}
-	_, err = f.Write(data)
-	if err != nil {
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close() // don't leak the SFTP handle on a failed write
 		return err
 	}
 	if err := f.Close(); err != nil {
@@ -118,9 +130,11 @@ func (s *SSHFS) WriteFile(path string, data []byte, perm os.FileMode) error {
 	return nil
 }
 
-// MkdirAll conn.getSFTP() → sc.MkdirAll(path)
+// MkdirAll creates a remote directory tree.
 // sftp.MkdirAll ignores perm (uses remote umask). Chmod walk if needed later.
 func (s *SSHFS) MkdirAll(path string, perm os.FileMode) error {
+	s.conn.beginOp()
+	defer s.conn.endOp()
 	sc, err := s.conn.getSFTP()
 	if err != nil {
 		return err
@@ -130,42 +144,40 @@ func (s *SSHFS) MkdirAll(path string, perm os.FileMode) error {
 
 // ── Command ─────────────────────────────────────────────────────────────────
 
-// Exec runs a remote command via SSH session.
-//
-// Steps:
-//  1. conn.newSession() → sess, release; defer release(); defer sess.Close()
-//  2. sess.Stdout / sess.Stderr = separate bytes.Buffer
-//  3. sess.Run(buildCmdLine(cmd, args))
-//  4. On error → check *ssh.ExitError:
-//     - yes: return stdout, stderr, ee.ExitStatus(), nil  (non-zero exit ≠ Go error)
-//     - no:  transport failure → return stdout, stderr, -1, err
-//  5. Success → return stdout, stderr, 0, nil
-//
-// ctx cancellation (later): goroutine watching ctx.Done() → sess.Signal(SIGKILL) or sess.Close()
+// Exec runs a remote command via an SSH session and returns stdout, stderr,
+// and the exit code. A non-zero exit is NOT a Go error; transport failures
+// are. ctx cancellation closes the session (the remote command gets EOF/HUP).
 func (s *SSHFS) Exec(ctx context.Context, cmd string, args ...string) (stdout, stderr []byte, exitCode int, err error) {
-	sess, release, err := s.conn.newSession()
+	s.conn.beginOp()
+	defer s.conn.endOp()
 
+	sess, release, err := s.conn.newSession(ctx)
 	if err != nil {
 		return nil, nil, -1, err
 	}
 	defer release()
 	defer sess.Close()
 
-	var buffo, buffe []byte
-	sob := bytes.NewBuffer(buffo)
-	seb := bytes.NewBuffer(buffe)
-	sess.Stdout = sob
-	sess.Stderr = seb
+	var sob, seb bytes.Buffer
+	sess.Stdout = &sob
+	sess.Stderr = &seb
 
+	// ctx watcher with a guaranteed exit path: `finished` is closed when Run
+	// returns, so this goroutine never outlives the call (a bare <-ctx.Done()
+	// wait would leak one goroutine per call under a long-lived ctx).
+	finished := make(chan struct{})
 	go func() {
-		<-ctx.Done()
-		sess.Close()
+		select {
+		case <-ctx.Done():
+			_ = sess.Close()
+		case <-finished:
+		}
 	}()
 
 	runErr := sess.Run(buildCmdLine(cmd, args))
-	so := sob.Bytes()
-	se := seb.Bytes()
+	close(finished)
 
+	so, se := sob.Bytes(), seb.Bytes()
 	if runErr != nil {
 		if ee, ok := runErr.(*ssh.ExitError); ok {
 			return so, se, ee.ExitStatus(), nil
@@ -175,58 +187,58 @@ func (s *SSHFS) Exec(ctx context.Context, cmd string, args ...string) (stdout, s
 	return so, se, 0, nil
 }
 
-// ExecStream runs a remote command, returns streaming io.ReadCloser of combined output.
-//
-// Steps:
-//  1. conn.newSession() → sess, release
-//  2. io.Pipe() → pr, pw; sess.Stdout = pw; sess.Stderr = pw
-//  3. sess.Start(buildCmdLine(cmd, args))  — NOT Run (Start is non-blocking)
-//  4. go func() { pw.CloseWithError(sess.Wait()); sess.Close(); release() }()
-//  5. return pr, nil
-//  6. On Start error → release + close sess/pw/pr, return error
+// ExecStream runs a remote command and returns a streaming reader of its
+// combined output. The session, semaphore slot, and busy-marker are released
+// when the command exits (or ctx is cancelled); the pipe's read side reports
+// the command's exit status via CloseWithError.
 func (s *SSHFS) ExecStream(ctx context.Context, cmd string, args ...string) (io.ReadCloser, error) {
-	sess, release, err := s.conn.newSession()
+	s.conn.beginOp()
 
+	sess, release, err := s.conn.newSession(ctx)
 	if err != nil {
+		s.conn.endOp()
 		return nil, err
 	}
 
 	pr, pw := io.Pipe()
-
 	sess.Stdout = pw
 	sess.Stderr = pw
 
-	startErr := sess.Start(buildCmdLine(cmd, args))
-
-	if startErr != nil {
+	if err := sess.Start(buildCmdLine(cmd, args)); err != nil {
 		pr.Close()
 		pw.Close()
 		sess.Close()
 		release()
-		return nil, startErr
+		s.conn.endOp()
+		return nil, err
 	}
 
+	// Same watcher pattern as Exec: exits when the stream finishes.
+	finished := make(chan struct{})
 	go func() {
-		<-ctx.Done()
-		sess.Close()
+		select {
+		case <-ctx.Done():
+			_ = sess.Close()
+		case <-finished:
+		}
 	}()
-
 	go func() {
 		pw.CloseWithError(sess.Wait())
 		sess.Close()
 		release()
+		close(finished)
+		s.conn.endOp()
 	}()
 	return pr, nil
 }
 
 // ── Transfer ────────────────────────────────────────────────────────────────
 
-// CopyToLocal sftp download to local file.
-//
-// Steps: applyCopyOpts(opts) → conn.getSFTP() → sc.Open(remotePath) →
-//
-//	os.Create(localPath) → io.Copy(dst, src) → close both
+// CopyToLocal downloads a remote file via sftp. The busy-marker covers the
+// whole transfer — large checkpoint downloads are never cut by idle teardown.
 func (s *SSHFS) CopyToLocal(remotePath, localPath string, opts ...CopyOption) error {
+	s.conn.beginOp()
+	defer s.conn.endOp()
 	_ = applyCopyOpts(opts) // for future
 	sc, err := s.conn.getSFTP()
 	if err != nil {
@@ -253,7 +265,6 @@ func (s *SSHFS) CopyToLocal(remotePath, localPath string, opts ...CopyOption) er
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 // shellQuote wraps s in single quotes, escaping any embedded single quotes.
-// This is the POSIX-safe quoting method: 'foo'\”bar' → foo'bar.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
@@ -279,19 +290,24 @@ func buildCmdLine(cmd string, args []string) string {
 	return strings.Join(parts, " ")
 }
 
-// sshFile wraps *sftp.File to satisfy rfs.File.
-// All four methods are one-line delegates.
+// sshFile wraps *sftp.File to satisfy rfs.File. Closing it also releases the
+// connection's busy-marker taken at Open (idempotent).
 type sshFile struct {
-	f *sftp.File
+	f       *sftp.File
+	release func()
 }
 
 func (sf *sshFile) Read(p []byte) (int, error)           { return sf.f.Read(p) }
 func (sf *sshFile) Seek(off int64, w int) (int64, error) { return sf.f.Seek(off, w) }
-func (sf *sshFile) Close() error                         { return sf.f.Close() }
 func (sf *sshFile) Stat() (fs.FileInfo, error)           { return sf.f.Stat() }
+
+func (sf *sshFile) Close() error {
+	if sf.release != nil {
+		sf.release()
+		sf.release = nil
+	}
+	return sf.f.Close()
+}
 
 // compile-time interface check
 var _ FS = (*SSHFS)(nil)
-
-// suppress unused import for ssh (only used inside TODO bodies)
-var _ = (*ssh.ExitError)(nil)

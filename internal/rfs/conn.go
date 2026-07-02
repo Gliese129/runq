@@ -1,6 +1,8 @@
 package rfs
 
 import (
+	"context"
+	"errors"
 	"net"
 	"sync"
 	"time"
@@ -18,8 +20,10 @@ type SSHConfig struct {
 	User       string
 	AuthMethod ssh.AuthMethod // from agent, key file, or password
 
-	// IdleTimeout controls how long a connection survives without traffic
-	// before sshConn tears it down. Zero means never idle-close.
+	// IdleTimeout controls how long a connection survives with no in-flight
+	// operations before sshConn tears it down. Zero means never idle-close.
+	// Callers that want the "look like a normal SSH user" behavior MUST set
+	// this (the daemon does; see backend.NewSSHBackend).
 	IdleTimeout time.Duration
 
 	// MaxSessions caps the number of concurrent SSH sessions (Exec calls).
@@ -29,7 +33,6 @@ type SSHConfig struct {
 }
 
 // addr returns Host with ":22" appended if no port is present.
-// Hint: strings.Contains(c.Host, ":") or net.SplitHostPort
 func (c SSHConfig) addr() string {
 	if _, _, err := net.SplitHostPort(c.Host); err != nil {
 		return c.Host + ":22"
@@ -37,78 +40,113 @@ func (c SSHConfig) addr() string {
 	return c.Host
 }
 
+// livenessCheckAfter: on reuse, probe the connection only when it has been
+// quiet for at least this long — recent successful traffic implies healthy,
+// and probing every call would add a round trip to every operation.
+const livenessCheckAfter = 30 * time.Second
+
+// livenessTimeout bounds the keepalive probe. A half-open TCP connection
+// (network partition) can block SendRequest for minutes; we declare the
+// connection dead after this and redial. The probe goroutine unblocks and
+// exits whenever the kernel finally gives up on the socket.
+const livenessTimeout = 5 * time.Second
+
+// errClosed is returned for operations on a Close()d connection manager.
+var errClosed = errors.New("ssh connection manager closed")
+
 // ── Connection manager ──────────────────────────────────────────────────────
 
 // sshConn is a lazy, reconnecting SSH connection manager.
 //
 // Design invariants:
-//   - ONE persistent connection: dial on first use, reuse until idle or broken.
-//   - sftp.Client rides on the same connection (its own SSH subsystem channel).
-//   - Session concurrency bounded by sessionSem (cap = MaxSessions).
-//   - Idle timeout: background goroutine tears down after IdleTimeout of inactivity.
-//   - Reconnect: if getConn() finds client nil or dead, it re-dials.
+//   - ONE persistent connection: dial on first use, reuse while healthy.
+//   - Liveness: a reused connection that has been quiet is probed with a
+//     keepalive; a dead one is torn down and redialed transparently.
+//   - sftp.Client rides on the same connection (its own SSH subsystem).
+//   - Session concurrency bounded by sessionSem (cap = MaxSessions);
+//     acquisition respects ctx cancellation and manager shutdown.
+//   - Idle teardown: after IdleTimeout with ZERO in-flight operations
+//     (active == 0), the watcher closes the connection. In-flight streams
+//     (logs -f, large SFTP copies) hold active > 0 and are never cut.
 type sshConn struct {
-	mu         sync.Mutex
-	client     *ssh.Client
-	sftp       *sftp.Client
-	lastUsed   time.Time
+	mu       sync.Mutex
+	client   *ssh.Client
+	sftp     *sftp.Client
+	lastUsed time.Time
+	active   int // in-flight operations; idle teardown requires active == 0
+
 	cfg        SSHConfig
 	sessionSem chan struct{} // cap = MaxSessions
 
 	closeOnce sync.Once
 	watchOnce sync.Once
-	done      chan struct{} // closed by Close() to stop idle watcher
-
+	done      chan struct{} // closed by Close() to stop idle watcher + waiters
 }
 
 // newSSHConn creates a connection manager. Does NOT dial.
-// Default MaxSessions to 3 if <= 0. Init sessionSem (buffered chan) and done chan.
 func newSSHConn(cfg SSHConfig) *sshConn {
 	maxCnt := cfg.MaxSessions
 	if maxCnt <= 0 {
 		maxCnt = 3
 	}
-
-	sc := sshConn{
+	return &sshConn{
 		cfg:        cfg,
 		lastUsed:   time.Now(),
 		sessionSem: make(chan struct{}, maxCnt),
 		done:       make(chan struct{}),
 	}
-
-	return &sc
 }
 
-// ── Public API (called by SSHFS) ────────────────────────────────────────────
+// ── Operation tracking ──────────────────────────────────────────────────────
 
-// getConn returns a live *ssh.Client, dialing if needed. Thread-safe.
-//
-// Flow:
-//  1. Lock mu (defer Unlock).
-//  2. If client != nil → (optional) liveness check via
-//     client.Conn.SendRequest("keepalive@openssh.com", true, nil) with short timeout.
-//     If alive → touch lastUsed, return client.
-//  3. If client nil or dead:
-//     a. teardownLocked() to clean stale state
-//     b. ssh.Dial("tcp", cfg.addr(), &ssh.ClientConfig{
-//     User: cfg.User,
-//     Auth: []ssh.AuthMethod{cfg.AuthMethod},
-//     HostKeyCallback: ssh.InsecureIgnoreHostKey(), // Phase 6: real verification
-//     Timeout: 10 * time.Second,
-//     })
-//     c. sftp.NewClient(client)
-//     d. Store both, touch lastUsed, call startIdleWatcher()
-//  4. On dial failure → return error.
+// beginOp marks an operation in flight: bumps the active count and touches
+// lastUsed. Every public SSHFS operation is bracketed by beginOp/endOp; for
+// handle-returning operations (Open, ExecStream) the bracket extends to the
+// handle's Close, so the idle watcher can never cut a live stream.
+func (c *sshConn) beginOp() {
+	c.mu.Lock()
+	c.active++
+	c.lastUsed = time.Now()
+	c.mu.Unlock()
+}
+
+// endOp marks an operation finished. Touches lastUsed so the idle clock
+// starts from the END of the last operation, not its start.
+func (c *sshConn) endOp() {
+	c.mu.Lock()
+	c.active--
+	c.lastUsed = time.Now()
+	c.mu.Unlock()
+}
+
+// ── Connection acquisition ──────────────────────────────────────────────────
+
+// getConn returns a live *ssh.Client, dialing or redialing as needed.
+// Thread-safe. On reuse after a quiet period, the connection's liveness is
+// verified first — a dead connection is torn down and redialed instead of
+// poisoning every future call.
 func (c *sshConn) getConn() (*ssh.Client, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	select {
+	case <-c.done:
+		return nil, errClosed
+	default:
+	}
+
+	// Reuse path: probe when the connection has been quiet.
+	if c.client != nil && time.Since(c.lastUsed) > livenessCheckAfter {
+		if !c.aliveLocked() {
+			c.teardownLocked()
+		}
+	}
+
 	if c.client == nil {
-		c.teardownLocked()
 		client, err := ssh.Dial("tcp", c.cfg.addr(), &ssh.ClientConfig{
 			User:            c.cfg.User,
 			Auth:            []ssh.AuthMethod{c.cfg.AuthMethod},
-			HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+			HostKeyCallback: ssh.InsecureIgnoreHostKey(), // Phase 6: real verification
 			Timeout:         10 * time.Second,
 		})
 		if err != nil {
@@ -121,34 +159,58 @@ func (c *sshConn) getConn() (*ssh.Client, error) {
 		}
 		c.client = client
 		c.sftp = sftpClient
-		c.lastUsed = time.Now()
 		c.startIdleWatcher()
 	}
+	c.lastUsed = time.Now()
 	return c.client, nil
 }
 
-// getSFTP returns *sftp.Client. Call getConn() first (populates c.sftp),
-// then return c.sftp.
+// aliveLocked probes the connection with a bounded keepalive round trip.
+// Must be called with mu held. A live server answers (even a "request type
+// unknown" reply proves the transport); a dead or half-open connection
+// errors or times out. The probe goroutine leaks only until the kernel
+// abandons the dead socket — bounded, and only at reconnect-worthy moments.
+func (c *sshConn) aliveLocked() bool {
+	ch := make(chan error, 1)
+	client := c.client
+	go func() {
+		_, _, err := client.SendRequest("keepalive@runq", true, nil)
+		ch <- err
+	}()
+	select {
+	case err := <-ch:
+		return err == nil
+	case <-time.After(livenessTimeout):
+		return false
+	}
+}
+
+// getSFTP returns the *sftp.Client, (re)dialing via getConn as needed.
 func (c *sshConn) getSFTP() (*sftp.Client, error) {
-	_, err := c.getConn()
-	if err != nil || c.sftp == nil {
+	if _, err := c.getConn(); err != nil {
 		return nil, err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.sftp == nil {
+		return nil, errClosed
 	}
 	return c.sftp, nil
 }
 
-// newSession opens an SSH session, blocking until a semaphore slot is free.
-//
-// Flow:
-//  1. c.sessionSem <- struct{}{} — acquire slot (blocks if full)
-//  2. getConn() → client; on error → <-sessionSem, return error
-//  3. client.NewSession(); on error → <-sessionSem, return error
-//  4. release = func() { <-c.sessionSem }
-//  5. return sess, release, nil
+// newSession opens an SSH session, blocking until a semaphore slot is free,
+// the ctx is cancelled, or the manager is closed. Hung remote commands can
+// exhaust the slots; ctx keeps callers (and shutdown) from hanging with them.
 //
 // Caller MUST: defer release(); defer sess.Close()
-func (c *sshConn) newSession() (sess *ssh.Session, release func(), err error) {
-	c.sessionSem <- struct{}{}
+func (c *sshConn) newSession(ctx context.Context) (sess *ssh.Session, release func(), err error) {
+	select {
+	case c.sessionSem <- struct{}{}:
+	case <-ctx.Done():
+		return nil, nil, ctx.Err()
+	case <-c.done:
+		return nil, nil, errClosed
+	}
 
 	client, err := c.getConn()
 	if err != nil {
@@ -157,26 +219,28 @@ func (c *sshConn) newSession() (sess *ssh.Session, release func(), err error) {
 	}
 	sess, err = client.NewSession()
 	if err != nil {
+		// A NewSession failure on a supposedly-live client usually means the
+		// connection died between probe and use — drop it so the next call
+		// redials instead of failing forever.
+		c.mu.Lock()
+		c.teardownLocked()
+		c.mu.Unlock()
 		<-c.sessionSem
 		return nil, nil, err
 	}
+	var once sync.Once
 	release = func() {
-		<-c.sessionSem
+		once.Do(func() { <-c.sessionSem })
 	}
 	return sess, release, nil
 }
 
 // ── Idle watcher ────────────────────────────────────────────────────────────
 
-// startIdleWatcher launches goroutine that tears down after IdleTimeout inactivity.
-// Must be called with mu held. Safe to call multiple times (only first spawns).
-//
-// If IdleTimeout <= 0 → no-op.
-// Tick = IdleTimeout / 2. Each tick:
-//
-//	mu.Lock → if client != nil && time.Since(lastUsed) > IdleTimeout → teardownLocked()
-//
-// Exit on <-c.done.
+// startIdleWatcher launches the goroutine that tears down the connection
+// after IdleTimeout with no in-flight operations. Must be called with mu
+// held. Only the first call spawns; the watcher survives teardown/redial
+// cycles. No-op when IdleTimeout <= 0.
 func (c *sshConn) startIdleWatcher() {
 	if c.cfg.IdleTimeout <= 0 {
 		return
@@ -189,7 +253,7 @@ func (c *sshConn) startIdleWatcher() {
 				select {
 				case <-ticker.C:
 					c.mu.Lock()
-					if c.client != nil && time.Since(c.lastUsed) > c.cfg.IdleTimeout {
+					if c.client != nil && c.active == 0 && time.Since(c.lastUsed) > c.cfg.IdleTimeout {
 						c.teardownLocked()
 					}
 					c.mu.Unlock()
@@ -201,9 +265,8 @@ func (c *sshConn) startIdleWatcher() {
 	})
 }
 
-// teardownLocked closes sftp then client, nils both. Must be called with mu held.
-// Order matters: sftp first (it runs over the ssh conn), then client.
-// Ignore close errors (best-effort cleanup).
+// teardownLocked closes sftp then client, nils both. Must be called with mu
+// held. Order matters: sftp rides on the ssh conn. Best-effort cleanup.
 func (c *sshConn) teardownLocked() {
 	if c.sftp != nil {
 		_ = c.sftp.Close()
@@ -217,8 +280,8 @@ func (c *sshConn) teardownLocked() {
 
 // ── Shutdown ────────────────────────────────────────────────────────────────
 
-// Close stops idle watcher and tears down connection. Safe to call multiple times.
-// closeOnce.Do(func(){ close(done) }) → mu.Lock → teardownLocked → return nil
+// Close stops the idle watcher, unblocks session waiters, and tears down the
+// connection. Safe to call multiple times.
 func (c *sshConn) Close() error {
 	c.closeOnce.Do(func() {
 		close(c.done)

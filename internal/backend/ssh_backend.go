@@ -100,6 +100,10 @@ func NewSSHBackend(cfg SSHBackendConfig) (*SSHBackend, error) {
 		Host:       host,
 		User:       t.SSH.User,
 		AuthMethod: auth,
+		// Idle disconnect: with the sensor loops running every ~2min while
+		// tasks are in flight, the connection stays warm during activity and
+		// closes ~10min after the queue drains — a normal SSH user's shape.
+		IdleTimeout: 10 * time.Minute,
 	}
 
 	sshFS := rfs.NewSSHFS(sshCfg)
