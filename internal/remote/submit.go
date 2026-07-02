@@ -148,9 +148,20 @@ func (b *Backend) Prepare(ctx context.Context, jobCfg job.JobConfig, proj *proje
 	}
 
 	jobID = utils.GenerateJobID()
-	wsRoot, err := config.ResolveRoot(b.StorageCfg, proj.WorkingDir, proj.ProjectName)
-	if err != nil {
-		return "", nil, fmt.Errorf("resolve workspace root: %w", err)
+	// Workspace root: a configured target workspace WINS — it is a path on
+	// the TARGET's filesystem, composed as POSIX and materialized via b.FS.
+	// ResolveRoot is the on-target/legacy fallback only; it resolves against
+	// the CLIENT machine (and even mkdirs locally), which is wrong for any
+	// remote target.
+	var wsRoot string
+	if b.Cfg.Workspace != "" {
+		wsRoot = b.Cfg.Workspace
+	} else {
+		var rerr error
+		wsRoot, rerr = config.ResolveRoot(b.StorageCfg, proj.WorkingDir, proj.ProjectName)
+		if rerr != nil {
+			return "", nil, fmt.Errorf("resolve workspace root: %w", rerr)
+		}
 	}
 
 	// Resolved note for display (job row, workspace files); ConfigJSON keeps
@@ -215,10 +226,24 @@ func (b *Backend) Prepare(ctx context.Context, jobCfg job.JobConfig, proj *proje
 		return "", nil, fmt.Errorf("persist job: %w", err)
 	}
 
+	// Ledger hygiene: if per-task preparation aborts midway, rows already
+	// inserted would otherwise rot as pending forever — they never reach the
+	// queue. The user sees the submit error; the ledger must agree with it.
+	defer func() {
+		if err == nil {
+			return
+		}
+		for _, r := range rows {
+			_ = b.Store.UpdateTaskStatus(ctx, r.ID, "failed",
+				map[string]any{"finished_at": nowUnix(), "status_source": SourceSubmit})
+		}
+		_ = b.refreshJobStatus(ctx, jobID)
+	}()
+
 	for _, t := range plan.Tasks {
 		// Local prep + template render first: these have no external side effect,
 		// so a failure here aborts before any cluster job or DB row exists.
-		if err := workspace.Write(t.TaskDir, t.Params, plan.Wandb, plan.Note); err != nil {
+		if err := workspace.WriteFS(b.FS, t.TaskDir, t.Params, plan.Wandb, plan.Note); err != nil {
 			return plan.JobID, rows, fmt.Errorf("prepare workspace for %s: %w", t.TaskID, err)
 		}
 		runsh := path.Join(t.TaskDir, runScriptName)

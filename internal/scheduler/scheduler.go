@@ -50,6 +50,12 @@ type Scheduler struct {
 	killRequested map[string]bool
 	killMu        sync.Mutex
 
+	// finishMu serializes FinishTask on the unsupervised lane, where multiple
+	// sensors (marker scan, probe align, kill paths) can deliver verdicts for
+	// the same task concurrently — and a STALE verdict (read before a retry
+	// requeued the task) must not clobber the new attempt.
+	finishMu sync.Mutex
+
 	// L2-C: optional disk-freeze state machine. nil means freeze disabled.
 	// When set, tick() filters on FrozenJobs/FrozenMounts and runTask calls
 	// freeze.RemoveTask on every exit so auto-thaw fires when the last

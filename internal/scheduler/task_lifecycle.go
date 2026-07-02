@@ -138,8 +138,55 @@ func (s *Scheduler) launchAsync(task *Task) {
 // from runTask after the process exits; unsupervised launchers reach it from
 // reconcile when a terminal signal arrives from the remote scheduler. For the
 // unsupervised lane this is also where the submission slot is released.
+//
+// Unsupervised concurrency contract: sensors (marker scan, probe align, kill
+// paths) may deliver verdicts concurrently, and a verdict computed from data
+// read BEFORE a retry requeued the task is stale. finishMu serializes the
+// check-then-act, and the queue's in-memory state is the authority on which
+// attempt is current: verdicts are accepted only for tasks whose queue entry
+// is running (in flight), plus the pending→killed case (user cancelling a
+// task that was never handed off). Everything else is dropped.
 func (s *Scheduler) FinishTask(task *Task, status TaskStatus, extra map[string]any) {
 	if !s.launcher.Supervised() {
+		s.finishMu.Lock()
+		defer s.finishMu.Unlock()
+
+		qt := s.queue.Get(task.ID)
+		switch {
+		case qt == nil:
+			// Unmanaged row: not in this lane's queue (should not happen
+			// while the daemon runs — restore covers all non-terminal rows —
+			// but a legacy writer or edge restore gap must not lose wrapper
+			// facts). Persist the terminal state directly, WITHOUT retry (no
+			// queue entry to relaunch) and without slot bookkeeping (never
+			// held one). Failed maps to a permanent failure.
+			s.logger.Warn("finish verdict for unmanaged task: persisting without lifecycle",
+				"task", task.ID, "status", string(status))
+			if status != StatusSuccess && status != StatusKilled {
+				status = StatusFailed
+			}
+			s.completeTask(task, status, extra)
+			s.RefreshJobStatus(task.JobID)
+			return
+		case qt.Status == StatusRunning:
+			// In flight — accept. Attempt-level staleness ("verdict computed
+			// against attempt N delivered after attempt N+1 re-entered
+			// running") is prevented BY CONSTRUCTION, not detected here: all
+			// verdict producers and manual retry serialize on the target's
+			// lifecycle lock (remote.Backend.lifecycleMu), and a requeue only
+			// happens inside a verdict delivery — so no verdict can ever be
+			// computed before a requeue and delivered after it. This gate
+			// remains as a cheap backstop for queue-state mismatches only.
+		case qt.Status == StatusPending && status == StatusKilled:
+			// Never handed off, user cancelled — accept.
+		default:
+			// Stale verdict: the task was requeued (new attempt pending) or
+			// already terminal. A previous attempt's failure must not
+			// clobber the new attempt or double-count a retry.
+			s.logger.Debug("finish verdict dropped: stale",
+				"task", task.ID, "queue_status", string(qt.Status), "verdict", string(status))
+			return
+		}
 		defer s.pool.Release(task.ID)
 	}
 	switch status {

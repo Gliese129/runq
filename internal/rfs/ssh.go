@@ -41,9 +41,14 @@ func (s *SSHFS) Close() error {
 // ── Read ────────────────────────────────────────────────────────────────────
 
 // Stat returns file info via sftp.
-func (s *SSHFS) Stat(path string) (fs.FileInfo, error) {
+//
+// All read/write methods below use the named-error + endOpErr pattern: the
+// connection's proof-of-life clock only advances on outcomes that show the
+// transport worked (incl. remote not-exist/permission verdicts), so a dead
+// connection accumulates quiet time and gets probed/redialed by getConn.
+func (s *SSHFS) Stat(path string) (fi fs.FileInfo, err error) {
 	s.conn.beginOp()
-	defer s.conn.endOp()
+	defer func() { s.conn.endOpErr(err) }()
 	sc, err := s.conn.getSFTP()
 	if err != nil {
 		return nil, err
@@ -52,9 +57,9 @@ func (s *SSHFS) Stat(path string) (fs.FileInfo, error) {
 }
 
 // ReadFile reads a whole remote file via sftp.
-func (s *SSHFS) ReadFile(path string) ([]byte, error) {
+func (s *SSHFS) ReadFile(path string) (data []byte, err error) {
 	s.conn.beginOp()
-	defer s.conn.endOp()
+	defer func() { s.conn.endOpErr(err) }()
 	sc, err := s.conn.getSFTP()
 	if err != nil {
 		return nil, err
@@ -74,21 +79,21 @@ func (s *SSHFS) Open(path string) (File, error) {
 	s.conn.beginOp()
 	sc, err := s.conn.getSFTP()
 	if err != nil {
-		s.conn.endOp()
+		s.conn.endOpErr(err)
 		return nil, err
 	}
 	f, err := sc.Open(path)
 	if err != nil {
-		s.conn.endOp()
+		s.conn.endOpErr(err)
 		return nil, err
 	}
 	return &sshFile{f: f, release: s.conn.endOp}, nil
 }
 
 // ReadDir lists a remote directory via sftp.
-func (s *SSHFS) ReadDir(path string) ([]fs.DirEntry, error) {
+func (s *SSHFS) ReadDir(path string) (entries []fs.DirEntry, err error) {
 	s.conn.beginOp()
-	defer s.conn.endOp()
+	defer func() { s.conn.endOpErr(err) }()
 	sc, err := s.conn.getSFTP()
 	if err != nil {
 		return nil, err
@@ -97,7 +102,7 @@ func (s *SSHFS) ReadDir(path string) ([]fs.DirEntry, error) {
 	if err != nil {
 		return nil, err
 	}
-	entries := make([]fs.DirEntry, 0, len(fis))
+	entries = make([]fs.DirEntry, 0, len(fis))
 	for _, fi := range fis {
 		entries = append(entries, fs.FileInfoToDirEntry(fi))
 	}
@@ -108,9 +113,9 @@ func (s *SSHFS) ReadDir(path string) ([]fs.DirEntry, error) {
 
 // WriteFile writes data to a remote file (create/truncate), then chmods it.
 // sftp has no atomic write; temp+rename is a future TODO.
-func (s *SSHFS) WriteFile(path string, data []byte, perm os.FileMode) error {
+func (s *SSHFS) WriteFile(path string, data []byte, perm os.FileMode) (err error) {
 	s.conn.beginOp()
-	defer s.conn.endOp()
+	defer func() { s.conn.endOpErr(err) }()
 	sc, err := s.conn.getSFTP()
 	if err != nil {
 		return err
@@ -132,9 +137,9 @@ func (s *SSHFS) WriteFile(path string, data []byte, perm os.FileMode) error {
 
 // MkdirAll creates a remote directory tree.
 // sftp.MkdirAll ignores perm (uses remote umask). Chmod walk if needed later.
-func (s *SSHFS) MkdirAll(path string, perm os.FileMode) error {
+func (s *SSHFS) MkdirAll(path string, perm os.FileMode) (err error) {
 	s.conn.beginOp()
-	defer s.conn.endOp()
+	defer func() { s.conn.endOpErr(err) }()
 	sc, err := s.conn.getSFTP()
 	if err != nil {
 		return err
@@ -149,7 +154,9 @@ func (s *SSHFS) MkdirAll(path string, perm os.FileMode) error {
 // are. ctx cancellation closes the session (the remote command gets EOF/HUP).
 func (s *SSHFS) Exec(ctx context.Context, cmd string, args ...string) (stdout, stderr []byte, exitCode int, err error) {
 	s.conn.beginOp()
-	defer s.conn.endOp()
+	// err carries transport failures only (non-zero exits return err == nil),
+	// which is exactly the classification endOpErr wants.
+	defer func() { s.conn.endOpErr(err) }()
 
 	sess, release, err := s.conn.newSession(ctx)
 	if err != nil {
@@ -196,7 +203,7 @@ func (s *SSHFS) ExecStream(ctx context.Context, cmd string, args ...string) (io.
 
 	sess, release, err := s.conn.newSession(ctx)
 	if err != nil {
-		s.conn.endOp()
+		s.conn.endOpErr(err)
 		return nil, err
 	}
 
@@ -209,7 +216,7 @@ func (s *SSHFS) ExecStream(ctx context.Context, cmd string, args ...string) (io.
 		pw.Close()
 		sess.Close()
 		release()
-		s.conn.endOp()
+		s.conn.endOpErr(err)
 		return nil, err
 	}
 
@@ -236,9 +243,9 @@ func (s *SSHFS) ExecStream(ctx context.Context, cmd string, args ...string) (io.
 
 // CopyToLocal downloads a remote file via sftp. The busy-marker covers the
 // whole transfer — large checkpoint downloads are never cut by idle teardown.
-func (s *SSHFS) CopyToLocal(remotePath, localPath string, opts ...CopyOption) error {
+func (s *SSHFS) CopyToLocal(remotePath, localPath string, opts ...CopyOption) (err error) {
 	s.conn.beginOp()
-	defer s.conn.endOp()
+	defer func() { s.conn.endOpErr(err) }()
 	_ = applyCopyOpts(opts) // for future
 	sc, err := s.conn.getSFTP()
 	if err != nil {

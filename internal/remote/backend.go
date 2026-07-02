@@ -99,6 +99,30 @@ type Backend struct {
 	// (guarded by probeMu). See DetectOrphans — two strikes mark, presence
 	// clears. In-memory: restart resets, erring on the safe side.
 	orphanStrikes map[string]int
+
+	// lifecycleMu serializes every verdict-producing pass on this target —
+	// EnsureFresh / EnsureAllFresh / ScanDoneMarkers / Kill — plus manual
+	// retry (via WithLifecycleLock). THE staleness invariant of the remote
+	// lane rests on it: a requeue only ever happens inside a verdict
+	// delivery, so with all producers serialized, "read against attempt N,
+	// deliver after attempt N+1 started" is impossible BY CONSTRUCTION —
+	// no attempt-identity token needed.
+	//
+	// INVARIANT: any new code path that reads task state and may call
+	// persistDecision/FinishTask, or that resets a task for relaunch, MUST
+	// hold this lock. Per-target lock: no cross-target contention; these
+	// paths are SSH-bound and effectively serial anyway.
+	lifecycleMu sync.Mutex
+}
+
+// WithLifecycleLock runs fn under this target's lifecycle lock. Exposed for
+// the one non-verdict identity mutation outside this package: user-initiated
+// retry (SSHBackend.RetryTask), which must not interleave with an in-flight
+// verdict delivery.
+func (b *Backend) WithLifecycleLock(fn func() error) error {
+	b.lifecycleMu.Lock()
+	defer b.lifecycleMu.Unlock()
+	return fn()
 }
 
 // New builds a Backend with a local filesystem (same-machine operation).
@@ -174,6 +198,9 @@ func rowToTask(tk store.TaskRow) *scheduler.Task {
 		MaxRetry:   tk.MaxRetry,
 		TaskDir:    tk.TaskDir,
 		LogPath:    tk.LogPath,
+		// Informational only (restore/display); staleness is handled by
+		// lifecycleMu serialization, not by id comparison.
+		ExternalID: tk.ExternalID,
 	}
 }
 

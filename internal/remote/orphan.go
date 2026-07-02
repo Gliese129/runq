@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io/fs"
+	"strings"
 	"time"
 
 	"github.com/gliese129/runq/internal/store"
@@ -40,26 +41,58 @@ func (b *Backend) DetectOrphans(ctx context.Context, immediate bool) error {
 		return err
 	}
 
+	// Two-phase: observe everything first, then decide. Marking inline would
+	// commit to early observations before the circuit breaker below can see
+	// the whole pattern.
 	now := time.Now()
+	var missing []store.TaskRow
+	observed := 0
+	rootPrefix := strings.TrimSuffix(root, "/") + "/"
 	for _, tk := range rows {
 		if !isTerminal(tk.Status) || tk.TaskDir == "" {
+			continue
+		}
+		// Ownership validation (guardrail 2 proper): only dirs UNDER the
+		// configured workspace are judged — the root guard above then
+		// genuinely covers their common ancestor. A task dir outside the
+		// workspace (pre-reconfiguration submissions, mis-pointed config)
+		// has no verifiable relationship to the root we just checked, so it
+		// is never marked, no matter what a stat says.
+		if !strings.HasPrefix(tk.TaskDir, rootPrefix) {
 			continue
 		}
 		_, serr := b.FS.Stat(tk.TaskDir)
 		switch {
 		case serr == nil:
 			// Present: clear any stale mark and reset the strike counter.
+			observed++
 			b.clearStrike(tk.ID)
 			_ = b.Store.ClearTaskOrphaned(ctx, tk.ID)
 		case errors.Is(serr, fs.ErrNotExist):
-			if immediate || b.addStrike(tk.ID) >= 2 {
-				if merr := b.Store.MarkTaskOrphaned(ctx, tk.ID, now); merr != nil && err == nil {
-					err = merr
-				}
-			}
+			observed++
+			missing = append(missing, tk)
 		default:
 			// Transport or permission error: no fact learned. Leave the
 			// strike counter untouched — do not accumulate toward a mark.
+		}
+	}
+
+	// Circuit breaker (guardrail 2b): the root exists but EVERY observed dir
+	// is missing. That pattern is far more likely a mis-pointed workspace or
+	// half-mounted filesystem than N simultaneous deletions — the plain root
+	// guard can be bypassed by `workspace:` pointing at some OTHER existing
+	// path, and this catches exactly that. Refuse to mark anything.
+	if len(missing) >= 3 && len(missing) == observed {
+		opLog("ORPHAN SCAN ABORTED target=%s: all %d observed task dirs missing — suspect workspace/mount misconfiguration",
+			b.Cfg.Name, observed)
+		return err
+	}
+
+	for _, tk := range missing {
+		if immediate || b.addStrike(tk.ID) >= 2 {
+			if merr := b.Store.MarkTaskOrphaned(ctx, tk.ID, now); merr != nil && err == nil {
+				err = merr
+			}
 		}
 	}
 	return err

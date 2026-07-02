@@ -99,7 +99,7 @@ type Observed struct {
 // Precedence:
 //
 //	KillRequested                              → killed   / runq
-//	wrapper success|failed                     → that     / wrapper
+//	wrapper success|failed|killed              → that     / wrapper
 //	scheduler Success|Failed|Killed            → that     / scheduler
 //	wrapper started|running + scheduler Gone   → failed   / inferred
 //	wrapper started|running                    → running  / wrapper
@@ -112,7 +112,12 @@ func Reconcile(currentStatus, currentSource string, o Observed) Decision {
 	if o.KillRequested {
 		return Decision{"killed", SourceRunq}
 	}
-	if o.WrapperStatus == "success" || o.WrapperStatus == "failed" {
+	// All three wrapper terminals count — including "killed", which run.sh's
+	// TERM/INT/HUP trap writes on scancel/walltime. Dropping it would let the
+	// task fall through to the scheduler branches and be misread as an
+	// inferred FAILURE (SchedGone + running), which then retries a task the
+	// user deliberately cancelled.
+	if o.WrapperStatus == "success" || o.WrapperStatus == "failed" || o.WrapperStatus == "killed" {
 		return Decision{o.WrapperStatus, SourceWrapper}
 	}
 	switch o.Scheduler {

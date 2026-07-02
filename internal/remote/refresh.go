@@ -52,6 +52,8 @@ func readStatus(fsys rfs.FS, taskDir string) statusFile {
 //
 // The method satisfies backend.Reconciler implicitly (Go structural typing).
 func (b *Backend) EnsureFresh(ctx context.Context, jobID string, ttl time.Duration) error {
+	b.lifecycleMu.Lock()
+	defer b.lifecycleMu.Unlock()
 	probe := ttl == 0 || !b.probeIsFresh(jobID, ttl)
 	return b.reconcile(ctx, jobID, probe)
 }
@@ -63,6 +65,8 @@ func (b *Backend) EnsureFresh(ctx context.Context, jobID string, ttl time.Durati
 // every active job. Without it, a shared memoRunner still deduplicates
 // listing-style per-job commands (e.g. SGE/UGE bare `qstat`) across jobs.
 func (b *Backend) EnsureAllFresh(ctx context.Context, ttl time.Duration) error {
+	b.lifecycleMu.Lock()
+	defer b.lifecycleMu.Unlock()
 	jobs, err := b.Store.ListJobs(ctx, "", b.Cfg.Name)
 	if err != nil {
 		return err

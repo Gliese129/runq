@@ -78,7 +78,7 @@ func (l *Launcher) Launch(ctx context.Context, t *scheduler.Task, _ map[string]s
 			"%w: record external id %s for %s: %v", scheduler.ErrLaunchUntracked, extID, t.ID, uerr)
 	}
 	opLog("SUBMIT OK task=%s job=%s ext=%s", t.ID, t.JobID, extID)
-	return scheduler.LaunchResult{}, nil
+	return scheduler.LaunchResult{ExtID: extID}, nil
 }
 
 // compile-time interface check

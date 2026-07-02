@@ -20,6 +20,8 @@ import (
 // task belongs to another target, are LEFT IN PLACE — another runq client
 // sharing this workspace may own them. We only ever delete what we settled.
 func (b *Backend) ScanDoneMarkers(ctx context.Context) error {
+	b.lifecycleMu.Lock()
+	defer b.lifecycleMu.Unlock()
 	dir := b.doneDir()
 	if dir == "" {
 		return nil // no workspace root configured — marker detection disabled

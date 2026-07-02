@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
+	posixpath "path"
 	"sort"
 	"strings"
 
@@ -106,7 +106,7 @@ func validateStrictChoices(proj *project.Config, tasks []job.TaskParams) error {
 // <working_dir>/.env when present; "" = disabled; other = required path.
 func resolveEnvFile(proj *project.Config) (string, error) {
 	if proj.EnvFile == nil {
-		auto := filepath.Join(proj.WorkingDir, ".env")
+		auto := posixpath.Join(proj.WorkingDir, ".env")
 		if _, err := os.Stat(auto); err == nil {
 			return auto, nil
 		}
@@ -116,8 +116,8 @@ func resolveEnvFile(proj *project.Config) (string, error) {
 	if path == "" {
 		return "", nil // explicitly disabled
 	}
-	if !filepath.IsAbs(path) {
-		path = filepath.Join(proj.WorkingDir, path)
+	if !posixpath.IsAbs(path) {
+		path = posixpath.Join(proj.WorkingDir, path)
 	}
 	if _, err := os.Stat(path); err != nil {
 		return "", fmt.Errorf("env_file %q: %w", path, err)
@@ -262,7 +262,7 @@ func Build(ctx context.Context, cfg job.JobConfig, proj *project.Config, d Deps)
 			GPUsNeeded:    gpusPerTask,
 			MaxRetry:      maxRetry,
 			Timeout:       timeoutSec,
-			LogPath:       filepath.Join(d.Paths.LogRoot, taskID+".log"),
+			LogPath:       posixpath.Join(d.Paths.LogRoot, taskID+".log"),
 			WorkingDir:    proj.WorkingDir,
 			Resumable:     proj.Resume.Enabled,
 			ExtraArgs:     proj.Resume.ExtraArgs,

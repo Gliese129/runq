@@ -63,6 +63,13 @@ type Task struct {
 	// runqenv.Identity so Base() can emit WANDB_RUN_GROUP / WANDB_TAGS.
 	SweepKeys []string `json:"sweep_keys,omitempty"`
 	JobNote   string   `json:"job_note,omitempty"`
+
+	// ExternalID is the remote scheduler's job id for the current attempt
+	// (empty before launch; cleared by requeue and manual retry). Purely
+	// informational — restore/display/kill plumbing. Verdict staleness is
+	// prevented by serializing all verdict producers on the target's
+	// lifecycle lock (remote.Backend.lifecycleMu), NOT by comparing ids.
+	ExternalID string `json:"external_id,omitempty"`
 }
 
 // Queue is a FIFO task queue with backfill + aging support. Thread-safe.
@@ -183,6 +190,9 @@ func (q *Queue) Requeue(taskID string) error {
 	t.GPUs = nil
 	t.StartedAt = nil
 	t.FinishedAt = nil
+	// New attempt: the old external id belongs to a dead cluster job, and
+	// clearing it is what invalidates any in-flight stale verdicts.
+	t.ExternalID = ""
 	return nil
 }
 
@@ -222,6 +232,9 @@ func (q *Queue) RetryExisting(task *Task) bool {
 	existing.TaskDir = task.TaskDir
 	existing.SweepKeys = task.SweepKeys
 	existing.JobNote = task.JobNote
+	// Manual retry reads the row AFTER external_id was cleared, so this
+	// resets the attempt identity just like Requeue does.
+	existing.ExternalID = task.ExternalID
 	return true
 }
 

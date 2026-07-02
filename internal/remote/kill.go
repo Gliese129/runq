@@ -25,6 +25,8 @@ import (
 // returns how many were killed plus an error summarizing the ones it could not
 // (so a single stuck task doesn't block cancelling the rest of a job).
 func (b *Backend) Kill(ctx context.Context, target string) (killed int, err error) {
+	b.lifecycleMu.Lock()
+	defer b.lifecycleMu.Unlock()
 	tasks, jobID, rerr := b.resolveTargets(ctx, target)
 	if rerr != nil {
 		return 0, rerr

@@ -423,6 +423,7 @@ func TaskRowToSchedulerTask(row *store.TaskRow) *scheduler.Task {
 		UID:           row.UID,
 		TaskDir:       row.TaskDir,
 		CheckpointDir: ckptDir,
+		ExternalID:    row.ExternalID,
 	}
 }
 

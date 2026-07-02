@@ -46,11 +46,14 @@ type StartInfo struct {
 }
 
 // LaunchResult is returned by Launch. For supervised launchers ExitCode is
-// the process exit code; unsupervised launchers report handoff only.
+// the process exit code; unsupervised launchers report the handoff — ExtID
+// is the external scheduler's id for this attempt (informational; the
+// launcher has already persisted it to the store).
 type LaunchResult struct {
 	ExitCode  int
 	PID       int
 	StartTime time.Time
+	ExtID     string
 }
 
 // LocalLauncher runs tasks as local child processes via the executor.

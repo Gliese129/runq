@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -33,7 +34,20 @@ import (
 //     User-triggered refreshes are separate and unaffected.
 const (
 	markerScanInterval = 2 * time.Minute
-	probeAlignInterval = 25 * time.Minute
+	probeAlignInterval = 15 * time.Minute
+
+	// hibernateAfter: with no user-driven interaction on this target for
+	// this long, the sensor drops to a skeleton cadence — qstat alignment
+	// stops ENTIRELY (a probe loop running all night is exactly what gets
+	// accounts flagged by cluster admins) and marker scans slow down but
+	// keep running (one readdir; it releases submission slots, so a big
+	// overnight sweep keeps flowing). Any user action wakes it instantly.
+	// Accepted cost: node-fail slot leaks wait until the user returns.
+	hibernateAfter = 30 * time.Minute
+
+	// hibernatedMarkerEvery: while hibernated, marker scan runs every Nth
+	// tick (N × markerScanInterval = 10min).
+	hibernatedMarkerEvery = 5
 )
 
 // SSHBackend implements Backend for a remote HPC cluster accessed via SSH.
@@ -62,6 +76,22 @@ type SSHBackend struct {
 
 	loopCancel context.CancelFunc
 	loopWG     sync.WaitGroup
+
+	// lastActivity is the unix time of the last user-driven interaction with
+	// this target (list/get/submit/kill/retry/refresh — dashboard polling
+	// counts: the user is watching). The sensor loop hibernates when it goes
+	// stale; see hibernateAfter.
+	lastActivity atomic.Int64
+}
+
+// touchActivity records a user-driven interaction (wakes a hibernated sensor
+// on its next tick).
+func (b *SSHBackend) touchActivity() { b.lastActivity.Store(time.Now().Unix()) }
+
+// userActive reports whether the target saw user activity within
+// hibernateAfter.
+func (b *SSHBackend) userActive() bool {
+	return time.Since(time.Unix(b.lastActivity.Load(), 0)) <= hibernateAfter
 }
 
 // SSHBackendConfig bundles everything needed to build an SSHBackend.
@@ -129,7 +159,7 @@ func NewSSHBackend(cfg SSHBackendConfig) (*SSHBackend, error) {
 	// scheduler's FinishTask funnel (retry policy, slot release).
 	hpcBe.Finisher = sched
 
-	return &SSHBackend{
+	be := &SSHBackend{
 		storeQueries: storeQueries{
 			store: cfg.Store,
 			reg:   project.NewRegistry(cfg.Store.DB()),
@@ -141,7 +171,12 @@ func NewSSHBackend(cfg SSHBackendConfig) (*SSHBackend, error) {
 		sched:    sched,
 		launcher: launcher,
 		logger:   logger,
-	}, nil
+	}
+	// Boot counts as activity: after a daemon restart the sensor gets one
+	// active window to re-align restored in-flight state before it may
+	// hibernate (zero value would mean "hibernated since 1970").
+	be.touchActivity()
+	return be, nil
 }
 
 // Start restores this target's tasks into the lane, starts the scheduler
@@ -151,9 +186,8 @@ func (b *SSHBackend) Start(ctx context.Context) {
 	b.sched.Start()
 	loopCtx, cancel := context.WithCancel(ctx)
 	b.loopCancel = cancel
-	b.loopWG.Add(2)
-	go b.markerLoop(loopCtx)
-	go b.probeAlignLoop(loopCtx)
+	b.loopWG.Add(1)
+	go b.sensorLoop(loopCtx)
 }
 
 // restoreLane rebuilds the in-memory queue/slots from the DB on startup:
@@ -189,47 +223,53 @@ func (b *SSHBackend) restoreLane(ctx context.Context) {
 	}
 }
 
-// markerLoop is the primary completion sensor: one readdir per tick, only
-// while something is in flight.
-func (b *SSHBackend) markerLoop(ctx context.Context) {
+// sensorLoop is the SINGLE background sensor goroutine for this target —
+// one ticker, sequential work, no sensor-vs-sensor concurrency by shape:
+//
+//   - every tick (markerScanInterval): done-marker scan (one readdir, cheap;
+//     the primary completion path)
+//   - every probeAlignInterval: batch scheduler probe (catches tasks whose
+//     wrapper never wrote a marker — node fail, hard kill — so their slots
+//     don't leak) + background orphan detection (two-strike hysteresis)
+//
+// Both gated on HasInFlight: zero in-flight tasks = zero SSH traffic.
+// Request-driven verdict paths (kill, manual retry, user-triggered refresh)
+// still arrive on API goroutines; the target's lifecycleMu serializes them
+// with this loop.
+func (b *SSHBackend) sensorLoop(ctx context.Context) {
 	defer b.loopWG.Done()
 	ticker := time.NewTicker(markerScanInterval)
 	defer ticker.Stop()
+	lastAlign := time.Now() // warm start: no immediate qstat on daemon boot
+	tick := 0
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			tick++
 			if inflight, err := b.backend.HasInFlight(ctx); err != nil || !inflight {
+				continue
+			}
+			active := b.userActive()
+
+			// Marker scan: every tick while active, every Nth while
+			// hibernated — cheap enough to keep an overnight sweep moving.
+			if !active && tick%hibernatedMarkerEvery != 0 {
 				continue
 			}
 			if err := b.backend.ScanDoneMarkers(ctx); err != nil {
 				b.logger.Warn("marker scan failed", "error", err)
 			}
-		}
-	}
-}
 
-// probeAlignLoop is the low-frequency safety net: a batch scheduler probe
-// catches tasks whose wrapper never wrote a marker (node fail, hard kill)
-// so their slots don't leak.
-func (b *SSHBackend) probeAlignLoop(ctx context.Context) {
-	defer b.loopWG.Done()
-	ticker := time.NewTicker(probeAlignInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			if inflight, err := b.backend.HasInFlight(ctx); err != nil || !inflight {
+			// qstat alignment: user-present periods only.
+			if !active || time.Since(lastAlign) < probeAlignInterval {
 				continue
 			}
+			lastAlign = time.Now()
 			if err := b.backend.EnsureAllFresh(ctx, DefaultReadTTL); err != nil {
 				b.logger.Warn("probe align failed", "error", err)
 			}
-			// Piggyback orphan detection on the same low-frequency pass
-			// (background mode: two-strike hysteresis applies).
 			if err := b.backend.DetectOrphans(ctx, false); err != nil {
 				b.logger.Warn("orphan detection failed", "error", err)
 			}
@@ -271,6 +311,7 @@ func (b *SSHBackend) Capabilities() Capabilities {
 // ── Reconcile ─────────────────────────────────────────────────────────────
 
 func (b *SSHBackend) RefreshJob(ctx context.Context, jobID string) error {
+	b.touchActivity()
 	return b.backend.EnsureFresh(ctx, jobID, 0)
 }
 
@@ -283,6 +324,7 @@ func (b *SSHBackend) ReconcileAll(ctx context.Context) error {
 // ── Job operations ────────────────────────────────────────────────────────
 
 func (b *SSHBackend) ListJobs(ctx context.Context, projectScope string) ([]JobSummary, error) {
+	b.touchActivity()
 	target := b.backend.Cfg.Name
 	jobs, err := b.store.ListJobsVisible(ctx, projectScope, target)
 	if err != nil {
@@ -318,6 +360,7 @@ func (b *SSHBackend) ListJobs(ctx context.Context, projectScope string) ([]JobSu
 }
 
 func (b *SSHBackend) GetJob(ctx context.Context, jobID string) (*JobDetail, error) {
+	b.touchActivity()
 	if err := b.backend.EnsureFresh(ctx, jobID, DefaultReadTTL); err != nil {
 		return nil, err
 	}
@@ -361,6 +404,7 @@ func (b *SSHBackend) GPUStatus(_ context.Context) ([]GPUSlot, error) {
 // ── Task operations ───────────────────────────────────────────────────────
 
 func (b *SSHBackend) GetTask(ctx context.Context, taskID string) (*TaskView, error) {
+	b.touchActivity()
 	task, err := b.store.GetTask(ctx, taskID)
 	if err != nil {
 		return nil, err
@@ -374,6 +418,7 @@ func (b *SSHBackend) GetTask(ctx context.Context, taskID string) (*TaskView, err
 }
 
 func (b *SSHBackend) TaskMetrics(ctx context.Context, taskID string) ([]MetricPoint, error) {
+	b.touchActivity()
 	task, err := b.store.GetTask(ctx, taskID)
 	if err != nil || task == nil {
 		return nil, fmt.Errorf("task %q: %w", taskID, ErrNotFound)
@@ -393,6 +438,7 @@ func (b *SSHBackend) reconcileTask(ctx context.Context, taskID string, fallback 
 }
 
 func (b *SSHBackend) KillTask(ctx context.Context, taskID string) error {
+	b.touchActivity()
 	task, err := b.store.GetTask(ctx, taskID)
 	if err != nil {
 		return err
@@ -423,6 +469,7 @@ func (b *SSHBackend) KillTask(ctx context.Context, taskID string) error {
 }
 
 func (b *SSHBackend) RetryTask(ctx context.Context, taskID string) error {
+	b.touchActivity()
 	row, err := b.store.GetTask(ctx, taskID)
 	if err != nil {
 		return err
@@ -434,35 +481,44 @@ func (b *SSHBackend) RetryTask(ctx context.Context, taskID string) error {
 		return fmt.Errorf("task %q is %s, only failed/killed tasks can be retried", taskID, row.Status)
 	}
 
-	// Reset the wrapper state files FIRST (synchronously, over SSH). A stale
-	// terminal status.json would be re-reconciled into an instant failure
-	// before the relaunch happens; the awaitingRelaunch guard doesn't cover
-	// user retries of first-attempt failures (retry_count may be 0).
-	if err := b.backend.ResetWrapperState(ctx, row.TaskDir, taskID); err != nil {
-		return fmt.Errorf("reset wrapper state: %w", err)
-	}
+	// The whole reset-and-requeue runs under the target's lifecycle lock:
+	// a verdict delivery in flight (marker/probe/kill) must fully land or
+	// fully wait — otherwise a stale verdict could interleave with the reset
+	// and clobber the fresh attempt (the serialization IS the staleness
+	// defense; see remote.Backend.lifecycleMu).
+	return b.backend.WithLifecycleLock(func() error {
+		// Reset the wrapper state files FIRST (synchronously, over SSH). A
+		// stale terminal status.json would be re-reconciled into an instant
+		// failure before the relaunch happens; the awaitingRelaunch guard
+		// doesn't cover user retries of first-attempt failures (retry_count
+		// may be 0).
+		if err := b.backend.ResetWrapperState(ctx, row.TaskDir, taskID); err != nil {
+			return fmt.Errorf("reset wrapper state: %w", err)
+		}
 
-	if err := b.store.UpdateTaskStatus(ctx, taskID, "pending", map[string]any{
-		"gpus":        nil,
-		"pid":         nil,
-		"started_at":  nil,
-		"finished_at": nil,
-		"external_id": nil,
-	}); err != nil {
-		return err
-	}
+		if err := b.store.UpdateTaskStatus(ctx, taskID, "pending", map[string]any{
+			"gpus":        nil,
+			"pid":         nil,
+			"started_at":  nil,
+			"finished_at": nil,
+			"external_id": nil,
+		}); err != nil {
+			return err
+		}
 
-	row, _ = b.store.GetTask(ctx, taskID)
-	task := TaskRowToSchedulerTask(row)
-	task.GPUsNeeded = 1
-	if !b.queue.RetryExisting(task) {
-		b.queue.Push(task)
-	}
-	b.sched.RefreshJobStatus(task.JobID)
-	return nil
+		row, _ = b.store.GetTask(ctx, taskID)
+		task := TaskRowToSchedulerTask(row)
+		task.GPUsNeeded = 1
+		if !b.queue.RetryExisting(task) {
+			b.queue.Push(task)
+		}
+		b.sched.RefreshJobStatus(task.JobID)
+		return nil
+	})
 }
 
 func (b *SSHBackend) KillJob(ctx context.Context, jobID string) error {
+	b.touchActivity()
 	// Settle locally-queued tasks first: they have no cluster job to cancel,
 	// and marking them killed here means backend.Kill (below) skips them as
 	// terminal instead of refusing over a missing external id.
@@ -493,6 +549,7 @@ func (b *SSHBackend) ResumeJob(_ context.Context, _ string) error {
 // sbatch happens asynchronously per task in remote.Launcher, throttled by
 // max_inflight slots. The returned count is tasks ACCEPTED (queued).
 func (b *SSHBackend) SubmitJob(ctx context.Context, cfg job.JobConfig, opts SubmitOptions) (string, int, error) {
+	b.touchActivity()
 	proj, err := b.reg.Get(ctx, cfg.Project)
 	if err != nil {
 		return "", 0, fmt.Errorf("project %q: %w", cfg.Project, err)

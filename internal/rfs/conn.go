@@ -3,6 +3,7 @@ package rfs
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"net"
 	"sync"
 	"time"
@@ -99,23 +100,36 @@ func newSSHConn(cfg SSHConfig) *sshConn {
 
 // ── Operation tracking ──────────────────────────────────────────────────────
 
-// beginOp marks an operation in flight: bumps the active count and touches
-// lastUsed. Every public SSHFS operation is bracketed by beginOp/endOp; for
-// handle-returning operations (Open, ExecStream) the bracket extends to the
-// handle's Close, so the idle watcher can never cut a live stream.
+// beginOp marks an operation in flight. Every public SSHFS operation is
+// bracketed by beginOp/endOpErr; for handle-returning operations (Open,
+// ExecStream) the bracket extends to the handle's Close, so the idle watcher
+// can never cut a live stream.
+//
+// Deliberately does NOT touch lastUsed: lastUsed means "last moment the
+// transport PROVED itself alive", and merely attempting an operation proves
+// nothing. If beginOp refreshed it, a stream of failing calls against a dead
+// connection would keep resetting the quiet-time clock and the keepalive
+// probe in getConn would never fire — the connection could never self-heal.
 func (c *sshConn) beginOp() {
 	c.mu.Lock()
 	c.active++
-	c.lastUsed = time.Now()
 	c.mu.Unlock()
 }
 
-// endOp marks an operation finished. Touches lastUsed so the idle clock
-// starts from the END of the last operation, not its start.
-func (c *sshConn) endOp() {
+// endOp is endOpErr for paths without an error to classify.
+func (c *sshConn) endOp() { c.endOpErr(nil) }
+
+// endOpErr marks an operation finished. lastUsed is refreshed only when the
+// outcome proves the transport worked: success, or a REMOTE verdict like
+// not-exist/permission (the server answered — that IS a live round trip).
+// Transport-level failures leave lastUsed alone, letting quiet time
+// accumulate until getConn's keepalive probe fires and heals the connection.
+func (c *sshConn) endOpErr(err error) {
 	c.mu.Lock()
 	c.active--
-	c.lastUsed = time.Now()
+	if err == nil || errors.Is(err, fs.ErrNotExist) || errors.Is(err, fs.ErrPermission) {
+		c.lastUsed = time.Now()
+	}
 	c.mu.Unlock()
 }
 
@@ -159,9 +173,9 @@ func (c *sshConn) getConn() (*ssh.Client, error) {
 		}
 		c.client = client
 		c.sftp = sftpClient
+		c.lastUsed = time.Now() // a successful dial IS proof of life
 		c.startIdleWatcher()
 	}
-	c.lastUsed = time.Now()
 	return c.client, nil
 }
 
@@ -219,11 +233,14 @@ func (c *sshConn) newSession(ctx context.Context) (sess *ssh.Session, release fu
 	}
 	sess, err = client.NewSession()
 	if err != nil {
-		// A NewSession failure on a supposedly-live client usually means the
-		// connection died between probe and use — drop it so the next call
-		// redials instead of failing forever.
+		// NewSession can fail because the connection died (must redial) OR
+		// because the server hit its per-connection session limit (healthy —
+		// tearing down would cut every in-flight SFTP operation). Probe to
+		// tell them apart and only tear down a genuinely dead connection.
 		c.mu.Lock()
-		c.teardownLocked()
+		if c.client == client && !c.aliveLocked() {
+			c.teardownLocked()
+		}
 		c.mu.Unlock()
 		<-c.sessionSem
 		return nil, nil, err
