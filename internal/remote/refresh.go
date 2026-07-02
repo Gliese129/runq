@@ -218,7 +218,7 @@ func (b *Backend) reconcileWith(ctx context.Context, jobID string, probe bool, p
 		// Metrics/checkpoints: idempotent (INSERT OR IGNORE), run for every task
 		// so files that appear/grow after a status change still land.
 		if _, ierr := ingest.ReapOutputs(ctx, b.Store, ingest.Target{
-			TaskID: tk.ID, JobID: tk.JobID, Dir: tk.TaskDir,
+			TaskID: tk.ID, JobID: tk.JobID, Dir: tk.TaskDir, FS: b.FS,
 		}); ierr != nil {
 			ingestErrs = append(ingestErrs, fmt.Errorf("ingest task %s: %w", tk.ID, ierr))
 		}
@@ -315,7 +315,7 @@ func (b *Backend) reconcileWithBatch(ctx context.Context, jobID string, signals 
 	var ingestErrs []error
 	for _, tk := range tasks {
 		if _, ierr := ingest.ReapOutputs(ctx, b.Store, ingest.Target{
-			TaskID: tk.ID, JobID: tk.JobID, Dir: tk.TaskDir,
+			TaskID: tk.ID, JobID: tk.JobID, Dir: tk.TaskDir, FS: b.FS,
 		}); ierr != nil {
 			ingestErrs = append(ingestErrs, fmt.Errorf("ingest task %s: %w", tk.ID, ierr))
 		}

@@ -219,12 +219,22 @@ func (s *Server) registerRoutes() {
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	// Capabilities come from the backend's self-description — the server
 	// does not infer them from mode (design philosophy #2).
-	writeJSON(w, http.StatusOK, backend.ConfigResponse{
+	resp := backend.ConfigResponse{
 		Mode:         s.mode,
 		DataPath:     s.cfg.DataPath,
 		ConfigPath:   config.ConfigPath(),
 		Capabilities: s.backend.Capabilities(),
-	})
+	}
+	// Multi-target daemons additionally expose per-target capabilities so
+	// the frontend can gate UI by each job's target (RQ-46).
+	if mt, ok := s.backend.(interface {
+		PerTargetCapabilities() map[string]backend.Capabilities
+		DefaultTargetName() string
+	}); ok {
+		resp.TargetCapabilities = mt.PerTargetCapabilities()
+		resp.DefaultTarget = mt.DefaultTargetName()
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleRefreshJob(w http.ResponseWriter, r *http.Request) {

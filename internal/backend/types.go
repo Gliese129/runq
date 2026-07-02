@@ -109,6 +109,14 @@ type ConfigResponse struct {
 	DataPath     string       `json:"data_path"`
 	ConfigPath   string       `json:"config_path"`
 	Capabilities Capabilities `json:"capabilities"`
+
+	// Per-target capabilities (RQ-46): with mixed local+remote targets one
+	// global capability set cannot be right for everyone. The frontend gates
+	// per-job UI (retry, live log, poll cadence) by the job's target via
+	// this map. Capabilities (above) stays = default target's, for backward
+	// compatibility.
+	TargetCapabilities map[string]Capabilities `json:"target_capabilities,omitempty"`
+	DefaultTarget      string                  `json:"default_target,omitempty"`
 }
 
 // Capabilities is each backend's self-description, in three dimensions
@@ -147,10 +155,13 @@ type Capabilities struct {
 // when combined with other selectors.
 type CleanOptions struct {
 	// Selectors — at least one must be true/non-empty.
-	Orphan   bool   `json:"orphan"`   // detect tasks whose taskDir is missing (on-demand os.Stat)
+	Orphan   bool   `json:"orphan"`   // tasks MARKED orphaned (rfs.FS detection, see remote.DetectOrphans)
 	Archived bool   `json:"archived"` // tasks belonging to archived jobs
 	JobID    string `json:"job_id"`   // specific job
 	TaskID   string `json:"task_id"`  // specific task
+	// TaskIDs selects an exact set of tasks — the execute phase of the
+	// interactive clean flow (user multi-selected from the preview).
+	TaskIDs []string `json:"task_ids,omitempty"`
 	// Target scopes the clean to a single compute target. Empty = all targets.
 	Target string `json:"target,omitempty"`
 	// Time filter — optional when other selectors are present.

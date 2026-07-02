@@ -94,6 +94,11 @@ type Backend struct {
 	// EnsureAllFresh skips the batch query if the last batch probe
 	// completed within the TTL window.
 	lastBatchProbe time.Time
+
+	// orphanStrikes counts consecutive missing-dir observations per task
+	// (guarded by probeMu). See DetectOrphans — two strikes mark, presence
+	// clears. In-memory: restart resets, erring on the safe side.
+	orphanStrikes map[string]int
 }
 
 // New builds a Backend with a local filesystem (same-machine operation).

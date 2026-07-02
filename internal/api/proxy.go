@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gliese129/runq/internal/backend"
@@ -172,7 +173,9 @@ func (p *Proxy) TaskMetrics(ctx context.Context, taskID string) ([]backend.Metri
 	if err := p.do(ctx, "GET", "/api/tasks/"+taskID, nil, &task); err != nil {
 		return nil, err
 	}
-	return backend.ReadMetricPoints(task.TaskDir), nil
+	// Client-side local read: only correct for local-target tasks; remote
+	// tasks are served by the daemon's Multi routing before reaching here.
+	return backend.ReadMetricPoints(nil, task.TaskDir), nil
 }
 
 func (p *Proxy) KillTask(ctx context.Context, taskID string) error {
@@ -296,6 +299,11 @@ func (p *Proxy) Clean(ctx context.Context, opts backend.CleanOptions) (*backend.
 	}
 	if opts.TaskID != "" {
 		q.Set("task", opts.TaskID)
+	}
+	if len(opts.TaskIDs) > 0 {
+		// Exact-set execute (interactive selection). Comma-safe: task ids
+		// contain no commas.
+		q.Set("task_ids", strings.Join(opts.TaskIDs, ","))
 	}
 	if opts.CkptOnly {
 		q.Set("ckpt_only", "true")

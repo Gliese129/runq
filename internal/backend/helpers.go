@@ -14,6 +14,7 @@ import (
 	"github.com/gliese129/runq/internal/config"
 	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/project"
+	"github.com/gliese129/runq/internal/rfs"
 	"github.com/gliese129/runq/internal/scheduler"
 	"github.com/gliese129/runq/internal/store"
 	"github.com/gliese129/runq/internal/workspace"
@@ -462,12 +463,17 @@ func parseGPUIndices(s string) []int {
 	return indices
 }
 
-// ReadMetricPoints reads metrics.jsonl and returns all metric points (excluding internal keys).
-func ReadMetricPoints(taskDir string) []MetricPoint {
+// ReadMetricPoints reads metrics.jsonl through the given filesystem and
+// returns all metric points (excluding internal keys). fsys nil = local os
+// semantics; remote backends pass their rfs.SSHFS.
+func ReadMetricPoints(fsys rfs.FS, taskDir string) []MetricPoint {
 	if taskDir == "" {
 		return nil
 	}
-	f, err := os.Open(workspace.MetricsPath(taskDir))
+	if fsys == nil {
+		fsys = rfs.NewLocalFS()
+	}
+	f, err := fsys.Open(workspace.MetricsPath(taskDir))
 	if err != nil {
 		return nil
 	}

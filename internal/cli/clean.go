@@ -7,9 +7,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/spf13/cobra"
+	"golang.org/x/term"
+
 	"github.com/gliese129/runq/internal/backend"
 	"github.com/gliese129/runq/internal/utils"
-	"github.com/spf13/cobra"
 )
 
 var cleanCmd = &cobra.Command{
@@ -116,17 +118,46 @@ func runClean(cmd *cobra.Command, args []string) error {
 			return nil
 		}
 
-		// Interactive confirmation.
+		// Interactive selection: on a real terminal, a spacebar multi-select
+		// over the preview replaces the blanket yes/no — the user picks
+		// exactly which tasks die. --yes skips; dumb terminals fall back to
+		// the yes/no confirmation.
 		yes, _ := cmd.Flags().GetBool("yes")
+		execOpts := opts
 		if !yes {
-			if !confirmClean(len(result.Preview)) {
+			if term.IsTerminal(int(os.Stdin.Fd())) {
+				lines := make([]string, len(result.Preview))
+				for i, p := range result.Preview {
+					lines[i] = cleanSelectLine(p)
+				}
+				picked, ok := multiSelect("Select tasks to clean", lines)
+				if !ok {
+					fmt.Println("Aborted.")
+					return nil
+				}
+				if len(picked) == 0 {
+					fmt.Println("Nothing selected.")
+					return nil
+				}
+				ids := make([]string, len(picked))
+				for i, idx := range picked {
+					ids[i] = result.Preview[idx].TaskID
+				}
+				// Exact-set execute: only what the user confirmed. Selector
+				// flags are dropped — the selection already reflects them.
+				execOpts = backend.CleanOptions{
+					TaskIDs:  ids,
+					CkptOnly: opts.CkptOnly,
+					Target:   opts.Target,
+				}
+			} else if !confirmClean(len(result.Preview)) {
 				fmt.Println("Aborted.")
 				return nil
 			}
 		}
 
 		// Execute the real clean.
-		result, err = be.Clean(cmd.Context(), opts)
+		result, err = be.Clean(cmd.Context(), execOpts)
 		if err != nil {
 			return err
 		}
@@ -165,6 +196,28 @@ func printCleanPreview(items []backend.CleanPreviewItem) {
 		fmt.Printf("  %s  %-8s  (%s)%s  reason=%s%s\n",
 			p.TaskID[:min(8, len(p.TaskID))], p.Status, detail, orphanTag, p.Reason, finished)
 	}
+}
+
+// cleanSelectLine is one entry in the interactive multi-select: compact,
+// fixed-width-ish, mirroring printCleanPreview's vocabulary.
+func cleanSelectLine(p backend.CleanPreviewItem) string {
+	var detail string
+	switch p.Action {
+	case backend.CleanActionDBOnly:
+		detail = "no files"
+	case backend.CleanActionCkpt:
+		detail = "checkpoints"
+	case backend.CleanActionCkptDB:
+		detail = "no checkpoints"
+	default:
+		detail = "all files"
+	}
+	finished := ""
+	if p.FinishedAt != nil {
+		finished = "  " + time.Unix(*p.FinishedAt, 0).Format("2006-01-02")
+	}
+	return fmt.Sprintf("%-10s %-8s %-9s %s%s",
+		p.TaskID[:min(10, len(p.TaskID))], p.Status, p.Reason, detail, finished)
 }
 
 func confirmClean(count int) bool {

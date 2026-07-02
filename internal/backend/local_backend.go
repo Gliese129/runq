@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -64,6 +65,35 @@ func NewLocalBackend(deps LocalBackendDeps) *LocalBackend {
 		storageCfg:   deps.StorageCfg,
 		targetName:   name,
 	}
+}
+
+// DetectOrphansNow marks/clears orphan state for this local target's
+// terminal tasks. A local os.Stat is authoritative (unlike remote
+// observation), so there is no hysteresis; the interactive clean
+// confirmation remains the final safety layer before any deletion.
+func (b *LocalBackend) DetectOrphansNow(ctx context.Context) error {
+	rows, err := b.store.ListTasks(ctx, store.TaskFilter{Target: b.targetName})
+	if err != nil {
+		return err
+	}
+	now := time.Now()
+	for _, r := range rows {
+		if store.IsActiveStatus(r.Status) || r.TaskDir == "" {
+			continue
+		}
+		_, serr := os.Stat(r.TaskDir)
+		switch {
+		case serr == nil:
+			_ = b.store.ClearTaskOrphaned(ctx, r.ID)
+		case os.IsNotExist(serr):
+			if merr := b.store.MarkTaskOrphaned(ctx, r.ID, now); merr != nil && err == nil {
+				err = merr
+			}
+		default:
+			// Permission or I/O error: no fact learned; leave as is.
+		}
+	}
+	return err
 }
 
 // ── Capabilities ──────────────────────────────────────────────────────────
@@ -187,7 +217,7 @@ func (b *LocalBackend) TaskMetrics(ctx context.Context, taskID string) ([]Metric
 	if task == nil {
 		return nil, fmt.Errorf("task %q: %w", taskID, ErrNotFound)
 	}
-	return ReadMetricPoints(task.TaskDir), nil
+	return ReadMetricPoints(nil, task.TaskDir), nil
 }
 
 // KillTask terminates a running or pending task.
@@ -200,8 +230,7 @@ func (b *LocalBackend) KillTask(ctx context.Context, taskID string) error {
 
 	switch task.Status {
 	case scheduler.StatusRunning:
-		b.scheduler.RequestKill(taskID)
-		b.exec.Stop(taskID)
+		b.scheduler.KillTask(taskID)
 	case scheduler.StatusPending:
 		b.queue.Complete(taskID, scheduler.StatusKilled)
 		_ = b.store.UpdateTaskStatus(ctx, taskID, "killed", map[string]any{
@@ -547,8 +576,7 @@ func (b *LocalBackend) killJob(ctx context.Context, jobID string) (int, error) {
 	killed := 0
 	for _, t := range tasks {
 		if t.Status == scheduler.StatusRunning {
-			b.scheduler.RequestKill(t.ID)
-			b.exec.Stop(t.ID)
+			b.scheduler.KillTask(t.ID)
 			killed++
 		} else if t.Status == scheduler.StatusPending {
 			_ = b.queue.Complete(t.ID, scheduler.StatusKilled)

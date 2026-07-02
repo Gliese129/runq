@@ -178,20 +178,33 @@ func collectCleanTargets(ctx context.Context, st *store.Store, opts CleanOptions
 	var reasons []string
 
 	if opts.Orphan {
-		// On-demand orphan detection: query non-active tasks with a task_dir,
-		// then os.Stat each to find missing directories.
-		rows, err := st.ListTasks(ctx, store.TaskFilter{})
+		// Only tasks already MARKED orphaned qualify (rfs.FS-based detection
+		// with guardrails — see remote.DetectOrphans / LocalBackend.
+		// DetectOrphansNow). Never stat paths here: this code runs on the
+		// client, where a remote target's path is unobservable and a blind
+		// os.Stat would misclassify every remote task as orphaned.
+		rows, err := st.ListOrphanedTasks(ctx, opts.Target)
 		if err != nil {
 			return nil, nil, err
 		}
 		for _, r := range rows {
-			if store.IsActiveStatus(r.Status) || r.TaskDir == "" {
+			if store.IsActiveStatus(r.Status) {
 				continue
 			}
-			if _, serr := os.Stat(r.TaskDir); serr != nil && os.IsNotExist(serr) {
-				tasks = append(tasks, r)
-				reasons = append(reasons, "orphan")
-			}
+			tasks = append(tasks, r)
+			reasons = append(reasons, "orphan")
+		}
+	}
+
+	// Exact-set selector: the execute phase of the interactive clean flow.
+	for _, id := range opts.TaskIDs {
+		tk, err := st.GetTask(ctx, id)
+		if err != nil {
+			return nil, nil, err
+		}
+		if tk != nil {
+			tasks = append(tasks, *tk)
+			reasons = append(reasons, "selected")
 		}
 	}
 

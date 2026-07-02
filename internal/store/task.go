@@ -262,6 +262,53 @@ func (s *Store) UpdateTaskStatus(ctx context.Context, taskID string, status stri
 	return nil
 }
 
+// ── Orphan marking ─────────────────────────────────────────────────────────
+//
+// A task is "orphaned" when its task_dir has been confirmed missing (deleted
+// by the user, or purged by a cluster scratch policy). Marking is REVERSIBLE
+// metadata — detection marks, only an explicit `runq clean --orphan` deletes.
+
+// MarkTaskOrphaned stamps orphaned_at (idempotent: keeps the first stamp).
+func (s *Store) MarkTaskOrphaned(ctx context.Context, taskID string, at time.Time) error {
+	_, err := s.db.ExecContext(ctx,
+		"UPDATE tasks SET orphaned_at = ? WHERE id = ? AND orphaned_at IS NULL",
+		at.Unix(), taskID)
+	return err
+}
+
+// ClearTaskOrphaned removes the orphan mark (the directory reappeared —
+// e.g. restored from backup, or the earlier observation was wrong).
+func (s *Store) ClearTaskOrphaned(ctx context.Context, taskID string) error {
+	_, err := s.db.ExecContext(ctx,
+		"UPDATE tasks SET orphaned_at = NULL WHERE id = ?", taskID)
+	return err
+}
+
+// ListOrphanedTasks returns tasks currently marked orphaned, optionally
+// scoped to one target.
+func (s *Store) ListOrphanedTasks(ctx context.Context, target string) ([]TaskRow, error) {
+	query := fmt.Sprintf("SELECT %s FROM tasks WHERE orphaned_at IS NOT NULL", allTaskColumns)
+	var args []any
+	if target != "" {
+		query += " AND target = ?"
+		args = append(args, target)
+	}
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []TaskRow
+	for rows.Next() {
+		t, serr := scanTask(rows)
+		if serr != nil {
+			return nil, serr
+		}
+		result = append(result, *t)
+	}
+	return result, rows.Err()
+}
+
 // GetTask returns a single task by ID. Returns (nil, nil) if not found.
 func (s *Store) GetTask(ctx context.Context, taskID string) (*TaskRow, error) {
 	query := fmt.Sprintf("SELECT %s FROM tasks WHERE id = ?", allTaskColumns)

@@ -51,6 +51,15 @@ func (s *Scheduler) RequestKill(taskID string) {
 	s.killRequested[taskID] = true
 }
 
+// KillTask is the single entry point for user-initiated kills on
+// scheduler-managed tasks: flag first (so the exit verdict reads "killed",
+// not "failed"→retry), then best-effort termination via the launcher
+// (process-group kill locally; scancel/qdel on remote lanes).
+func (s *Scheduler) KillTask(taskID string) {
+	s.RequestKill(taskID)
+	s.launcher.Kill(taskID)
+}
+
 // consumeKillRequest checks and clears the kill flag for a task.
 func (s *Scheduler) consumeKillRequest(taskID string) bool {
 	s.killMu.Lock()

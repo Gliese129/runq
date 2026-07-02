@@ -49,6 +49,13 @@ func (s *Store) addMissingColumns(ctx context.Context) error {
 	if err := addColumnIfMissing(ctx, s.db, "jobs", "note", "TEXT"); err != nil {
 		return fmt.Errorf("add jobs.note: %w", err)
 	}
+	// orphaned_at: set when the task's task_dir has been confirmed missing
+	// (rfs.FS-based detection with guardrails; see remote.DetectOrphans).
+	// Reversible metadata — detection marks, only `runq clean --orphan`
+	// deletes. NULL = not orphaned.
+	if err := addColumnIfMissing(ctx, s.db, "tasks", "orphaned_at", "INTEGER"); err != nil {
+		return fmt.Errorf("add tasks.orphaned_at: %w", err)
+	}
 	// refreshed_at: last reconcile of job state from external sources.
 	// HPC mode only (hpc.Refresh is the sole writer); always NULL in daemon
 	// mode — the daemon is the source of truth, there is nothing to reconcile.

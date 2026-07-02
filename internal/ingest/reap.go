@@ -4,9 +4,11 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
-	"os"
+	"errors"
+	"io/fs"
 
 	"github.com/bytedance/gopkg/util/logger"
+	"github.com/gliese129/runq/internal/rfs"
 	"github.com/gliese129/runq/internal/store"
 	"github.com/gliese129/runq/internal/workspace"
 )
@@ -16,6 +18,12 @@ type Target struct {
 	TaskID string
 	JobID  string
 	Dir    string
+
+	// FS is the filesystem Dir lives on. nil = local (os semantics). Remote
+	// backends pass their rfs.SSHFS so metrics.jsonl on the cluster is
+	// actually readable — a bare os.Open of a remote path silently reads
+	// nothing.
+	FS rfs.FS
 }
 
 // Result summarizes what was ingested from <task_dir>/metrics.jsonl.
@@ -74,9 +82,13 @@ type checkpointEvent struct {
 // reaped the freeze decision is long gone. If an old jsonl from a pre-pivot
 // task still has a disk_low line, it falls through to the "unknown type" branch.
 func ReapOutputs(ctx context.Context, st *store.Store, target Target) (Result, error) {
+	fsys := target.FS
+	if fsys == nil {
+		fsys = rfs.NewLocalFS()
+	}
 	path := workspace.MetricsPath(target.Dir)
-	f, err := os.Open(path)
-	if os.IsNotExist(err) {
+	f, err := fsys.Open(path)
+	if errors.Is(err, fs.ErrNotExist) {
 		return Result{}, nil
 	}
 	if err != nil {

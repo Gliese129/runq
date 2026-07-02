@@ -82,6 +82,36 @@ func (m *MultiBackend) Capabilities() Capabilities {
 	return m.defaultBackend().Capabilities()
 }
 
+// PerTargetCapabilities exposes each target's own capability set — the
+// dashboard gates per-job UI (retry, live log, poll cadence) by the job's
+// target through this map.
+func (m *MultiBackend) PerTargetCapabilities() map[string]Capabilities {
+	out := make(map[string]Capabilities, len(m.targets))
+	for name, be := range m.targets {
+		out[name] = be.Capabilities()
+	}
+	return out
+}
+
+// DefaultTargetName exposes the routing default for config responses.
+func (m *MultiBackend) DefaultTargetName() string { return m.defaultTarget }
+
+// ReconcileAll fans the dashboard's activity-gated background reconcile out
+// to every target that supports it (remote lanes). Local targets are push
+// model — nothing to reconcile. This is what keeps a WATCHED dashboard
+// fresher (30s cadence) than the lanes' own 25min alignment loops.
+func (m *MultiBackend) ReconcileAll(ctx context.Context) error {
+	var firstErr error
+	for _, be := range m.targets {
+		if r, ok := be.(interface{ ReconcileAll(context.Context) error }); ok {
+			if err := r.ReconcileAll(ctx); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	return firstErr
+}
+
 func (m *MultiBackend) RefreshJob(ctx context.Context, jobID string) error {
 	be, err := m.resolveJob(ctx, jobID)
 	if err != nil {
@@ -293,7 +323,28 @@ func (m *MultiBackend) ResolveNote(ctx context.Context, cfg job.JobConfig) (stri
 	return m.defaultBackend().ResolveNote(ctx, cfg)
 }
 
+// orphanDetector is the optional per-target capability of scanning for
+// missing task dirs THROUGH that target's own filesystem (rfs.FS) — the only
+// vantage point that can tell "gone" from "unobservable".
+type orphanDetector interface {
+	DetectOrphansNow(ctx context.Context) error
+}
+
 func (m *MultiBackend) Clean(ctx context.Context, opts CleanOptions) (*CleanResult, error) {
+	// Orphan cleaning: refresh each target's orphan marks first, each through
+	// its own FS. Detection failures are non-fatal — an unobservable target
+	// simply contributes no NEW marks (its guardrails also prevent false
+	// ones), and must not block cleaning the others.
+	if opts.Orphan {
+		for name, be := range m.targets {
+			if opts.Target != "" && name != opts.Target {
+				continue
+			}
+			if det, ok := be.(orphanDetector); ok {
+				_ = det.DetectOrphansNow(ctx)
+			}
+		}
+	}
 	return m.defaultBackend().Clean(ctx, opts)
 }
 

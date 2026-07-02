@@ -228,8 +228,19 @@ func (b *SSHBackend) probeAlignLoop(ctx context.Context) {
 			if err := b.backend.EnsureAllFresh(ctx, DefaultReadTTL); err != nil {
 				b.logger.Warn("probe align failed", "error", err)
 			}
+			// Piggyback orphan detection on the same low-frequency pass
+			// (background mode: two-strike hysteresis applies).
+			if err := b.backend.DetectOrphans(ctx, false); err != nil {
+				b.logger.Warn("orphan detection failed", "error", err)
+			}
 		}
 	}
+}
+
+// DetectOrphansNow runs an immediate (no-hysteresis) orphan scan. Called by
+// the interactive clean path, where the user visually confirms every entry.
+func (b *SSHBackend) DetectOrphansNow(ctx context.Context) error {
+	return b.backend.DetectOrphans(ctx, true)
 }
 
 // Close stops the sensor loops and the scheduler, then releases the SSH
@@ -368,7 +379,7 @@ func (b *SSHBackend) TaskMetrics(ctx context.Context, taskID string) ([]MetricPo
 		return nil, fmt.Errorf("task %q: %w", taskID, ErrNotFound)
 	}
 	task = b.reconcileTask(ctx, taskID, task)
-	return ReadMetricPoints(task.TaskDir), nil
+	return ReadMetricPoints(b.backend.FS, task.TaskDir), nil
 }
 
 func (b *SSHBackend) reconcileTask(ctx context.Context, taskID string, fallback *store.TaskRow) *store.TaskRow {

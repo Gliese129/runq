@@ -648,6 +648,9 @@ func (s *Server) handleClean(c *gin.Context) {
 		Target:   c.Query("target"),
 		CkptOnly: c.Query("ckpt_only") == "true",
 	}
+	if ids := c.Query("task_ids"); ids != "" {
+		opts.TaskIDs = strings.Split(ids, ",")
+	}
 
 	if cutoffStr := c.Query("cutoff"); cutoffStr != "" {
 		cutoffUnix, err := strconv.ParseInt(cutoffStr, 10, 64)
@@ -671,12 +674,16 @@ func (s *Server) handleClean(c *gin.Context) {
 	}
 
 	// At least one selector must be present.
-	if !opts.Orphan && !opts.Archived && opts.JobID == "" && opts.TaskID == "" && opts.OlderThan == nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "at least one selector required (cutoff, orphan, archived, job, task)"})
+	if !opts.Orphan && !opts.Archived && opts.JobID == "" && opts.TaskID == "" &&
+		len(opts.TaskIDs) == 0 && opts.OlderThan == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "at least one selector required (cutoff, orphan, archived, job, task, task_ids)"})
 		return
 	}
 
-	result, err := backend.PerformClean(c.Request.Context(), s.deps.Store, opts)
+	// Route through MultiBackend: for --orphan it fans out per-target orphan
+	// detection (each target observes through its OWN rfs.FS) before the
+	// shared PerformClean runs against the store.
+	result, err := s.deps.Multi.Clean(c.Request.Context(), opts)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
