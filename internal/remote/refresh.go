@@ -11,6 +11,7 @@ import (
 
 	"github.com/gliese129/runq/internal/ingest"
 	"github.com/gliese129/runq/internal/rfs"
+	"github.com/gliese129/runq/internal/scheduler"
 	"github.com/gliese129/runq/internal/store"
 	"github.com/gliese129/runq/internal/utils"
 )

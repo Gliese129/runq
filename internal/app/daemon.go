@@ -136,6 +136,7 @@ func NewDaemon() (*Daemon, error) {
 				Target:    tc,
 				Store:     st,
 				GlobalCfg: storageCfg,
+				Logger:    logger,
 			})
 			if err != nil {
 				return nil, fmt.Errorf("build SSH backend for target %q: %w", tc.Name, err)
@@ -225,6 +226,13 @@ func (d *Daemon) Run() error {
 	}
 
 	d.Scheduler.Start()
+
+	// Start each remote target's scheduler lane: restore its queue/slots from
+	// DB, start the lane scheduler, and launch the sensor loops (marker scan +
+	// probe align). Loops stop via Close() on shutdown.
+	for _, sshBe := range d.sshBackends {
+		sshBe.Start(context.Background())
+	}
 
 	// Start embedded dashboard on TCP (non-blocking).
 	if d.Dashboard != nil {

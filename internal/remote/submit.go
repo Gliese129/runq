@@ -126,33 +126,38 @@ func resolveNote(ctx context.Context, st *store.Store, cfg job.JobConfig) (strin
 	})
 }
 
-func (b *Backend) Submit(ctx context.Context, jobCfg job.JobConfig, proj *project.Config, opts SubmitOpts) (jobID string, submitted int, err error) {
+// Prepare does everything up to (but NOT including) the external submission:
+// plan, validate, one-shot setup, job row, and — per task — workspace files,
+// run.sh, submit.cmd, and the pending task row. The returned rows are ready
+// to be queued; the actual submission happens per task in Launcher.Launch
+// (scheduler lane) or inline in Submit (legacy lane).
+func (b *Backend) Prepare(ctx context.Context, jobCfg job.JobConfig, proj *project.Config, opts SubmitOpts) (jobID string, rows []store.TaskRow, err error) {
 	// Satisfy the jobs.project_name foreign key: ensure the project exists in
 	// the HPC store. Add-if-missing covers both "resolved from registry" and
 	// "loaded from a file" callers.
 	reg := project.NewRegistry(b.Store.DB())
 	if _, gerr := reg.Get(ctx, proj.ProjectName); gerr != nil {
 		if aerr := reg.Add(ctx, *proj); aerr != nil {
-			return "", 0, fmt.Errorf("register project %q: %w", proj.ProjectName, aerr)
+			return "", nil, fmt.Errorf("register project %q: %w", proj.ProjectName, aerr)
 		}
 	}
 	// THE submit precondition (exists + not archived, fail-closed) lives in
 	// one place — see Registry.RequireSubmittable.
 	if err := reg.RequireSubmittable(ctx, proj.ProjectName); err != nil {
-		return "", 0, err
+		return "", nil, err
 	}
 
 	jobID = utils.GenerateJobID()
 	wsRoot, err := config.ResolveRoot(b.StorageCfg, proj.WorkingDir, proj.ProjectName)
 	if err != nil {
-		return "", 0, fmt.Errorf("resolve workspace root: %w", err)
+		return "", nil, fmt.Errorf("resolve workspace root: %w", err)
 	}
 
 	// Resolved note for display (job row, workspace files); ConfigJSON keeps
 	// the template so re-submission keeps incrementing {{version}}.
 	planCfg := jobCfg
 	if resolved, nerr := resolveNote(ctx, b.Store, jobCfg); nerr != nil {
-		return "", 0, nerr
+		return "", nil, nerr
 	} else {
 		planCfg.Note = resolved
 	}
@@ -174,7 +179,7 @@ func (b *Backend) Submit(ctx context.Context, jobCfg job.JobConfig, proj *projec
 		SchedulerParams:       config.HPCTemplateParamRefs(b.Cfg.SubmitTemplate),
 	})
 	if err != nil {
-		return "", 0, err
+		return "", nil, err
 	}
 	printPreflight(plan.Preflight)
 
@@ -184,7 +189,7 @@ func (b *Backend) Submit(ctx context.Context, jobCfg job.JobConfig, proj *projec
 	// mid-loop with the job row already inserted.
 	if len(plan.Tasks) > 0 {
 		if _, err := renderSubmitCmd(b.Cfg.SubmitTemplate, plan.Tasks[0], plan, "<run_sh>"); err != nil {
-			return "", 0, fmt.Errorf(
+			return "", nil, fmt.Errorf(
 				"%w\nHint: every {{param.NAME}} in submit_template must exist as a task param — add it to fixed_params (same value for all tasks) or as a sweep column (per-task values). Try `runq hpc submit --dry-run` to preview",
 				err)
 		}
@@ -193,13 +198,13 @@ func (b *Backend) Submit(ctx context.Context, jobCfg job.JobConfig, proj *projec
 	// One-shot job setup (e.g. model pre-download on the login node).
 	// Runs before any DB row or cluster submission — failure leaves nothing.
 	if err := submitplan.RunSetup(ctx, proj, jobCfg); err != nil {
-		return "", 0, err
+		return "", nil, err
 	}
 
 	now := time.Now()
 	cfgJSON, err := json.Marshal(jobCfg)
 	if err != nil {
-		return "", 0, fmt.Errorf("marshal job config: %w", err)
+		return "", nil, fmt.Errorf("marshal job config: %w", err)
 	}
 	jobRow := store.JobRow{
 		ID: plan.JobID, ProjectName: plan.Project, Description: plan.Description,
@@ -207,22 +212,22 @@ func (b *Backend) Submit(ctx context.Context, jobCfg job.JobConfig, proj *projec
 		TotalTasks: len(plan.Tasks), Target: b.Cfg.Name, CreatedAt: now,
 	}
 	if err := b.Store.InsertJob(ctx, &jobRow); err != nil {
-		return "", 0, fmt.Errorf("persist job: %w", err)
+		return "", nil, fmt.Errorf("persist job: %w", err)
 	}
 
 	for _, t := range plan.Tasks {
 		// Local prep + template render first: these have no external side effect,
 		// so a failure here aborts before any cluster job or DB row exists.
 		if err := workspace.Write(t.TaskDir, t.Params, plan.Wandb, plan.Note); err != nil {
-			return plan.JobID, submitted, fmt.Errorf("prepare workspace for %s: %w", t.TaskID, err)
+			return plan.JobID, rows, fmt.Errorf("prepare workspace for %s: %w", t.TaskID, err)
 		}
 		runsh := path.Join(t.TaskDir, runScriptName)
 		if err := b.FS.WriteFile(runsh, []byte(b.buildRunScript(t, plan)), 0o755); err != nil {
-			return plan.JobID, submitted, fmt.Errorf("write run.sh for %s: %w", t.TaskID, err)
+			return plan.JobID, rows, fmt.Errorf("write run.sh for %s: %w", t.TaskID, err)
 		}
 		cmd, err := renderSubmitCmd(b.Cfg.SubmitTemplate, t, plan, runsh)
 		if err != nil {
-			return plan.JobID, submitted, fmt.Errorf("render submit_template for %s: %w", t.TaskID, err)
+			return plan.JobID, rows, fmt.Errorf("render submit_template for %s: %w", t.TaskID, err)
 		}
 		fullCmd := submitEnvPrefix(proj.Environment) + cmd
 
@@ -230,7 +235,7 @@ func (b *Backend) Submit(ctx context.Context, jobCfg job.JobConfig, proj *projec
 		// launch path (remote.Launcher) replays this file verbatim, so retries
 		// re-run exactly what was validated here. 0o600: may embed env values.
 		if err := b.FS.WriteFile(path.Join(t.TaskDir, submitCmdFileName), []byte(fullCmd), 0o600); err != nil {
-			return plan.JobID, submitted, fmt.Errorf("write submit.cmd for %s: %w", t.TaskID, err)
+			return plan.JobID, rows, fmt.Errorf("write submit.cmd for %s: %w", t.TaskID, err)
 		}
 
 		// Durable ledger BEFORE the external submit: insert the task (pending, no
@@ -239,20 +244,42 @@ func (b *Backend) Submit(ctx context.Context, jobCfg job.JobConfig, proj *projec
 		// exists and status/kill/collect can see it.
 		row := planToTaskRow(t, plan, now, "", b.Cfg.Name)
 		if err := b.Store.InsertTask(ctx, &row); err != nil {
-			return plan.JobID, submitted, fmt.Errorf("persist task %s: %w", t.TaskID, err)
+			return plan.JobID, rows, fmt.Errorf("persist task %s: %w", t.TaskID, err)
 		}
-		out, err := b.shellRun(ctx, fullCmd)
-		if err != nil {
+		rows = append(rows, row)
+	}
+
+	return plan.JobID, rows, nil
+}
+
+// Submit is the LEGACY inline path: Prepare followed by synchronous per-task
+// submission. The scheduler lane (SSHBackend queue + remote.Launcher) replaces
+// it in the daemon; this remains for tests and non-daemon callers and will be
+// removed in Step 3 of the scheduler unification.
+func (b *Backend) Submit(ctx context.Context, jobCfg job.JobConfig, proj *project.Config, opts SubmitOpts) (jobID string, submitted int, err error) {
+	jobID, rows, err := b.Prepare(ctx, jobCfg, proj, opts)
+	if err != nil {
+		return jobID, 0, err
+	}
+	for _, row := range rows {
+		cmdBytes, rerr := b.FS.ReadFile(path.Join(row.TaskDir, submitCmdFileName))
+		if rerr != nil {
+			return jobID, submitted, fmt.Errorf("read submit.cmd for %s: %w", row.ID, rerr)
+		}
+		fullCmd := string(cmdBytes)
+
+		out, xerr := b.shellRun(ctx, fullCmd)
+		if xerr != nil {
 			// sbatch itself errored → no cluster job exists → truly terminal.
-			opLog("SUBMIT FAIL task=%s job=%s\ncmd: %s\nerr: %v\noutput: %s", t.TaskID, plan.JobID, fullCmd, err, out)
-			_ = b.Store.UpdateTaskStatus(ctx, t.TaskID, "failed",
+			opLog("SUBMIT FAIL task=%s job=%s\ncmd: %s\nerr: %v\noutput: %s", row.ID, jobID, fullCmd, xerr, out)
+			_ = b.Store.UpdateTaskStatus(ctx, row.ID, "failed",
 				map[string]any{"finished_at": nowUnix(), "status_source": SourceSubmit})
-			return plan.JobID, submitted, fmt.Errorf("submit %s failed: %w\noutput:\n%s", t.TaskID, err, out)
+			return jobID, submitted, fmt.Errorf("submit %s failed: %w\noutput:\n%s", row.ID, xerr, out)
 		}
 
-		extID, err := utils.ExtractSubmitID(out, b.Cfg.SubmitIDRegex)
-		if err != nil {
-			opLog("SUBMIT NOID task=%s job=%s\ncmd: %s\noutput: %s", t.TaskID, plan.JobID, fullCmd, out)
+		extID, perr := utils.ExtractSubmitID(out, b.Cfg.SubmitIDRegex)
+		if perr != nil {
+			opLog("SUBMIT NOID task=%s job=%s\ncmd: %s\noutput: %s", row.ID, jobID, fullCmd, out)
 			// Submit SUCCEEDED but the id is unparseable → a cluster job may be
 			// running untracked. LEAVE the task pending (already inserted): it is
 			// not a failure, and pending is non-terminal so reconcile won't stamp a
@@ -260,19 +287,18 @@ func (b *Backend) Submit(ctx context.Context, jobCfg job.JobConfig, proj *projec
 			// status.json and Reconcile heals pending→running/success. We just
 			// can't kill it (no external id). Surface the error so the user fixes
 			// submit_id_regex.
-			return plan.JobID, submitted, fmt.Errorf(
+			return jobID, submitted, fmt.Errorf(
 				"submitted %s but could not parse its job id — check submit_id_regex (the cluster job may be running untracked and is not killable without its id): %w\noutput:\n%s",
-				t.TaskID, err, out)
+				row.ID, perr, out)
 		}
 
-		if err := b.Store.UpdateTaskStatus(ctx, t.TaskID, "pending", map[string]any{"external_id": extID}); err != nil {
-			return plan.JobID, submitted, fmt.Errorf("record external id for %s: %w", t.TaskID, err)
+		if uerr := b.Store.UpdateTaskStatus(ctx, row.ID, "pending", map[string]any{"external_id": extID}); uerr != nil {
+			return jobID, submitted, fmt.Errorf("record external id for %s: %w", row.ID, uerr)
 		}
-		opLog("SUBMIT OK task=%s job=%s ext=%s\ncmd: %s", t.TaskID, plan.JobID, extID, fullCmd)
+		opLog("SUBMIT OK task=%s job=%s ext=%s\ncmd: %s", row.ID, jobID, extID, fullCmd)
 		submitted++
 	}
-
-	return plan.JobID, submitted, nil
+	return jobID, submitted, nil
 }
 
 // buildRunScript assembles the wrapper script. The script SKELETON is glue; the

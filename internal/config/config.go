@@ -84,6 +84,13 @@ type TargetConfig struct {
 	Workspace string           `yaml:"workspace,omitempty"` // HPC workspace root on the target
 	SSH       *SSHTargetConfig `yaml:"ssh,omitempty"`
 
+	// MaxInflight caps how many of this target's tasks may be in flight on
+	// the external scheduler at once (submitted and not yet terminal); tasks
+	// beyond the cap wait in runq's own queue. Protects against per-user
+	// submit limits (e.g. Slurm MaxSubmitJobs) on huge sweeps, and keeps
+	// not-yet-submitted tasks cancellable at zero cost. 0 = unlimited.
+	MaxInflight int `yaml:"max_inflight,omitempty" json:"max_inflight,omitempty"`
+
 	// ── HPC scheduler templates (scheduler-type targets only) ──────────────
 
 	// SubmitTemplate is the shell command that queues a task.

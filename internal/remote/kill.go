@@ -67,7 +67,11 @@ func (b *Backend) Kill(ctx context.Context, target string) (killed int, err erro
 		}
 		opLog("KILL OK task=%s ext=%s cmd: %s", tk.ID, tk.ExternalID, cmd)
 
-		if uErr := b.Store.UpdateTaskStatus(ctx, tk.ID, "killed",
+		// Route through the lifecycle funnel: with a Finisher wired this is
+		// FinishTask (queue + slot bookkeeping); without one it is the same
+		// direct DB write as before.
+		d := Decision{Status: "killed", Source: SourceRunq}
+		if uErr := b.persistDecision(ctx, tk, d,
 			map[string]any{"finished_at": nowUnix(), "status_source": SourceRunq}); uErr != nil {
 			return killed, fmt.Errorf("mark task %s killed: %w", tk.ID, uErr)
 		}

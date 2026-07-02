@@ -53,16 +53,10 @@ func (l *Launcher) Launch(ctx context.Context, t *scheduler.Task, _ map[string]s
 		return scheduler.LaunchResult{}, fmt.Errorf("read %s: %w", cmdFile, err)
 	}
 
-	// New attempt = fresh wrapper state. A previous attempt's terminal
-	// status.json ("failed") would be re-reconciled into an instant failure
-	// while the new cluster job is still queued; its done marker would
-	// double-report. Reset both BEFORE the submit so the new job can't race.
-	statusFile := path.Join(t.TaskDir, statusFileName)
-	if werr := l.b.FS.WriteFile(statusFile, []byte("{}\n"), 0o644); werr != nil {
-		return scheduler.LaunchResult{}, fmt.Errorf("reset %s: %w", statusFile, werr)
-	}
-	if dir := l.b.doneDir(); dir != "" {
-		_, _, _, _ = l.b.FS.Exec(ctx, "rm", "-f", path.Join(dir, t.ID))
+	// New attempt = fresh wrapper state, BEFORE the submit so the new job
+	// can't race the reset.
+	if werr := l.b.ResetWrapperState(ctx, t.TaskDir, t.ID); werr != nil {
+		return scheduler.LaunchResult{}, werr
 	}
 
 	out, err := l.b.shellRun(ctx, string(cmdBytes))

@@ -142,6 +142,22 @@ func (b *Backend) doneDir() string {
 	return path.Join(b.Cfg.Workspace, doneDirName)
 }
 
+// ResetWrapperState clears a previous attempt's status.json and done marker
+// so a (re)launch starts from a blank slate — a stale terminal status.json
+// would be re-reconciled into an instant failure while the new cluster job
+// is still queued. Called by Launcher.Launch before every submission and by
+// user-initiated retry.
+func (b *Backend) ResetWrapperState(ctx context.Context, taskDir, taskID string) error {
+	statusFile := path.Join(taskDir, statusFileName)
+	if err := b.FS.WriteFile(statusFile, []byte("{}\n"), 0o644); err != nil {
+		return fmt.Errorf("reset %s: %w", statusFile, err)
+	}
+	if dir := b.doneDir(); dir != "" {
+		_, _, _, _ = b.FS.Exec(ctx, "rm", "-f", path.Join(dir, taskID))
+	}
+	return nil
+}
+
 // rowToTask builds the minimal scheduler.Task that FinishTask needs from a
 // store row. Only lifecycle-relevant fields are populated (retry decision,
 // queue/job bookkeeping) — this is a projection, not a full rehydration.
