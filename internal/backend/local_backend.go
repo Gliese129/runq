@@ -67,6 +67,69 @@ func NewLocalBackend(deps LocalBackendDeps) *LocalBackend {
 	}
 }
 
+// ── Foreign task lane (runq preset, server side) ──────────────────────────
+
+// ForeignTaskSpec describes one pre-planned task handed to this server by a
+// remote runq client. The client prepared run.sh, the task dir and the log
+// path on THIS machine's filesystem (it IS the client's target workspace);
+// the server contributes only what it owns — GPU allocation, scheduling,
+// process supervision. run.sh is self-contained (env exports, status.json,
+// done marker), so the client's sensors work on it unchanged.
+type ForeignTaskSpec struct {
+	RunSH   string `json:"run_sh"`
+	GPUs    int    `json:"gpus"`
+	Name    string `json:"name,omitempty"`
+	TaskDir string `json:"task_dir"`
+	LogPath string `json:"log_path,omitempty"`
+}
+
+// foreignProject is the reserved project that satisfies the jobs FK for
+// foreign tasks. Created lazily on first use.
+const foreignProject = "external"
+
+// EnqueueForeign inserts a single-task job for a foreign task and pushes it
+// into this server's scheduler queue. Returns the task id — the caller
+// (remote client) records it as the task's external_id, exactly as it would
+// record a Slurm job id.
+func (b *LocalBackend) EnqueueForeign(ctx context.Context, spec ForeignTaskSpec) (string, error) {
+	if spec.RunSH == "" || spec.TaskDir == "" {
+		return "", fmt.Errorf("run_sh and task_dir are required")
+	}
+	if _, err := b.reg.Get(ctx, foreignProject); err != nil {
+		// Best-effort create; a lost race surfaces at the FK insert below.
+		_ = b.reg.Add(ctx, project.Config{ProjectName: foreignProject, WorkingDir: "/"})
+	}
+
+	now := time.Now()
+	jobID := utils.GenerateJobID()
+	taskID := utils.GenerateTaskID()
+	logPath := spec.LogPath
+	if logPath == "" {
+		logPath = filepath.Join(spec.TaskDir, taskID+".log")
+	}
+
+	jobRow := store.JobRow{
+		ID: jobID, ProjectName: foreignProject, Note: spec.Name,
+		Status: "pending", TotalTasks: 1, Target: b.targetName, CreatedAt: now,
+	}
+	if err := b.store.InsertJob(ctx, &jobRow); err != nil {
+		return "", fmt.Errorf("persist foreign job: %w", err)
+	}
+	row := store.TaskRow{
+		ID: taskID, JobID: jobID, ProjectName: foreignProject,
+		Command:    "sh " + utils.ShellQuote(spec.RunSH),
+		GPUsNeeded: spec.GPUs, Status: "pending",
+		LogPath: logPath, WorkingDir: spec.TaskDir,
+		TaskDir: spec.TaskDir, Target: b.targetName,
+		EnqueuedAt: now,
+	}
+	if err := b.store.InsertTask(ctx, &row); err != nil {
+		return "", fmt.Errorf("persist foreign task: %w", err)
+	}
+	b.queue.Push(TaskRowToSchedulerTask(&row))
+	return taskID, nil
+}
+
 // DetectOrphansNow marks/clears orphan state for this local target's
 // terminal tasks. A local os.Stat is authoritative (unlike remote
 // observation), so there is no hysteresis; the interactive clean

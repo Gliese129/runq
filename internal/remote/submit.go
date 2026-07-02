@@ -186,7 +186,11 @@ func (b *Backend) Prepare(ctx context.Context, jobCfg job.JobConfig, proj *proje
 		},
 		SkipPreflight:         opts.SkipPreflight,
 		PreflightDisableLocal: disableLocal,
-		PreflightScope:        "on this login node",
+		// Checks run against the TARGET: paths/script via its FS, probes on
+		// its login node. The scope label is the honest caveat that the
+		// login-node env may still differ from compute nodes.
+		PreflightScope: fmt.Sprintf("on %s login node", b.Cfg.Name),
+		PreflightFS:    b.FS,
 		SchedulerParams:       config.HPCTemplateParamRefs(b.Cfg.SubmitTemplate),
 	})
 	if err != nil {

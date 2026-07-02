@@ -180,6 +180,14 @@ type CleanResult struct {
 	Preview    []CleanPreviewItem `json:"preview,omitempty"` // populated only in dry-run
 }
 
+// QueueEntry is one row of the squeue output (runq preset): a non-terminal
+// task's id and status, in runq's own status vocabulary (which doubles as
+// remote.ParseSignal's canonical vocabulary — no SignalMap needed).
+type QueueEntry struct {
+	ID     string `json:"id"`
+	Status string `json:"status"`
+}
+
 // CleanAction describes what kind of cleanup will happen for a task.
 type CleanAction string
 

@@ -389,6 +389,27 @@ func (p *Proxy) taskRows(ctx context.Context, jobID string) ([]store.TaskRow, er
 	return tasks, nil
 }
 
+// Sbatch enqueues a foreign task on the server (runq preset). Returns the
+// task id, which the client records as the task's external_id.
+func (p *Proxy) Sbatch(ctx context.Context, spec backend.ForeignTaskSpec) (string, error) {
+	var out struct {
+		TaskID string `json:"task_id"`
+	}
+	if err := p.do(ctx, "POST", "/api/sbatch", spec, &out); err != nil {
+		return "", err
+	}
+	return out.TaskID, nil
+}
+
+// Squeue lists the server's non-terminal tasks (runq preset batch probe).
+func (p *Proxy) Squeue(ctx context.Context) ([]backend.QueueEntry, error) {
+	var out []backend.QueueEntry
+	if err := p.do(ctx, "GET", "/api/squeue", nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (p *Proxy) do(ctx context.Context, method, path string, body any, out any) error {
 	return p.doWithTimeout(ctx, method, path, body, out, 0)
 }

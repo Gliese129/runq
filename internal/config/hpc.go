@@ -93,7 +93,7 @@ func SaveHPCConfig(cfg *TargetConfig) error {
 }
 
 // HPCPresets returns the scheduler names WriteHPCTemplate understands.
-func HPCPresets() []string { return []string{"slurm", "pbs", "sge", "tsubame", "abci"} }
+func HPCPresets() []string { return []string{"slurm", "pbs", "sge", "tsubame", "abci", "runq"} }
 
 // HPCPreset parses a named template's hpc section into a TargetConfig.
 func HPCPreset(name string) (*TargetConfig, error) {
@@ -357,6 +357,25 @@ hpc:
   kill_template: "qdel {{ext_id}}"
 `
 
+// runqHPCBody drives a remote runqd (the "runq preset"): the server
+// exposes sbatch/squeue/scancel isomorphs, so a runqd is just another
+// command-driven scheduler — with the nice property that its status
+// vocabulary already IS the canonical signal vocabulary (no signal_map, no
+// parsers). squeue reads the server's local SQLite, so probing it is cheap;
+// the client still applies the same hibernation etiquette as everywhere.
+const runqHPCBody = `
+hpc:
+  submit_template: "runq sbatch {{run_sh}} --gpus {{gpus}} --task-dir {{task_dir}} --name {{name}}"
+  submit_id_regex: "submitted (\\S+)"
+
+  # Per-task probe and batch probe both come from runq's own vocabulary —
+  # PENDING/RUNNING/SUCCESS/FAILED/KILLED map 1:1 onto canonical signals.
+  status_template: "runq squeue | awk -v id={{ext_id}} '$1==id{print $2}'"
+  status_list_template: "runq squeue"
+
+  kill_template: "runq scancel {{ext_id}}"
+`
+
 // Full templates = global header + hpc header + hpc body (for new files).
 var hpcTemplates = map[string]string{
 	"":        hpcConfigHeader + hpcSectionHeader + genericHPCBody,
@@ -365,6 +384,7 @@ var hpcTemplates = map[string]string{
 	"sge":     hpcConfigHeader + hpcSectionHeader + sgeHPCBody,
 	"tsubame": hpcConfigHeader + hpcSectionHeader + tsubameHPCBody,
 	"abci":    hpcConfigHeader + hpcSectionHeader + abciHPCBody,
+	"runq":    hpcConfigHeader + hpcSectionHeader + runqHPCBody,
 }
 
 // hpcSnippets maps a scheduler name to its hpc-only section (for appending).
@@ -375,4 +395,5 @@ var hpcSnippets = map[string]string{
 	"sge":     hpcSectionHeader + sgeHPCBody,
 	"tsubame": hpcSectionHeader + tsubameHPCBody,
 	"abci":    hpcSectionHeader + abciHPCBody,
+	"runq":    hpcSectionHeader + runqHPCBody,
 }

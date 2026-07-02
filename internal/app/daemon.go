@@ -51,7 +51,7 @@ type Daemon struct {
 
 // DaemonOptions selects which surfaces a daemon exposes.
 type DaemonOptions struct {
-	// Headless is the server deployment (`runq-server` on a lab GPU box):
+	// Headless is the server deployment (`runqd` on a lab GPU box):
 	// scheduler + executor + store + socket API only. It forces the
 	// dashboard off and REFUSES ssh targets — a server manages exactly its
 	// own hardware; routing to other machines is the client's job. Keeping

@@ -11,6 +11,7 @@ import (
 	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/preflight"
 	"github.com/gliese129/runq/internal/project"
+	"github.com/gliese129/runq/internal/rfs"
 	"github.com/gliese129/runq/internal/utils"
 	"github.com/gliese129/runq/internal/workspace"
 )
@@ -36,6 +37,10 @@ type Deps struct {
 	PreflightDisableLocal bool
 	// PreflightScope labels where local checks ran (e.g. "on login node").
 	PreflightScope string
+	// PreflightFS is the filesystem preflight checks run against — the
+	// TARGET's rfs.FS for remote targets (paths statted remotely, script
+	// read remotely, probes executed on the login node). nil = local os.
+	PreflightFS rfs.FS
 	// SchedulerParams are param names consumed by the HPC submit_template
 	// ({{param.*}}): exempt from the command renderer's unconsumed check
 	// and excluded from {{args}} injection.
@@ -220,6 +225,7 @@ func Build(ctx context.Context, cfg job.JobConfig, proj *project.Config, d Deps)
 	pf.DisableLocal = d.PreflightDisableLocal
 	pf.Scope = d.PreflightScope
 	pf.ExcludeParams = schedParams
+	pf.FS = d.PreflightFS
 	pfReport, err := pf.Run(ctx, proj, taskParams)
 	if err != nil {
 		return Plan{}, err

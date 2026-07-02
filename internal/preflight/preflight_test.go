@@ -125,7 +125,7 @@ Row = dict[str, Any]
 		t.Fatal(err)
 	}
 
-	path, modules, err := extractImports("python train.py", dir)
+	path, modules, err := (Preflight{}).extractImports("python train.py", dir)
 	if err != nil {
 		t.Fatalf("extractImports: %v", err)
 	}
@@ -234,12 +234,12 @@ func TestThreeStateReport(t *testing.T) {
 // absolute paths (real false positives from an HPC eval command).
 func TestCheckPathArgsTokenBoundaries(t *testing.T) {
 	cmd := `bash scripts/qsub/evaluate_lighteval.sh --model-name tokyotech-llm/Qwen3-Swallow-8B-RL-v0.2 --repo-path .`
-	if f := checkPathArgs(cmd); len(f) != 0 {
+	if f := (Preflight{}).checkPathArgs(cmd); len(f) != 0 {
 		t.Fatalf("relative paths / model ids flagged: %+v", f)
 	}
 
 	// Genuine absolute paths are still checked: token-initial, after = and quotes.
-	bad := checkPathArgs(`run --out=/definitely-missing-zz/x '/also-missing-zz/y' /missing-zz/z`)
+	bad := (Preflight{}).checkPathArgs(`run --out=/definitely-missing-zz/x '/also-missing-zz/y' /missing-zz/z`)
 	if len(bad) != 3 {
 		t.Fatalf("want 3 findings, got %+v", bad)
 	}

@@ -72,6 +72,12 @@ func (s *Server) registerRoutes() {
 	api.POST("/thaw", s.handleThaw)
 	api.POST("/clean", s.handleClean)
 
+	// Foreign task lane (runq preset, server side): a remote runq client
+	// drives THIS server like an external scheduler via sbatch/squeue
+	// isomorphs. scancel maps onto the existing task kill endpoint.
+	api.POST("/sbatch", s.handleSbatch)
+	api.GET("/squeue", s.handleSqueue)
+
 	// Internal — SDK-only control plane. Not for human / CLI use.
 	// Auth model matches Linux file permissions on the unix socket: any
 	// process under the daemon's UID can call these. We don't try to be
@@ -83,6 +89,40 @@ func (s *Server) registerRoutes() {
 
 	// Log SSE
 	tasks.GET("/:id/log/stream", s.handleTaskLogStream)
+}
+
+// ── Foreign task handlers (runq preset, server side) ──
+
+func (s *Server) handleSbatch(c *gin.Context) {
+	var spec backend.ForeignTaskSpec
+	if err := c.ShouldBindJSON(&spec); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	id, err := s.deps.Local.EnqueueForeign(c.Request.Context(), spec)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusCreated, gin.H{"task_id": id})
+}
+
+// handleSqueue lists this server's non-terminal tasks as (id, status) pairs
+// — the batch status probe of the runq preset. Status vocabulary is runq's
+// own, which is already remote.ParseSignal's canonical vocabulary.
+func (s *Server) handleSqueue(c *gin.Context) {
+	rows, err := s.deps.Store.ListTasks(c.Request.Context(), store.TaskFilter{})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	out := make([]backend.QueueEntry, 0, len(rows))
+	for _, r := range rows {
+		if store.IsActiveStatus(r.Status) {
+			out = append(out, backend.QueueEntry{ID: r.ID, Status: r.Status})
+		}
+	}
+	c.JSON(http.StatusOK, out)
 }
 
 // ── Project handlers (thin — Registry is already a clean service) ──
