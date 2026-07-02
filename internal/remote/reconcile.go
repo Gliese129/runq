@@ -1,6 +1,6 @@
 // Reconcile algorithm: merges wrapper status.json + scheduler probe into a
 // canonical task status. Pure logic, no I/O. Previously lived in hpccore.
-package hpc
+package remote
 
 import (
 	"strings"

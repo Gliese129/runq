@@ -1,4 +1,4 @@
-package hpc
+package remote
 
 import (
 	"os"

@@ -2,10 +2,18 @@ package scheduler
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/gliese129/runq/internal/executor"
 )
+
+// ErrLaunchUntracked is returned (wrapped) by unsupervised launchers when the
+// task WAS handed to the external scheduler but runq failed to record its
+// external id. The task must NOT be retried — a retry would submit a second
+// cluster job while the first may be running untracked. The scheduler leaves
+// such tasks in flight; reconcile heals them via status.json if they run.
+var ErrLaunchUntracked = errors.New("task submitted but external id unknown")
 
 // Launcher abstracts how a dispatched task is started and killed. It is the
 // single divergence point between execution models:

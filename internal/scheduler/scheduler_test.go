@@ -369,7 +369,7 @@ func TestHandleFailureLogsNextRetryOnce(t *testing.T) {
 	q.Push(task)
 
 	s := New(DefaultConfig(), q, testPool(1), NewLocalLauncher(executor.New()), st, logger, nil, "", nil)
-	s.handleFailure(task)
+	s.handleFailure(task, nil)
 
 	logs := buf.String()
 	if !strings.Contains(logs, "retry=1") {

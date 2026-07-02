@@ -1,9 +1,9 @@
-package hpc
+package remote
 
 import (
 	"context"
 	"fmt"
-	"path/filepath"
+	"path"
 	"strconv"
 	"strings"
 
@@ -51,7 +51,7 @@ func (b *Backend) Preview(ctx context.Context, jobCfg job.JobConfig, proj *proje
 	}
 
 	t := plan.Tasks[0]
-	runsh := filepath.Join(t.TaskDir, runScriptName)
+	runsh := path.Join(t.TaskDir, runScriptName)
 	vars := map[string]string{
 		"run_sh": runsh, "gpus": strconv.Itoa(t.GPUsNeeded),
 		"job_id": plan.JobID, "task_id": t.TaskID, "task_dir": t.TaskDir,

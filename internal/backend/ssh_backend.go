@@ -11,7 +11,7 @@ import (
 	"golang.org/x/crypto/ssh/agent"
 
 	"github.com/gliese129/runq/internal/config"
-	"github.com/gliese129/runq/internal/hpc"
+	"github.com/gliese129/runq/internal/remote"
 	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/project"
 	"github.com/gliese129/runq/internal/rfs"
@@ -30,7 +30,7 @@ import (
 //   - status.json: written by run.sh on compute nodes, read by daemon via SSH.
 type SSHBackend struct {
 	storeQueries // embeds store, reg, and shared project/clean/thaw/dryrun methods
-	backend      *hpc.Backend
+	backend      *remote.Backend
 	sshFS        *rfs.SSHFS // held for Close()
 }
 
@@ -72,7 +72,7 @@ func NewSSHBackend(cfg SSHBackendConfig) (*SSHBackend, error) {
 	}
 
 	sshFS := rfs.NewSSHFS(sshCfg)
-	hpcBe := hpc.NewWithFS(&cfg.Target, cfg.Store, cfg.GlobalCfg, sshFS)
+	hpcBe := remote.NewWithFS(&cfg.Target, cfg.Store, cfg.GlobalCfg, sshFS)
 
 	return &SSHBackend{
 		storeQueries: storeQueries{
@@ -276,7 +276,7 @@ func (b *SSHBackend) SubmitJob(ctx context.Context, cfg job.JobConfig, opts Subm
 	if err != nil {
 		return "", 0, fmt.Errorf("project %q: %w", cfg.Project, err)
 	}
-	return b.backend.Submit(ctx, cfg, proj, hpc.SubmitOpts{SkipPreflight: opts.SkipPreflight})
+	return b.backend.Submit(ctx, cfg, proj, remote.SubmitOpts{SkipPreflight: opts.SkipPreflight})
 }
 
 func (b *SSHBackend) PreviewSubmit(ctx context.Context, cfg job.JobConfig, skipPreflight bool) (string, error) {

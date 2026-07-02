@@ -1,10 +1,10 @@
-package hpc
+package remote
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"path/filepath"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -158,7 +158,7 @@ func (b *Backend) Submit(ctx context.Context, jobCfg job.JobConfig, proj *projec
 	}
 	// Job dir carries the resolved note so `ls .runq/` reads like an
 	// experiment log; the DB stores full paths (never re-derived from id).
-	jobRoot := filepath.Join(wsRoot, workspace.JobDirName(planCfg.Note, jobID))
+	jobRoot := path.Join(wsRoot, workspace.JobDirName(planCfg.Note, jobID))
 
 	disableLocal := b.Cfg.PreflightLocal != nil && !*b.Cfg.PreflightLocal
 	plan, err := submitplan.Build(ctx, planCfg, proj, submitplan.Deps{
@@ -216,13 +216,21 @@ func (b *Backend) Submit(ctx context.Context, jobCfg job.JobConfig, proj *projec
 		if err := workspace.Write(t.TaskDir, t.Params, plan.Wandb, plan.Note); err != nil {
 			return plan.JobID, submitted, fmt.Errorf("prepare workspace for %s: %w", t.TaskID, err)
 		}
-		runsh := filepath.Join(t.TaskDir, runScriptName)
+		runsh := path.Join(t.TaskDir, runScriptName)
 		if err := b.FS.WriteFile(runsh, []byte(b.buildRunScript(t, plan)), 0o755); err != nil {
 			return plan.JobID, submitted, fmt.Errorf("write run.sh for %s: %w", t.TaskID, err)
 		}
 		cmd, err := renderSubmitCmd(b.Cfg.SubmitTemplate, t, plan, runsh)
 		if err != nil {
 			return plan.JobID, submitted, fmt.Errorf("render submit_template for %s: %w", t.TaskID, err)
+		}
+		fullCmd := submitEnvPrefix(proj.Environment) + cmd
+
+		// Persist the rendered command next to run.sh. The scheduler-driven
+		// launch path (remote.Launcher) replays this file verbatim, so retries
+		// re-run exactly what was validated here. 0o600: may embed env values.
+		if err := b.FS.WriteFile(path.Join(t.TaskDir, submitCmdFileName), []byte(fullCmd), 0o600); err != nil {
+			return plan.JobID, submitted, fmt.Errorf("write submit.cmd for %s: %w", t.TaskID, err)
 		}
 
 		// Durable ledger BEFORE the external submit: insert the task (pending, no
@@ -233,8 +241,6 @@ func (b *Backend) Submit(ctx context.Context, jobCfg job.JobConfig, proj *projec
 		if err := b.Store.InsertTask(ctx, &row); err != nil {
 			return plan.JobID, submitted, fmt.Errorf("persist task %s: %w", t.TaskID, err)
 		}
-
-		fullCmd := submitEnvPrefix(proj.Environment) + cmd
 		out, err := b.shellRun(ctx, fullCmd)
 		if err != nil {
 			// sbatch itself errored → no cluster job exists → truly terminal.
@@ -291,6 +297,12 @@ func (b *Backend) buildRunScript(t submitplan.PlannedTask, plan submitplan.Plan)
 		env[k] = v
 	}
 	env["RUNQ_NO_DAEMON"] = "1"
+	// Done-marker dir: enables O(1) completion detection (one readdir instead
+	// of N status.json reads). Only baked in when the target has a workspace
+	// root; without it the daemon falls back to probe-only reconcile.
+	if dir := b.doneDir(); dir != "" {
+		env["RUNQ_DONE_DIR"] = dir
+	}
 
 	var s strings.Builder
 	s.WriteString("#!/bin/sh\n")
@@ -309,20 +321,24 @@ func (b *Backend) buildRunScript(t submitplan.PlannedTask, plan submitplan.Plan)
 	for _, k := range sortedKeys(env) {
 		fmt.Fprintf(&s, "export %s=%s\n", k, utils.ShellQuote(env[k]))
 	}
-	fmt.Fprintf(&s, "STATUS_FILE=%s\n", utils.ShellQuote(filepath.Join(t.TaskDir, statusFileName)))
+	fmt.Fprintf(&s, "STATUS_FILE=%s\n", utils.ShellQuote(path.Join(t.TaskDir, statusFileName)))
 	s.WriteString(`_runq_status() { printf '%s\n' "$1" > "$STATUS_FILE.tmp" && mv "$STATUS_FILE.tmp" "$STATUS_FILE"; }` + "\n")
+	// Done marker: written AFTER the terminal status.json, so a marker's
+	// presence guarantees the status file is readable. The daemon's marker
+	// scan turns one readdir into "which tasks finished since last look".
+	s.WriteString(`_runq_done() { if [ -n "$RUNQ_DONE_DIR" ]; then mkdir -p "$RUNQ_DONE_DIR" 2>/dev/null; : > "$RUNQ_DONE_DIR/$RUNQ_TASK_ID"; fi; }` + "\n")
 	// Last words: schedulers send TERM (qdel/scancel/walltime) with a grace
 	// period before KILL — write a terminal status while we still can, so
 	// the kill becomes a wrapper FACT instead of a qstat inference.
 	// Deliberately NOT trapping USR1/USR2: training frameworks use those
 	// for checkpoint signaling and runq must not intercept them.
-	s.WriteString(`trap 'kill $_RUNQ_ACTIVITY_PID 2>/dev/null; _runq_status "$(printf '\''{"status":"killed","exit_code":143,"finished_at":%s}'\'' "$(date +%s)")"; exit 143' TERM INT HUP` + "\n")
+	s.WriteString(`trap 'kill $_RUNQ_ACTIVITY_PID 2>/dev/null; _runq_status "$(printf '\''{"status":"killed","exit_code":143,"finished_at":%s}'\'' "$(date +%s)")"; _runq_done; exit 143' TERM INT HUP` + "\n")
 	s.WriteString(`_runq_status "$(printf '{"status":"running","started_at":%s}' "$(date +%s)")"` + "\n")
 	// Activity sidecar: sample log file size + incremental line count every 60s
 	// into 3-column activity.tsv {ts, bytes, lines}. The trap kills the sidecar
 	// on exit. Byte count is O(1) (fstat); line count reads only the delta bytes
 	// since the last sample (~1MB/60s typical), <10ms/tick.
-	activityFile := utils.ShellQuote(filepath.Join(t.TaskDir, "activity.tsv"))
+	activityFile := utils.ShellQuote(path.Join(t.TaskDir, "activity.tsv"))
 	logFileQuoted := utils.ShellQuote(t.LogPath)
 	fmt.Fprintf(&s, "ACTIVITY_FILE=%s\n", activityFile)
 	fmt.Fprintf(&s, "LOG_FILE=%s\n", logFileQuoted)
@@ -348,6 +364,7 @@ func (b *Backend) buildRunScript(t submitplan.PlannedTask, plan submitplan.Plan)
 	s.WriteString("kill $_RUNQ_ACTIVITY_PID 2>/dev/null\n")
 	s.WriteString(`if [ "$code" -eq 0 ]; then _st=success; else _st=failed; fi` + "\n")
 	s.WriteString(`_runq_status "$(printf '{"status":"%s","exit_code":%s,"finished_at":%s}' "$_st" "$code" "$(date +%s)")"` + "\n")
+	s.WriteString("_runq_done\n")
 	s.WriteString("exit $code\n")
 	return s.String()
 }

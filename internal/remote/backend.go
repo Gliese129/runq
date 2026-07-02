@@ -1,8 +1,11 @@
-// Package hpc is the HPC backend: the second consumer of submitplan.Plan
-// (alongside the daemon). It has no resident process — each CLI command opens
-// the HPC store, does its work, and exits. Compute nodes only ever write files
-// (status.json, metrics.jsonl); the DB is written exclusively here, on the
-// login node.
+// Package remote is the command-template-driven scheduler backend: it drives
+// any scheduler reachable through shell commands (sbatch/squeue/scancel for
+// Slurm, qsub/qstat/qdel for PBS/SGE — and, in the future, a remote `runq
+// server` via its --json CLI). Formerly named "hpc"; renamed during the
+// scheduler unification (RQ-46) because nothing here is scheduler-brand
+// specific — this is "a scheduler you talk to by running commands", locally
+// or over SSH (both via rfs.FS). Compute nodes only ever write files
+// (status.json, metrics.jsonl); the DB is written exclusively client-side.
 //
 // The package reuses the shared kernel for everything that is "runq semantics":
 // submitplan.Build (plan), workspace.Write (file contract), runqenv.Base (env
@@ -37,17 +40,19 @@
 //   - The DB never records a fact runq does not know: a task only becomes
 //     "killed" after a cancel actually succeeds (see Kill), never just because a
 //     kill was requested.
-package hpc
+package remote
 
 import (
 	"context"
 	"fmt"
+	"path"
 	"sort"
 	"sync"
 	"time"
 
 	"github.com/gliese129/runq/internal/config"
 	"github.com/gliese129/runq/internal/rfs"
+	"github.com/gliese129/runq/internal/scheduler"
 	"github.com/gliese129/runq/internal/store"
 )
 
@@ -55,6 +60,13 @@ import (
 // function type used by memoRunner for caching probe results within a
 // reconcile pass. Derived from FS.Exec by Backend.shellRun.
 type runner func(ctx context.Context, command string) (string, error)
+
+// TaskFinisher is the slice of scheduler.Scheduler that reconcile needs to
+// drive tasks to terminal states through the shared lifecycle (retry policy,
+// slot release, queue bookkeeping). Satisfied by *scheduler.Scheduler.
+type TaskFinisher interface {
+	FinishTask(t *scheduler.Task, status scheduler.TaskStatus, extra map[string]any)
+}
 
 // Backend bundles the resolved config, the HPC store, and the filesystem.
 // FS handles both file I/O and command execution — LocalFS for same-machine
@@ -65,6 +77,12 @@ type Backend struct {
 	Store      *store.Store
 	FS         rfs.FS
 	StorageCfg *config.GlobalConfig // nil-safe: nil = project_path mode
+
+	// Finisher, when set (daemon assembly), routes terminal state transitions
+	// through the target's scheduler instance — the single lifecycle funnel
+	// (retry, slot release, queue). nil = legacy direct-DB-write mode, used
+	// by tests and any path not yet running under a per-target scheduler.
+	Finisher TaskFinisher
 
 	// Per-job TTL cache (see refresh.go): tracks when each job's scheduler
 	// was last probed, so EnsureFresh can skip the probe (not the local
@@ -104,13 +122,39 @@ func (b *Backend) shellRun(ctx context.Context, command string) (string, error) 
 	return combined, nil
 }
 
-// HPC-local filenames. These are backend artifacts, NOT part of the shared SDK
-// file contract (which lives in internal/workspace) — the daemon never reads
-// them, only the run.sh wrapper writes status.json.
+// Remote-lane filenames. These are backend artifacts, NOT part of the shared
+// SDK file contract (which lives in internal/workspace) — only the run.sh
+// wrapper writes status.json; the daemon reads them via rfs.FS.
 const (
 	runScriptName  = "run.sh"
 	statusFileName = "status.json"
+	doneDirName    = ".runq-done"
 )
+
+// doneDir returns the target-level done-marker directory, or "" when the
+// target has no workspace root configured (marker detection disabled; the
+// probe path still works). Shared across projects on purpose: one readdir
+// covers every in-flight task on this target.
+func (b *Backend) doneDir() string {
+	if b.Cfg == nil || b.Cfg.Workspace == "" {
+		return ""
+	}
+	return path.Join(b.Cfg.Workspace, doneDirName)
+}
+
+// rowToTask builds the minimal scheduler.Task that FinishTask needs from a
+// store row. Only lifecycle-relevant fields are populated (retry decision,
+// queue/job bookkeeping) — this is a projection, not a full rehydration.
+func rowToTask(tk store.TaskRow) *scheduler.Task {
+	return &scheduler.Task{
+		ID:         tk.ID,
+		JobID:      tk.JobID,
+		RetryCount: tk.RetryCount,
+		MaxRetry:   tk.MaxRetry,
+		TaskDir:    tk.TaskDir,
+		LogPath:    tk.LogPath,
+	}
+}
 
 // terminalStatuses are the states a task never leaves.
 func isTerminal(status string) bool {

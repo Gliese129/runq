@@ -1,11 +1,11 @@
-package hpc
+package remote
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"path/filepath"
+	"path"
 	"strings"
 	"time"
 
@@ -28,7 +28,7 @@ type statusFile struct {
 // Reconcile treats as "no terminal signal yet".
 func readStatus(fsys rfs.FS, taskDir string) statusFile {
 	var sf statusFile
-	buf, err := fsys.ReadFile(filepath.Join(taskDir, statusFileName))
+	buf, err := fsys.ReadFile(path.Join(taskDir, statusFileName))
 	if err != nil {
 		return sf
 	}
@@ -120,6 +120,28 @@ func (b *Backend) EnsureAllFresh(ctx context.Context, ttl time.Duration) error {
 	return firstErr
 }
 
+// awaitingRelaunch reports whether the task was requeued by the scheduler
+// (retry) and has not been relaunched yet: no external id, at least one prior
+// attempt. Wrapper files on disk belong to the PREVIOUS attempt and must not
+// be reconciled against — remote.Launcher resets them at the next launch.
+func awaitingRelaunch(tk store.TaskRow) bool {
+	return tk.ExternalID == "" && tk.RetryCount > 0
+}
+
+// persistDecision writes a reconcile decision. A terminal transition of a
+// not-yet-terminal task goes through the scheduler's FinishTask funnel when a
+// Finisher is wired (retry policy, slot release, queue bookkeeping); every
+// other write — non-terminal moves, display-field refreshes, terminal-to-
+// terminal corrections (inferred→wrapper) — stays a direct store update,
+// because the scheduler only manages in-flight tasks.
+func (b *Backend) persistDecision(ctx context.Context, tk store.TaskRow, d Decision, fields map[string]any) error {
+	if b.Finisher != nil && isTerminal(d.Status) && !isTerminal(tk.Status) {
+		b.Finisher.FinishTask(rowToTask(tk), scheduler.TaskStatus(d.Status), fields)
+		return nil
+	}
+	return b.Store.UpdateTaskStatus(ctx, tk.ID, d.Status, fields)
+}
+
 // probeIsFresh returns true if jobID's scheduler was probed within the TTL.
 func (b *Backend) probeIsFresh(jobID string, ttl time.Duration) bool {
 	b.probeMu.Lock()
@@ -206,6 +228,11 @@ func (b *Backend) reconcileWith(ctx context.Context, jobID string, probe bool, p
 		if isTerminal(tk.Status) && (tk.StatusSource == SourceWrapper || tk.StatusSource == SourceRunq) {
 			continue
 		}
+		// Requeued-but-not-relaunched: on-disk wrapper state is the previous
+		// attempt's — reconciling against it would re-fail the task in a loop.
+		if awaitingRelaunch(tk) {
+			continue
+		}
 
 		sf := readStatus(b.FS, tk.TaskDir)
 		var pr ProbeResult
@@ -251,7 +278,7 @@ func (b *Backend) reconcileWith(ctx context.Context, jobID string, probe bool, p
 			fields["finished_at"] = nil
 		}
 
-		if err := b.Store.UpdateTaskStatus(ctx, tk.ID, d.Status, fields); err != nil {
+		if err := b.persistDecision(ctx, tk, d, fields); err != nil {
 			return fmt.Errorf("update task %s: %w", tk.ID, err)
 		}
 	}
@@ -293,6 +320,10 @@ func (b *Backend) reconcileWithBatch(ctx context.Context, jobID string, signals 
 		}
 
 		if isTerminal(tk.Status) && (tk.StatusSource == SourceWrapper || tk.StatusSource == SourceRunq) {
+			continue
+		}
+		// Requeued-but-not-relaunched: skip, same as reconcileWith.
+		if awaitingRelaunch(tk) {
 			continue
 		}
 
@@ -342,7 +373,7 @@ func (b *Backend) reconcileWithBatch(ctx context.Context, jobID string, signals 
 			fields["finished_at"] = nil
 		}
 
-		if err := b.Store.UpdateTaskStatus(ctx, tk.ID, d.Status, fields); err != nil {
+		if err := b.persistDecision(ctx, tk, d, fields); err != nil {
 			return fmt.Errorf("update task %s: %w", tk.ID, err)
 		}
 	}

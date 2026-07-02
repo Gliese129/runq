@@ -12,7 +12,7 @@ import (
 // ── Config ──────────────────────────────────────────────────────────────────
 
 // SSHConfig holds the parameters needed to establish an SSH connection.
-// Populated from the HPC config section; see internal/hpcconfig.
+// Populated from the target config (see internal/config.TargetConfig).
 type SSHConfig struct {
 	Host       string // "login.cluster.edu" or "login.cluster.edu:22"
 	User       string

@@ -6,7 +6,7 @@
 //   - ~/.runq (always per-user; the daemon's *runtime* dir is separate)
 //
 // The file has two sections: top-level keys are global (read by all backends),
-// and the `hpc:` section is HPC-specific (parsed by internal/hpcconfig).
+// remote-target templates live on each targets[] entry (internal/remote).
 //
 // # Storage model
 //

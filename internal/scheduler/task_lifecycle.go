@@ -79,7 +79,7 @@ func (s *Scheduler) runTask(task *Task) {
 	})
 	if err != nil {
 		s.logger.Error("task start failed", "task", task.ID, "error", err)
-		s.FinishTask(task, StatusFailed)
+		s.FinishTask(task, StatusFailed, nil)
 		return
 	}
 
@@ -87,50 +87,81 @@ func (s *Scheduler) runTask(task *Task) {
 	// treated as killed.
 	switch {
 	case s.consumeKillRequest(task.ID):
-		s.FinishTask(task, StatusKilled)
+		s.FinishTask(task, StatusKilled, nil)
 		s.logger.Info("task killed by user", "task", task.ID)
 	case result.ExitCode == 0:
-		s.FinishTask(task, StatusSuccess)
+		s.FinishTask(task, StatusSuccess, nil)
 		s.logger.Info("task completed", "task", task.ID, "job", task.JobID)
 	case task.Timeout > 0 && errors.Is(ctx.Err(), context.DeadlineExceeded):
-		s.FinishTask(task, StatusKilled)
+		s.FinishTask(task, StatusKilled, nil)
 		s.logger.Warn("task timed out", "task", task.ID, "timeout", task.Timeout)
 	case s.ctx.Err() != nil:
 		// Global shutdown — mark remaining running tasks as killed.
-		s.FinishTask(task, StatusKilled)
+		s.FinishTask(task, StatusKilled, nil)
 		s.logger.Warn("task killed by shutdown", "task", task.ID)
 	default:
 		s.logger.Warn("task failed", "task", task.ID, "exit_code", result.ExitCode,
 			"retry", task.RetryCount, "max_retry", task.MaxRetry)
-		s.FinishTask(task, StatusFailed)
+		s.FinishTask(task, StatusFailed, nil)
 	}
+}
+
+// launchAsync hands a task to an unsupervised launcher and returns. There is
+// no verdict to evaluate here — the terminal state arrives later through
+// FinishTask, fed by reconcile (.done marker / scheduler probe).
+func (s *Scheduler) launchAsync(task *Task) {
+	_, err := s.launcher.Launch(s.ctx, task, nil, nil)
+	if err != nil {
+		if errors.Is(err, ErrLaunchUntracked) {
+			// Handed off but the external id is unknown: the remote job may be
+			// running untracked. Leave the task in flight — reconcile heals it
+			// via status.json if it runs. Do NOT retry (double submission).
+			s.logger.Error("task submitted but untracked", "task", task.ID, "error", err)
+			return
+		}
+		s.logger.Error("remote submit failed", "task", task.ID, "error", err)
+		s.FinishTask(task, StatusFailed, map[string]any{"status_source": "submit"})
+		return
+	}
+	s.logger.Info("task submitted to remote scheduler", "task", task.ID, "job", task.JobID)
 }
 
 // FinishTask drives a task to a terminal state through the shared lifecycle.
 // StatusSuccess / StatusKilled persist immediately; StatusFailed goes through
 // handleFailure, which requeues (retry) or permanently fails the task.
 //
+// extra carries additional DB fields to persist with the terminal transition
+// (e.g. status_source, native_state, a wrapper-reported finished_at); nil is
+// fine. Keys in extra override the defaults.
+//
 // This is the single funnel for task completion: supervised launchers reach it
-// from runTask after the process exits; unsupervised launchers (Step 2) will
-// have reconcile call it when a terminal signal arrives from the remote
-// scheduler (.done marker / probe).
-func (s *Scheduler) FinishTask(task *Task, status TaskStatus) {
+// from runTask after the process exits; unsupervised launchers reach it from
+// reconcile when a terminal signal arrives from the remote scheduler. For the
+// unsupervised lane this is also where the submission slot is released.
+func (s *Scheduler) FinishTask(task *Task, status TaskStatus, extra map[string]any) {
+	if !s.launcher.Supervised() {
+		defer s.pool.Release(task.ID)
+	}
 	switch status {
 	case StatusSuccess, StatusKilled:
-		s.completeTask(task, status)
+		s.completeTask(task, status, extra)
 		s.RefreshJobStatus(task.JobID)
 	default:
-		s.handleFailure(task)
+		s.handleFailure(task, extra)
 	}
 }
 
 // completeTask persists a terminal status to DB, then updates the queue.
-func (s *Scheduler) completeTask(task *Task, status TaskStatus) {
+// extra fields are merged over the defaults (so a wrapper-reported
+// finished_at wins over the wall clock).
+func (s *Scheduler) completeTask(task *Task, status TaskStatus, extra map[string]any) {
 	dbCtx, cancel := context.WithTimeout(s.ctx, 5*time.Second)
 	defer cancel()
-	if err := s.store.UpdateTaskStatus(dbCtx, task.ID, string(status), map[string]any{
-		"finished_at": time.Now().Unix(),
-	}); err != nil {
+	fields := map[string]any{"finished_at": time.Now().Unix()}
+	for k, v := range extra {
+		fields[k] = v
+	}
+	if err := s.store.UpdateTaskStatus(dbCtx, task.ID, string(status), fields); err != nil {
 		s.logger.Error("persist task completion failed", "task", task.ID, "status", status, "error", err)
 	}
 	if err := s.queue.Complete(task.ID, status); err != nil {
@@ -184,11 +215,11 @@ func (s *Scheduler) MonitorReattached(task *Task, ch <-chan executor.ReattachRes
 
 		// Check user-kill flag first, same as runTask.
 		if s.consumeKillRequest(task.ID) || res.Killed {
-			s.completeTask(task, StatusKilled)
+			s.completeTask(task, StatusKilled, nil)
 		} else {
 			// Signal 0 polling can't get real exit code.
 			// Treat non-killed exit as failed; user can inspect logs and retry.
-			s.completeTask(task, StatusFailed)
+			s.completeTask(task, StatusFailed, nil)
 		}
 		s.RefreshJobStatus(task.JobID)
 		s.logger.Info("reattached task exited", "task", task.ID, "status", task.Status)
@@ -196,8 +227,10 @@ func (s *Scheduler) MonitorReattached(task *Task, ch <-chan executor.ReattachRes
 }
 
 // handleFailure decides whether to retry or permanently fail a task.
-// MaxRetry == 0 means unlimited retries.
-func (s *Scheduler) handleFailure(task *Task) {
+// MaxRetry == 0 means unlimited retries. extra fields (may be nil) are
+// persisted only with the permanent-failure transition; a requeue resets
+// state instead.
+func (s *Scheduler) handleFailure(task *Task, extra map[string]any) {
 	canRetry := task.MaxRetry == 0 || task.RetryCount < task.MaxRetry
 	if canRetry {
 		nextRetry := task.RetryCount + 1
@@ -208,6 +241,10 @@ func (s *Scheduler) handleFailure(task *Task) {
 			"gpus":        nil,
 			"started_at":  nil,
 			"finished_at": nil,
+			// Clear the external scheduler id: on the remote lane a requeue
+			// means a NEW submission — probing the old id would track a dead
+			// cluster job. Harmless no-op for local tasks (column unused).
+			"external_id": nil,
 		}); err != nil {
 			s.logger.Error("persist requeue failed", "task", task.ID, "error", err)
 		}
@@ -219,7 +256,7 @@ func (s *Scheduler) handleFailure(task *Task) {
 		return
 	}
 
-	s.completeTask(task, StatusFailed)
+	s.completeTask(task, StatusFailed, extra)
 	s.RefreshJobStatus(task.JobID)
 	s.logger.Warn("task failed permanently", "task", task.ID, "retry", task.RetryCount, "max_retry", task.MaxRetry)
 }
