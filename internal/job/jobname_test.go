@@ -7,9 +7,13 @@ func TestSanitizeJobName(t *testing.T) {
 		{"3385434e", "rq-3385434e"},            // SGE: cannot start with a digit
 		{"eval llama 3/8B", "eval-llama-3-8B"}, // spaces, slash → '-'
 		{"--weird--", "weird"},                 // trim + collapse separators
+		{"name!!!v2", "name-v2"},               // arbitrary punctuation collapses
 		{"", "rq"},                             // empty stays valid
+		{"---...---", "rq"},                    // all separators stays valid
 		{"模型eval", "eval"},                     // non-ASCII → '-' then trimmed
 		{"42", "rq-42"},                        // all-digit → prefixed
+		{"_hidden", "rq-_hidden"},              // leading non-letter still gets a safe prefix
+		{"9.name", "rq-9.name"},                // leading digit before valid punctuation
 		{"ok_name.v2", "ok_name.v2"},           // already valid: untouched
 	}
 	for _, c := range cases {
@@ -23,6 +27,10 @@ func TestSanitizeJobName(t *testing.T) {
 	}
 	if got := SanitizeJobName(string(long)); len(got) != 64 {
 		t.Errorf("length cap: got %d", len(got))
+	}
+	longDigitFirst := append([]byte{'9'}, long...)
+	if got := SanitizeJobName(string(longDigitFirst)); len(got) != 64 || got[:3] != "rq-" {
+		t.Errorf("digit-first length cap should keep safe prefix and 64-char cap, got %q len=%d", got, len(got))
 	}
 }
 

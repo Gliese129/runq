@@ -56,10 +56,12 @@ import (
 	"github.com/gliese129/runq/internal/store"
 )
 
-// runner executes a shell command and returns its combined output. Internal
-// function type used by memoRunner for caching probe results within a
-// reconcile pass. Derived from FS.Exec by Backend.shellRun.
-type runner func(ctx context.Context, command string) (string, error)
+// runner executes a shell command and returns (combined output, exit code,
+// transport error). The three-way split is load-bearing for probe semantics:
+// a TRANSPORT error means the command never ran — no fact was learned and it
+// must never be interpreted as a scheduler verdict (a blip parsed as "gone"
+// would fail healthy tasks). An EXIT code is the scheduler talking.
+type runner func(ctx context.Context, command string) (string, int, error)
 
 // TaskFinisher is the slice of scheduler.Scheduler that reconcile needs to
 // drive tasks to terminal states through the shared lifecycle (retry policy,
@@ -136,19 +138,25 @@ func NewWithFS(cfg *config.TargetConfig, st *store.Store, storageCfg *config.Glo
 	return &Backend{Cfg: cfg, Store: st, FS: fsys, StorageCfg: storageCfg}
 }
 
-// shellRun executes a shell command through the FS layer, returning combined
-// stdout+stderr and any error (including non-zero exit). This is the FS-backed
-// replacement for the old Runner/shellRunner pattern.
-func (b *Backend) shellRun(ctx context.Context, command string) (string, error) {
+// shellRunClassified executes a shell command through the FS layer and
+// preserves the transport-vs-verdict distinction (see runner).
+func (b *Backend) shellRunClassified(ctx context.Context, command string) (string, int, error) {
 	stdout, stderr, code, err := b.FS.Exec(ctx, "sh", "-c", command)
-	combined := string(stdout) + string(stderr)
+	return string(stdout) + string(stderr), code, err
+}
+
+// shellRun is the collapsed convenience form for callers that treat any
+// failure the same way (kill, marker cleanup, legacy submit): non-zero exit
+// becomes an error.
+func (b *Backend) shellRun(ctx context.Context, command string) (string, error) {
+	out, code, err := b.shellRunClassified(ctx, command)
 	if err != nil {
-		return combined, err
+		return out, err
 	}
 	if code != 0 {
-		return combined, fmt.Errorf("exit status %d", code)
+		return out, fmt.Errorf("exit status %d", code)
 	}
-	return combined, nil
+	return out, nil
 }
 
 // Remote-lane filenames. These are backend artifacts, NOT part of the shared
@@ -160,12 +168,18 @@ const (
 	doneDirName    = ".runq-done"
 )
 
-// doneDir returns the target-level done-marker directory, or "" when the
-// target has no workspace root configured (marker detection disabled; the
+// doneDir returns the target-level done-marker directory: explicit done_dir
+// wins, then <workspace>/.runq-done, else "" (marker detection disabled; the
 // probe path still works). Shared across projects on purpose: one readdir
 // covers every in-flight task on this target.
 func (b *Backend) doneDir() string {
-	if b.Cfg == nil || b.Cfg.Workspace == "" {
+	if b.Cfg == nil {
+		return ""
+	}
+	if b.Cfg.DoneDir != "" {
+		return b.Cfg.DoneDir
+	}
+	if b.Cfg.Workspace == "" {
 		return ""
 	}
 	return path.Join(b.Cfg.Workspace, doneDirName)

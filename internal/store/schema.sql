@@ -10,7 +10,12 @@ CREATE TABLE IF NOT EXISTS projects (
 
 CREATE TABLE IF NOT EXISTS jobs (
     id           TEXT PRIMARY KEY,    -- ULID or short UUID
-    project_name TEXT NOT NULL REFERENCES projects(name),
+    -- No FK to projects: on runqd this ledger is a SCHEDULER's — foreign
+    -- tasks carry the client's project name as a plain LABEL (like Slurm
+    -- records a job name); registration is a client-side concept. Pre-split
+    -- client DBs keep their old FK (CREATE IF NOT EXISTS never alters) and
+    -- the client only writes registered projects, so behavior is identical.
+    project_name TEXT NOT NULL,
     description  TEXT,
     note         TEXT,                -- user-supplied experiment note (--note flag or job.yaml note: field)
     config_json  TEXT NOT NULL,       -- serialized job.JobConfig as JSON

@@ -42,7 +42,7 @@ func ScanArgparse(filePath string) ([]ArgInfo, error) {
 	flagReg := regexp.MustCompile(`"--([\w-]+)"|'--([\w-]+)'`)
 	typeReg := regexp.MustCompile(`type\s*=\s*(\w+)`)
 	defaultReg := regexp.MustCompile(`default\s*=\s*(.+?)\s*[,)]`)
-	storeReg := regexp.MustCompile(`action="store_true"`)
+	storeReg := regexp.MustCompile(`action\s*=\s*["']store_true["']`)
 	matches := argReg.FindAllIndex(content, -1)
 
 	args := make([]ArgInfo, 0)

@@ -49,6 +49,8 @@ func renderSubmitCmd(tmpl string, t submitplan.PlannedTask, plan submitplan.Plan
 		"task_id":  t.TaskID,
 		"task_dir": t.TaskDir,
 		"name":     t.Name,
+		"project":  plan.Project,
+		"log_path": t.LogPath,
 	}
 	for name, value := range t.Params {
 		vars["param."+name] = fmt.Sprintf("%v", value)
@@ -105,6 +107,8 @@ func printPreflight(r preflight.Report) {
 			mark = "✓"
 		case "failed":
 			mark = "✗"
+		case "warning":
+			mark = "!"
 		}
 		fmt.Printf("%s %-10s %s\n", mark, c.Name, c.Detail)
 	}
@@ -189,14 +193,20 @@ func (b *Backend) Prepare(ctx context.Context, jobCfg job.JobConfig, proj *proje
 		// Checks run against the TARGET: paths/script via its FS, probes on
 		// its login node. The scope label is the honest caveat that the
 		// login-node env may still differ from compute nodes.
-		PreflightScope: fmt.Sprintf("on %s login node", b.Cfg.Name),
-		PreflightFS:    b.FS,
-		SchedulerParams:       config.HPCTemplateParamRefs(b.Cfg.SubmitTemplate),
+		PreflightScope:  fmt.Sprintf("on %s login node", b.Cfg.Name),
+		PreflightFS:     b.FS,
+		SchedulerParams: config.HPCTemplateParamRefs(b.Cfg.SubmitTemplate),
 	})
 	if err != nil {
 		return "", nil, err
 	}
 	printPreflight(plan.Preflight)
+
+	// A plan with zero tasks means the sweep expanded to nothing — a config
+	// mistake, surfaced as a validation error before anything persists.
+	if len(plan.Tasks) == 0 {
+		return "", nil, fmt.Errorf("sweep expands to zero tasks — check sweep parameters (nothing would be submitted)")
+	}
 
 	// Fail-fast template validation: render the submit command for the
 	// first task BEFORE anything is persisted or submitted. A missing

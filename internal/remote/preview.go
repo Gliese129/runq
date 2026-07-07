@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"path"
-	"strconv"
 	"strings"
 
 	"github.com/gliese129/runq/internal/config"
@@ -43,24 +42,22 @@ func (b *Backend) Preview(ctx context.Context, jobCfg job.JobConfig, proj *proje
 	root := config.ProspectiveRoot(b.StorageCfg, proj.WorkingDir, proj.ProjectName)
 	fmt.Fprintf(&s, "workspace root: %s/<note>-<job_id> — <workspace> below means that job dir (ids regenerate at submit)\n\n", root)
 	for _, c := range plan.Preflight.Results {
-		mark := map[string]string{"passed": "✓", "failed": "✗"}[c.Status]
+		mark := map[string]string{"passed": "✓", "failed": "✗", "warning": "!"}[c.Status]
 		if mark == "" {
 			mark = "-"
 		}
 		fmt.Fprintf(&s, "%s %-10s %s\n", mark, c.Name, c.Detail)
 	}
 
+	if len(plan.Tasks) == 0 {
+		return "", fmt.Errorf("sweep expands to zero tasks — check sweep parameters (nothing would be submitted)")
+	}
 	t := plan.Tasks[0]
 	runsh := path.Join(t.TaskDir, runScriptName)
-	vars := map[string]string{
-		"run_sh": runsh, "gpus": strconv.Itoa(t.GPUsNeeded),
-		"job_id": plan.JobID, "task_id": t.TaskID, "task_dir": t.TaskDir,
-		"name": t.Name,
-	}
-	for name, value := range t.Params {
-		vars["param."+name] = fmt.Sprintf("%v", value)
-	}
-	cmd, err := utils.Render(b.Cfg.SubmitTemplate, vars)
+	// Render through THE submit renderer — a private copy of its vars map is
+	// how preview and submit drift apart (deep-test P1: preview missed the
+	// {{project}}/{{log_path}} vars the runq preset requires).
+	cmd, err := renderSubmitCmd(b.Cfg.SubmitTemplate, t, plan, runsh)
 	if err != nil {
 		return "", fmt.Errorf("render submit_template: %w", err)
 	}

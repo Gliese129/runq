@@ -1,8 +1,12 @@
 package backend
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net"
 	"os"
@@ -10,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gliese129/runq/internal/logfile"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
 
@@ -77,6 +82,12 @@ type SSHBackend struct {
 	loopCancel context.CancelFunc
 	loopWG     sync.WaitGroup
 
+	// GPU view cache (gpu_template targets): dashboard panels poll at
+	// human-refresh frequency; one SSH exec per gpuCacheTTL is plenty.
+	gpuMu      sync.Mutex
+	gpuCache   []GPUSlot
+	gpuCacheAt time.Time
+
 	// lastActivity is the unix time of the last user-driven interaction with
 	// this target (list/get/submit/kill/retry/refresh — dashboard polling
 	// counts: the user is watching). The sensor loop hibernates when it goes
@@ -100,6 +111,13 @@ type SSHBackendConfig struct {
 	Store     *store.Store
 	GlobalCfg *config.GlobalConfig
 	Logger    *slog.Logger // nil → slog.Default()
+
+	// FS overrides the filesystem/exec transport. When set, the ssh:
+	// section is not required — this is how the client's synthesized
+	// localhost-runqd lane runs the exact same remote machinery over
+	// rfs.LocalFS (plumbing commands default to runqd.sock, so templates
+	// are verbatim identical to a remote runq target).
+	FS rfs.FS
 }
 
 // NewSSHBackend creates a Backend for a remote HPC target. The SSH
@@ -108,36 +126,44 @@ type SSHBackendConfig struct {
 // The caller must call Close() on shutdown to release the SSH connection.
 func NewSSHBackend(cfg SSHBackendConfig) (*SSHBackend, error) {
 	t := cfg.Target
-	if t.SSH == nil {
-		return nil, fmt.Errorf("target %q: ssh section is required for scheduler targets", t.Name)
-	}
 	if t.SubmitTemplate == "" {
 		return nil, fmt.Errorf("target %q: submit_template is required", t.Name)
 	}
 
-	// Build SSH config from target.
-	host := t.SSH.Host
-	if t.SSH.Port > 0 {
-		host = fmt.Sprintf("%s:%d", t.SSH.Host, t.SSH.Port)
-	}
+	var laneFS rfs.FS
+	var sshFS *rfs.SSHFS
+	if cfg.FS != nil {
+		// Injected transport (localhost-runqd lane over LocalFS).
+		laneFS = cfg.FS
+	} else {
+		if t.SSH == nil {
+			return nil, fmt.Errorf("target %q: ssh section is required for scheduler targets", t.Name)
+		}
+		// Build SSH config from target.
+		host := t.SSH.Host
+		if t.SSH.Port > 0 {
+			host = fmt.Sprintf("%s:%d", t.SSH.Host, t.SSH.Port)
+		}
 
-	auth, err := resolveSSHAuth(t.SSH)
-	if err != nil {
-		return nil, fmt.Errorf("target %q: ssh auth: %w", t.Name, err)
-	}
+		auth, err := resolveSSHAuth(t.SSH)
+		if err != nil {
+			return nil, fmt.Errorf("target %q: ssh auth: %w", t.Name, err)
+		}
 
-	sshCfg := rfs.SSHConfig{
-		Host:       host,
-		User:       t.SSH.User,
-		AuthMethod: auth,
-		// Idle disconnect: with the sensor loops running every ~2min while
-		// tasks are in flight, the connection stays warm during activity and
-		// closes ~10min after the queue drains — a normal SSH user's shape.
-		IdleTimeout: 10 * time.Minute,
+		sshCfg := rfs.SSHConfig{
+			Host:       host,
+			User:       t.SSH.User,
+			AuthMethod: auth,
+			// Idle disconnect: with the sensor loops running every ~2min
+			// while tasks are in flight, the connection stays warm during
+			// activity and closes ~10min after the queue drains — a normal
+			// SSH user's shape.
+			IdleTimeout: 10 * time.Minute,
+		}
+		sshFS = rfs.NewSSHFS(sshCfg)
+		laneFS = sshFS
 	}
-
-	sshFS := rfs.NewSSHFS(sshCfg)
-	hpcBe := remote.NewWithFS(&cfg.Target, cfg.Store, cfg.GlobalCfg, sshFS)
+	hpcBe := remote.NewWithFS(&cfg.Target, cfg.Store, cfg.GlobalCfg, laneFS)
 
 	logger := cfg.Logger
 	if logger == nil {
@@ -284,27 +310,31 @@ func (b *SSHBackend) DetectOrphansNow(ctx context.Context) error {
 }
 
 // Close stops the sensor loops and the scheduler, then releases the SSH
-// connection. Must be called on daemon shutdown.
+// connection (if any — the localhost lane has none). Must be called on
+// daemon shutdown.
 func (b *SSHBackend) Close() error {
 	if b.loopCancel != nil {
 		b.loopCancel()
 		b.loopWG.Wait()
 		b.sched.Shutdown()
 	}
-	return b.sshFS.Close()
+	if b.sshFS != nil {
+		return b.sshFS.Close()
+	}
+	return nil
 }
 
 // ── Capabilities ──────────────────────────────────────────────────────────
 
 func (b *SSHBackend) Capabilities() Capabilities {
 	return Capabilities{
-		GPUMap:        false,  // no node-local GPU visibility
-		PauseResume:   false,  // cluster queues have no runq-level pause (Step 3 candidate)
-		LiveLog:       true,   // logs readable via SSH
-		Retry:         true,   // scheduler lane re-runs submit.cmd (RQ-46)
-		StateModel:    "poll", // best-effort projection; staleness surfaced
-		KillAsync:     true,   // qdel/scancel forwarded
-		SubmitPreview: true,   // zero-disk dry-run via submit code path
+		GPUMap:        b.backend.Cfg.GPUTemplate != "", // gpu_template-driven (runq preset)
+		PauseResume:   false,                           // cluster queues have no runq-level pause
+		LiveLog:       true,                            // logs readable via SSH
+		Retry:         true,                            // scheduler lane re-runs submit.cmd (RQ-46)
+		StateModel:    "poll",                          // best-effort projection; staleness surfaced
+		KillAsync:     true,                            // qdel/scancel forwarded
+		SubmitPreview: true,                            // zero-disk dry-run via submit code path
 	}
 }
 
@@ -397,8 +427,43 @@ func (b *SSHBackend) CompareMetrics(ctx context.Context, jobID, key string, desc
 	return BuildCompareRows(tasks, key, desc), nil
 }
 
-func (b *SSHBackend) GPUStatus(_ context.Context) ([]GPUSlot, error) {
-	return []GPUSlot{}, nil
+// gpuCacheTTL bounds how often dashboard GPU-panel polling can turn into an
+// actual SSH exec on this target.
+const gpuCacheTTL = 10 * time.Second
+
+// GPUStatus reports this target's GPUs through its optional gpu_template
+// (runq preset: `runq gpu --json`). No template = no visibility = empty.
+// Observation failures are empty-not-error: the aggregated panel must not
+// go dark because one cluster hiccuped.
+func (b *SSHBackend) GPUStatus(ctx context.Context) ([]GPUSlot, error) {
+	tmpl := b.backend.Cfg.GPUTemplate
+	if tmpl == "" {
+		return []GPUSlot{}, nil
+	}
+	b.touchActivity()
+
+	b.gpuMu.Lock()
+	defer b.gpuMu.Unlock()
+	if b.gpuCache != nil && time.Since(b.gpuCacheAt) < gpuCacheTTL {
+		return b.gpuCache, nil
+	}
+
+	// stdout only — stderr noise (motd, activation chatter) must not reach
+	// the JSON parser.
+	stdout, _, code, err := b.backend.FS.Exec(ctx, "sh", "-c", tmpl)
+	if err != nil || code != 0 {
+		return []GPUSlot{}, nil
+	}
+	var slots []GPUSlot
+	if uerr := json.Unmarshal(bytes.TrimSpace(stdout), &slots); uerr != nil {
+		return []GPUSlot{}, nil
+	}
+	for i := range slots {
+		slots[i].Target = b.backend.Cfg.Name
+	}
+	b.gpuCache = slots
+	b.gpuCacheAt = time.Now()
+	return slots, nil
 }
 
 // ── Task operations ───────────────────────────────────────────────────────
@@ -466,6 +531,90 @@ func (b *SSHBackend) KillTask(ctx context.Context, taskID string) error {
 	}
 	_, err = b.backend.Kill(ctx, taskID)
 	return err
+}
+
+// ── RQ-44: log access（核心实现 — Human 主笔，CC review）────────────────────
+//
+// TaskLogRead — 契约修订版（与 Human 对齐）：字节锚点 + 行数量 → *LogPage。
+// 字节做锚（O(1) seek / 断线续传 / 热力图跳转），行做量（UI 渲染单位，
+// 断行对齐在 logfile 层）。logfile.Reader 正好是这个模型：
+// Open(path, fs) → ReadLines(offset, maxLines)。单行长度与单页字节预算
+// 在 logfile 内 clamp（病态长行防御——review 重点）。
+func (b *SSHBackend) TaskLogRead(ctx context.Context, taskID string, offset int64, maxLines int) (*LogPage, error) {
+	b.touchActivity()
+	task, err := b.store.GetTask(ctx, taskID)
+	if err != nil {
+		return nil, fmt.Errorf("task log read: %w", err)
+	}
+	if task == nil {
+		return nil, fmt.Errorf("task %q: %w", taskID, ErrNotFound)
+	}
+	r, err := logfile.Open(task.LogPath, b.backend.FS)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return &LogPage{Lines: []string{}}, nil // pending: empty page, Size 0
+		}
+		return nil, err
+	}
+	defer r.Close()
+
+	return r.ReadLines(offset, maxLines) // LogPage = logfile.Page: no mapping
+}
+
+// TaskLogTail — 尾部视图（每次首屏的入口）：解析 + 委托 TailLines。
+// 返回页的 Offset 即向上翻页锚点。
+func (b *SSHBackend) TaskLogTail(ctx context.Context, taskID string, maxLines int) (*LogPage, error) {
+	b.touchActivity()
+	task, err := b.store.GetTask(ctx, taskID)
+	if err != nil {
+		return nil, fmt.Errorf("task log tail: %w", err)
+	}
+	if task == nil {
+		return nil, fmt.Errorf("task %q: %w", taskID, ErrNotFound)
+	}
+	r, err := logfile.Open(task.LogPath, b.backend.FS)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return &LogPage{Lines: []string{}}, nil // pending: empty page, Size 0
+		}
+		return nil, err
+	}
+	defer r.Close()
+
+	return r.TailLines(maxLines) // LogPage = logfile.Page: no mapping
+}
+
+// TaskLogFollow — pure assembly: resolve the task, hand path+FS+offset to
+// logfile.Follow. *logfile.Follower satisfies LogFollower natively (LogPage
+// = logfile.Page), so there is no adapter and deliberately NO goroutine:
+// LogFollower is a PULL iterator, driven by the consumer's loop (SSE
+// handler, CLI logs -f). offset passes through unclamped: size < offset IS
+// the rotation signal. Pending log (no file yet) is handled inside
+// Follower (lazy open). No lifecycleMu (read-only, produces no verdicts).
+func (b *SSHBackend) TaskLogFollow(ctx context.Context, taskID string, offset int64) (LogFollower, error) {
+	b.touchActivity()
+	task, err := b.store.GetTask(ctx, taskID)
+	if err != nil {
+		return nil, fmt.Errorf("task log follow: %w", err)
+	}
+	if task == nil {
+		return nil, fmt.Errorf("task %q: %w", taskID, ErrNotFound)
+	}
+	f, err := logfile.Follow(task.LogPath, b.backend.FS, offset)
+	if err != nil {
+		return nil, fmt.Errorf("task log follow: %w", err)
+	}
+	return f, nil
+}
+
+// TODO(RQ-44): JobLogSearch — grep 在归属侧跑（CC 可代劳，属边角）。
+//
+//	· rows := ListTasks(JobID) → 收集 LogPath → 一条 FS.Exec:
+//	  grep -n -H -m <cap> -- <quoted query> <quoted paths...>
+//	· 解析 "path:line:text" → LogMatch（path→TaskID 反查表）
+//	· grep exit 1 = 无匹配（不是错误）；exit 2 = 真错
+func (b *SSHBackend) JobLogSearch(ctx context.Context, jobID, query string) ([]LogMatch, error) {
+	return nil, fmt.Errorf("job log search: %w", ErrNotSupported) // TODO(RQ-44)
 }
 
 func (b *SSHBackend) RetryTask(ctx context.Context, taskID string) error {

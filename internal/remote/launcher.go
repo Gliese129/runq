@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path"
+	"strings"
 
 	"github.com/gliese129/runq/internal/scheduler"
 	"github.com/gliese129/runq/internal/utils"
@@ -47,22 +48,32 @@ func (l *Launcher) Kill(taskID string) {
 //   - id-parse or id-persist failure → wrapped scheduler.ErrLaunchUntracked.
 //     A cluster job may exist untracked: the scheduler must NOT retry.
 func (l *Launcher) Launch(ctx context.Context, t *scheduler.Task, _ map[string]string, _ func(scheduler.StartInfo)) (scheduler.LaunchResult, error) {
+	// Pre-submit file operations are pure FS work: their failures are
+	// transport-class (SSH down, workspace unreachable) — TRANSIENT, the
+	// launch never happened.
 	cmdFile := path.Join(t.TaskDir, submitCmdFileName)
 	cmdBytes, err := l.b.FS.ReadFile(cmdFile)
 	if err != nil {
-		return scheduler.LaunchResult{}, fmt.Errorf("read %s: %w", cmdFile, err)
+		return scheduler.LaunchResult{}, fmt.Errorf("%w: read %s: %v", scheduler.ErrLaunchTransient, cmdFile, err)
 	}
 
 	// New attempt = fresh wrapper state, BEFORE the submit so the new job
 	// can't race the reset.
 	if werr := l.b.ResetWrapperState(ctx, t.TaskDir, t.ID); werr != nil {
-		return scheduler.LaunchResult{}, werr
+		return scheduler.LaunchResult{}, fmt.Errorf("%w: %v", scheduler.ErrLaunchTransient, werr)
 	}
 
-	out, err := l.b.shellRun(ctx, string(cmdBytes))
-	if err != nil {
-		opLog("SUBMIT FAIL task=%s job=%s\ncmd file: %s\nerr: %v\noutput: %s", t.ID, t.JobID, cmdFile, err, out)
-		return scheduler.LaunchResult{}, fmt.Errorf("submit %s failed: %w\noutput:\n%s", t.ID, err, out)
+	out, exitCode, rerr := l.b.shellRunClassified(ctx, string(cmdBytes))
+	if rerr != nil {
+		// Transport: the command never reached the scheduler.
+		opLog("SUBMIT TRANSPORT task=%s job=%s err=%v", t.ID, t.JobID, rerr)
+		return scheduler.LaunchResult{}, fmt.Errorf("%w: %v", scheduler.ErrLaunchTransient, rerr)
+	}
+	if exitCode != 0 {
+		// The scheduler RAN and said no — deterministic rejection; its own
+		// words go into the permanent failure.
+		opLog("SUBMIT REJECTED task=%s job=%s exit=%d\ncmd file: %s\noutput: %s", t.ID, t.JobID, exitCode, cmdFile, out)
+		return scheduler.LaunchResult{}, fmt.Errorf("submit %s rejected (exit %d):\n%s", t.ID, exitCode, strings.TrimSpace(out))
 	}
 
 	extID, err := utils.ExtractSubmitID(out, l.b.Cfg.SubmitIDRegex)

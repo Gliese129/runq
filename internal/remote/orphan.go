@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gliese129/runq/internal/rfs"
 	"github.com/gliese129/runq/internal/store"
 )
 
@@ -28,12 +29,20 @@ import (
 // Dirs observed present again get their mark cleared (restored from backup,
 // or an earlier observation was wrong).
 func (b *Backend) DetectOrphans(ctx context.Context, immediate bool) error {
+	// Local lanes (LocalFS) observe their own machine: a stat is
+	// authoritative, so the root/membership guardrails — built against
+	// UNRELIABLE remote observation — don't apply. The circuit breaker
+	// below still does (mis-mounted external disks look the same locally).
+	_, localObservation := b.FS.(*rfs.LocalFS)
+
 	root := b.Cfg.Workspace
-	if root == "" {
-		return nil // no workspace root configured — cannot apply guardrail 2
-	}
-	if _, err := b.FS.Stat(root); err != nil {
-		return nil // root unobservable/missing: config or mount problem, not orphans
+	if !localObservation {
+		if root == "" {
+			return nil // no workspace root configured — cannot apply guardrail 2
+		}
+		if _, err := b.FS.Stat(root); err != nil {
+			return nil // root unobservable/missing: config or mount problem, not orphans
+		}
 	}
 
 	rows, err := b.Store.ListTasks(ctx, store.TaskFilter{Target: b.Cfg.Name})
@@ -52,13 +61,14 @@ func (b *Backend) DetectOrphans(ctx context.Context, immediate bool) error {
 		if !isTerminal(tk.Status) || tk.TaskDir == "" {
 			continue
 		}
-		// Ownership validation (guardrail 2 proper): only dirs UNDER the
-		// configured workspace are judged — the root guard above then
-		// genuinely covers their common ancestor. A task dir outside the
-		// workspace (pre-reconfiguration submissions, mis-pointed config)
-		// has no verifiable relationship to the root we just checked, so it
-		// is never marked, no matter what a stat says.
-		if !strings.HasPrefix(tk.TaskDir, rootPrefix) {
+		// Ownership validation (guardrail 2 proper, remote only): only dirs
+		// UNDER the configured workspace are judged — the root guard above
+		// then genuinely covers their common ancestor. A task dir outside
+		// the workspace (pre-reconfiguration submissions, mis-pointed
+		// config) has no verifiable relationship to the root we checked, so
+		// it is never marked, no matter what a stat says. Local lanes skip
+		// this: task dirs legitimately live under per-project roots.
+		if !localObservation && !strings.HasPrefix(tk.TaskDir, rootPrefix) {
 			continue
 		}
 		_, serr := b.FS.Stat(tk.TaskDir)

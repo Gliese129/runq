@@ -55,6 +55,22 @@ func (b *UnavailableBackend) TaskMetrics(ctx context.Context, taskID string) ([]
 	return nil, b.wrap()
 }
 
+func (b *UnavailableBackend) TaskLogRead(ctx context.Context, taskID string, offset int64, maxLines int) (*LogPage, error) {
+	return nil, b.wrap()
+}
+
+func (b *UnavailableBackend) TaskLogTail(ctx context.Context, taskID string, maxLines int) (*LogPage, error) {
+	return nil, b.wrap()
+}
+
+func (b *UnavailableBackend) TaskLogFollow(ctx context.Context, taskID string, offset int64) (LogFollower, error) {
+	return nil, b.wrap()
+}
+
+func (b *UnavailableBackend) JobLogSearch(ctx context.Context, jobID, query string) ([]LogMatch, error) {
+	return nil, b.wrap()
+}
+
 func (b *UnavailableBackend) KillTask(ctx context.Context, taskID string) error {
 	return b.wrap()
 }

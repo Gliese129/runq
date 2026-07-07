@@ -8,13 +8,11 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/gliese129/runq/internal/backend"
 	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/project"
-	"github.com/gliese129/runq/internal/store"
 )
 
 // proxySubmitTimeout is the client-side timeout for the submit RPC,
@@ -43,18 +41,27 @@ func NewProxyFromClient(c *Client) *Proxy {
 	return &Proxy{client: c}
 }
 
+// Capabilities asks the daemon (config endpoint) instead of hardcoding:
+// with mixed targets the truth is per-target. TargetFilter selects that
+// target's caps; otherwise the default target's. Errors fall back to the
+// legacy push-model defaults so display gating degrades instead of breaking.
 func (p *Proxy) Capabilities() backend.Capabilities {
+	var resp backend.ConfigResponse
+	if err := p.do(context.Background(), "GET", "/api/dashboard/config", nil, &resp); err == nil {
+		if p.TargetFilter != "" {
+			if caps, ok := resp.TargetCapabilities[p.TargetFilter]; ok {
+				return caps
+			}
+		}
+		return resp.Capabilities
+	}
 	return backend.Capabilities{
 		GPUMap:      true,
 		PauseResume: true,
 		LiveLog:     true,
 		Retry:       true,
-		StateModel:  "push", // the daemon owns the truth; data is always current
+		StateModel:  "push",
 		KillAsync:   false,
-		// Activity heatmap and log search handlers are still TODO stubs.
-		// Keep the capabilities off until the endpoints have real behavior.
-		ActivityHeatmap: false,
-		LogSearch:       false,
 	}
 }
 
@@ -72,7 +79,7 @@ func (p *Proxy) ListJobs(ctx context.Context, projectScope string) ([]backend.Jo
 	if p.TargetFilter != "" {
 		q.Set("target", p.TargetFilter)
 	}
-	path := "/api/jobs"
+	path := "/api/dashboard/jobs"
 	if len(q) > 0 {
 		path += "?" + q.Encode()
 	}
@@ -84,36 +91,40 @@ func (p *Proxy) ListJobs(ctx context.Context, projectScope string) ([]backend.Jo
 }
 
 func (p *Proxy) ListArchivedJobs(ctx context.Context) ([]backend.JobSummary, error) {
-	q := url.Values{"archived": {"1"}}
+	q := url.Values{}
 	if p.TargetFilter != "" {
 		q.Set("target", p.TargetFilter)
 	}
+	path := "/api/dashboard/jobs/archived"
+	if len(q) > 0 {
+		path += "?" + q.Encode()
+	}
 	var out []backend.JobSummary
-	if err := p.do(ctx, "GET", "/api/jobs?"+q.Encode(), nil, &out); err != nil {
+	if err := p.do(ctx, "GET", path, nil, &out); err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
 func (p *Proxy) ArchiveJob(ctx context.Context, jobID string) error {
-	return p.do(ctx, "POST", "/api/jobs/"+url.PathEscape(jobID)+"/archive", nil, nil)
+	return p.do(ctx, "POST", "/api/dashboard/jobs/"+url.PathEscape(jobID)+"/archive", nil, nil)
 }
 
 func (p *Proxy) UnarchiveJob(ctx context.Context, jobID string) error {
-	return p.do(ctx, "POST", "/api/jobs/"+url.PathEscape(jobID)+"/unarchive", nil, nil)
+	return p.do(ctx, "POST", "/api/dashboard/jobs/"+url.PathEscape(jobID)+"/unarchive", nil, nil)
 }
 
 func (p *Proxy) ArchiveProject(ctx context.Context, name string) error {
-	return p.do(ctx, "POST", "/api/projects/"+url.PathEscape(name)+"/archive", nil, nil)
+	return p.do(ctx, "POST", "/api/dashboard/projects/"+url.PathEscape(name)+"/archive", nil, nil)
 }
 
 func (p *Proxy) UnarchiveProject(ctx context.Context, name string) error {
-	return p.do(ctx, "POST", "/api/projects/"+url.PathEscape(name)+"/unarchive", nil, nil)
+	return p.do(ctx, "POST", "/api/dashboard/projects/"+url.PathEscape(name)+"/unarchive", nil, nil)
 }
 
 func (p *Proxy) GetJob(ctx context.Context, jobID string) (*backend.JobDetail, error) {
 	var detail backend.JobDetail
-	if err := p.do(ctx, "GET", "/api/jobs/"+jobID, nil, &detail); err != nil {
+	if err := p.do(ctx, "GET", "/api/dashboard/jobs/"+jobID, nil, &detail); err != nil {
 		return nil, err
 	}
 	if detail.Job.ID == "" {
@@ -122,15 +133,35 @@ func (p *Proxy) GetJob(ctx context.Context, jobID string) (*backend.JobDetail, e
 	return &detail, nil
 }
 
+// CompareMetrics is server-side: the daemon routes to the owning target
+// and reads metrics through that target's FS — a client-side rebuild would
+// only see local files.
 func (p *Proxy) CompareMetrics(ctx context.Context, jobID, key string, desc bool) ([]backend.CompareRow, error) {
-	rows, err := p.taskRows(ctx, jobID)
-	if err != nil {
+	q := url.Values{"key": {key}}
+	if desc {
+		q.Set("order", "desc")
+	}
+	var rows []backend.CompareRow
+	if err := p.do(ctx, "GET", "/api/dashboard/jobs/"+url.PathEscape(jobID)+"/compare?"+q.Encode(), nil, &rows); err != nil {
 		return nil, err
 	}
-	return backend.BuildCompareRows(rows, key, desc), nil
+	return rows, nil
 }
 
+// GPUStatus is the aggregated (local ∪ remote) view from the client daemon.
 func (p *Proxy) GPUStatus(ctx context.Context) ([]backend.GPUSlot, error) {
+	var gpus []backend.GPUSlot
+	if err := p.do(ctx, "GET", "/api/dashboard/gpu", nil, &gpus); err != nil {
+		return nil, err
+	}
+	return gpus, nil
+}
+
+// MachineGPUStatus is the PLUMBING view: THIS machine's GPUs from runqd's
+// legacy endpoint. Used by `runq gpu --json` (the runq preset's
+// gpu_template) — must not go through the dashboard routes, which runqd
+// doesn't serve.
+func (p *Proxy) MachineGPUStatus(ctx context.Context) ([]backend.GPUSlot, error) {
 	type enrichedGPU struct {
 		Index    int    `json:"index"`
 		Name     string `json:"name"`
@@ -159,43 +190,75 @@ func (p *Proxy) GPUStatus(ctx context.Context) ([]backend.GPUSlot, error) {
 	return out, nil
 }
 
+// MachineKillTask cancels a task on THIS machine's executor via runqd's
+// legacy endpoint (scancel plumbing).
+func (p *Proxy) MachineKillTask(ctx context.Context, taskID string) error {
+	return p.do(ctx, "POST", "/api/tasks/"+url.PathEscape(taskID)+"/kill", nil, nil)
+}
+
 func (p *Proxy) GetTask(ctx context.Context, taskID string) (*backend.TaskView, error) {
-	var task store.TaskRow
-	if err := p.do(ctx, "GET", "/api/tasks/"+taskID, nil, &task); err != nil {
+	var view backend.TaskView
+	if err := p.do(ctx, "GET", "/api/dashboard/tasks/"+url.PathEscape(taskID), nil, &view); err != nil {
 		return nil, err
 	}
-	view := backend.BuildTaskView(task)
 	return &view, nil
 }
 
+// TaskMetrics is server-side: the daemon reads metrics.jsonl through the
+// owning target's FS (remote tasks included).
 func (p *Proxy) TaskMetrics(ctx context.Context, taskID string) ([]backend.MetricPoint, error) {
-	var task store.TaskRow
-	if err := p.do(ctx, "GET", "/api/tasks/"+taskID, nil, &task); err != nil {
+	var points []backend.MetricPoint
+	if err := p.do(ctx, "GET", "/api/dashboard/tasks/"+url.PathEscape(taskID)+"/metrics", nil, &points); err != nil {
 		return nil, err
 	}
-	// Client-side local read: only correct for local-target tasks; remote
-	// tasks are served by the daemon's Multi routing before reaching here.
-	return backend.ReadMetricPoints(nil, task.TaskDir), nil
+	return points, nil
+}
+
+// ── RQ-44: log access（CLI 侧 — CC 的边角批，等核心落地后接线）──────────────
+//
+// TODO(RQ-44): TaskLogRead → GET /api/dashboard/tasks/{id}/log
+//   ?offset=&lines=，响应即 LogPage JSON（与现有 handler wire 对齐）。
+// TODO(RQ-44): TaskLogTail → 同端点不带 offset 参数（handler 分流：无
+//   offset = tail），?lines= 照传。
+// TODO(RQ-44): TaskLogFollow → CLI 不经 Proxy 流式——logs -f 直接消费 SSE
+//   端点（/api/dashboard/tasks/{id}/log/stream?offset=），此方法仅为接口
+//   合规，保持 ErrNotSupported。
+// TODO(RQ-44): JobLogSearch → GET /api/dashboard/jobs/{id}/log/search?q=。
+
+func (p *Proxy) TaskLogRead(ctx context.Context, taskID string, offset int64, maxLines int) (*backend.LogPage, error) {
+	return nil, fmt.Errorf("task log read: %w", backend.ErrNotSupported) // TODO(RQ-44)
+}
+
+func (p *Proxy) TaskLogTail(ctx context.Context, taskID string, maxLines int) (*backend.LogPage, error) {
+	return nil, fmt.Errorf("task log tail: %w", backend.ErrNotSupported) // TODO(RQ-44)
+}
+
+func (p *Proxy) TaskLogFollow(ctx context.Context, taskID string, offset int64) (backend.LogFollower, error) {
+	return nil, fmt.Errorf("task log follow: %w", backend.ErrNotSupported) // TODO(RQ-44)
+}
+
+func (p *Proxy) JobLogSearch(ctx context.Context, jobID, query string) ([]backend.LogMatch, error) {
+	return nil, fmt.Errorf("job log search: %w", backend.ErrNotSupported) // TODO(RQ-44)
 }
 
 func (p *Proxy) KillTask(ctx context.Context, taskID string) error {
-	return p.do(ctx, "POST", "/api/tasks/"+taskID+"/kill", nil, nil)
+	return p.do(ctx, "POST", "/api/dashboard/tasks/"+taskID+"/kill", nil, nil)
 }
 
 func (p *Proxy) RetryTask(ctx context.Context, taskID string) error {
-	return p.do(ctx, "POST", "/api/tasks/"+taskID+"/retry", nil, nil)
+	return p.do(ctx, "POST", "/api/dashboard/tasks/"+taskID+"/retry", nil, nil)
 }
 
 func (p *Proxy) KillJob(ctx context.Context, jobID string) error {
-	return p.do(ctx, "DELETE", "/api/jobs/"+jobID, nil, nil)
+	return p.do(ctx, "POST", "/api/dashboard/jobs/"+jobID+"/kill", nil, nil)
 }
 
 func (p *Proxy) PauseJob(ctx context.Context, jobID string) error {
-	return p.do(ctx, "POST", "/api/jobs/"+jobID+"/pause", nil, nil)
+	return p.do(ctx, "POST", "/api/dashboard/jobs/"+jobID+"/pause", nil, nil)
 }
 
 func (p *Proxy) ResumeJob(ctx context.Context, jobID string) error {
-	return p.do(ctx, "POST", "/api/jobs/"+jobID+"/resume", nil, nil)
+	return p.do(ctx, "POST", "/api/dashboard/jobs/"+jobID+"/resume", nil, nil)
 }
 
 func (p *Proxy) SubmitJob(ctx context.Context, cfg job.JobConfig, opts backend.SubmitOptions) (string, int, error) {
@@ -225,9 +288,9 @@ func proxySubmitPath(opts backend.SubmitOptions) string {
 		q.Set("target", opts.Target)
 	}
 	if len(q) == 0 {
-		return "/api/jobs"
+		return "/api/dashboard/jobs"
 	}
-	return "/api/jobs?" + q.Encode()
+	return "/api/dashboard/jobs?" + q.Encode()
 }
 
 // PreviewSubmit routes through the daemon's /api/jobs/preview endpoint,
@@ -238,18 +301,19 @@ func (p *Proxy) PreviewSubmit(ctx context.Context, cfg job.JobConfig, skipPrefli
 	if p.TargetFilter != "" {
 		q.Set("target", p.TargetFilter)
 	}
-	if skipPreflight {
-		q.Set("no_preflight", "1")
+	path := "/api/dashboard/jobs/preview"
+	if len(q) > 0 {
+		path += "?" + q.Encode()
+	}
+	body := map[string]any{
+		"config":         cfg,
+		"skip_preflight": skipPreflight,
 	}
 	var resp struct {
-		Supported bool   `json:"supported"`
-		Preview   string `json:"preview"`
+		Preview string `json:"preview"`
 	}
-	if err := p.do(ctx, "POST", "/api/jobs/preview?"+q.Encode(), cfg, &resp); err != nil {
+	if err := p.do(ctx, "POST", path, body, &resp); err != nil {
 		return "", err
-	}
-	if !resp.Supported {
-		return "", fmt.Errorf("submit preview: %w", backend.ErrNotSupported)
 	}
 	return resp.Preview, nil
 }
@@ -266,54 +330,28 @@ func (p *Proxy) ResolveNote(ctx context.Context, cfg job.JobConfig) (string, err
 	var resp struct {
 		Resolved string `json:"resolved"`
 	}
-	if err := p.do(ctx, "POST", "/api/jobs/resolve-note", cfg, &resp); err != nil {
+	if err := p.do(ctx, "POST", "/api/dashboard/jobs/resolve-note", cfg, &resp); err != nil {
 		return "", err
 	}
 	return resp.Resolved, nil
 }
 
 func (p *Proxy) CreateProject(ctx context.Context, cfg project.Config) error {
-	return p.do(ctx, "POST", "/api/projects", cfg, nil)
+	return p.do(ctx, "POST", "/api/dashboard/projects", cfg, nil)
 }
 
 func (p *Proxy) UpdateProject(ctx context.Context, cfg project.Config) error {
-	return p.do(ctx, "PUT", "/api/projects/"+url.PathEscape(cfg.ProjectName), cfg, nil)
+	return p.do(ctx, "PUT", "/api/dashboard/projects/"+url.PathEscape(cfg.ProjectName), cfg, nil)
 }
 
 func (p *Proxy) Clean(ctx context.Context, opts backend.CleanOptions) (*backend.CleanResult, error) {
-	q := url.Values{}
-	if opts.OlderThan != nil {
-		q.Set("cutoff", strconv.FormatInt(opts.OlderThan.Unix(), 10))
+	// Pipe the target filter from CLI → daemon so clean is scoped correctly.
+	if opts.Target == "" {
+		opts.Target = p.TargetFilter
 	}
-	if opts.DryRun {
-		q.Set("dry_run", "true")
-	}
-	if opts.Orphan {
-		q.Set("orphan", "true")
-	}
-	if opts.Archived {
-		q.Set("archived", "true")
-	}
-	if opts.JobID != "" {
-		q.Set("job", opts.JobID)
-	}
-	if opts.TaskID != "" {
-		q.Set("task", opts.TaskID)
-	}
-	if len(opts.TaskIDs) > 0 {
-		// Exact-set execute (interactive selection). Comma-safe: task ids
-		// contain no commas.
-		q.Set("task_ids", strings.Join(opts.TaskIDs, ","))
-	}
-	if opts.CkptOnly {
-		q.Set("ckpt_only", "true")
-	}
-	// Pipe target filter from CLI → daemon so clean is scoped correctly.
-	if p.TargetFilter != "" {
-		q.Set("target", p.TargetFilter)
-	}
+	// JSON body — CleanOptions already carries the full wire shape.
 	var result backend.CleanResult
-	if err := p.do(ctx, "POST", "/api/clean?"+q.Encode(), nil, &result); err != nil {
+	if err := p.do(ctx, "POST", "/api/dashboard/clean", opts, &result); err != nil {
 		return nil, err
 	}
 	return &result, nil
@@ -333,14 +371,14 @@ func (p *Proxy) ThawTasks(ctx context.Context, owner int, force bool) (*backend.
 }
 
 func (p *Proxy) RenameProject(ctx context.Context, oldName, newName string) error {
-	return p.do(ctx, "POST", "/api/projects/"+url.PathEscape(oldName)+"/rename", map[string]string{
+	return p.do(ctx, "POST", "/api/dashboard/projects/"+url.PathEscape(oldName)+"/rename", map[string]string{
 		"new_name": newName,
 	}, nil)
 }
 
 func (p *Proxy) GetProject(ctx context.Context, name string) (*project.Config, error) {
 	var cfg project.Config
-	if err := p.do(ctx, "GET", "/api/projects/"+url.PathEscape(name), nil, &cfg); err != nil {
+	if err := p.do(ctx, "GET", "/api/dashboard/projects/"+url.PathEscape(name), nil, &cfg); err != nil {
 		return nil, err
 	}
 	return &cfg, nil
@@ -349,7 +387,7 @@ func (p *Proxy) GetProject(ctx context.Context, name string) (*project.Config, e
 // ListProjects forwards the daemon's server-assembled summaries verbatim.
 func (p *Proxy) ListProjects(ctx context.Context) ([]backend.ProjectSummary, error) {
 	var out []backend.ProjectSummary
-	if err := p.do(ctx, "GET", "/api/projects/summaries", nil, &out); err != nil {
+	if err := p.do(ctx, "GET", "/api/dashboard/projects", nil, &out); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -357,7 +395,7 @@ func (p *Proxy) ListProjects(ctx context.Context) ([]backend.ProjectSummary, err
 
 func (p *Proxy) MatchProjects(ctx context.Context, dir string) ([]backend.ProjectSummary, error) {
 	var configs []project.Config
-	if err := p.do(ctx, "GET", "/api/projects/match?dir="+url.QueryEscape(dir), nil, &configs); err != nil {
+	if err := p.do(ctx, "GET", "/api/dashboard/projects/match?dir="+url.QueryEscape(dir), nil, &configs); err != nil {
 		return nil, err
 	}
 	summaries, err := p.ListProjects(ctx)
@@ -380,14 +418,6 @@ func (p *Proxy) MatchProjects(ctx context.Context, dir string) ([]backend.Projec
 }
 
 // ── HTTP helpers ────────────────────────────────────────────────────────
-
-func (p *Proxy) taskRows(ctx context.Context, jobID string) ([]store.TaskRow, error) {
-	var tasks []store.TaskRow
-	if err := p.do(ctx, "GET", "/api/tasks?job="+url.QueryEscape(jobID)+"&status=all", nil, &tasks); err != nil {
-		return nil, err
-	}
-	return tasks, nil
-}
 
 // Sbatch enqueues a foreign task on the server (runq preset). Returns the
 // task id, which the client records as the task's external_id.

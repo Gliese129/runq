@@ -43,6 +43,15 @@ type Daemon struct {
 	// sshBackends holds SSHBackend references for cleanup on shutdown.
 	sshBackends []*backend.SSHBackend
 
+	// pidPath is this deployment's PID file (client: daemon.pid,
+	// runqd: runqd.pid) — the two daemons coexist on one machine.
+	pidPath string
+
+	// Client deployment only: the unix socket the dashboard mux serves the
+	// CLI on, and the http.Server wrapping it (for shutdown).
+	socketPath string
+	clientSrv  *http.Server
+
 	// localTargetNames are the routing keys for local GPU targets. Used by
 	// restore paths to avoid loading remote tasks into the local queue.
 	// nil means legacy/test mode: restore all local-store rows.
@@ -69,7 +78,13 @@ func NewDaemon() (*Daemon, error) {
 // NewDaemonWith creates a daemon with explicit surface options.
 func NewDaemonWith(opts DaemonOptions) (*Daemon, error) {
 	_, dataDir := utils.ResolveDataDir()
+	// Two deployments, two file sets under one data root: the client keeps
+	// every legacy name (runq.db/runq.sock/daemon.pid — history and socket
+	// paths survive the split); runqd gets its own store, socket and pid.
 	paths := utils.PathsFromDataDir(dataDir)
+	if opts.Headless {
+		paths = utils.RunqdPathsFromDataDir(dataDir)
+	}
 
 	// Ensure data and log directories exist.
 	if err := os.MkdirAll(paths.LogDir, 0o755); err != nil {
@@ -83,6 +98,13 @@ func NewDaemonWith(opts DaemonOptions) (*Daemon, error) {
 	st, err := store.Open(paths.DBPath)
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
+	}
+
+	// Client deployment: routing + tracking + dashboard only — assembled in
+	// client_daemon.go. Everything below this line is the runqd (headless
+	// execution) assembly: local lane + gin API.
+	if !opts.Headless {
+		return newClientDaemon(dataDir, paths, logger, st)
 	}
 
 	gpus, err := resource.Detect()
@@ -118,11 +140,6 @@ func NewDaemonWith(opts DaemonOptions) (*Daemon, error) {
 		return nil, fmt.Errorf("load global config: %w", err)
 	}
 	reg := project.NewRegistry(st.DB())
-
-	// Determine the mode string for dashboard config response. With
-	// targets[], the concept of a single mode is legacy; use "daemon" for
-	// the local target's push-model semantics.
-	mode := config.ConfigMode(storageCfg)
 
 	// Build per-target backends. The local target always exists (daemon's
 	// GPU pool); scheduler-type targets get SSHBackend wrappers.
@@ -211,30 +228,24 @@ func NewDaemonWith(opts DaemonOptions) (*Daemon, error) {
 		Pool:             pool,
 		sshBackends:      sshBackends,
 		localTargetNames: localTargetNames,
+		pidPath:          paths.PIDPath,
 	}
 
-	// Embedded dashboard: client deployments only, and only when enabled in
-	// config. The server stays headless — a server-side web UI would need
-	// its own auth story (who sees whose jobs), which violates the
-	// "SSH is the auth boundary" principle.
-	dashCfg := storageCfg.Dashboard
-	if !opts.Headless && (dashCfg == nil || dashCfg.Enabled) {
-		listen := "127.0.0.1:8077"
-		if dashCfg != nil && dashCfg.Listen != "" {
-			listen = dashCfg.Listen
-		}
-		d.Dashboard = dashboard.NewServer(multiBe, mode, storageCfg)
-		d.dashboardListen = listen
-		logger.Info("dashboard enabled", "listen", listen)
-	}
-
+	// No dashboard here: this is the runqd assembly, and the server stays
+	// headless — a server-side web UI would need its own auth story (who
+	// sees whose jobs), which violates the "SSH is the auth boundary"
+	// principle. The dashboard belongs to the client (client_daemon.go).
 	return d, nil
 }
 
 // Run starts the scheduler, API server (Unix socket), and embedded
 // dashboard (TCP), then blocks until SIGINT/SIGTERM.
 func (d *Daemon) Run() error {
-	pidFile, err := utils.LockFile(api.DefaultPIDPath())
+	pidPath := d.pidPath
+	if pidPath == "" {
+		pidPath = api.DefaultPIDPath() // legacy/test construction path
+	}
+	pidFile, err := utils.LockFile(pidPath)
 	if err != nil {
 		return err
 	}
@@ -244,21 +255,31 @@ func (d *Daemon) Run() error {
 	}
 	d.PidFile = pidFile
 
-	if err := d.restoreRuntimeState(); err != nil {
-		return err
+	// runqd (execution daemon): restore local lane, start the scheduler,
+	// serve the gin API on the socket.
+	if d.Server != nil {
+		if err := d.restoreRuntimeState(); err != nil {
+			return err
+		}
+		d.Scheduler.Start()
+
+		sigChan := make(chan os.Signal, 1)
+		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+		go func() {
+			<-sigChan
+			d.Shutdown(context.Background())
+		}()
+
+		// API server blocks on Unix socket.
+		return d.Server.Start()
 	}
 
-	d.Scheduler.Start()
-
-	// Start each remote target's scheduler lane: restore its queue/slots from
-	// DB, start the lane scheduler, and launch the sensor loops (marker scan +
-	// probe align). Loops stop via Close() on shutdown.
+	// Client daemon: lanes restore themselves in Start(); the dashboard mux
+	// serves both listeners (unix socket for the CLI, TCP for the browser).
 	for _, sshBe := range d.sshBackends {
 		sshBe.Start(context.Background())
 	}
-
-	// Start embedded dashboard on TCP (non-blocking).
-	if d.Dashboard != nil {
+	if d.dashboardListen != "" {
 		go d.serveDashboard()
 	}
 
@@ -269,8 +290,29 @@ func (d *Daemon) Run() error {
 		d.Shutdown(context.Background())
 	}()
 
-	// API server blocks on Unix socket.
-	return d.Server.Start()
+	return d.serveClientSocket()
+}
+
+// serveClientSocket serves the dashboard mux on the client's unix socket —
+// the CLI's channel. Blocks until Shutdown.
+func (d *Daemon) serveClientSocket() error {
+	// Stale socket from an unclean exit: the PID lock above guarantees we
+	// are the only client daemon, so removing it is safe.
+	_ = os.Remove(d.socketPath)
+	ln, err := net.Listen("unix", d.socketPath)
+	if err != nil {
+		return fmt.Errorf("listen on client socket %s: %w", d.socketPath, err)
+	}
+	if err := os.Chmod(d.socketPath, 0o600); err != nil {
+		d.Logger.Warn("chmod client socket failed", "error", err)
+	}
+	d.Logger.Info("client daemon serving", "socket", d.socketPath)
+	d.clientSrv = &http.Server{Handler: d.Dashboard.Handler()}
+	err = d.clientSrv.Serve(ln)
+	if err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	return nil
 }
 
 // serveDashboard starts the dashboard HTTP server on TCP. Errors are
@@ -384,16 +426,28 @@ func (d *Daemon) Shutdown(_ context.Context) {
 	if d.Dashboard != nil {
 		d.Dashboard.Close()
 	}
-	// Close SSH backends before the scheduler and store — outstanding SSH
+	// Close lanes before the scheduler and store — outstanding SSH
 	// operations should drain before the DB is closed.
 	for _, sshBe := range d.sshBackends {
 		if err := sshBe.Close(); err != nil {
-			d.Logger.Warn("SSH backend close failed", "error", err)
+			d.Logger.Warn("lane close failed", "error", err)
 		}
 	}
-	d.Scheduler.Shutdown()
-	if err := d.Server.Shutdown(); err != nil {
-		d.Logger.Error("server shutdown failed", "error", err)
+	// Deployment-specific surfaces: runqd has Scheduler+gin Server; the
+	// client has the socket http.Server. Guard both — one Daemon type, two
+	// assemblies.
+	if d.Scheduler != nil {
+		d.Scheduler.Shutdown()
+	}
+	if d.Server != nil {
+		if err := d.Server.Shutdown(); err != nil {
+			d.Logger.Error("server shutdown failed", "error", err)
+		}
+	}
+	if d.clientSrv != nil {
+		if err := d.clientSrv.Close(); err != nil {
+			d.Logger.Error("client socket server close failed", "error", err)
+		}
 	}
 	if err := d.Store.Close(); err != nil {
 		d.Logger.Error("db close failed", "error", err)

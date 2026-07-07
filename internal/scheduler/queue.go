@@ -196,6 +196,25 @@ func (q *Queue) Requeue(taskID string) error {
 	return nil
 }
 
+// RequeueTransient returns a task to pending WITHOUT consuming retry budget:
+// the launch never happened (scheduler unreachable), so this is not an
+// attempt — no count, no external id (it was never assigned).
+func (q *Queue) RequeueTransient(taskID string) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	t := q.findLocked(taskID)
+	if t == nil {
+		return fmt.Errorf("task %q not found in queue", taskID)
+	}
+	t.Status = StatusPending
+	t.GPUs = nil
+	t.StartedAt = nil
+	t.FinishedAt = nil
+	t.ExternalID = ""
+	return nil
+}
+
 // RetryExisting updates an existing terminal task in-place for manual retry.
 // Returns false if the task is not currently in the queue.
 func (q *Queue) RetryExisting(task *Task) bool {

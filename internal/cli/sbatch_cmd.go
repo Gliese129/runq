@@ -30,11 +30,12 @@ var sbatchCmd = &cobra.Command{
 		name, _ := cmd.Flags().GetString("name")
 		taskDir, _ := cmd.Flags().GetString("task-dir")
 		logPath, _ := cmd.Flags().GetString("log")
+		projectLabel, _ := cmd.Flags().GetString("project")
 
-		p := api.NewProxy(getSocketPath())
+		p := api.NewProxy(getPlumbingSocketPath())
 		id, err := p.Sbatch(cmd.Context(), backend.ForeignTaskSpec{
 			RunSH: args[0], GPUs: gpus, Name: name,
-			TaskDir: taskDir, LogPath: logPath,
+			TaskDir: taskDir, LogPath: logPath, Project: projectLabel,
 		})
 		if err != nil {
 			return err
@@ -51,7 +52,7 @@ var squeueCmd = &cobra.Command{
 	Hidden: true,
 	Args:   cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		p := api.NewProxy(getSocketPath())
+		p := api.NewProxy(getPlumbingSocketPath())
 		entries, err := p.Squeue(cmd.Context())
 		if err != nil {
 			return err
@@ -72,9 +73,9 @@ var scancelCmd = &cobra.Command{
 	Hidden: true,
 	Args:   cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return withBackend(cmd, func(be backend.Backend) error {
-			return be.KillTask(cmd.Context(), args[0])
-		})
+		// Plumbing socket: cancel on THIS machine's executor.
+		p := api.NewProxy(getPlumbingSocketPath())
+		return p.MachineKillTask(cmd.Context(), args[0])
 	},
 }
 
@@ -83,6 +84,7 @@ func init() {
 	sbatchCmd.Flags().String("name", "", "Display name (job note)")
 	sbatchCmd.Flags().String("task-dir", "", "Task workspace dir prepared by the client (required)")
 	sbatchCmd.Flags().String("log", "", "Log path (default <task-dir>/<task_id>.log)")
+	sbatchCmd.Flags().String("project", "", "Client-side project name (plain label, no registration)")
 	_ = sbatchCmd.MarkFlagRequired("task-dir")
 	rootCmd.AddCommand(sbatchCmd, squeueCmd, scancelCmd)
 }

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gliese129/runq/internal/logfile"
+	"github.com/gliese129/runq/internal/rfs"
 )
 
 // utilsLogSession tracks a single uploaded log file for the log viewer.
@@ -164,7 +165,7 @@ func (s *Server) handleUtilsLogRead(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	lr, err := logfile.Open(path)
+	lr, err := logfile.Open(path, rfs.NewLocalFS())
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -205,7 +206,7 @@ func (s *Server) handleUtilsLogSearch(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	lr, err := logfile.Open(path)
+	lr, err := logfile.Open(path, rfs.NewLocalFS())
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return

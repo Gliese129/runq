@@ -19,6 +19,22 @@ func getSocketPath() string {
 	return api.DefaultSocketPath()
 }
 
+// getPlumbingSocketPath resolves the socket for PLUMBING commands
+// (sbatch/squeue/scancel, gpu --json, thaw, status): they address "this
+// machine's executor" — runqd — not the client daemon. Same override
+// precedence as getSocketPath; only the default differs. This split is what
+// makes runq-preset templates portable verbatim (remote lab server or the
+// client's own machine) and immune to the client-asks-itself loop.
+func getPlumbingSocketPath() string {
+	if socketPathFlags, _ := rootCmd.PersistentFlags().GetString("socket"); socketPathFlags != "" {
+		return socketPathFlags
+	}
+	if socketPathEnv := os.Getenv("RUNQ_SOCKET"); socketPathEnv != "" {
+		return socketPathEnv
+	}
+	return api.DefaultRunqdSocketPath()
+}
+
 // ── Helpers (provided) ──
 
 // printJSON prints v as indented JSON to stdout.

@@ -134,13 +134,14 @@ func (f PreflightFinding) String() string {
 	return fmt.Sprintf("  - %s: %s", f.Kind, f.Detail)
 }
 
-// CheckResult is one check in the three-state grammar shared with
-// hpcconfig.Check: passed / failed / skipped. skipped means "could not be
-// checked HERE" (missing prerequisite, disabled by config) — it never
-// blocks a submit and must never be presented as a failure.
+// CheckResult is one check in the four-state grammar: passed / failed /
+// warning / skipped. skipped means "could not be checked HERE" (missing
+// prerequisite, disabled by config); warning means "found something, but it
+// correlates too weakly with task runnability to block" (pip check). Only
+// "failed" blocks a submit.
 type CheckResult struct {
 	Name   string `json:"name"`   // writable | paths | imports | pip_check | gpu
-	Status string `json:"status"` // passed | failed | skipped
+	Status string `json:"status"` // passed | failed | warning | skipped
 	Detail string `json:"detail,omitempty"`
 }
 
@@ -192,6 +193,16 @@ func fold(name string, findings []PreflightFinding, scope string) CheckResult {
 	return CheckResult{name, "passed", detail}
 }
 
+// foldAdvisory is fold for checks whose findings should be SEEN but never
+// block a submit: status "warning" is excluded from Report.OK()/Err().
+func foldAdvisory(name string, findings []PreflightFinding, scope string) CheckResult {
+	r := fold(name, findings, scope)
+	if r.Status == "failed" {
+		r.Status = "warning"
+	}
+	return r
+}
+
 // RunPreflight executes all four checks against the project config + a
 // **sample rendered command** (the first task's command is the natural
 // choice — all tasks in a sweep share the same script + same env, only
@@ -234,7 +245,12 @@ func (p Preflight) RunPreflight(ctx context.Context, proj *project.Config, sampl
 		} else {
 			results = append(results, fold("imports", p.checkImports(ctx, proj, interp, importNames, p.ImportTimeout), p.Scope))
 		}
-		results = append(results, fold("pip_check", p.checkPipCheck(ctx, proj, interp, p.PipCheckTimeout), p.Scope))
+		// pip check is ADVISORY: its findings (env-wide dependency
+		// inconsistencies) correlate weakly with whether THIS task can run —
+		// a broken global stub package must not block a runnable job.
+		// Warnings display but never fail the submit (imports stay blocking:
+		// they directly predict a crash).
+		results = append(results, foldAdvisory("pip_check", p.checkPipCheck(ctx, proj, interp, p.PipCheckTimeout), p.Scope))
 	}
 
 	// GPU smoke test: probe-don't-enumerate (C2). No driver here ≠ failure.

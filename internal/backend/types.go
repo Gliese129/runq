@@ -1,10 +1,12 @@
 package backend
 
 import (
+	"context"
 	"encoding/json"
 	"time"
 
 	"github.com/gliese129/runq/internal/job"
+	"github.com/gliese129/runq/internal/logfile"
 )
 
 // View types shared by HTTP responses and CLI --json output.
@@ -98,6 +100,10 @@ type GPUSlot struct {
 	UtilPercent int    `json:"util_percent"`
 	TaskID      string `json:"task_id,omitempty"`
 	JobID       string `json:"job_id,omitempty"`
+	// Target is the compute target these GPUs belong to — the aggregated
+	// dashboard panel (local ∪ remote) groups by it. Stamped by
+	// MultiBackend during aggregation.
+	Target string `json:"target,omitempty"`
 }
 
 type ActionResponse struct {
@@ -178,6 +184,37 @@ type CleanResult struct {
 	Jobs       int                `json:"jobs"`
 	FreedBytes int64              `json:"freed_bytes"`
 	Preview    []CleanPreviewItem `json:"preview,omitempty"` // populated only in dry-run
+}
+
+// LogMatch is one grep hit from JobLogSearch: which task's log, where, and
+// the matching line (owning-side grep — results travel, files don't).
+type LogMatch struct {
+	TaskID string `json:"task_id"`
+	Line   int    `json:"line"`
+	Text   string `json:"text"`
+}
+
+// LogPage is one page of a task log: byte-anchored, line-quantified. The
+// log-paging vocabulary is owned by the logfile package (single domain,
+// single spelling); this alias only re-exports it for Backend signatures.
+type LogPage = logfile.Page
+
+// LogFollower is a pull-based LogPage iterator over a growing log — the
+// return type of TaskLogFollow. Content arrives as pages (stripped lines +
+// byte anchors), never raw bytes, so consumers inherit the positional read
+// path's clamping/stripping instead of re-implementing it.
+// *logfile.Follower satisfies this natively — no adapter.
+//
+// Next blocks until new data is available, then returns one page and
+// advances. It returns promptly with ctx.Err() on cancellation. After a
+// rotation the next page's Offset is 0 (view reset signal). Next never
+// returns an empty page: it waits instead.
+//
+// Close releases the underlying file handle and must be idempotent; a
+// blocked Next must not deadlock Close.
+type LogFollower interface {
+	Next(ctx context.Context) (*LogPage, error)
+	Close() error
 }
 
 // QueueEntry is one row of the squeue output (runq preset): a non-terminal

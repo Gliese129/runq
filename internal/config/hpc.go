@@ -167,7 +167,7 @@ func WriteHPCTemplate(scheduler string) (path string, created bool, err error) {
 // HPCPlaceholders is the single source of truth for which {{vars}} each
 // template accepts.
 var HPCPlaceholders = map[string][]string{
-	"submit_template": {"run_sh", "gpus", "job_id", "task_id", "task_dir", "name"},
+	"submit_template": {"run_sh", "gpus", "job_id", "task_id", "task_dir", "name", "project", "log_path"},
 	"kill_template":   {"ext_id"},
 	"status_template": {"ext_id"},
 	"status_parser":   {"ext_id"},
@@ -270,6 +270,13 @@ hpc:
     PREEMPTED: failed
 
   kill_template: "scancel {{ext_id}}"
+
+  # Optional: contribute this cluster's GPU view to the client's aggregated
+  # panel (local + every remote target). The command must print a JSON array
+  # of {"index","name","mem_total_mb","mem_used_mb","util_percent"} objects.
+  # Cluster-specific — e.g. synthesize from sinfo gres/gresused columns, or
+  # point at a site-provided reporting script.
+  # gpu_template: "my-cluster-gpu-report --json"
 `
 
 const pbsHPCBody = `
@@ -365,8 +372,12 @@ hpc:
 // the client still applies the same hibernation etiquette as everywhere.
 const runqHPCBody = `
 hpc:
-  submit_template: "runq sbatch {{run_sh}} --gpus {{gpus}} --task-dir {{task_dir}} --name {{name}}"
+  submit_template: "runq sbatch {{run_sh}} --gpus {{gpus}} --task-dir {{task_dir}} --name {{name}} --project {{project}} --log {{log_path}}"
   submit_id_regex: "submitted (\\S+)"
+
+  # runqd's squeue reads its own SQLite — an empty list is a real answer,
+  # not a parse suspicion; skip the conservative per-job fallback.
+  trust_empty_list: true
 
   # Per-task probe and batch probe both come from runq's own vocabulary —
   # PENDING/RUNNING/SUCCESS/FAILED/KILLED map 1:1 onto canonical signals.
@@ -374,6 +385,9 @@ hpc:
   status_list_template: "runq squeue"
 
   kill_template: "runq scancel {{ext_id}}"
+
+  # This server's GPUs feed the client's aggregated (local + remote) panel.
+  gpu_template: "runq gpu --json"
 `
 
 // Full templates = global header + hpc header + hpc body (for new files).

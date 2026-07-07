@@ -37,13 +37,30 @@ type DataDirPaths struct {
 	LogDir     string
 }
 
-// PathsFromDataDir computes all daemon file paths from a data directory.
+// PathsFromDataDir computes the CLIENT daemon's file paths from a data
+// directory. The client inherits every legacy filename (runq.db / runq.sock /
+// daemon.pid) on purpose: pre-split job history stays visible in the
+// dashboard and existing CLI socket paths keep working.
 func PathsFromDataDir(dataDir string) DataDirPaths {
 	return DataDirPaths{
 		DataDir:    dataDir,
 		DBPath:     filepath.Join(dataDir, "runq.db"),
 		SocketPath: filepath.Join(dataDir, "runq.sock"),
 		PIDPath:    filepath.Join(dataDir, "daemon.pid"),
+		LogDir:     filepath.Join(dataDir, "logs"),
+	}
+}
+
+// RunqdPathsFromDataDir computes the EXECUTION daemon's (runqd) file paths.
+// Same data root, distinct names: runqd owns its own store (the execution
+// ledger) and its own socket — the two-daemon split means two single-writer
+// stores, never two writers on one file.
+func RunqdPathsFromDataDir(dataDir string) DataDirPaths {
+	return DataDirPaths{
+		DataDir:    dataDir,
+		DBPath:     filepath.Join(dataDir, "runqd.db"),
+		SocketPath: filepath.Join(dataDir, "runqd.sock"),
+		PIDPath:    filepath.Join(dataDir, "runqd.pid"),
 		LogDir:     filepath.Join(dataDir, "logs"),
 	}
 }

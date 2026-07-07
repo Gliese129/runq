@@ -19,6 +19,9 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"unicode/utf8"
+
+	"github.com/gliese129/runq/internal/rfs"
 )
 
 // DefaultPageLines is the number of lines returned when the caller doesn't
@@ -33,6 +36,8 @@ const MaxSearchMatches = 500
 
 const BufferSize = 64 * 1024 // 64KB
 
+const MaxPageSize = 4 * 1024 * 1024 // 4MB
+
 // ────────────────────────────────────────────────────────────────────────────
 // Reader
 // ────────────────────────────────────────────────────────────────────────────
@@ -41,14 +46,18 @@ const BufferSize = 64 * 1024 // 64KB
 // It is NOT safe for concurrent use; callers must synchronise externally or
 // open one Reader per goroutine.
 type Reader struct {
-	f    *os.File
+	f    rfs.File
 	path string
 	size int64 // cached at Open; refreshed by Refresh()
+	fs   rfs.FS
 }
 
 // Open opens a log file for reading. The caller must call Close when done.
-func Open(path string) (*Reader, error) {
-	f, err := os.Open(path)
+func Open(path string, fs rfs.FS) (*Reader, error) {
+	if fs == nil {
+		fs = rfs.NewLocalFS()
+	}
+	f, err := fs.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("logfile.Open: %w", err)
 	}
@@ -57,7 +66,7 @@ func Open(path string) (*Reader, error) {
 		f.Close()
 		return nil, fmt.Errorf("logfile.Open stat: %w", err)
 	}
-	return &Reader{f: f, path: path, size: info.Size()}, nil
+	return &Reader{f: f, path: path, size: info.Size(), fs: fs}, nil
 }
 
 // Close releases the underlying file handle.
@@ -80,21 +89,28 @@ func (r *Reader) Refresh() error {
 // Page — the return type for ReadLines
 // ────────────────────────────────────────────────────────────────────────────
 
-// Page is a window of log lines anchored by byte offsets.
+// Page is a window of log lines anchored by byte offsets. It is the ONE
+// vocabulary for log paging across the codebase: backend.LogPage is an
+// alias of this type, and it marshals directly onto the HTTP wire.
 type Page struct {
 	// Lines contains the ANSI-stripped text of each line (no trailing \n).
 	Lines []string `json:"lines"`
 
-	// StartOffset is the byte offset in the raw file where the first
-	// returned line begins (after snap-to-line-boundary).
-	StartOffset int64 `json:"start_offset"`
+	// Offset is the byte offset in the raw file where the first returned
+	// line begins (after snap-to-line-boundary).
+	Offset int64 `json:"offset"`
 
-	// EndOffset is the byte offset immediately after the last byte of the
-	// last returned line (i.e. pointing at the \n or EOF).
-	EndOffset int64 `json:"end_offset"`
+	// NextOffset is the byte offset immediately after the last byte of the
+	// last returned line — the resume anchor for the next page.
+	NextOffset int64 `json:"next_offset"`
 
-	// TotalBytes is the file size as of this read.
-	TotalBytes int64 `json:"total_bytes"`
+	// Size is the file size as of this read (pager/heatmap denominator).
+	Size int64 `json:"size"`
+
+	// Truncated reports that the page's LAST line was cut mid-line by the
+	// page byte budget (continuation follows at NextOffset). It does NOT
+	// fire at the true end of file.
+	Truncated bool `json:"truncated,omitempty"`
 
 	// TotalLines is the total line count. Computing this requires a full
 	// scan, so it is set to -1 when unknown (large files). Callers must
@@ -111,43 +127,122 @@ type Page struct {
 //  4. TotalBytes from r.size; TotalLines = -1 (lazy).
 //
 // Returns an empty Page (not an error) when offset >= file size.
+// offset is a pure byte position (io.Seek style): negative values are an
+// error — the tail view is TailLines' job, not a sentinel here.
 func (r *Reader) ReadLines(offset int64, n int) (*Page, error) {
-	f, err := os.Open(r.path)
+	if offset < 0 {
+		return nil, fmt.Errorf("logfile: negative offset %d (use TailLines for tail view)", offset)
+	}
+	_ = r.Refresh()
+
+	startOffset, err := snapToLineStart(r.f, offset, r.size)
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
-
-	startOffset, err := snapToLineStart(f, offset, r.size)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := f.Seek(startOffset, io.SeekStart); err != nil {
+	if _, err := r.f.Seek(startOffset, io.SeekStart); err != nil {
 		return nil, err
 	}
 
-	br := bufio.NewReaderSize(f, BufferSize)
+	lr := &io.LimitedReader{
+		R: r.f,
+		N: MaxPageSize + 1,
+	}
+	br := bufio.NewReaderSize(lr, BufferSize)
 	currOffset := startOffset
 	lines := make([]string, 0, n)
+	truncated := false
+	ansiRegex := regexp.MustCompile(`^\x1b\[[0-9;]*[a-zA-Z]`)
+
 	for len(lines) < n {
 		raw, err := br.ReadBytes('\n')
+		if err == io.EOF {
+			if len(raw) > 0 {
+				// quick ASNI check
+				for i := len(raw) - 1; i >= max(0, len(raw)-64); i-- {
+					if raw[i] == '\x1b' {
+						// check if full ASNI
+						if !ansiRegex.Match(raw[i:]) {
+							raw = raw[:i]
+						}
+						break
+					}
+				}
+				// quick utf-8 check
+				for i := len(raw) - 1; i >= max(0, len(raw)-utf8.UTFMax); i-- {
+					if utf8.RuneStart(raw[i]) {
+						if !utf8.FullRune(raw[i:]) {
+							raw = raw[:i]
+						}
+						break
+					}
+				}
+
+				lines = append(lines, StripANSI(string(raw)))
+				currOffset += int64(len(raw))
+				if currOffset < r.size {
+					truncated = true
+				}
+			}
+			break
+		}
+
 		if len(raw) > 0 {
 			line := trimNewline(raw)
 			lines = append(lines, StripANSI(string(line)))
 			currOffset += int64(len(raw))
 		}
-		if err != nil { // EOF or other error
-			break
+		if err != nil { // other error
+			return nil, err
 		}
 	}
 
 	return &Page{
-		Lines:       lines,
-		StartOffset: startOffset,
-		EndOffset:   currOffset,
-		TotalBytes:  r.size,
-		TotalLines:  -1, // lazy: full-file line count not computed on read path
+		Lines:      lines,
+		Offset:     startOffset,
+		NextOffset: currOffset,
+		Size:       r.size,
+		Truncated:  truncated,
+		TotalLines: -1, // lazy: full-file line count not computed on read path
 	}, nil
+}
+
+// TailLines returns the last n lines of the file — the entry point for
+// every first paint (CLI logs, dashboard log view, follow's initial
+// snapshot), where the caller has no byte coordinates yet.
+//
+// Resolve-then-delegate, NOT a mirror of ReadLines: scanBackNewlines counts
+// n newlines backward from EOF to find the start position, then ReadLines
+// does all actual reading. One read path, one clamp path.
+//
+// The returned Page's Offset is the caller's anchor for paging up; after
+// the first paint everything is positional ReadLines.
+func (r *Reader) TailLines(n int) (*Page, error) {
+	if n <= 0 {
+		n = DefaultPageLines
+	}
+	_ = r.Refresh()
+
+	end := r.size
+	if end > 0 {
+		// A trailing '\n' TERMINATES the last line rather than starting an
+		// empty one ("a\nb\n" is 2 lines, not 3) — exclude it before counting.
+		one := make([]byte, 1)
+		if _, err := r.f.Seek(end-1, io.SeekStart); err != nil {
+			return nil, err
+		}
+		if _, err := io.ReadFull(r.f, one); err != nil {
+			return nil, err
+		}
+		if one[0] == '\n' {
+			end--
+		}
+	}
+
+	start, _, err := scanBackNewlines(r.f, end, n, -1) // unbounded; <n lines → (0, true)
+	if err != nil {
+		return nil, err
+	}
+	return r.ReadLines(start, n)
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -372,8 +467,11 @@ type ActivityRecord struct {
 // ParseActivityTSV parses an activity.tsv file into records.
 // Supports both 3-column (ts, bytes, lines) and legacy 2-column (ts, bytes) format.
 // Legacy 2-column rows get Lines = -1.
-func ParseActivityTSV(path string) ([]ActivityRecord, error) {
-	data, err := os.ReadFile(path)
+func ParseActivityTSV(path string, fs rfs.FS) ([]ActivityRecord, error) {
+	if fs == nil {
+		fs = rfs.NewLocalFS()
+	}
+	data, err := fs.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -401,32 +499,74 @@ func ParseActivityTSV(path string) ([]ActivityRecord, error) {
 	return records, nil
 }
 
-func snapToLineStart(f *os.File, offset int64, fileSize int64) (lineStart int64, err error) {
+// snapWindow bounds how far snapToLineStart may rewind. It must stay well
+// below MaxPageSize: that is what guarantees the PROGRESS invariant — a
+// truncated-page continuation point sits page-budget bytes past its line
+// start, and an unbounded rewind would re-read the same page forever.
+// 64KB is generous for any sane line; beyond it the offset is deep inside
+// a mega-line and starting in place (continuation view) is the right call.
+const snapWindow = int64(BufferSize)
+
+func snapToLineStart(f rfs.File, offset int64, fileSize int64) (lineStart int64, err error) {
 	if offset == 0 {
 		return 0, nil
 	}
 	if offset >= fileSize {
 		return fileSize, nil
 	}
-	const chunkSize = int64(512)
+	pos, ok, err := scanBackNewlines(f, offset, 1, snapWindow)
+	if err != nil {
+		return 0, err
+	}
+	if !ok {
+		return offset, nil // no '\n' within the window: continuation point, stay put
+	}
+	return pos, nil
+}
+
+// scanBackNewlines walks backward from `from`, returning the position just
+// after the n-th '\n'. This is the single backward-scanning primitive —
+// direction lives in the POSITION domain; content is always read forward
+// (ReadLines), so there is exactly one clamp/strip path in this package.
+//
+// window < 0 means unbounded. ok=false only when the window was exhausted
+// before n newlines were found (the caller picks the fallback); hitting
+// the beginning of file returns (0, true) — the file head IS a line start.
+func scanBackNewlines(f rfs.File, from int64, n int, window int64) (int64, bool, error) {
+	if from <= 0 || n <= 0 {
+		return 0, true, nil
+	}
+	floor := int64(0)
+	if window >= 0 && from-window > 0 {
+		floor = from - window
+	}
+
+	const chunkSize = int64(4096)
 	buf := make([]byte, chunkSize)
-	currOffset := offset
-	for currOffset > 0 {
-		readSize := min(currOffset, chunkSize)
-		currOffset -= readSize
-		if _, err := f.Seek(currOffset, io.SeekStart); err != nil {
-			return 0, err
+	seen := 0
+	curr := from
+	for curr > floor {
+		readSize := min(curr-floor, chunkSize)
+		curr -= readSize
+		if _, err := f.Seek(curr, io.SeekStart); err != nil {
+			return 0, false, err
 		}
-		n, err := f.Read(buf[:readSize])
-		if err != nil && err != io.EOF {
-			return 0, err
+		if _, err := io.ReadFull(f, buf[:readSize]); err != nil {
+			return 0, false, err
 		}
-		idx := bytes.LastIndexByte(buf[:n], '\n')
-		if idx != -1 {
-			return currOffset + int64(idx) + 1, nil // +1: past the \n to actual line start
+		for i := readSize - 1; i >= 0; i-- {
+			if buf[i] == '\n' {
+				seen++
+				if seen >= n {
+					return curr + i + 1, true, nil // +1: past the '\n' to the line start
+				}
+			}
 		}
 	}
-	return 0, nil
+	if curr == 0 {
+		return 0, true, nil // hit BOF: fewer than n lines above `from`
+	}
+	return 0, false, nil // window exhausted before BOF
 }
 
 func trimNewline(raw []byte) []byte {

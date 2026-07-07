@@ -176,13 +176,21 @@ func (m *MultiBackend) CompareMetrics(ctx context.Context, jobID, key string, de
 	return be.CompareMetrics(ctx, jobID, key, desc)
 }
 
+// GPUStatus aggregates GPU visibility across ALL targets (local ∪ remote —
+// remote targets report through their gpu_template, e.g. the runq preset's
+// `runq gpu --json`; targets without one contribute nothing). Slots are
+// stamped with their target name for panel grouping.
 func (m *MultiBackend) GPUStatus(ctx context.Context) ([]GPUSlot, error) {
-	// Only local targets have GPU visibility; aggregate all.
 	var all []GPUSlot
-	for _, be := range m.targets {
+	for name, be := range m.targets {
 		slots, err := be.GPUStatus(ctx)
 		if err != nil {
 			continue
+		}
+		for i := range slots {
+			if slots[i].Target == "" {
+				slots[i].Target = name
+			}
 		}
 		all = append(all, slots...)
 	}
@@ -203,6 +211,40 @@ func (m *MultiBackend) TaskMetrics(ctx context.Context, taskID string) ([]Metric
 		return nil, err
 	}
 	return be.TaskMetrics(ctx, taskID)
+}
+
+// ── RQ-44: log access — pure ownership routing ────────────────────────────
+
+func (m *MultiBackend) TaskLogRead(ctx context.Context, taskID string, offset int64, maxLines int) (*LogPage, error) {
+	be, err := m.resolveTask(ctx, taskID)
+	if err != nil {
+		return nil, err
+	}
+	return be.TaskLogRead(ctx, taskID, offset, maxLines)
+}
+
+func (m *MultiBackend) TaskLogTail(ctx context.Context, taskID string, maxLines int) (*LogPage, error) {
+	be, err := m.resolveTask(ctx, taskID)
+	if err != nil {
+		return nil, err
+	}
+	return be.TaskLogTail(ctx, taskID, maxLines)
+}
+
+func (m *MultiBackend) TaskLogFollow(ctx context.Context, taskID string, offset int64) (LogFollower, error) {
+	be, err := m.resolveTask(ctx, taskID)
+	if err != nil {
+		return nil, err
+	}
+	return be.TaskLogFollow(ctx, taskID, offset)
+}
+
+func (m *MultiBackend) JobLogSearch(ctx context.Context, jobID, query string) ([]LogMatch, error) {
+	be, err := m.resolveJob(ctx, jobID)
+	if err != nil {
+		return nil, err
+	}
+	return be.JobLogSearch(ctx, jobID, query)
 }
 
 func (m *MultiBackend) KillTask(ctx context.Context, taskID string) error {

@@ -101,6 +101,14 @@ func (r *Registry) syncFromYAML(ctx context.Context, name string, dbCfg *Config)
 	if fileCfg.WorkingDir == "" || fileCfg.CmdTemplate == "" {
 		return dbCfg
 	}
+	// Ownership: the file speaks ONLY for the project it names. Multiple
+	// projects can legitimately share a working_dir (--project-file
+	// submissions); syncing the dir's project.yaml into a DIFFERENTLY-named
+	// registry entry would graft one project's config onto another's
+	// identity. Same-name (or legacy nameless) files stay source of truth.
+	if fileCfg.ProjectName != "" && fileCfg.ProjectName != name {
+		return dbCfg
+	}
 	// Identity stays with the DB key — renames go through Rename(), not a
 	// hand-edited project_name (that would orphan the job FKs).
 	fileCfg.ProjectName = name

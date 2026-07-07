@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -78,7 +79,25 @@ func NewServerWithAssets(be backend.Backend, mode string, cfg *config.GlobalConf
 }
 
 func (s *Server) Handler() http.Handler {
-	return corsMiddleware(s.mux)
+	return recoverMiddleware(corsMiddleware(s.mux))
+}
+
+// recoverMiddleware turns a handler panic into a logged 500 instead of a
+// dropped connection: without it the CLI sees a bare "EOF" and the panic's
+// stack never reaches anyone. (gin has this built in; this mux needs it.)
+func recoverMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				slog.Error("panic in dashboard handler",
+					"path", r.URL.Path, "panic", rec, "stack", string(debug.Stack()))
+				writeJSON(w, http.StatusInternalServerError, backend.ErrorResponse{
+					Error: fmt.Sprintf("internal error: %v", rec),
+				})
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
 }
 
 // Close stops the background reconcile loop (if running). Safe to call
@@ -209,6 +228,12 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/dashboard/fs/read", s.handleFSRead)
 	s.mux.HandleFunc("POST /api/dashboard/fs/parse-script", s.handleParseScript)
 	s.mux.HandleFunc("GET /api/dashboard/conda/envs", s.handleCondaEnvs)
+	// CLI-parity endpoint (4c): the client socket serves this same mux, so
+	// the CLI's Proxy can reach every Backend operation through ONE route
+	// table. JSON body (not query params) — CleanOptions already has the
+	// full JSON shape. (thaw is deliberately absent: freeze/thaw is a
+	// runqd-machine concern and stays on the runqd API.)
+	s.mux.HandleFunc("POST /api/dashboard/clean", s.handleClean)
 	s.mux.HandleFunc("GET /api/{path...}", s.handleAPINotFound)
 	s.mux.HandleFunc("POST /api/{path...}", s.handleAPINotFound)
 	s.mux.HandleFunc("PUT /api/{path...}", s.handleAPINotFound)
@@ -235,6 +260,28 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		resp.DefaultTarget = mt.DefaultTargetName()
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleClean routes a clean request through the Backend (MultiBackend fans
+// out per-target orphan detection before the shared PerformClean).
+func (s *Server) handleClean(w http.ResponseWriter, r *http.Request) {
+	var opts backend.CleanOptions
+	if err := json.NewDecoder(r.Body).Decode(&opts); err != nil {
+		writeJSON(w, http.StatusBadRequest, backend.ErrorResponse{Error: "invalid clean options: " + err.Error()})
+		return
+	}
+	// At least one selector must be present (mirrors the legacy endpoint).
+	if !opts.Orphan && !opts.Archived && opts.JobID == "" && opts.TaskID == "" &&
+		len(opts.TaskIDs) == 0 && opts.OlderThan == nil {
+		writeJSON(w, http.StatusBadRequest, backend.ErrorResponse{Error: "at least one selector required (older_than, orphan, archived, job_id, task_id, task_ids)"})
+		return
+	}
+	result, err := s.backend.Clean(r.Context(), opts)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (s *Server) handleRefreshJob(w http.ResponseWriter, r *http.Request) {
@@ -353,12 +400,30 @@ func (s *Server) handleRenameProject(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// targetScopedLister is MultiBackend's per-target list capability — the CLI's
+// --target / RUNQ_TARGET scoping arrives here as a query parameter.
+type targetScopedLister interface {
+	ListJobsForTarget(ctx context.Context, target, projectScope string) ([]backend.JobSummary, error)
+	ListArchivedJobsForTarget(ctx context.Context, target string) ([]backend.JobSummary, error)
+}
+
 func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	// Mark that the frontend is actively polling — the background
 	// reconcileLoop checks this to skip work when nobody is watching.
 	s.lastPoll.Store(time.Now().Unix())
 
-	jobs, err := s.backend.ListJobs(r.Context(), r.URL.Query().Get("project"))
+	var jobs []backend.JobSummary
+	var err error
+	if target := r.URL.Query().Get("target"); target != "" {
+		tl, ok := s.backend.(targetScopedLister)
+		if !ok {
+			writeErrorStatus(w, http.StatusBadRequest, fmt.Errorf("target scoping not supported by this backend"))
+			return
+		}
+		jobs, err = tl.ListJobsForTarget(r.Context(), target, r.URL.Query().Get("project"))
+	} else {
+		jobs, err = s.backend.ListJobs(r.Context(), r.URL.Query().Get("project"))
+	}
 	if err != nil {
 		writeError(w, err)
 		return
@@ -444,7 +509,18 @@ func (s *Server) handleDryRun(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListArchivedJobs(w http.ResponseWriter, r *http.Request) {
-	jobs, err := s.backend.ListArchivedJobs(r.Context())
+	var jobs []backend.JobSummary
+	var err error
+	if target := r.URL.Query().Get("target"); target != "" {
+		tl, ok := s.backend.(targetScopedLister)
+		if !ok {
+			writeErrorStatus(w, http.StatusBadRequest, fmt.Errorf("target scoping not supported by this backend"))
+			return
+		}
+		jobs, err = tl.ListArchivedJobsForTarget(r.Context(), target)
+	} else {
+		jobs, err = s.backend.ListArchivedJobs(r.Context())
+	}
 	if err != nil {
 		writeError(w, err)
 		return
@@ -496,7 +572,22 @@ func (s *Server) handlePreviewSubmit(w http.ResponseWriter, r *http.Request) {
 		writeErrorStatus(w, http.StatusBadRequest, err)
 		return
 	}
-	text, err := s.backend.PreviewSubmit(r.Context(), body.Config, body.SkipPreflight)
+	// ?target= routes the preview to that target's backend (full run.sh +
+	// submit command rendering); default target otherwise.
+	var text string
+	var err error
+	if target := r.URL.Query().Get("target"); target != "" {
+		pt, ok := s.backend.(interface {
+			PreviewSubmitForTarget(ctx context.Context, target string, cfg job.JobConfig, skipPreflight bool) (string, error)
+		})
+		if !ok {
+			writeErrorStatus(w, http.StatusBadRequest, fmt.Errorf("target scoping not supported by this backend"))
+			return
+		}
+		text, err = pt.PreviewSubmitForTarget(r.Context(), target, body.Config, body.SkipPreflight)
+	} else {
+		text, err = s.backend.PreviewSubmit(r.Context(), body.Config, body.SkipPreflight)
+	}
 	if err != nil {
 		writeError(w, err)
 		return
@@ -515,29 +606,14 @@ func (s *Server) handleGetTask(w http.ResponseWriter, r *http.Request) {
 
 // handleTaskLog reads a page of log lines starting at a byte offset.
 // Query params:
-//   - offset: byte offset into the raw log file (default 0)
+//   - offset: byte offset into the raw log file; ABSENT = tail view
+//     (TaskLogTail — the first-paint entry point)
 //   - lines:  number of lines to return (default 200, max 5000)
 //
-// Returns a logfile.Page JSON. The frontend uses start_offset / end_offset
-// for forward/backward paging and total_bytes for progress indication.
+// Returns a logfile.Page JSON (offset / next_offset / size / truncated).
+// All path/FS resolution lives in the owning lane behind the Backend
+// interface — this handler never touches the filesystem.
 func (s *Server) handleTaskLog(w http.ResponseWriter, r *http.Request) {
-	view, err := s.backend.GetTask(r.Context(), r.PathValue("id"))
-	if err != nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
-		return
-	}
-	logPath := view.LogPath
-	if logPath == "" {
-		writeJSON(w, http.StatusOK, &logfile.Page{Lines: []string{}})
-		return
-	}
-
-	offset := int64(0)
-	if v := r.URL.Query().Get("offset"); v != "" {
-		if n, e := strconv.ParseInt(v, 10, 64); e == nil && n >= 0 {
-			offset = n
-		}
-	}
 	lines := logfile.DefaultPageLines
 	if v := r.URL.Query().Get("lines"); v != "" {
 		if n, e := strconv.Atoi(v); e == nil && n > 0 && n <= logfile.MaxPageLines {
@@ -545,14 +621,18 @@ func (s *Server) handleTaskLog(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	lr, err := logfile.Open(logPath)
-	if err != nil {
-		writeJSON(w, http.StatusOK, &logfile.Page{Lines: []string{}})
-		return
+	var page *backend.LogPage
+	var err error
+	if v := r.URL.Query().Get("offset"); v != "" {
+		offset, e := strconv.ParseInt(v, 10, 64)
+		if e != nil || offset < 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid offset"})
+			return
+		}
+		page, err = s.backend.TaskLogRead(r.Context(), r.PathValue("id"), offset, lines)
+	} else {
+		page, err = s.backend.TaskLogTail(r.Context(), r.PathValue("id"), lines)
 	}
-	defer lr.Close()
-
-	page, err := lr.ReadLines(offset, lines)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -565,22 +645,10 @@ func (s *Server) handleTaskLog(w http.ResponseWriter, r *http.Request) {
 //   - offset: byte offset to start streaming from (default 0)
 //
 // Sends "lines" events containing logfile.Page JSON as new content appears.
+// The handler is a bare pull loop over LogFollower — poll cadence,
+// rotation handling and pending-file waiting all live in the follower.
 // Stops when the client disconnects (EventSource.close / page navigation).
 func (s *Server) handleTaskLogStream(w http.ResponseWriter, r *http.Request) {
-	view, err := s.backend.GetTask(r.Context(), r.PathValue("id"))
-	if err != nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
-		return
-	}
-	logPath := view.LogPath
-	if logPath == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no log file"})
-		return
-	}
-
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming not supported", http.StatusInternalServerError)
@@ -594,36 +662,25 @@ func (s *Server) handleTaskLogStream(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	lr, err := logfile.Open(logPath)
+	f, err := s.backend.TaskLogFollow(r.Context(), r.PathValue("id"), offset)
 	if err != nil {
-		http.Error(w, "cannot open log file", http.StatusInternalServerError)
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
 		return
 	}
-	defer lr.Close()
+	defer f.Close()
 
-	ticker := time.NewTicker(1 * time.Second)
-	defer ticker.Stop()
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
 
 	for {
-		select {
-		case <-r.Context().Done():
-			return
-		case <-ticker.C:
-			if err := lr.Refresh(); err != nil {
-				continue
-			}
-			if lr.Size() <= offset {
-				continue
-			}
-			page, err := lr.ReadLines(offset, logfile.DefaultPageLines)
-			if err != nil || len(page.Lines) == 0 {
-				continue
-			}
-			data, _ := json.Marshal(page)
-			fmt.Fprintf(w, "event: lines\ndata: %s\n\n", data)
-			flusher.Flush()
-			offset = page.EndOffset
+		page, err := f.Next(r.Context())
+		if err != nil {
+			return // ctx cancelled (client gone) or follower failed: end stream
 		}
+		data, _ := json.Marshal(page)
+		fmt.Fprintf(w, "event: lines\ndata: %s\n\n", data)
+		flusher.Flush()
 	}
 }
 

@@ -91,6 +91,25 @@ type TargetConfig struct {
 	// not-yet-submitted tasks cancellable at zero cost. 0 = unlimited.
 	MaxInflight int `yaml:"max_inflight,omitempty" json:"max_inflight,omitempty"`
 
+	// TrustEmptyList declares that an EMPTY status_list output is a real
+	// answer ("no jobs"), not a parse suspicion. runqd targets set it (their
+	// squeue reads a local SQLite); dialect schedulers leave it off so the
+	// conservative per-job fallback still guards against silent breakage.
+	TrustEmptyList bool `yaml:"trust_empty_list,omitempty" json:"trust_empty_list,omitempty"`
+
+	// DoneDir overrides the done-marker directory (default:
+	// <workspace>/.runq-done). The client's synthesized localhost-runqd lane
+	// sets this to a data-dir location so marker-based completion works
+	// without forcing a central workspace root onto local projects.
+	DoneDir string `yaml:"done_dir,omitempty" json:"done_dir,omitempty"`
+
+	// GPUTemplate is an optional command whose output is a JSON []GPUSlot —
+	// this target's GPU view for the client's aggregated (local ∪ remote)
+	// dashboard panel. The runq preset sets `runq gpu --json`; schedulers
+	// without a meaningful per-user GPU view (slurm login nodes) leave it
+	// empty and simply contribute nothing to the panel.
+	GPUTemplate string `yaml:"gpu_template,omitempty" json:"gpu_template,omitempty"`
+
 	// ── HPC scheduler templates (scheduler-type targets only) ──────────────
 
 	// SubmitTemplate is the shell command that queues a task.
@@ -142,7 +161,6 @@ func (t *TargetConfig) Type() string {
 func (t *TargetConfig) IsRemote() bool {
 	return t.SSH != nil
 }
-
 
 // ResolveTargets returns the configured targets, synthesizing from the
 // deprecated Mode field when Targets is empty (backward compatibility).

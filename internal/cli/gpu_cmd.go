@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 
+	"github.com/gliese129/runq/internal/api"
 	"github.com/gliese129/runq/internal/backend"
 	"github.com/spf13/cobra"
 )
@@ -16,6 +17,20 @@ var gpuCmd = &cobra.Command{
 }
 
 func runGPU(cmd *cobra.Command, args []string) error {
+	// --json is the machine contract consumed by the runq preset's
+	// gpu_template: "THIS machine's GPUs" — plumbing socket (runqd), so the
+	// template is portable verbatim and loop-proof. The human view (no
+	// --json) goes through the client daemon: aggregated across all targets.
+	if jsonOut, _ := cmd.Flags().GetBool("json"); jsonOut {
+		p := api.NewProxy(getPlumbingSocketPath())
+		gpus, err := p.MachineGPUStatus(cmd.Context())
+		if err != nil {
+			return err
+		}
+		printJSON(gpus)
+		return nil
+	}
+
 	return withBackend(cmd, func(be backend.Backend) error {
 		gpus, err := be.GPUStatus(cmd.Context())
 		if err != nil {
@@ -39,5 +54,6 @@ func runGPU(cmd *cobra.Command, args []string) error {
 
 func init() {
 	gpuCmd.GroupID = groupDiag
+	gpuCmd.Flags().Bool("json", false, "Machine-readable output ([]GPUSlot JSON)")
 	rootCmd.AddCommand(gpuCmd)
 }

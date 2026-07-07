@@ -81,11 +81,12 @@ type ForeignTaskSpec struct {
 	Name    string `json:"name,omitempty"`
 	TaskDir string `json:"task_dir"`
 	LogPath string `json:"log_path,omitempty"`
+	// Project is the CLIENT's project name, carried through the protocol as
+	// a plain label (like a Slurm job name): it makes squeue/logs greppable
+	// but requires NO registration here — this ledger is a scheduler's,
+	// not an experiment registry.
+	Project string `json:"project,omitempty"`
 }
-
-// foreignProject is the reserved project that satisfies the jobs FK for
-// foreign tasks. Created lazily on first use.
-const foreignProject = "external"
 
 // EnqueueForeign inserts a single-task job for a foreign task and pushes it
 // into this server's scheduler queue. Returns the task id — the caller
@@ -95,9 +96,9 @@ func (b *LocalBackend) EnqueueForeign(ctx context.Context, spec ForeignTaskSpec)
 	if spec.RunSH == "" || spec.TaskDir == "" {
 		return "", fmt.Errorf("run_sh and task_dir are required")
 	}
-	if _, err := b.reg.Get(ctx, foreignProject); err != nil {
-		// Best-effort create; a lost race surfaces at the FK insert below.
-		_ = b.reg.Add(ctx, project.Config{ProjectName: foreignProject, WorkingDir: "/"})
+	label := spec.Project
+	if label == "" {
+		label = "external"
 	}
 
 	now := time.Now()
@@ -109,14 +110,14 @@ func (b *LocalBackend) EnqueueForeign(ctx context.Context, spec ForeignTaskSpec)
 	}
 
 	jobRow := store.JobRow{
-		ID: jobID, ProjectName: foreignProject, Note: spec.Name,
+		ID: jobID, ProjectName: label, Note: spec.Name,
 		Status: "pending", TotalTasks: 1, Target: b.targetName, CreatedAt: now,
 	}
 	if err := b.store.InsertJob(ctx, &jobRow); err != nil {
 		return "", fmt.Errorf("persist foreign job: %w", err)
 	}
 	row := store.TaskRow{
-		ID: taskID, JobID: jobID, ProjectName: foreignProject,
+		ID: taskID, JobID: jobID, ProjectName: label,
 		Command:    "sh " + utils.ShellQuote(spec.RunSH),
 		GPUsNeeded: spec.GPUs, Status: "pending",
 		LogPath: logPath, WorkingDir: spec.TaskDir,
@@ -157,6 +158,27 @@ func (b *LocalBackend) DetectOrphansNow(ctx context.Context) error {
 		}
 	}
 	return err
+}
+
+// ── RQ-44: log access（runqd 侧本机实现）───────────────────────────────────
+//
+// TODO(RQ-44): 与 SSHBackend 共享读取核心（建议抽到共享 helper 或 logfile 包，
+// FS 参数化：这里传 rfs.NewLocalFS()），四个方法逐一实现。
+
+func (b *LocalBackend) TaskLogRead(ctx context.Context, taskID string, offset int64, maxLines int) (*LogPage, error) {
+	return nil, fmt.Errorf("task log read: %w", ErrNotSupported) // TODO(RQ-44)
+}
+
+func (b *LocalBackend) TaskLogTail(ctx context.Context, taskID string, maxLines int) (*LogPage, error) {
+	return nil, fmt.Errorf("task log tail: %w", ErrNotSupported) // TODO(RQ-44)
+}
+
+func (b *LocalBackend) TaskLogFollow(ctx context.Context, taskID string, offset int64) (LogFollower, error) {
+	return nil, fmt.Errorf("task log follow: %w", ErrNotSupported) // TODO(RQ-44)
+}
+
+func (b *LocalBackend) JobLogSearch(ctx context.Context, jobID, query string) ([]LogMatch, error) {
+	return nil, fmt.Errorf("job log search: %w", ErrNotSupported) // TODO(RQ-44)
 }
 
 // ── Capabilities ──────────────────────────────────────────────────────────

@@ -109,21 +109,43 @@ func (s *Scheduler) runTask(task *Task) {
 // launchAsync hands a task to an unsupervised launcher and returns. There is
 // no verdict to evaluate here — the terminal state arrives later through
 // FinishTask, fed by reconcile (.done marker / scheduler probe).
+//
+// Launch failures split three ways (the taxonomy matters):
+//   - TRANSIENT (scheduler unreachable): not the task's failure — back to
+//     pending, no retry budget consumed, next tick retries.
+//   - UNTRACKED (submitted, id lost): leave in flight; reconcile heals via
+//     status.json. Never retry (double submission).
+//   - REJECTED (scheduler said no, exit != 0): deterministic — permanent
+//     failure with the scheduler's own words in the error.
 func (s *Scheduler) launchAsync(task *Task) {
 	_, err := s.launcher.Launch(s.ctx, task, nil, nil)
-	if err != nil {
-		if errors.Is(err, ErrLaunchUntracked) {
-			// Handed off but the external id is unknown: the remote job may be
-			// running untracked. Leave the task in flight — reconcile heals it
-			// via status.json if it runs. Do NOT retry (double submission).
-			s.logger.Error("task submitted but untracked", "task", task.ID, "error", err)
-			return
-		}
-		s.logger.Error("remote submit failed", "task", task.ID, "error", err)
-		s.FinishTask(task, StatusFailed, map[string]any{"status_source": "submit"})
-		return
+	switch {
+	case err == nil:
+		s.logger.Info("task submitted to remote scheduler", "task", task.ID, "job", task.JobID)
+	case errors.Is(err, ErrLaunchTransient):
+		s.logger.Warn("scheduler unreachable, task returned to queue",
+			"task", task.ID, "error", err)
+		s.requeueTransient(task)
+	case errors.Is(err, ErrLaunchUntracked):
+		s.logger.Error("task submitted but untracked", "task", task.ID, "error", err)
+	default:
+		s.logger.Error("submission rejected", "task", task.ID, "error", err)
+		s.FinishTaskNoRetry(task, map[string]any{"status_source": "submit"})
 	}
-	s.logger.Info("task submitted to remote scheduler", "task", task.ID, "job", task.JobID)
+}
+
+// requeueTransient puts an unsupervised task back to pending after a launch
+// that never reached the scheduler. Under finishMu so it can't interleave
+// with a verdict delivery; releases the submission slot; the DB row stayed
+// "pending" throughout (unsupervised dispatch doesn't write DB), so there is
+// nothing to reset there.
+func (s *Scheduler) requeueTransient(task *Task) {
+	s.finishMu.Lock()
+	defer s.finishMu.Unlock()
+	if err := s.queue.RequeueTransient(task.ID); err != nil {
+		s.logger.Error("transient requeue failed", "task", task.ID, "error", err)
+	}
+	s.pool.Release(task.ID)
 }
 
 // FinishTask drives a task to a terminal state through the shared lifecycle.
@@ -147,6 +169,18 @@ func (s *Scheduler) launchAsync(task *Task) {
 // is running (in flight), plus the pending→killed case (user cancelling a
 // task that was never handed off). Everything else is dropped.
 func (s *Scheduler) FinishTask(task *Task, status TaskStatus, extra map[string]any) {
+	s.finishTaskInner(task, status, extra, true)
+}
+
+// FinishTaskNoRetry records a permanent failure that must NOT enter the
+// retry policy — deterministic scheduler rejections (submission ran, exit
+// non-zero): retrying replays the same answer and, with max_retry=0
+// (unlimited), becomes a log storm.
+func (s *Scheduler) FinishTaskNoRetry(task *Task, extra map[string]any) {
+	s.finishTaskInner(task, StatusFailed, extra, false)
+}
+
+func (s *Scheduler) finishTaskInner(task *Task, status TaskStatus, extra map[string]any, allowRetry bool) {
 	if !s.launcher.Supervised() {
 		s.finishMu.Lock()
 		defer s.finishMu.Unlock()
@@ -189,12 +223,15 @@ func (s *Scheduler) FinishTask(task *Task, status TaskStatus, extra map[string]a
 		}
 		defer s.pool.Release(task.ID)
 	}
-	switch status {
-	case StatusSuccess, StatusKilled:
+	switch {
+	case status == StatusSuccess || status == StatusKilled:
 		s.completeTask(task, status, extra)
 		s.RefreshJobStatus(task.JobID)
-	default:
+	case allowRetry:
 		s.handleFailure(task, extra)
+	default:
+		s.completeTask(task, StatusFailed, extra)
+		s.RefreshJobStatus(task.JobID)
 	}
 }
 

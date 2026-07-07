@@ -527,14 +527,7 @@ func (s *Server) handleTaskLog(c *gin.Context) {
 		}
 	}
 
-	lr, err := logfile.Open(logPath)
-	if err != nil {
-		c.JSON(http.StatusOK, &logfile.Page{Lines: []string{}})
-		return
-	}
-	defer lr.Close()
-
-	page, err := lr.ReadLines(offset, lines)
+	page, err := s.deps.Multi.TaskLogRead(c, task.ID, offset, lines)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -542,23 +535,14 @@ func (s *Server) handleTaskLog(c *gin.Context) {
 	c.JSON(http.StatusOK, page)
 }
 
+// handleTaskLogStream streams new log lines via SSE — a bare pull loop
+// over LogFollower. Poll cadence, rotation handling and pending-file
+// waiting all live in the follower; there is no ticker here (Next blocks
+// with its own adaptive backoff, and pacing it with an external ticker
+// would just add latency).
 func (s *Server) handleTaskLogStream(c *gin.Context) {
-	task, err := s.deps.Store.GetTask(c.Request.Context(), c.Param("id"))
-	if err != nil || task == nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
-		return
-	}
-	logPath := task.LogPath
-	if logPath == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "no log file"})
-		return
-	}
-
 	w := c.Writer
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	flusher, ok := w.(http.Flusher)
+	flusher, ok := http.ResponseWriter(w).(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming not supported", http.StatusInternalServerError)
 		return
@@ -571,36 +555,25 @@ func (s *Server) handleTaskLogStream(c *gin.Context) {
 		}
 	}
 
-	lr, err := logfile.Open(logPath)
+	f, err := s.deps.Multi.TaskLogFollow(c.Request.Context(), c.Param("id"), offset)
 	if err != nil {
-		http.Error(w, "cannot open log file", http.StatusInternalServerError)
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 		return
 	}
-	defer lr.Close()
+	defer f.Close()
 
-	ticker := time.NewTicker(1 * time.Second)
-	defer ticker.Stop()
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
 
 	for {
-		select {
-		case <-c.Request.Context().Done():
-			return
-		case <-ticker.C:
-			if err := lr.Refresh(); err != nil {
-				continue
-			}
-			if lr.Size() <= offset {
-				continue
-			}
-			page, err := lr.ReadLines(offset, logfile.DefaultPageLines)
-			if err != nil || len(page.Lines) == 0 {
-				continue
-			}
-			data, _ := json.Marshal(page)
-			fmt.Fprintf(w, "event: lines\ndata: %s\n\n", data)
-			flusher.Flush()
-			offset = page.EndOffset
+		page, err := f.Next(c.Request.Context())
+		if err != nil {
+			return // ctx cancelled (client gone) or follower failed: end stream
 		}
+		data, _ := json.Marshal(page)
+		fmt.Fprintf(w, "event: lines\ndata: %s\n\n", data)
+		flusher.Flush()
 	}
 }
 

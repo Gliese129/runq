@@ -108,7 +108,7 @@ func (b *Backend) EnsureAllFresh(ctx context.Context, ttl time.Duration) error {
 	}
 
 	// Fallback: shared memoRunner deduplicates identical commands across jobs.
-	sharedRun := memoRunner(b.shellRun)
+	sharedRun := memoRunner(b.shellRunClassified)
 
 	var firstErr error
 	for _, e := range active {
@@ -188,7 +188,7 @@ func (b *Backend) markBatchProbed() {
 // memoRunner for the single-job case; EnsureAllFresh calls reconcileWith
 // directly with a shared runner.
 func (b *Backend) reconcile(ctx context.Context, jobID string, probe bool) error {
-	return b.reconcileWith(ctx, jobID, probe, memoRunner(b.shellRun))
+	return b.reconcileWith(ctx, jobID, probe, memoRunner(b.shellRunClassified))
 }
 
 // reconcileWith is the core engine that advances task state. For each task it
@@ -211,7 +211,7 @@ func (b *Backend) reconcile(ctx context.Context, jobID string, probe bool) error
 //
 // The probeRun argument is a (possibly memo-cached) runner: EnsureAllFresh
 // shares one across all jobs so listing-style commands (bare `qstat`) hit
-// the scheduler once; single-job callers pass memoRunner(b.shellRun).
+// the scheduler once; single-job callers pass memoRunner(b.shellRunClassified).
 func (b *Backend) reconcileWith(ctx context.Context, jobID string, probe bool, probeRun runner) error {
 	tasks, err := b.Store.ListTasks(ctx, store.TaskFilter{JobID: jobID})
 	if err != nil {
@@ -448,10 +448,12 @@ func (b *Backend) probeBatch(ctx context.Context) (map[string]ProbeResult, error
 		result[parts[0]] = pr
 	}
 
-	// Empty result is suspicious — the command succeeded but produced
-	// nothing we could parse. Don't treat this as "all jobs are gone";
-	// fall back to per-job probing for safety.
-	if len(result) == 0 {
+	// Empty result: for dialect schedulers (qstat/squeue) this is suspicious
+	// — the command "succeeded" but nothing parsed, so fall back to per-job
+	// probing rather than declaring every job gone. Targets that TRUST their
+	// list (runqd: squeue reads its own SQLite — empty means truly empty)
+	// opt in via trust_empty_list and skip the wasteful fallback.
+	if len(result) == 0 && !b.Cfg.TrustEmptyList {
 		return nil, nil
 	}
 	return result, nil
@@ -465,7 +467,7 @@ func (b *Backend) probeBatch(ctx context.Context) (map[string]ProbeResult, error
 //   - without a hook → empty output = SchedGone, recognized token = that signal,
 //     present-but-unrecognized = SchedActive (alive)
 func (b *Backend) probeScheduler(ctx context.Context, extID string) ProbeResult {
-	return b.probeSchedulerWith(ctx, b.shellRun, extID)
+	return b.probeSchedulerWith(ctx, b.shellRunClassified, extID)
 }
 
 func (b *Backend) probeSchedulerWith(ctx context.Context, run runner, extID string) ProbeResult {
@@ -477,21 +479,24 @@ func (b *Backend) probeSchedulerWith(ctx context.Context, run runner, extID stri
 	if err != nil {
 		return none
 	}
-	// Note: status command exit code handling differs by mode (below). Capture
-	// the output regardless of error so a parser can still interpret it.
-	out, runErr := run(ctx, cmd)
+	out, exitCode, runErr := run(ctx, cmd)
+	// TRANSPORT failure: the command never ran — no fact learned, regardless
+	// of parser config. Only an EXIT code may be read as a scheduler verdict
+	// ("qstat errors once the job left the queue"); a connection blip parsed
+	// as "gone" would get healthy tasks inferred as failed.
+	if runErr != nil {
+		return none
+	}
 
 	// Optional parser pipeline: feed the status output to stage 1 on stdin and
 	// pipe each stage into the next. runq assembles the pipe so each stage stays
 	// a short filter; {{ext_id}} is available in any stage.
 	//
-	// When a parser is configured we do NOT bail on a non-zero status command:
-	// many active queries (e.g. `qstat -f <finished_id>`) ERROR once the job
-	// leaves the queue, and that error IS the "gone" signal. We hand the (often
-	// empty) output to the parser and let it decide — the parser is contracted to
-	// emit `gone` for absence. (Trade-off: a genuinely broken status binary that
-	// returns empty will also look "gone"; for reliable terminal states use an
-	// accounting query like the slurm preset's sacct.)
+	// When a parser is configured we do NOT bail on a non-zero EXIT of the
+	// status command: many active queries (e.g. `qstat -f <finished_id>`)
+	// ERROR once the job leaves the queue, and that exit IS the "gone"
+	// signal. We hand the (often empty) output to the parser and let it
+	// decide — the parser is contracted to emit `gone` for absence.
 	if len(b.Cfg.StatusParser) > 0 {
 		stages := make([]string, 0, len(b.Cfg.StatusParser))
 		for _, s := range b.Cfg.StatusParser {
@@ -502,9 +507,9 @@ func (b *Backend) probeSchedulerWith(ctx context.Context, run runner, extID stri
 			stages = append(stages, rs)
 		}
 		pipeline := "printf '%s\\n' " + utils.ShellQuote(out) + " | " + strings.Join(stages, " | ")
-		pout, perr := run(ctx, pipeline)
-		if perr != nil {
-			return none
+		pout, pcode, perr := run(ctx, pipeline)
+		if perr != nil || pcode != 0 {
+			return none // the PIPELINE must succeed; its failure is never a verdict
 		}
 		token := strings.TrimSpace(pout)
 		// Empty parser output = job absent from the active query = gone.
@@ -517,8 +522,8 @@ func (b *Backend) probeSchedulerWith(ctx context.Context, run runner, extID stri
 		}
 	}
 
-	// No parser: a status command error is "no info" (don't guess).
-	if runErr != nil {
+	// No parser: any non-zero exit is "no info" (don't guess).
+	if exitCode != 0 {
 		return none
 	}
 	token := strings.TrimSpace(out)
@@ -537,16 +542,17 @@ func (b *Backend) probeSchedulerWith(ctx context.Context, run runner, extID stri
 // command need not hit the scheduler twice. Sequential use only (no lock).
 func memoRunner(run runner) runner {
 	type result struct {
-		out string
-		err error
+		out  string
+		code int
+		err  error
 	}
 	cache := map[string]result{}
-	return func(ctx context.Context, command string) (string, error) {
+	return func(ctx context.Context, command string) (string, int, error) {
 		if r, ok := cache[command]; ok {
-			return r.out, r.err
+			return r.out, r.code, r.err
 		}
-		out, err := run(ctx, command)
-		cache[command] = result{out, err}
-		return out, err
+		out, code, err := run(ctx, command)
+		cache[command] = result{out, code, err}
+		return out, code, err
 	}
 }

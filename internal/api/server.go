@@ -32,10 +32,20 @@ func DefaultPaths() utils.DataDirPaths {
 	return utils.PathsFromDataDir(dataDir)
 }
 
-// DefaultSocketPath returns the resolved unix socket path.
+// DefaultSocketPath returns the CLIENT daemon's unix socket path.
 func DefaultSocketPath() string { return DefaultPaths().SocketPath }
 
-// DefaultPIDPath returns the resolved PID file path.
+// DefaultRunqdSocketPath returns the EXECUTION daemon's (runqd) socket path.
+// Plumbing commands (sbatch/squeue/scancel, gpu --json) default here — on
+// any machine they mean "this machine's executor", which also makes the
+// runq-preset templates loop-proof: a client's local lane can never end up
+// talking to the client itself.
+func DefaultRunqdSocketPath() string {
+	_, dataDir := utils.ResolveDataDir()
+	return utils.RunqdPathsFromDataDir(dataDir).SocketPath
+}
+
+// DefaultPIDPath returns the client daemon's PID file path.
 func DefaultPIDPath() string { return DefaultPaths().PIDPath }
 
 // Deps holds all dependencies the API handlers need.

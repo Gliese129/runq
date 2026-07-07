@@ -15,6 +15,14 @@ import (
 // such tasks in flight; reconcile heals them via status.json if they run.
 var ErrLaunchUntracked = errors.New("task submitted but external id unknown")
 
+// ErrLaunchTransient is returned (wrapped) by unsupervised launchers when the
+// submission NEVER REACHED the scheduler (transport/file layer: SSH down,
+// runqd not yet listening, workspace unreadable). This is not the task's
+// failure: it returns to pending without consuming retry budget and the next
+// tick tries again. Contrast with a scheduler REJECTION (command ran, exit
+// non-zero) — that is deterministic and fails the task permanently.
+var ErrLaunchTransient = errors.New("scheduler unreachable")
+
 // Launcher abstracts how a dispatched task is started and killed. It is the
 // single divergence point between execution models:
 //
