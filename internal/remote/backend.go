@@ -102,6 +102,13 @@ type Backend struct {
 	// clears. In-memory: restart resets, erring on the safe side.
 	orphanStrikes map[string]int
 
+	// lastContact is the PASSIVE reachability record (spec §5.1 /health,
+	// D6): outcome of the most recent transport-touching operation. Updated
+	// as a side effect of work that was happening anyway — never probed.
+	contactMu  sync.Mutex
+	contactAt  time.Time
+	contactErr string // "" = last contact succeeded
+
 	// lifecycleMu serializes every verdict-producing pass on this target —
 	// EnsureFresh / EnsureAllFresh / ScanDoneMarkers / Kill — plus manual
 	// retry (via WithLifecycleLock). THE staleness invariant of the remote
@@ -142,7 +149,30 @@ func NewWithFS(cfg *config.TargetConfig, st *store.Store, storageCfg *config.Glo
 // preserves the transport-vs-verdict distinction (see runner).
 func (b *Backend) shellRunClassified(ctx context.Context, command string) (string, int, error) {
 	stdout, stderr, code, err := b.FS.Exec(ctx, "sh", "-c", command)
+	b.recordContact(err) // transport outcome only: exit codes are scheduler verdicts, not reachability
 	return string(stdout) + string(stderr), code, err
+}
+
+// recordContact updates the passive reachability record. ok = the
+// transport worked (a non-zero exit code still proves the target is
+// reachable). Call it from paths that touch the transport anyway.
+func (b *Backend) recordContact(transportErr error) {
+	b.contactMu.Lock()
+	defer b.contactMu.Unlock()
+	b.contactAt = time.Now()
+	if transportErr != nil {
+		b.contactErr = transportErr.Error()
+	} else {
+		b.contactErr = ""
+	}
+}
+
+// LastContact returns the passive reachability snapshot for /health:
+// zero time = no contact since boot.
+func (b *Backend) LastContact() (at time.Time, ok bool, lastErr string) {
+	b.contactMu.Lock()
+	defer b.contactMu.Unlock()
+	return b.contactAt, b.contactErr == "", b.contactErr
 }
 
 // shellRun is the collapsed convenience form for callers that treat any

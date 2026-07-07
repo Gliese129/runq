@@ -102,12 +102,15 @@ type RefreshReceipt struct {
 func (p *Proxy) Capabilities() backend.Capabilities {
 	var resp backend.ConfigResponse
 	if err := p.do(context.Background(), "GET", "/api/v1/config", nil, &resp); err == nil {
-		if p.TargetFilter != "" {
-			if caps, ok := resp.TargetCapabilities[p.TargetFilter]; ok {
-				return caps
+		want := p.TargetFilter
+		if want == "" {
+			want = resp.DefaultTarget
+		}
+		for _, t := range resp.Targets {
+			if t.Name == want {
+				return t.Capabilities
 			}
 		}
-		return resp.Capabilities
 	}
 	return backend.Capabilities{
 		GPUMap:      true,
@@ -182,22 +185,38 @@ func (p *Proxy) ListArchivedJobs(ctx context.Context) ([]backend.JobSummary, err
 }
 
 // ListTasks — GET /tasks flat table (spec §5.5, D7): `runq ps <job_id>`.
-func (p *Proxy) ListTasks(ctx context.Context, jobID, status string) ([]backend.TaskView, error) {
+func (p *Proxy) ListTasks(ctx context.Context, opts backend.TaskListOptions) ([]backend.TaskView, int, error) {
 	q := url.Values{}
-	if jobID != "" {
-		q.Set("job", jobID)
+	if opts.JobID != "" {
+		q.Set("job", opts.JobID)
 	}
-	if status != "" {
-		q.Set("status", status)
+	if opts.Status != "" {
+		q.Set("status", opts.Status)
 	}
-	if p.TargetFilter != "" {
-		q.Set("target", p.TargetFilter)
+	target := opts.Target
+	if target == "" {
+		target = p.TargetFilter
+	}
+	if target != "" {
+		q.Set("target", target)
+	}
+	if opts.Limit > 0 {
+		q.Set("limit", strconv.Itoa(opts.Limit))
+		q.Set("offset", strconv.Itoa(opts.Offset))
 	}
 	path := "/api/v1/tasks"
 	if len(q) > 0 {
 		path += "?" + q.Encode()
 	}
-	return getList[backend.TaskView](p, ctx, path)
+	var env wireEnvelope[backend.TaskView]
+	if err := p.do(ctx, "GET", path, nil, &env); err != nil {
+		return nil, 0, err
+	}
+	total := len(env.Items)
+	if env.Total != nil {
+		total = *env.Total
+	}
+	return env.Items, total, nil
 }
 
 func (p *Proxy) ArchiveJob(ctx context.Context, jobID string) error {
@@ -282,11 +301,8 @@ func (p *Proxy) GPUStatusByTarget(ctx context.Context) (map[string][]backend.GPU
 		if err := p.do(ctx, "GET", "/api/v1/config", nil, &cfg); err != nil {
 			return nil, err
 		}
-		for name := range cfg.TargetCapabilities {
-			names = append(names, name)
-		}
-		if len(names) == 0 && cfg.DefaultTarget != "" {
-			names = append(names, cfg.DefaultTarget)
+		for _, t := range cfg.Targets {
+			names = append(names, t.Name)
 		}
 	}
 	out := make(map[string][]backend.GPUSlot, len(names))

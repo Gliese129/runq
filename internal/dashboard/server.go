@@ -262,23 +262,38 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /", s.handleSPA)
 }
 
+// handleConfig — GET /config, the v1 bootstrap summary (spec §4): paths,
+// default_target, per-target type/scheduler/capabilities. Identity comes
+// from config.yaml (ResolveTargets), capability bits from each backend's
+// self-description (philosophy #2: declared facts, not inferences) — mode
+// is gone from the wire (D5/D9).
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
-	// Capabilities come from the backend's self-description — the server
-	// does not infer them from mode (design philosophy #2).
 	resp := backend.ConfigResponse{
-		Mode:         s.mode,
-		DataPath:     s.cfg.DataPath,
-		ConfigPath:   config.ConfigPath(),
-		Capabilities: s.backend.Capabilities(),
+		DataPath:      s.cfg.DataPath,
+		ConfigPath:    config.ConfigPath(),
+		DefaultTarget: s.cfg.ResolveDefaultTarget(),
+		Targets:       []backend.TargetSummary{},
 	}
-	// Multi-target daemons additionally expose per-target capabilities so
-	// the frontend can gate UI by each job's target (RQ-46).
+	caps := map[string]backend.Capabilities{}
 	if mt, ok := s.backend.(interface {
 		PerTargetCapabilities() map[string]backend.Capabilities
 		DefaultTargetName() string
 	}); ok {
-		resp.TargetCapabilities = mt.PerTargetCapabilities()
+		caps = mt.PerTargetCapabilities()
 		resp.DefaultTarget = mt.DefaultTargetName()
+	}
+	for _, t := range s.cfg.ResolveTargets() {
+		ts := backend.TargetSummary{
+			Name:      t.Name,
+			Type:      t.Type(),
+			Scheduler: t.Scheduler,
+		}
+		if c, ok := caps[t.Name]; ok {
+			ts.Capabilities = c
+		} else {
+			ts.Capabilities = s.backend.Capabilities()
+		}
+		resp.Targets = append(resp.Targets, ts)
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -321,22 +336,44 @@ func (s *Server) handleRefreshJob(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleHealth — GET /health (spec §5.1, D6): PASSIVE endpoint. Target
-// reachability must come from the most recent sync/interaction result
-// cache, never an active probe (§3 契约 6). Per-target reachability lands
-// with L4; version/uptime are real now.
+// reachability comes from each lane's most recent transport outcome
+// (marker scan / probe / user op) — never an active probe.
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	targets := []backend.TargetHealth{}
+	if ph, ok := s.backend.(interface{ PerTargetHealth() []backend.TargetHealth }); ok {
+		targets = ph.PerTargetHealth()
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"version":        s.version,
 		"uptime_seconds": int64(time.Since(s.startedAt).Seconds()),
-		"targets":        []any{}, // TODO(L4): {name, reachable, last_error?, last_checked} from result cache
+		"targets":        targets,
 	})
 }
 
 // handleListTasks — GET /tasks?job=&status=&target=&limit=&offset= (spec
-// §5.5, D7): the flat task table `runq ps <job_id>` renders. Needs a
-// cross-job task lister on the Backend (L3).
+// §5.5, D7): the flat task table. Pagination is SQL-level (D20).
 func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request) {
-	notImplemented(w, "task listing") // TODO(L3): {items: TaskRow[], total}
+	q := r.URL.Query()
+	opts := backend.TaskListOptions{
+		JobID:  q.Get("job"),
+		Status: q.Get("status"),
+		Target: q.Get("target"),
+		Limit:  200,
+	}
+	if n, err := strconv.Atoi(q.Get("limit")); err == nil && n > 0 {
+		opts.Limit = n
+	}
+	if n, err := strconv.Atoi(q.Get("offset")); err == nil && n > 0 {
+		opts.Offset = n
+	}
+	items, total, err := s.backend.ListTasks(r.Context(), opts)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	env := envelope(items)
+	env.Total = &total
+	writeJSON(w, http.StatusOK, env)
 }
 
 // handleJobEvents — GET /jobs/{id}/events (spec §6.4, D14): SSE state

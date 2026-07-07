@@ -295,6 +295,13 @@ func (b *LocalBackend) GetTask(ctx context.Context, taskID string) (*TaskView, e
 	return &view, nil
 }
 
+// ListTasks — runqd's own ledger has no target dimension; the filter's
+// Target is ignored (everything here is this machine).
+func (b *LocalBackend) ListTasks(ctx context.Context, opts TaskListOptions) ([]TaskView, int, error) {
+	opts.Target = ""
+	return listTasksFromStore(ctx, b.store, opts)
+}
+
 func (b *LocalBackend) TaskMetrics(ctx context.Context, taskID string) ([]MetricPoint, error) {
 	task, err := b.store.GetTask(ctx, taskID)
 	if err != nil {

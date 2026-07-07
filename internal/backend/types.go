@@ -110,19 +110,36 @@ type ActionResponse struct {
 	OK bool `json:"ok"`
 }
 
+// ConfigResponse is the v1 bootstrap summary (spec §4): the frontend pulls
+// it once at startup — paths, default target, and each target's
+// type/capabilities. NOT the management view (/targets has full
+// TargetConfig fields). mode is gone from the wire (D5/D9).
 type ConfigResponse struct {
-	Mode         string       `json:"mode"`
-	DataPath     string       `json:"data_path"`
-	ConfigPath   string       `json:"config_path"`
-	Capabilities Capabilities `json:"capabilities"`
+	DataPath      string          `json:"data_path"`
+	ConfigPath    string          `json:"config_path"`
+	DefaultTarget string          `json:"default_target"`
+	Targets       []TargetSummary `json:"targets"`
+}
 
-	// Per-target capabilities (RQ-46): with mixed local+remote targets one
-	// global capability set cannot be right for everyone. The frontend gates
-	// per-job UI (retry, live log, poll cadence) by the job's target via
-	// this map. Capabilities (above) stays = default target's, for backward
-	// compatibility.
-	TargetCapabilities map[string]Capabilities `json:"target_capabilities,omitempty"`
-	DefaultTarget      string                  `json:"default_target,omitempty"`
+// TargetSummary is one target's bootstrap entry (spec §4): identity +
+// capability bits, no scheduler template details. Type is inferred from
+// config fields (no ssh/scheduler → local), matching state_model 1:1.
+type TargetSummary struct {
+	Name         string       `json:"name"`
+	Type         string       `json:"type"`      // "local" | "remote"
+	Scheduler    string       `json:"scheduler"` // slurm | pbs | ... | runq | ""
+	Capabilities Capabilities `json:"capabilities"`
+	// Cache TTLs (spec §3) land with the cache layer (L4).
+}
+
+// TargetHealth is one row of GET /health's targets[] (spec §5.1, D6):
+// PASSIVE reachability — filled from the most recent sync/interaction
+// outcome, never an active probe.
+type TargetHealth struct {
+	Name        string `json:"name"`
+	Reachable   bool   `json:"reachable"`
+	LastError   string `json:"last_error,omitempty"`
+	LastChecked int64  `json:"last_checked"` // unix; 0 = no contact yet
 }
 
 // Capabilities is each backend's self-description, in three dimensions
@@ -184,6 +201,16 @@ type CleanResult struct {
 	Jobs       int                `json:"jobs"`
 	FreedBytes int64              `json:"freed_bytes"`
 	Preview    []CleanPreviewItem `json:"preview,omitempty"` // populated only in dry-run
+}
+
+// TaskListOptions filters the flat task table (spec §5.5). Zero values
+// mean "no filter"; Limit 0 means unpaginated.
+type TaskListOptions struct {
+	JobID  string
+	Status string
+	Target string
+	Limit  int
+	Offset int
 }
 
 // LogMatch is one grep hit from JobLogSearch: which task's log, where, and

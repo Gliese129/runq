@@ -2,6 +2,7 @@ package backend
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"net/url"
 	"os"
@@ -89,6 +90,32 @@ func BuildJobDetail(job store.JobRow, tasks []store.TaskRow) JobDetail {
 		// template" in the GUI without a second endpoint.
 		Config: json.RawMessage(job.ConfigJSON),
 	}
+}
+
+// listTasksFromStore is the shared ListTasks implementation: every lane and
+// the Multi router sit on the same store (tasks.target column), so the flat
+// table is one SQL query regardless of who serves it.
+func listTasksFromStore(ctx context.Context, st *store.Store, opts TaskListOptions) ([]TaskView, int, error) {
+	filter := store.TaskFilter{
+		JobID:  opts.JobID,
+		Status: opts.Status,
+		Target: opts.Target,
+		Limit:  opts.Limit,
+		Offset: opts.Offset,
+	}
+	rows, err := st.ListTasks(ctx, filter)
+	if err != nil {
+		return nil, 0, err
+	}
+	total, err := st.CountTasks(ctx, filter)
+	if err != nil {
+		return nil, 0, err
+	}
+	views := make([]TaskView, 0, len(rows))
+	for _, r := range rows {
+		views = append(views, BuildTaskView(r))
+	}
+	return views, total, nil
 }
 
 func BuildTaskView(task store.TaskRow) TaskView {

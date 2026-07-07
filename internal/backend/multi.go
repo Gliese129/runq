@@ -3,9 +3,12 @@ package backend
 import (
 	"context"
 	"fmt"
+	"sort"
+	"time"
 
 	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/project"
+	"github.com/gliese129/runq/internal/rfs"
 	"github.com/gliese129/runq/internal/store"
 )
 
@@ -221,6 +224,42 @@ func (m *MultiBackend) TaskLogRead(ctx context.Context, taskID string, offset in
 		return nil, err
 	}
 	return be.TaskLogRead(ctx, taskID, offset, maxLines)
+}
+
+// TargetFS resolves the addressed target's filesystem (spec §5.2 fs 组,
+// #44): the fs browser and python-envs operate on the TARGET's disk, not
+// the daemon's. Lanes without an FS concept fall back to LocalFS.
+func (m *MultiBackend) TargetFS(name string) (rfs.FS, error) {
+	be, ok := m.targets[name]
+	if !ok {
+		return nil, fmt.Errorf("target %q: %w", name, ErrNotFound)
+	}
+	if fsp, ok := be.(interface{ FS() rfs.FS }); ok {
+		return fsp.FS(), nil
+	}
+	return rfs.NewLocalFS(), nil
+}
+
+// PerTargetHealth collects each lane's passive reachability row (/health,
+// D6). Lanes without the concept (e.g. a pure-push local backend, always
+// reachable by construction) report reachable with LastChecked = now.
+func (m *MultiBackend) PerTargetHealth() []TargetHealth {
+	out := make([]TargetHealth, 0, len(m.targets))
+	for name, be := range m.targets {
+		if h, ok := be.(interface{ TargetHealth() TargetHealth }); ok {
+			out = append(out, h.TargetHealth())
+			continue
+		}
+		out = append(out, TargetHealth{Name: name, Reachable: true, LastChecked: time.Now().Unix()})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+// ListTasks — flat table over the shared store (all lanes write here;
+// tasks.target scopes). No routing needed.
+func (m *MultiBackend) ListTasks(ctx context.Context, opts TaskListOptions) ([]TaskView, int, error) {
+	return listTasksFromStore(ctx, m.store, opts)
 }
 
 func (m *MultiBackend) TaskLogTail(ctx context.Context, taskID string, maxLines int) (*LogPage, error) {

@@ -149,8 +149,9 @@ func writeProjectYAML(path, projectName, workingDir, scriptFile string) error {
 		},
 	}
 
-	// Auto-detect Python environment.
-	envType, envPath, envName := utils.DetectPythonEnv(workingDir)
+	// Auto-detect Python environment (nil FS = this machine — init is a
+	// daemonless local command; under `runq connect` "local" IS the HPC).
+	envType, envPath, envName := utils.DetectPythonEnv(nil, workingDir)
 	if envType != "" {
 		pyenv := map[string]any{"type": envType}
 		if envPath != "" {

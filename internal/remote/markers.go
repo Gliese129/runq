@@ -2,6 +2,8 @@ package remote
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"path"
 	"strings"
 
@@ -27,8 +29,13 @@ func (b *Backend) ScanDoneMarkers(ctx context.Context) error {
 		return nil // no workspace root configured — marker detection disabled
 	}
 	entries, err := b.FS.ReadDir(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		b.recordContact(nil) // dir absent = successful contact, nothing finished yet
+		return nil
+	}
+	b.recordContact(err) // the 2min marker scan is /health's main heartbeat
 	if err != nil {
-		return nil // dir absent = nothing has finished yet; not an error
+		return nil // transport blip: no verdicts this round; sensor retries
 	}
 
 	var cleanup []string

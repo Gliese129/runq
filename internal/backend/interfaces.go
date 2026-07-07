@@ -27,6 +27,10 @@ type Backend interface {
 	GPUStatus(ctx context.Context) ([]GPUSlot, error)
 
 	GetTask(ctx context.Context, taskID string) (*TaskView, error)
+	// ListTasks is the flat cross-job task table (spec §5.5, D7 — `runq ps
+	// <job_id>` and the WebUI task list). Pagination is SQL-level (D20);
+	// total is the unpaginated match count.
+	ListTasks(ctx context.Context, opts TaskListOptions) (items []TaskView, total int, err error)
 	TaskMetrics(ctx context.Context, taskID string) ([]MetricPoint, error) // returns all metric points
 
 	// ── RQ-44: log access through the OWNING target's filesystem ─────────

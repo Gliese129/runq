@@ -56,6 +56,19 @@ func (s *SSHFS) Stat(path string) (fi fs.FileInfo, err error) {
 	return sc.Stat(path)
 }
 
+// Home returns the remote user's home directory (sftp Getwd — the
+// protocol's session start dir is the user home). Optional interface: the
+// fs browser uses it as the default start point.
+func (s *SSHFS) Home() (dir string, err error) {
+	s.conn.beginOp()
+	defer func() { s.conn.endOpErr(err) }()
+	sc, err := s.conn.getSFTP()
+	if err != nil {
+		return "", err
+	}
+	return sc.Getwd()
+}
+
 // ReadFile reads a whole remote file via sftp.
 func (s *SSHFS) ReadFile(path string) (data []byte, err error) {
 	s.conn.beginOp()

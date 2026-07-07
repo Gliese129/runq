@@ -70,6 +70,8 @@ type TaskFilter struct {
 	Status string // filter by status; empty = no filter
 	JobID  string // filter by job; empty = no filter
 	Target string // filter by target; empty = no filter
+	Limit  int    // page size; 0 = no limit (D20: SQL-level pagination)
+	Offset int    // page start; only applied when Limit > 0
 }
 
 // allTaskColumns lists every column in the tasks table.
@@ -347,6 +349,10 @@ func (s *Store) ListTasks(ctx context.Context, filter TaskFilter) ([]TaskRow, er
 		query += " WHERE " + strings.Join(where, " AND ")
 	}
 	query += " ORDER BY enqueued_at ASC"
+	if filter.Limit > 0 {
+		query += " LIMIT ? OFFSET ?"
+		args = append(args, filter.Limit, filter.Offset)
+	}
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -363,6 +369,34 @@ func (s *Store) ListTasks(ctx context.Context, filter TaskFilter) ([]TaskRow, er
 		result = append(result, *t)
 	}
 	return result, rows.Err()
+}
+
+// CountTasks returns the number of tasks matching the filter (ignoring
+// Limit/Offset) — the pagination envelope's `total` (D20).
+func (s *Store) CountTasks(ctx context.Context, filter TaskFilter) (int, error) {
+	var where []string
+	var args []any
+	if filter.Status != "" {
+		where = append(where, "status = ?")
+		args = append(args, filter.Status)
+	}
+	if filter.JobID != "" {
+		where = append(where, "job_id = ?")
+		args = append(args, filter.JobID)
+	}
+	if filter.Target != "" {
+		where = append(where, "target = ?")
+		args = append(args, filter.Target)
+	}
+	query := "SELECT COUNT(*) FROM tasks"
+	if len(where) > 0 {
+		query += " WHERE " + strings.Join(where, " AND ")
+	}
+	var n int
+	if err := s.db.QueryRowContext(ctx, query, args...).Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, nil
 }
 
 // ListTasksForJobs returns tasks belonging to the given job IDs.

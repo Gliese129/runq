@@ -69,6 +69,7 @@ type SSHBackend struct {
 	storeQueries // embeds store, reg, and shared project/clean/thaw/dryrun methods
 	backend      *remote.Backend
 	sshFS        *rfs.SSHFS // held for Close()
+	targetName   string     // this lane's target name (tasks.target scope)
 
 	// Per-target scheduler lane (RQ-46): queue + submission-slot pool +
 	// scheduler instance + remote launcher. Same lifecycle code as the local
@@ -190,13 +191,14 @@ func NewSSHBackend(cfg SSHBackendConfig) (*SSHBackend, error) {
 			store: cfg.Store,
 			reg:   project.NewRegistry(cfg.Store.DB()),
 		},
-		backend:  hpcBe,
-		sshFS:    sshFS,
-		queue:    q,
-		pool:     pool,
-		sched:    sched,
-		launcher: launcher,
-		logger:   logger,
+		backend:    hpcBe,
+		sshFS:      sshFS,
+		queue:      q,
+		pool:       pool,
+		sched:      sched,
+		launcher:   launcher,
+		logger:     logger,
+		targetName: t.Name,
 	}
 	// Boot counts as activity: after a daemon restart the sensor gets one
 	// active window to re-align restored in-flight state before it may
@@ -480,6 +482,33 @@ func (b *SSHBackend) GetTask(ctx context.Context, taskID string) (*TaskView, err
 	task = b.reconcileTask(ctx, taskID, task)
 	view := BuildTaskView(*task)
 	return &view, nil
+}
+
+// FS exposes this lane's filesystem (LocalFS or SSHFS — the lane doesn't
+// know the difference, and neither should callers).
+func (b *SSHBackend) FS() rfs.FS { return b.backend.FS }
+
+// TargetHealth is this lane's passive reachability row for /health (D6):
+// a snapshot of the most recent transport outcome — never a probe.
+func (b *SSHBackend) TargetHealth() TargetHealth {
+	at, ok, lastErr := b.backend.LastContact()
+	h := TargetHealth{Name: b.targetName, Reachable: ok, LastError: lastErr}
+	if !at.IsZero() {
+		h.LastChecked = at.Unix()
+	} else {
+		h.Reachable = false // no contact since boot: unknown ≠ reachable
+	}
+	return h
+}
+
+// ListTasks — the lane defaults the target scope to itself (its slice of
+// the shared store); an explicit opts.Target overrides.
+func (b *SSHBackend) ListTasks(ctx context.Context, opts TaskListOptions) ([]TaskView, int, error) {
+	b.touchActivity()
+	if opts.Target == "" {
+		opts.Target = b.targetName
+	}
+	return listTasksFromStore(ctx, b.store, opts)
 }
 
 func (b *SSHBackend) TaskMetrics(ctx context.Context, taskID string) ([]MetricPoint, error) {

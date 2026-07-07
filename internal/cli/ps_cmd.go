@@ -1,9 +1,6 @@
 package cli
 
 import (
-	"fmt"
-
-	"github.com/gliese129/runq/internal/api"
 	"github.com/gliese129/runq/internal/backend"
 	"github.com/spf13/cobra"
 )
@@ -34,11 +31,7 @@ func runPs(cmd *cobra.Command, args []string) error {
 		// Task view: ps <job_id> → flat task table.
 		if len(args) == 1 {
 			applyFresh(cmd, be, args[0])
-			p, ok := be.(*api.Proxy)
-			if !ok {
-				return fmt.Errorf("task listing requires the daemon proxy")
-			}
-			tasks, err := p.ListTasks(cmd.Context(), args[0], "")
+			tasks, _, err := be.ListTasks(cmd.Context(), backend.TaskListOptions{JobID: args[0]})
 			if err != nil {
 				return err
 			}

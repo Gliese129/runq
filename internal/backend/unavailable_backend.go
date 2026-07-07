@@ -51,6 +51,10 @@ func (b *UnavailableBackend) GetTask(ctx context.Context, taskID string) (*TaskV
 	return nil, b.wrap()
 }
 
+func (b *UnavailableBackend) ListTasks(ctx context.Context, opts TaskListOptions) ([]TaskView, int, error) {
+	return nil, 0, b.wrap()
+}
+
 func (b *UnavailableBackend) TaskMetrics(ctx context.Context, taskID string) ([]MetricPoint, error) {
 	return nil, b.wrap()
 }
