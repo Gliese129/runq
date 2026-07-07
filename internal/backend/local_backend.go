@@ -67,15 +67,17 @@ func NewLocalBackend(deps LocalBackendDeps) *LocalBackend {
 	}
 }
 
-// ── Foreign task lane (runq preset, server side) ──────────────────────────
+// ── Task intake (runq preset, executor lane) ──────────────────────────────
 
-// ForeignTaskSpec describes one pre-planned task handed to this server by a
-// remote runq client. The client prepared run.sh, the task dir and the log
-// path on THIS machine's filesystem (it IS the client's target workspace);
-// the server contributes only what it owns — GPU allocation, scheduling,
-// process supervision. run.sh is self-contained (env exports, status.json,
-// done marker), so the client's sensors work on it unchanged.
-type ForeignTaskSpec struct {
+// TaskSpec describes one pre-planned task handed to this server by a runq
+// client — the ONLY intake path into this ledger, so there is no
+// "foreign/internal" distinction to name. The client prepared run.sh, the
+// task dir and the log path on THIS machine's filesystem (it IS the
+// client's target workspace); the server contributes only what it owns —
+// GPU allocation, scheduling, process supervision. run.sh is
+// self-contained (env exports, status.json, done marker), so the client's
+// sensors work on it unchanged.
+type TaskSpec struct {
 	RunSH   string `json:"run_sh"`
 	GPUs    int    `json:"gpus"`
 	Name    string `json:"name,omitempty"`
@@ -88,11 +90,10 @@ type ForeignTaskSpec struct {
 	Project string `json:"project,omitempty"`
 }
 
-// EnqueueForeign inserts a single-task job for a foreign task and pushes it
-// into this server's scheduler queue. Returns the task id — the caller
-// (remote client) records it as the task's external_id, exactly as it would
-// record a Slurm job id.
-func (b *LocalBackend) EnqueueForeign(ctx context.Context, spec ForeignTaskSpec) (string, error) {
+// Enqueue inserts a single-task job and pushes it into this server's
+// scheduler queue. Returns the task id — the caller (runq client) records
+// it as the task's external_id, exactly as it would record a Slurm job id.
+func (b *LocalBackend) Enqueue(ctx context.Context, spec TaskSpec) (string, error) {
 	if spec.RunSH == "" || spec.TaskDir == "" {
 		return "", fmt.Errorf("run_sh and task_dir are required")
 	}

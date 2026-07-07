@@ -20,63 +20,34 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// registerRoutes wires up all API endpoints with route grouping.
+// registerRoutes wires the runqd EXECUTOR LANE only (protocol spec §9, D1).
+// The public dashboard-style Gin surface is retired: humans and the WebUI
+// speak /api/v1/* to the CLIENT daemon; runqd is driven exclusively by
+// the client daemon's backend and the CLI plumbing commands (⚙).
+//
+// Lane inventory:
+//   - sbatch/squeue isomorphs + task kill (= scancel) — the runq preset's
+//     scheduler dialect
+//   - gpu / status / thaw — machine plumbing probes
+//   - /internal/freeze-self — SDK-only control plane
+//
+// NOTE: the retired handlers below this file are dead code pending
+// deletion in the L1 review pass — kept out of the route table first so
+// the surface change is reviewable independently of the code removal.
 func (s *Server) registerRoutes() {
 	api := s.router.Group("/api")
 
-	// Project
-	projects := api.Group("/projects")
-	{
-		projects.POST("", s.handleProjectAdd)
-		projects.GET("", s.handleProjectList)
-		projects.GET("/match", s.handleProjectMatch) // before /:name
-		projects.GET("/:name", s.handleProjectGet)
-		projects.PUT("/:name", s.handleProjectUpdate)
-		projects.POST("/:name/rename", s.handleProjectRename)
-		// Static segment alongside /:name — gin's radix tree gives static
-		// routes precedence over params regardless of registration order
-		// (same coexistence as /match above).
-		projects.GET("/summaries", s.handleProjectSummaries)
-		projects.POST("/:name/archive", s.handleProjectArchive)
-		projects.POST("/:name/unarchive", s.handleProjectUnarchive)
-	}
+	// Task intake lane (runq preset): a runq client
+	// drives THIS server like an external scheduler via sbatch/squeue
+	// isomorphs. scancel maps onto the task kill endpoint.
+	api.POST("/sbatch", s.handleSbatch)
+	api.GET("/squeue", s.handleSqueue)
+	api.POST("/tasks/:id/kill", s.handleTaskKill) // scancel isomorph
 
-	// Job
-	jobs := api.Group("/jobs")
-	{
-		jobs.POST("", s.handleJobSubmit)
-		jobs.POST("/preview", s.handleJobPreview)
-		jobs.POST("/resolve-note", s.handleResolveNote)
-		jobs.GET("", s.handleJobList)
-		jobs.GET("/:id", s.handleJobShow)
-		jobs.DELETE("/:id", s.handleJobKill)
-		jobs.POST("/:id/pause", s.handleJobPause)
-		jobs.POST("/:id/archive", s.handleJobArchive)
-		jobs.POST("/:id/unarchive", s.handleJobUnarchive)
-		jobs.POST("/:id/resume", s.handleJobResume)
-	}
-
-	// Task
-	tasks := api.Group("/tasks")
-	{
-		tasks.GET("", s.handleTaskList)
-		tasks.GET("/:id", s.handleTaskGet)
-		tasks.GET("/:id/log", s.handleTaskLog)
-		tasks.POST("/:id/kill", s.handleTaskKill)
-		tasks.POST("/:id/retry", s.handleTaskRetry)
-	}
-
-	// System
+	// Machine plumbing
 	api.GET("/gpu", s.handleGPUStatus)
 	api.GET("/status", s.handleStatus)
 	api.POST("/thaw", s.handleThaw)
-	api.POST("/clean", s.handleClean)
-
-	// Foreign task lane (runq preset, server side): a remote runq client
-	// drives THIS server like an external scheduler via sbatch/squeue
-	// isomorphs. scancel maps onto the existing task kill endpoint.
-	api.POST("/sbatch", s.handleSbatch)
-	api.GET("/squeue", s.handleSqueue)
 
 	// Internal — SDK-only control plane. Not for human / CLI use.
 	// Auth model matches Linux file permissions on the unix socket: any
@@ -86,20 +57,17 @@ func (s *Server) registerRoutes() {
 	{
 		internal.POST("/freeze-self", s.handleFreezeSelf)
 	}
-
-	// Log SSE
-	tasks.GET("/:id/log/stream", s.handleTaskLogStream)
 }
 
-// ── Foreign task handlers (runq preset, server side) ──
+// ── Task intake handlers (runq preset, executor lane) ──
 
 func (s *Server) handleSbatch(c *gin.Context) {
-	var spec backend.ForeignTaskSpec
+	var spec backend.TaskSpec
 	if err := c.ShouldBindJSON(&spec); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	id, err := s.deps.Local.EnqueueForeign(c.Request.Context(), spec)
+	id, err := s.deps.Local.Enqueue(c.Request.Context(), spec)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return

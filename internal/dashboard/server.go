@@ -43,6 +43,9 @@ type Server struct {
 	reconciler backgroundReconciler // nil in daemon mode
 	lastPoll   atomic.Int64         // unix timestamp of last frontend poll
 	stopLoop   context.CancelFunc   // cancels the reconcileLoop goroutine
+
+	version   string    // /health; "dev" until release stamping exists
+	startedAt time.Time // /health uptime_seconds
 }
 
 func NewServer(be backend.Backend, mode string, cfg *config.GlobalConfig) *Server {
@@ -60,6 +63,8 @@ func NewServerWithAssets(be backend.Backend, mode string, cfg *config.GlobalConf
 		staticSource: static.Source,
 		staticErr:    static.Err,
 		utilsLogs:    newUtilsLogStore(),
+		version:      "dev", // TODO: release stamping (ldflags)
+		startedAt:    time.Now(),
 	}
 	s.registerRoutes()
 
@@ -91,9 +96,8 @@ func recoverMiddleware(next http.Handler) http.Handler {
 			if rec := recover(); rec != nil {
 				slog.Error("panic in dashboard handler",
 					"path", r.URL.Path, "panic", rec, "stack", string(debug.Stack()))
-				writeJSON(w, http.StatusInternalServerError, backend.ErrorResponse{
-					Error: fmt.Sprintf("internal error: %v", rec),
-				})
+				writeErr(w, http.StatusInternalServerError, backend.CodeInternal,
+					fmt.Sprintf("internal error: %v", rec))
 			}
 		}()
 		next.ServeHTTP(w, r)
@@ -182,58 +186,75 @@ func corsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// registerRoutes mounts the v1 protocol surface (spec §5). Single surface
+// for CLI and WebUI: the same mux is served on the unix socket and TCP.
+// Layout follows the spec sections; legacy /api/dashboard/* is gone
+// (spec-first, no back-compat — D1).
 func (s *Server) registerRoutes() {
-	s.mux.HandleFunc("GET /api/dashboard/config", s.handleConfig)
-	s.mux.HandleFunc("GET /api/dashboard/jobs", s.handleListJobs)
-	s.mux.HandleFunc("GET /api/dashboard/jobs/{id}", s.handleGetJob)
-	s.mux.HandleFunc("GET /api/dashboard/jobs/{id}/compare", s.handleCompare)
-	s.mux.HandleFunc("GET /api/dashboard/projects", s.handleListProjects)
-	s.mux.HandleFunc("GET /api/dashboard/projects/match", s.handleMatchProjects)
-	s.mux.HandleFunc("GET /api/dashboard/projects/{name}", s.handleGetProject)
-	s.mux.HandleFunc("POST /api/dashboard/projects", s.handleCreateProject)
-	s.mux.HandleFunc("PUT /api/dashboard/projects/{name}", s.handleUpdateProject)
-	s.mux.HandleFunc("POST /api/dashboard/projects/{name}/rename", s.handleRenameProject)
-	s.mux.HandleFunc("GET /api/dashboard/gpu", s.handleGPU)
-	s.mux.HandleFunc("POST /api/dashboard/jobs", s.handleSubmitJob)
-	s.mux.HandleFunc("POST /api/dashboard/jobs/dry-run", s.handleDryRun)
-	s.mux.HandleFunc("POST /api/dashboard/jobs/preview", s.handlePreviewSubmit)
-	s.mux.HandleFunc("GET /api/dashboard/jobs/archived", s.handleListArchivedJobs)
-	s.mux.HandleFunc("POST /api/dashboard/jobs/{id}/archive", s.handleArchiveJob)
-	s.mux.HandleFunc("POST /api/dashboard/jobs/{id}/unarchive", s.handleUnarchiveJob)
-	s.mux.HandleFunc("POST /api/dashboard/projects/{name}/archive", s.handleArchiveProject)
-	s.mux.HandleFunc("POST /api/dashboard/projects/{name}/unarchive", s.handleUnarchiveProject)
-	s.mux.HandleFunc("POST /api/dashboard/jobs/resolve-note", s.handleResolveNote)
-	s.mux.HandleFunc("GET /api/dashboard/tasks/{id}", s.handleGetTask)
-	s.mux.HandleFunc("GET /api/dashboard/tasks/{id}/log", s.handleTaskLog)
-	s.mux.HandleFunc("GET /api/dashboard/tasks/{id}/log/stream", s.handleTaskLogStream)
-	s.mux.HandleFunc("GET /api/dashboard/tasks/{id}/metrics", s.handleTaskMetrics)
-	s.mux.HandleFunc("GET /api/dashboard/jobs/{id}/activity", s.handleJobActivity)
-	s.mux.HandleFunc("GET /api/dashboard/jobs/{id}/log/search", s.handleJobLogSearch)
-	s.mux.HandleFunc("POST /api/dashboard/tasks/{id}/kill", s.handleKillTask)
-	s.mux.HandleFunc("POST /api/dashboard/tasks/{id}/retry", s.handleRetryTask)
-	s.mux.HandleFunc("POST /api/dashboard/utils/log", s.handleUtilsLogUpload)
-	s.mux.HandleFunc("GET /api/dashboard/utils/log/{id}", s.handleUtilsLogRead)
-	s.mux.HandleFunc("GET /api/dashboard/utils/log/{id}/search", s.handleUtilsLogSearch)
-	s.mux.HandleFunc("DELETE /api/dashboard/utils/log/{id}", s.handleUtilsLogDelete)
-	s.mux.HandleFunc("POST /api/dashboard/jobs/{id}/kill", s.handleKillJob)
-	s.mux.HandleFunc("POST /api/dashboard/jobs/{id}/refresh", s.handleRefreshJob)
-	s.mux.HandleFunc("POST /api/dashboard/jobs/{id}/pause", s.handlePauseJob)
-	s.mux.HandleFunc("POST /api/dashboard/jobs/{id}/resume", s.handleResumeJob)
-	s.mux.HandleFunc("GET /api/dashboard/hpc-config", s.handleGetHPCConfig)
-	s.mux.HandleFunc("GET /api/dashboard/hpc-config/presets", s.handleHPCPresets)
-	s.mux.HandleFunc("PUT /api/dashboard/hpc-config", s.handlePutHPCConfig)
-	s.mux.HandleFunc("POST /api/dashboard/hpc-config/check", s.handleCheckHPCConfig)
-	s.mux.HandleFunc("PUT /api/dashboard/global-config", s.handlePutGlobalConfig)
-	s.mux.HandleFunc("GET /api/dashboard/fs/list", s.handleFSList)
-	s.mux.HandleFunc("GET /api/dashboard/fs/read", s.handleFSRead)
-	s.mux.HandleFunc("POST /api/dashboard/fs/parse-script", s.handleParseScript)
-	s.mux.HandleFunc("GET /api/dashboard/conda/envs", s.handleCondaEnvs)
-	// CLI-parity endpoint (4c): the client socket serves this same mux, so
-	// the CLI's Proxy can reach every Backend operation through ONE route
-	// table. JSON body (not query params) — CleanOptions already has the
-	// full JSON shape. (thaw is deliberately absent: freeze/thaw is a
-	// runqd-machine concern and stays on the runqd API.)
-	s.mux.HandleFunc("POST /api/dashboard/clean", s.handleClean)
+	// ── §5.1 System ──────────────────────────────────────────────────
+	s.mux.HandleFunc("GET /api/v1/health", s.handleHealth)
+	s.mux.HandleFunc("GET /api/v1/config", s.handleConfig)
+	s.mux.HandleFunc("PUT /api/v1/config", s.handlePutGlobalConfig)
+	s.mux.HandleFunc("POST /api/v1/clean", s.handleClean)
+
+	// ── §5.2 Targets（含 target 级资源）────────────────────────────────
+	// "presets" is a reserved name (never a valid target); register the
+	// literal route before the {name} wildcards.
+	s.mux.HandleFunc("GET /api/v1/targets", s.handleListTargets)
+	s.mux.HandleFunc("GET /api/v1/targets/presets", s.handleTargetPresets)
+	s.mux.HandleFunc("PUT /api/v1/targets/{name}", s.handlePutTarget)
+	s.mux.HandleFunc("DELETE /api/v1/targets/{name}", s.handleDeleteTarget)
+	s.mux.HandleFunc("POST /api/v1/targets/{name}/check", s.handleCheckTarget)
+	s.mux.HandleFunc("POST /api/v1/targets/{name}/refresh", s.handleRefreshTarget)
+	s.mux.HandleFunc("GET /api/v1/targets/{name}/gpus", s.handleTargetGPUs)
+	s.mux.HandleFunc("GET /api/v1/targets/{name}/fs/list", s.handleFSList)
+	s.mux.HandleFunc("GET /api/v1/targets/{name}/fs/read", s.handleFSRead)
+	s.mux.HandleFunc("POST /api/v1/targets/{name}/fs/parse-script", s.handleParseScript)
+	s.mux.HandleFunc("GET /api/v1/targets/{name}/python-envs", s.handlePythonEnvs)
+
+	// ── §5.3 Projects ────────────────────────────────────────────────
+	s.mux.HandleFunc("GET /api/v1/projects", s.handleListProjects) // ?dir=&archived= 吸收旧 /projects/match
+	s.mux.HandleFunc("POST /api/v1/projects", s.handleCreateProject)
+	s.mux.HandleFunc("GET /api/v1/projects/{name}", s.handleGetProject)
+	s.mux.HandleFunc("PUT /api/v1/projects/{name}", s.handleUpdateProject)
+	s.mux.HandleFunc("POST /api/v1/projects/{name}/rename", s.handleRenameProject)
+	s.mux.HandleFunc("POST /api/v1/projects/{name}/archive", s.handleArchiveProject)
+	s.mux.HandleFunc("POST /api/v1/projects/{name}/unarchive", s.handleUnarchiveProject)
+
+	// ── §5.4 Jobs（提交族 = plan → preview → submit，选项进 body）──────
+	s.mux.HandleFunc("POST /api/v1/jobs/plan", s.handlePlanJob) // 合并 dry-run + resolve-note
+	s.mux.HandleFunc("POST /api/v1/jobs/preview", s.handlePreviewSubmit)
+	s.mux.HandleFunc("POST /api/v1/jobs", s.handleSubmitJob)
+	s.mux.HandleFunc("GET /api/v1/jobs", s.handleListJobs) // ?project=&archived=&status=&target=&limit=&offset=
+	s.mux.HandleFunc("GET /api/v1/jobs/{id}", s.handleGetJob)
+	s.mux.HandleFunc("GET /api/v1/jobs/{id}/metrics", s.handleJobMetrics) // 双模式：无 key → {keys}，有 key → {rows}
+	s.mux.HandleFunc("GET /api/v1/jobs/{id}/activity", s.handleJobActivity)
+	s.mux.HandleFunc("GET /api/v1/jobs/{id}/log/search", s.handleJobLogSearch)
+	s.mux.HandleFunc("GET /api/v1/jobs/{id}/events", s.handleJobEvents) // SSE §6.4（capability: event_stream）
+	s.mux.HandleFunc("POST /api/v1/jobs/{id}/kill", s.handleKillJob)
+	s.mux.HandleFunc("POST /api/v1/jobs/{id}/pause", s.handlePauseJob)
+	s.mux.HandleFunc("POST /api/v1/jobs/{id}/resume", s.handleResumeJob)
+	s.mux.HandleFunc("POST /api/v1/jobs/{id}/archive", s.handleArchiveJob)
+	s.mux.HandleFunc("POST /api/v1/jobs/{id}/unarchive", s.handleUnarchiveJob)
+	s.mux.HandleFunc("POST /api/v1/jobs/{id}/refresh", s.handleRefreshJob)
+
+	// ── §5.5 Tasks ───────────────────────────────────────────────────
+	s.mux.HandleFunc("GET /api/v1/tasks", s.handleListTasks) // ?job=&status=&target=&limit=&offset=
+	s.mux.HandleFunc("GET /api/v1/tasks/{id}", s.handleGetTask)
+	s.mux.HandleFunc("GET /api/v1/tasks/{id}/log", s.handleTaskLog)
+	s.mux.HandleFunc("GET /api/v1/tasks/{id}/log/stream", s.handleTaskLogStream)
+	s.mux.HandleFunc("GET /api/v1/tasks/{id}/metrics", s.handleTaskMetrics)
+	s.mux.HandleFunc("POST /api/v1/tasks/{id}/kill", s.handleKillTask)
+	s.mux.HandleFunc("POST /api/v1/tasks/{id}/retry", s.handleRetryTask)
+
+	// ── §5.6 Log sessions（原 /utils/log）──────────────────────────────
+	s.mux.HandleFunc("POST /api/v1/log-sessions", s.handleUtilsLogUpload)
+	s.mux.HandleFunc("GET /api/v1/log-sessions/{id}", s.handleUtilsLogRead)
+	s.mux.HandleFunc("GET /api/v1/log-sessions/{id}/search", s.handleUtilsLogSearch)
+	s.mux.HandleFunc("DELETE /api/v1/log-sessions/{id}", s.handleUtilsLogDelete)
+
+	// (thaw is deliberately absent: freeze/thaw is a runqd-machine concern
+	// and stays on the runqd executor lane, spec §9.)
 	s.mux.HandleFunc("GET /api/{path...}", s.handleAPINotFound)
 	s.mux.HandleFunc("POST /api/{path...}", s.handleAPINotFound)
 	s.mux.HandleFunc("PUT /api/{path...}", s.handleAPINotFound)
@@ -267,13 +288,13 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleClean(w http.ResponseWriter, r *http.Request) {
 	var opts backend.CleanOptions
 	if err := json.NewDecoder(r.Body).Decode(&opts); err != nil {
-		writeJSON(w, http.StatusBadRequest, backend.ErrorResponse{Error: "invalid clean options: " + err.Error()})
+		writeErr(w, http.StatusBadRequest, backend.CodeBadRequest, "invalid clean options: "+err.Error())
 		return
 	}
 	// At least one selector must be present (mirrors the legacy endpoint).
 	if !opts.Orphan && !opts.Archived && opts.JobID == "" && opts.TaskID == "" &&
 		len(opts.TaskIDs) == 0 && opts.OlderThan == nil {
-		writeJSON(w, http.StatusBadRequest, backend.ErrorResponse{Error: "at least one selector required (older_than, orphan, archived, job_id, task_id, task_ids)"})
+		writeErr(w, http.StatusBadRequest, backend.CodeBadRequest, "at least one selector required (older_than, orphan, archived, job_id, task_id, task_ids)")
 		return
 	}
 	result, err := s.backend.Clean(r.Context(), opts)
@@ -284,38 +305,73 @@ func (s *Server) handleClean(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
+// handleRefreshJob — POST /jobs/{id}/refresh. Returns the D22 receipt so
+// the caller knows whether it actually refreshed. The 5min floor + honest
+// {refreshed:false, reason:"min_interval"} arrive with the cache layer
+// (L4); until then every call refreshes.
 func (s *Server) handleRefreshJob(w http.ResponseWriter, r *http.Request) {
 	if err := s.backend.RefreshJob(r.Context(), r.PathValue("id")); err != nil {
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, backend.ActionResponse{OK: true})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"refreshed_at": time.Now().Unix(),
+		"refreshed":    true, // TODO(L4): min_interval receipt
+	})
 }
 
+// handleHealth — GET /health (spec §5.1, D6): PASSIVE endpoint. Target
+// reachability must come from the most recent sync/interaction result
+// cache, never an active probe (§3 契约 6). Per-target reachability lands
+// with L4; version/uptime are real now.
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"version":        s.version,
+		"uptime_seconds": int64(time.Since(s.startedAt).Seconds()),
+		"targets":        []any{}, // TODO(L4): {name, reachable, last_error?, last_checked} from result cache
+	})
+}
+
+// handleListTasks — GET /tasks?job=&status=&target=&limit=&offset= (spec
+// §5.5, D7): the flat task table `runq ps <job_id>` renders. Needs a
+// cross-job task lister on the Backend (L3).
+func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request) {
+	notImplemented(w, "task listing") // TODO(L3): {items: TaskRow[], total}
+}
+
+// handleJobEvents — GET /jobs/{id}/events (spec §6.4, D14): SSE state
+// stream, capability event_stream. Push targets emit live; poll targets
+// emit on cache refresh. Lands with the cache layer + #49.
+func (s *Server) handleJobEvents(w http.ResponseWriter, r *http.Request) {
+	notImplemented(w, "job event stream") // TODO(L4): SSE `state` events
+}
+
+// handleListProjects — GET /projects?dir=&archived= (spec §5.3, D3).
+// ?dir= absorbs the retired /projects/match; projects are local config,
+// so the envelope carries no freshness fields.
 func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
-	projects, err := s.backend.ListProjects(r.Context())
+	var projects []backend.ProjectSummary
+	var err error
+	if dir := r.URL.Query().Get("dir"); dir != "" {
+		projects, err = s.backend.MatchProjects(r.Context(), dir)
+	} else {
+		projects, err = s.backend.ListProjects(r.Context())
+	}
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, projects)
-}
-
-func (s *Server) handleMatchProjects(w http.ResponseWriter, r *http.Request) {
-	dir := r.URL.Query().Get("dir")
-	if dir == "" {
-		writeErrorStatus(w, http.StatusBadRequest, fmt.Errorf("dir query parameter is required"))
-		return
+	if v := r.URL.Query().Get("archived"); v != "" {
+		want := v == "true" || v == "1"
+		kept := projects[:0]
+		for _, p := range projects {
+			if p.Archived == want {
+				kept = append(kept, p)
+			}
+		}
+		projects = kept
 	}
-	projects, err := s.backend.MatchProjects(r.Context(), dir)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	if projects == nil {
-		projects = []backend.ProjectSummary{}
-	}
-	writeJSON(w, http.StatusOK, projects)
+	writeJSON(w, http.StatusOK, envelope(projects))
 }
 
 func (s *Server) handleGetProject(w http.ResponseWriter, r *http.Request) {
@@ -407,28 +463,80 @@ type targetScopedLister interface {
 	ListArchivedJobsForTarget(ctx context.Context, target string) ([]backend.JobSummary, error)
 }
 
+// handleListJobs — GET /jobs?project=&archived=&status=&target=&limit=&offset=
+// (spec §5.4, D3/D20). ?archived=true absorbs the retired /jobs/archived.
+// status/pagination are handler-level filters for now; they move into SQL
+// once the list queries grow LIMIT/OFFSET (D20 落地在 store 层时).
 func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	// Mark that the frontend is actively polling — the background
 	// reconcileLoop checks this to skip work when nobody is watching.
 	s.lastPoll.Store(time.Now().Unix())
 
+	q := r.URL.Query()
+	archived := q.Get("archived") == "true" || q.Get("archived") == "1"
+	target := q.Get("target")
+
 	var jobs []backend.JobSummary
 	var err error
-	if target := r.URL.Query().Get("target"); target != "" {
+	switch {
+	case target != "" && archived:
 		tl, ok := s.backend.(targetScopedLister)
 		if !ok {
-			writeErrorStatus(w, http.StatusBadRequest, fmt.Errorf("target scoping not supported by this backend"))
+			writeErr(w, http.StatusBadRequest, backend.CodeBadRequest, "target scoping not supported by this backend")
 			return
 		}
-		jobs, err = tl.ListJobsForTarget(r.Context(), target, r.URL.Query().Get("project"))
-	} else {
-		jobs, err = s.backend.ListJobs(r.Context(), r.URL.Query().Get("project"))
+		jobs, err = tl.ListArchivedJobsForTarget(r.Context(), target)
+	case target != "":
+		tl, ok := s.backend.(targetScopedLister)
+		if !ok {
+			writeErr(w, http.StatusBadRequest, backend.CodeBadRequest, "target scoping not supported by this backend")
+			return
+		}
+		jobs, err = tl.ListJobsForTarget(r.Context(), target, q.Get("project"))
+	case archived:
+		jobs, err = s.backend.ListArchivedJobs(r.Context())
+	default:
+		jobs, err = s.backend.ListJobs(r.Context(), q.Get("project"))
 	}
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, jobs)
+
+	if status := q.Get("status"); status != "" {
+		kept := jobs[:0]
+		for _, j := range jobs {
+			if j.Status == status {
+				kept = append(kept, j)
+			}
+		}
+		jobs = kept
+	}
+
+	total := len(jobs)
+	jobs = paginate(jobs, q.Get("limit"), q.Get("offset"))
+	env := envelope(jobs)
+	env.Total = &total
+	writeJSON(w, http.StatusOK, env)
+}
+
+// paginate applies limit/offset query semantics (default limit 200).
+func paginate[T any](items []T, limitStr, offsetStr string) []T {
+	limit, offset := 200, 0
+	if n, err := strconv.Atoi(limitStr); err == nil && n > 0 {
+		limit = n
+	}
+	if n, err := strconv.Atoi(offsetStr); err == nil && n > 0 {
+		offset = n
+	}
+	if offset >= len(items) {
+		return []T{}
+	}
+	items = items[offset:]
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	return items
 }
 
 func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
@@ -440,10 +548,15 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, detail)
 }
 
-func (s *Server) handleCompare(w http.ResponseWriter, r *http.Request) {
+// handleJobMetrics — GET /jobs/{id}/metrics, dual-mode (spec §5.4, D13):
+// without ?key= → {keys: [...]} (key discovery); with ?key=&order=&limit=
+// → {rows: MetricRankRow[]}. Both shapes are objects so the frontend can
+// discriminate by field.
+func (s *Server) handleJobMetrics(w http.ResponseWriter, r *http.Request) {
 	key := r.URL.Query().Get("key")
 	if key == "" {
-		writeErrorStatus(w, http.StatusBadRequest, fmt.Errorf("key is required"))
+		// Key discovery needs the metrics-in-SQLite layer (spec §8.1.4).
+		notImplemented(w, "metric key discovery") // TODO(L3): {keys: [...]}
 		return
 	}
 	desc := strings.EqualFold(r.URL.Query().Get("order"), "desc")
@@ -452,34 +565,61 @@ func (s *Server) handleCompare(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, rows)
+	if rows == nil {
+		rows = []backend.CompareRow{}
+	}
+	rows = paginate(rows, r.URL.Query().Get("limit"), "")
+	writeJSON(w, http.StatusOK, map[string]any{"rows": rows})
 }
 
-func (s *Server) handleGPU(w http.ResponseWriter, r *http.Request) {
+// handleTargetGPUs — GET /targets/{name}/gpus (spec §5.2, D11). The
+// aggregated GPUStatus is filtered down to the addressed target.
+// refreshed_at/stale become real once the light cache lands (L4); until
+// then the response claims "fresh now", which is true for push targets
+// and a TODO-honest lie for poll ones.
+func (s *Server) handleTargetGPUs(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
 	gpus, err := s.backend.GPUStatus(r.Context())
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, gpus)
+	kept := make([]backend.GPUSlot, 0, len(gpus))
+	for _, g := range gpus {
+		if g.Target == name {
+			kept = append(kept, g)
+		}
+	}
+	env := envelope(kept)
+	now := time.Now().Unix() // TODO(L4): real cache timestamps + stale
+	stale := false
+	env.RefreshedAt, env.Stale = &now, &stale
+	writeJSON(w, http.StatusOK, env)
+}
+
+// submitBody is the v1 submit-family request body (spec §5.4, D12):
+// options live in the body, never in query parameters.
+type submitBody struct {
+	Config        job.JobConfig `json:"config"`
+	Target        string        `json:"target"`         // 缺省 = default_target
+	SkipPreflight bool          `json:"skip_preflight"` //nolint:tagliatelle
 }
 
 func (s *Server) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
-	var cfg job.JobConfig
-	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
-		writeErrorStatus(w, http.StatusBadRequest, err)
+	var body submitBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, backend.CodeBadRequest, err.Error())
 		return
 	}
-	cfg.Project = strings.TrimSpace(cfg.Project)
-	if cfg.Project == "" {
-		writeErrorStatus(w, http.StatusBadRequest, fmt.Errorf("project is required"))
+	body.Config.Project = strings.TrimSpace(body.Config.Project)
+	if body.Config.Project == "" {
+		writeErr(w, http.StatusBadRequest, backend.CodeBadRequest, "config.project is required")
 		return
 	}
-	opts := backend.SubmitOptions{
-		SkipPreflight: r.URL.Query().Get("no_preflight") == "1",
-		Target:        r.URL.Query().Get("target"),
-	}
-	jobID, total, err := s.backend.SubmitJob(r.Context(), cfg, opts)
+	jobID, total, err := s.backend.SubmitJob(r.Context(), body.Config, backend.SubmitOptions{
+		SkipPreflight: body.SkipPreflight,
+		Target:        body.Target,
+	})
 	if err != nil {
 		writeError(w, err)
 		return
@@ -490,13 +630,16 @@ func (s *Server) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) handleDryRun(w http.ResponseWriter, r *http.Request) {
-	var cfg job.JobConfig
-	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
-		writeErrorStatus(w, http.StatusBadRequest, err)
+// handlePlanJob — POST /jobs/plan (spec §5.4, D12): merges the retired
+// dry-run + resolve-note into one cheap, purely local expansion so the
+// submit wizard makes a single call.
+func (s *Server) handlePlanJob(w http.ResponseWriter, r *http.Request) {
+	var body submitBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, backend.CodeBadRequest, err.Error())
 		return
 	}
-	result, err := s.backend.DryRun(r.Context(), cfg)
+	result, err := s.backend.DryRun(r.Context(), body.Config)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -505,30 +648,16 @@ func (s *Server) handleDryRun(w http.ResponseWriter, r *http.Request) {
 	if tasks == nil {
 		tasks = []job.TaskParams{}
 	}
-	writeJSON(w, http.StatusOK, tasks)
-}
-
-func (s *Server) handleListArchivedJobs(w http.ResponseWriter, r *http.Request) {
-	var jobs []backend.JobSummary
-	var err error
-	if target := r.URL.Query().Get("target"); target != "" {
-		tl, ok := s.backend.(targetScopedLister)
-		if !ok {
-			writeErrorStatus(w, http.StatusBadRequest, fmt.Errorf("target scoping not supported by this backend"))
-			return
-		}
-		jobs, err = tl.ListArchivedJobsForTarget(r.Context(), target)
-	} else {
-		jobs, err = s.backend.ListArchivedJobs(r.Context())
-	}
+	note, err := s.backend.ResolveNote(r.Context(), body.Config)
 	if err != nil {
-		writeError(w, err)
-		return
+		// note 解析失败不应阻塞 plan：降级为原样返回
+		note = body.Config.Note
 	}
-	if jobs == nil {
-		jobs = []backend.JobSummary{}
-	}
-	writeJSON(w, http.StatusOK, jobs)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"tasks":         tasks,
+		"note_resolved": note,
+		"warnings":      []string{}, // TODO(L3): preflight-adjacent warnings
+	})
 }
 
 func (s *Server) handleArchiveJob(w http.ResponseWriter, r *http.Request) {
@@ -564,27 +693,25 @@ func (s *Server) handleUnarchiveProject(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) handlePreviewSubmit(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Config        job.JobConfig `json:"config"`
-		SkipPreflight bool          `json:"skip_preflight"`
-	}
+	var body submitBody
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeErrorStatus(w, http.StatusBadRequest, err)
+		writeErr(w, http.StatusBadRequest, backend.CodeBadRequest, err.Error())
 		return
 	}
-	// ?target= routes the preview to that target's backend (full run.sh +
-	// submit command rendering); default target otherwise.
+	// body.target routes the preview to that target's backend (full run.sh
+	// + submit command rendering); default target otherwise. (D11: target
+	// 一律显式进 body，?target= 变体已退役。)
 	var text string
 	var err error
-	if target := r.URL.Query().Get("target"); target != "" {
+	if body.Target != "" {
 		pt, ok := s.backend.(interface {
 			PreviewSubmitForTarget(ctx context.Context, target string, cfg job.JobConfig, skipPreflight bool) (string, error)
 		})
 		if !ok {
-			writeErrorStatus(w, http.StatusBadRequest, fmt.Errorf("target scoping not supported by this backend"))
+			writeErr(w, http.StatusBadRequest, backend.CodeBadRequest, "target scoping not supported by this backend")
 			return
 		}
-		text, err = pt.PreviewSubmitForTarget(r.Context(), target, body.Config, body.SkipPreflight)
+		text, err = pt.PreviewSubmitForTarget(r.Context(), body.Target, body.Config, body.SkipPreflight)
 	} else {
 		text, err = s.backend.PreviewSubmit(r.Context(), body.Config, body.SkipPreflight)
 	}
@@ -684,16 +811,21 @@ func (s *Server) handleTaskLogStream(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleTaskMetrics — GET /tasks/{id}/metrics → {points, refreshed_at}
+// (spec §5.5 envelope 化).
 func (s *Server) handleTaskMetrics(w http.ResponseWriter, r *http.Request) {
 	points, err := s.backend.TaskMetrics(r.Context(), r.PathValue("id"))
 	if err != nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		writeError(w, err)
 		return
 	}
 	if points == nil {
 		points = []backend.MetricPoint{}
 	}
-	writeJSON(w, http.StatusOK, points)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"points":       points,
+		"refreshed_at": time.Now().Unix(), // TODO(L4): cache stamp
+	})
 }
 
 // handleJobActivity returns activity.tsv data for all tasks in a job.
@@ -833,26 +965,67 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// writeError classifies an error into the v1 (status, code) pair (spec §2).
+// Handlers that already know the code should call writeErr directly.
 func writeError(w http.ResponseWriter, err error) {
-	status := http.StatusInternalServerError
+	status, code := http.StatusInternalServerError, backend.CodeInternal
 	msg := strings.ToLower(err.Error())
-	if errors.Is(err, backend.ErrNotSupported) {
-		status = http.StatusBadRequest
-	} else if backend.IsNotFound(err) {
-		status = http.StatusNotFound
-	} else if strings.Contains(msg, "already exists") {
-		status = http.StatusConflict
-	} else if strings.Contains(msg, "required") || strings.Contains(msg, "invalid") {
-		status = http.StatusBadRequest
+	switch {
+	case errors.Is(err, backend.ErrNotSupported):
+		status, code = http.StatusConflict, backend.CodeNotSupported
+	case backend.IsNotFound(err):
+		status, code = http.StatusNotFound, backend.CodeNotFound
+	case strings.Contains(msg, "already exists"):
+		status, code = http.StatusConflict, backend.CodeInvalidState
+	case strings.Contains(msg, "required") || strings.Contains(msg, "invalid"):
+		status, code = http.StatusBadRequest, backend.CodeBadRequest
 	}
-	writeErrorStatus(w, status, err)
+	writeErr(w, status, code, err.Error())
 }
 
+// writeErr emits the v1 error envelope: error for humans, code for
+// programs (stable enum — clients branch only on code).
+func writeErr(w http.ResponseWriter, status int, code, msg string) {
+	writeJSON(w, status, backend.ErrorResponse{Error: msg, Code: code})
+}
+
+// writeErrorStatus is a transitional shim for status-only call sites: the
+// code is derived from the status. New code should call writeErr directly.
 func writeErrorStatus(w http.ResponseWriter, status int, err error) {
-	writeJSON(w, status, backend.ErrorResponse{
-		Error: err.Error(),
-		Code:  status,
-	})
+	code := backend.CodeInternal
+	switch status {
+	case http.StatusBadRequest:
+		code = backend.CodeBadRequest
+	case http.StatusNotFound:
+		code = backend.CodeNotFound
+	case http.StatusConflict:
+		code = backend.CodeInvalidState
+	}
+	writeErr(w, status, code, err.Error())
+}
+
+// notImplemented is the spec-first stub response: the endpoint is defined
+// in the protocol spec but its layer below is not built yet (501).
+func notImplemented(w http.ResponseWriter, what string) {
+	writeErr(w, http.StatusNotImplemented, backend.CodeNotImplemented, what+": not implemented yet")
+}
+
+// listEnvelope is the v1 list response (spec §2/D20): never bare arrays.
+// Freshness fields are pointers so plain local resources (projects) omit
+// them entirely.
+type listEnvelope[T any] struct {
+	Items       []T    `json:"items"`
+	Total       *int   `json:"total,omitempty"`
+	RefreshedAt *int64 `json:"refreshed_at,omitempty"`
+	Stale       *bool  `json:"stale,omitempty"`
+}
+
+// envelope wraps items, materializing nil slices to [] (JSON []).
+func envelope[T any](items []T) listEnvelope[T] {
+	if items == nil {
+		items = []T{}
+	}
+	return listEnvelope[T]{Items: items}
 }
 
 func ParsePort(port string) (int, error) {

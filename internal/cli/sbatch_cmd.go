@@ -33,7 +33,7 @@ var sbatchCmd = &cobra.Command{
 		projectLabel, _ := cmd.Flags().GetString("project")
 
 		p := api.NewProxy(getPlumbingSocketPath())
-		id, err := p.Sbatch(cmd.Context(), backend.ForeignTaskSpec{
+		id, err := p.Sbatch(cmd.Context(), backend.TaskSpec{
 			RunSH: args[0], GPUs: gpus, Name: name,
 			TaskDir: taskDir, LogPath: logPath, Project: projectLabel,
 		})

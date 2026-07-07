@@ -49,6 +49,9 @@ var rootCmd = &cobra.Command{
 
 func init() {
 	rootCmd.PersistentFlags().String("socket", "", "path to daemon unix socket")
+	// --fresh（spec §7 全局 flag）：绕过 daemon 缓存 TTL 强制刷新（受服务端
+	// 5min 下限保护）；未真刷时提示「x 秒前已刷新」而非静默 no-op（D22）。
+	rootCmd.PersistentFlags().Bool("fresh", false, "force-refresh cached target data before the command (rate-limited server-side)")
 
 	// Register command groups.
 	rootCmd.AddGroup(

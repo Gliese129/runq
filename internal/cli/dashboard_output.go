@@ -76,6 +76,50 @@ func printDashboardDetail(detail *backend.JobDetail) error {
 	return w.Flush()
 }
 
+// printDashboardTasks renders the flat task table for `runq ps <job_id>`
+// (D16 task view) — same column logic as the job-detail table.
+func printDashboardTasks(tasks []backend.TaskView) error {
+	if len(tasks) == 0 {
+		fmt.Println("no tasks")
+		return nil
+	}
+	hasHPC := false
+	for _, t := range tasks {
+		if t.ExternalID != "" {
+			hasHPC = true
+			break
+		}
+	}
+	w := newTable()
+	if hasHPC {
+		fmt.Fprintf(w, "TASK_ID\tEXT_ID\tSTATUS\tSCHED_STATE\tQUEUE\tRETRY\tSTEP\tELAPSED\tPARAMS\n")
+	} else {
+		fmt.Fprintf(w, "TASK_ID\tSTATUS\tRETRY\tSTEP\tELAPSED\tPARAMS\n")
+	}
+	for _, task := range tasks {
+		step := "-"
+		if task.CurrentStep != nil {
+			step = fmt.Sprintf("%d", *task.CurrentStep)
+		}
+		elapsed := "-"
+		if task.ElapsedSec != nil {
+			elapsed = fmt.Sprintf("%.0fs", *task.ElapsedSec)
+		}
+		status := utils.StatusColor(task.Status)
+		if hasHPC {
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\n",
+				utils.IDColor(task.ID), task.ExternalID, status,
+				task.NativeState, task.Queue,
+				task.RetryCount, step, elapsed, compactJSON(task.Params))
+		} else {
+			fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\t%s\n",
+				utils.IDColor(task.ID), status, task.RetryCount,
+				step, elapsed, compactJSON(task.Params))
+		}
+	}
+	return w.Flush()
+}
+
 func compactJSON(v any) string {
 	buf, err := json.Marshal(v)
 	if err != nil {

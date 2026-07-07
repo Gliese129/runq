@@ -1,9 +1,11 @@
 package cli
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/gliese129/runq/internal/api"
 	"github.com/gliese129/runq/internal/backend"
@@ -27,6 +29,41 @@ func withBackend(cmd *cobra.Command, fn func(backend.Backend) error) error {
 		be.TargetFilter = target
 	}
 	return fn(be)
+}
+
+// applyFresh implements the global --fresh flag (spec §7, D22): before the
+// command's read, force a TTL-bypassing refresh — job-scoped when a jobID
+// is at hand, target-scoped otherwise. The receipt is surfaced honestly:
+// when the server's 5min floor blocked the refresh, say so instead of
+// silently reading stale data. Refresh failures never block the command
+// (the read below will surface real connectivity problems).
+func applyFresh(cmd *cobra.Command, be backend.Backend, jobID string) {
+	if fresh, _ := cmd.Root().PersistentFlags().GetBool("fresh"); !fresh {
+		return
+	}
+	p, ok := be.(*api.Proxy)
+	if !ok {
+		return
+	}
+	var receipt *api.RefreshReceipt
+	var err error
+	switch {
+	case jobID != "":
+		receipt, err = p.RefreshJobReceipt(cmd.Context(), jobID)
+	case p.TargetFilter != "":
+		receipt, err = p.RefreshTarget(cmd.Context(), p.TargetFilter)
+	default:
+		fmt.Fprintln(os.Stderr, "--fresh: no target resolved (set --target or a default); reading cache")
+		return
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "--fresh: refresh failed (%v); reading cache\n", err)
+		return
+	}
+	if !receipt.Refreshed {
+		ago := time.Now().Unix() - receipt.RefreshedAt
+		fmt.Fprintf(os.Stderr, "--fresh: refreshed %ds ago, not re-pulled (%s)\n", ago, receipt.Reason)
+	}
 }
 
 // resolveTarget reads the active target from the CLI --target flag, the

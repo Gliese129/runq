@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 
+	"github.com/gliese129/runq/internal/api"
 	"github.com/gliese129/runq/internal/backend"
 	"github.com/spf13/cobra"
 )
@@ -25,6 +26,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 
 		// With a job_id argument: show that job's details (ID-based, no target filter).
 		if len(args) == 1 {
+			applyFresh(cmd, be, args[0])
 			detail, err := be.GetJob(ctx, args[0])
 			if err != nil {
 				return err
@@ -36,7 +38,14 @@ func runStatus(cmd *cobra.Command, args []string) error {
 			return printDashboardDetail(detail)
 		}
 
-		// No arguments: show aggregate status (running/pending/GPU).
+		// No arguments: daemon health first (spec §7.2: status → /health)…
+		if p, ok := be.(*api.Proxy); ok {
+			if health, err := p.Health(ctx); err == nil && !jsonOut {
+				fmt.Printf("Daemon:    %v (up %vs)\n", health["version"], health["uptime_seconds"])
+			}
+		}
+
+		// …then aggregate queue status (running/pending/GPU).
 		jobs, err := be.ListJobs(ctx, "")
 		if err != nil {
 			return err

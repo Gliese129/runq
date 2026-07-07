@@ -83,7 +83,7 @@ func runDoctorHPC(d *doctorChecks) {
 
 	fmt.Println("Config dir:")
 	if info, err := os.Stat(dir); err != nil {
-		d.check(false, "", fmt.Sprintf("%s: %v — run `runq hpc init`", dir, err))
+		d.check(false, "", fmt.Sprintf("%s: %v — add a target: `runq config add <name> --template=<scheduler>`", dir, err))
 	} else if !info.IsDir() {
 		d.check(false, "", fmt.Sprintf("%s: exists but is not a directory", dir))
 	} else {
@@ -93,9 +93,9 @@ func runDoctorHPC(d *doctorChecks) {
 	fmt.Println("HPC config:")
 	hpcCfg, err := config.LoadHPCConfig()
 	if err != nil {
-		d.check(false, "", fmt.Sprintf("%s: %v — run `runq hpc init`", config.ConfigPath(), err))
+		d.check(false, "", fmt.Sprintf("%s: %v — add a target: `runq config add <name> --template=<scheduler>`", config.ConfigPath(), err))
 	} else {
-		d.check(true, fmt.Sprintf("%s (validate with `runq hpc config check`)", config.ConfigPath()), "")
+		d.check(true, fmt.Sprintf("%s (validate with `runq config check <name>`)", config.ConfigPath()), "")
 	}
 
 	fmt.Println("Scheduler CLI:")
@@ -208,7 +208,7 @@ func checkModeConsistency(d *doctorChecks) {
 	case hpcConfigured && mode != config.ModeHPC:
 		d.check(false, "", fmt.Sprintf("hpc: section is configured but mode is %q — run `runq config set mode=hpc` (or use --mode)", mode))
 	case !hpcConfigured && mode == config.ModeHPC:
-		d.check(false, "", "mode is hpc but the hpc: section is missing — run `runq hpc init`")
+		d.check(false, "", "mode is hpc but the hpc: section is missing — add a target: `runq config add <name> --template=<scheduler>`")
 	default:
 		d.check(true, fmt.Sprintf("mode %s, config consistent", mode), "")
 	}

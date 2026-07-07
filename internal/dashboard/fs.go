@@ -9,13 +9,17 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/gliese129/runq/internal/backend"
 	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/utils"
 )
 
-
+// fs group — /targets/{name}/fs/* (spec §5.2). Addressing is per-target;
+// TODO(L3, #44): route through the target's rfs.FS (LocalFS/SSHFS) so
+// remote targets browse THEIR filesystem. Until then the implementation
+// is local-machine only (correct for local / login-node targets).
 
 func (s *Server) handleFSList(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Query().Get("path")
@@ -61,7 +65,11 @@ func (s *Server) handleFSList(w http.ResponseWriter, r *http.Request) {
 		}
 		return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
 	})
-	writeJSON(w, http.StatusOK, out)
+	env := envelope(out)
+	now := time.Now().Unix() // local read = fresh; real cache stamps in L4
+	stale := false
+	env.RefreshedAt, env.Stale = &now, &stale
+	writeJSON(w, http.StatusOK, env)
 }
 
 // handleFSRead returns a text file's content (size-capped). Generic on
@@ -88,7 +96,10 @@ func (s *Server) handleFSRead(w http.ResponseWriter, r *http.Request) {
 		writeErrorStatus(w, http.StatusBadRequest, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"content": string(buf)})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"content":      string(buf),
+		"refreshed_at": time.Now().Unix(),
+	})
 }
 
 func (s *Server) handleParseScript(w http.ResponseWriter, r *http.Request) {
@@ -167,20 +178,31 @@ func homeSafePath(path string) (string, error) {
 	return abs, nil
 }
 
-func (s *Server) handleCondaEnvs(w http.ResponseWriter, r *http.Request) {
+// handlePythonEnvs — GET /targets/{name}/python-envs (spec §5.2, D13:
+// renamed from /conda/envs — the endpoint doesn't promise a conda
+// implementation). Currently conda-backed and local-only; TODO(L3, #44):
+// per-target via rfs Exec.
+func (s *Server) handlePythonEnvs(w http.ResponseWriter, r *http.Request) {
+	writeEnvs := func(names []string) {
+		env := envelope(names)
+		now := time.Now().Unix()
+		stale := false
+		env.RefreshedAt, env.Stale = &now, &stale
+		writeJSON(w, http.StatusOK, env)
+	}
 	// Try conda info --envs --json
 	cmd := exec.Command("conda", "info", "--envs", "--json")
 	out, err := cmd.Output()
 	if err != nil {
 		// conda not installed or not in PATH
-		writeJSON(w, http.StatusOK, []string{})
+		writeEnvs(nil)
 		return
 	}
 	var info struct {
 		Envs []string `json:"envs"`
 	}
 	if err := json.Unmarshal(out, &info); err != nil {
-		writeJSON(w, http.StatusOK, []string{})
+		writeEnvs(nil)
 		return
 	}
 	// Extract env names from paths: /path/to/envs/myenv → myenv, base is special
@@ -205,7 +227,7 @@ func (s *Server) handleCondaEnvs(w http.ResponseWriter, r *http.Request) {
 			seen[name] = true
 		}
 	}
-	writeJSON(w, http.StatusOK, names)
+	writeEnvs(names)
 }
 
 func detectedEnv(dir string) string {

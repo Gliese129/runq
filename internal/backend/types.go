@@ -256,10 +256,27 @@ type DryRunResult struct {
 	WorkspaceRoot string           `json:"workspace_root,omitempty"`
 }
 
+// ErrorResponse is the v1 error envelope (spec §2): Error is for humans,
+// Code is the stable machine enum — CLI/WebUI branch ONLY on Code.
 type ErrorResponse struct {
-	Error string `json:"error"`
-	Code  int    `json:"code"`
+	Error             string `json:"error"`
+	Code              string `json:"code"`
+	Details           string `json:"details,omitempty"`
+	RetryAfterSeconds int    `json:"retry_after_seconds,omitempty"`
 }
+
+// v1 error codes (spec §2) × HTTP status. Keep in sync with the protocol
+// spec — additions must be reflected there first (spec-first).
+const (
+	CodeBadRequest        = "bad_request"        // 400
+	CodeNotFound          = "not_found"          // 404
+	CodeInvalidState      = "invalid_state"      // 409: action illegal in current state
+	CodeNotSupported      = "not_supported"      // 409: target lacks the capability
+	CodeNotImplemented    = "not_implemented"    // 501: spec-first stub, pending implementation
+	CodeTargetUnreachable = "target_unreachable" // 502
+	CodeMinInterval       = "min_interval"       // 429: refresh blocked by the 5min floor
+	CodeInternal          = "internal"           // 500
+)
 
 // Project summary for sidebar.
 
