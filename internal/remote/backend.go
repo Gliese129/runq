@@ -9,7 +9,7 @@
 //
 // The package reuses the shared kernel for everything that is "runq semantics":
 // submitplan.Build (plan), workspace.Write (file contract), workspace.BaseEnv (env
-// contract), ingest.ReapOutputs (metrics projection). The HPC-specific glue is
+// contract), ingest.ReapIncremental (metrics projection). The HPC-specific glue is
 // template rendering, run.sh generation, and DB reconciliation — the genuinely
 // algorithmic bits (shell-safe interpolation, id extraction, status reconcile)
 // live in reconcile.go (this package) and internal/utils (shell quoting).

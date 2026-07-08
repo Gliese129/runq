@@ -100,7 +100,7 @@ func TestSubmitRefreshKill(t *testing.T) {
 	writeFile(t, filepath.Join(done.TaskDir, statusFileName),
 		`{"status":"success","exit_code":0,"finished_at":1730000000}`)
 	writeFile(t, filepath.Join(done.TaskDir, "metrics.jsonl"),
-		`{"type":"metric","key":"loss","value":0.5,"step":1,"ts":1730000000}`)
+		"{\"type\":\"metric\",\"key\":\"loss\",\"value\":0.5,\"step\":1,\"ts\":1730000000}\n")
 
 	if err := b.EnsureFresh(ctx, jobID, 0); err != nil {
 		t.Fatalf("EnsureFresh: %v", err)
@@ -117,20 +117,20 @@ func TestSubmitRefreshKill(t *testing.T) {
 		t.Errorf("finished_at not stamped on terminal task")
 	}
 
-	metrics, err := st.ListMetrics(ctx, done.ID, "loss")
+	metrics, err := st.ListMetricSummaries(ctx, jobID, "loss")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(metrics) != 1 || metrics[0].Value != 0.5 {
-		t.Fatalf("metrics = %+v, want one loss=0.5", metrics)
+	if len(metrics) != 1 || metrics[0].Last != 0.5 || metrics[0].Count != 1 {
+		t.Fatalf("summaries = %+v, want one loss last=0.5", metrics)
 	}
 
 	// EnsureFresh is idempotent: running again must not duplicate metrics.
 	if err := b.EnsureFresh(ctx, jobID, 0); err != nil {
 		t.Fatalf("EnsureFresh #2: %v", err)
 	}
-	if m, _ := st.ListMetrics(ctx, done.ID, "loss"); len(m) != 1 {
-		t.Fatalf("metrics duplicated after second refresh: %d", len(m))
+	if m, _ := st.ListMetricSummaries(ctx, jobID, "loss"); len(m) != 1 || m[0].Count != 1 {
+		t.Fatalf("summaries duplicated after second refresh: %+v", m)
 	}
 
 	// Kill the other task: scancel issued with its ext id, DB marked killed.

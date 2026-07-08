@@ -36,7 +36,7 @@ func ptrInt64(v int64) *int64 { return &v }
 
 // ── tests ─────────────────────────────────────────────────────────────────
 
-func TestInsertMetricsBatch(t *testing.T) {
+func TestMergeMetricSummaries(t *testing.T) {
 	s, err := Open(":memory:")
 	if err != nil {
 		t.Fatalf("open: %v", err)
@@ -44,85 +44,96 @@ func TestInsertMetricsBatch(t *testing.T) {
 	defer s.Close()
 	seedJobAndTask(t, s, "t1", "j1")
 
-	rows := []MetricRow{
-		{TaskID: "t1", JobID: "j1", Key: "loss", Value: 0.42, Step: ptrInt64(100), TS: 1700000000},
-		{TaskID: "t1", JobID: "j1", Key: "lr", Value: 1e-4, Step: ptrInt64(100), TS: 1700000000},
+	// First delta pass.
+	if err := s.MergeMetricSummaries(context.Background(), []MetricSummaryRow{
+		{TaskID: "t1", JobID: "j1", Key: "loss", Min: 0.4, Max: 0.9, Last: 0.5, LastTS: 100, Count: 10},
+		{TaskID: "t1", JobID: "j1", Key: "lr", Min: 1e-4, Max: 1e-4, Last: 1e-4, LastTS: 100, Count: 10},
+	}); err != nil {
+		t.Fatalf("merge 1: %v", err)
 	}
-	if err := s.InsertMetricsBatch(context.Background(), rows); err != nil {
-		t.Fatalf("InsertMetricsBatch: %v", err)
+	// Second delta: lower min, later last — must compose losslessly.
+	if err := s.MergeMetricSummaries(context.Background(), []MetricSummaryRow{
+		{TaskID: "t1", JobID: "j1", Key: "loss", Min: 0.2, Max: 0.3, Last: 0.2, LastTS: 200, Count: 5},
+	}); err != nil {
+		t.Fatalf("merge 2: %v", err)
 	}
 
-	var count int
-	s.DB().QueryRow(`SELECT COUNT(*) FROM metrics WHERE task_id = ?`, "t1").Scan(&count)
-	if count != 2 {
-		t.Errorf("expected 2 rows, got %d", count)
+	got, err := s.ListMetricSummaries(context.Background(), "j1", "loss")
+	if err != nil || len(got) != 1 {
+		t.Fatalf("ListMetricSummaries: %v (%d rows)", err, len(got))
+	}
+	sm := got[0]
+	if sm.Min != 0.2 || sm.Max != 0.9 || sm.Count != 15 || sm.Last != 0.2 || sm.LastTS != 200 {
+		t.Errorf("merged summary = %+v", sm)
 	}
 
-	got, err := s.ListMetrics(context.Background(), "t1", "loss")
-	if err != nil {
-		t.Fatalf("ListMetrics: %v", err)
+	// Out-of-order delta (older last_ts) must NOT clobber last.
+	if err := s.MergeMetricSummaries(context.Background(), []MetricSummaryRow{
+		{TaskID: "t1", JobID: "j1", Key: "loss", Min: 0.25, Max: 0.25, Last: 0.25, LastTS: 150, Count: 1},
+	}); err != nil {
+		t.Fatalf("merge 3: %v", err)
 	}
-	if len(got) != 1 || got[0].Value != 0.42 {
-		t.Errorf("ListMetrics(loss) = %+v, want one row with value 0.42", got)
-	}
-	if got[0].Step == nil || *got[0].Step != 100 {
-		t.Errorf("expected step 100, got %v", got[0].Step)
+	got, _ = s.ListMetricSummaries(context.Background(), "j1", "loss")
+	if got[0].Last != 0.2 || got[0].LastTS != 200 || got[0].Count != 16 {
+		t.Errorf("out-of-order merge clobbered last: %+v", got[0])
 	}
 }
 
-func TestInsertMetricsBatchNullStep(t *testing.T) {
+func TestMergeMetricSummariesEmpty(t *testing.T) {
 	s, _ := Open(":memory:")
 	defer s.Close()
-	seedJobAndTask(t, s, "t1", "j1")
-
-	rows := []MetricRow{
-		{TaskID: "t1", JobID: "j1", Key: "no_step", Value: 1.0, Step: nil, TS: 1700000000},
-		// Different ts so PK (task_id, key, step, ts) doesn't collide on null step.
-		{TaskID: "t1", JobID: "j1", Key: "no_step", Value: 2.0, Step: nil, TS: 1700000001},
-	}
-	if err := s.InsertMetricsBatch(context.Background(), rows); err != nil {
-		t.Fatalf("InsertMetricsBatch: %v", err)
-	}
-
-	got, _ := s.ListMetrics(context.Background(), "t1", "no_step")
-	if len(got) != 2 {
-		t.Errorf("nullable step + distinct ts should produce 2 rows, got %d", len(got))
-	}
-	for _, m := range got {
-		if m.Step != nil {
-			t.Errorf("expected null step, got %v", *m.Step)
-		}
-	}
-}
-
-func TestInsertMetricsBatchEmpty(t *testing.T) {
-	s, _ := Open(":memory:")
-	defer s.Close()
-	if err := s.InsertMetricsBatch(context.Background(), nil); err != nil {
+	if err := s.MergeMetricSummaries(context.Background(), nil); err != nil {
 		t.Errorf("empty slice should be a no-op, got %v", err)
 	}
 }
 
-func TestInsertMetricsBatchIdempotent(t *testing.T) {
+func TestMetricKeysDiscovery(t *testing.T) {
 	s, _ := Open(":memory:")
 	defer s.Close()
 	seedJobAndTask(t, s, "t1", "j1")
 
-	rows := []MetricRow{
-		{TaskID: "t1", JobID: "j1", Key: "loss", Value: 0.42, Step: ptrInt64(1), TS: 1700000000},
+	if err := s.MergeMetricSummaries(context.Background(), []MetricSummaryRow{
+		{TaskID: "t1", JobID: "j1", Key: "loss", Min: 1, Max: 1, Last: 1, LastTS: 1, Count: 1},
+		{TaskID: "t1", JobID: "j1", Key: "acc", Min: 1, Max: 1, Last: 1, LastTS: 1, Count: 1},
+	}); err != nil {
+		t.Fatalf("merge: %v", err)
 	}
-	if err := s.InsertMetricsBatch(context.Background(), rows); err != nil {
-		t.Fatalf("first insert: %v", err)
+	keys, err := s.MetricKeys(context.Background(), "j1")
+	if err != nil {
+		t.Fatalf("MetricKeys: %v", err)
 	}
-	// Re-reaping the same jsonl after daemon restart should not error out
-	// or duplicate rows.
-	if err := s.InsertMetricsBatch(context.Background(), rows); err != nil {
-		t.Fatalf("second insert (idempotent): %v", err)
+	if len(keys) != 2 || keys[0] != "acc" || keys[1] != "loss" {
+		t.Errorf("keys = %v, want [acc loss]", keys)
 	}
-	var count int
-	s.DB().QueryRow(`SELECT COUNT(*) FROM metrics WHERE task_id='t1'`).Scan(&count)
-	if count != 1 {
-		t.Errorf("expected 1 row after dup insert (INSERT OR IGNORE), got %d", count)
+}
+
+func TestIngestMarkRoundTrip(t *testing.T) {
+	s, _ := Open(":memory:")
+	defer s.Close()
+	seedJobAndTask(t, s, "t1", "j1")
+
+	// Absent → zero value.
+	m, err := s.GetIngestMark(context.Background(), "t1")
+	if err != nil || m.Size != 0 || m.Final {
+		t.Fatalf("zero mark: %+v, %v", m, err)
+	}
+	if err := s.SetIngestMark(context.Background(), "t1", IngestMark{Size: 100, Offset: 90, Final: false}); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	if err := s.SetIngestMark(context.Background(), "t1", IngestMark{Size: 200, Offset: 200, Final: true}); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	m, _ = s.GetIngestMark(context.Background(), "t1")
+	if m.Size != 200 || m.Offset != 200 || !m.Final {
+		t.Errorf("mark = %+v", m)
+	}
+	// DeleteTaskMetrics unfreezes (retry path).
+	if err := s.DeleteTaskMetrics(context.Background(), "t1"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	m, _ = s.GetIngestMark(context.Background(), "t1")
+	if m.Final || m.Size != 0 {
+		t.Errorf("mark after delete = %+v", m)
 	}
 }
 
@@ -156,10 +167,13 @@ func TestMetricsCascadeDelete(t *testing.T) {
 	defer s.Close()
 	seedJobAndTask(t, s, "t1", "j1")
 
-	if err := s.InsertMetricsBatch(context.Background(), []MetricRow{
-		{TaskID: "t1", JobID: "j1", Key: "loss", Value: 1, Step: ptrInt64(1), TS: 1},
+	if err := s.MergeMetricSummaries(context.Background(), []MetricSummaryRow{
+		{TaskID: "t1", JobID: "j1", Key: "loss", Min: 1, Max: 1, Last: 1, LastTS: 1, Count: 1},
 	}); err != nil {
-		t.Fatalf("insert metric: %v", err)
+		t.Fatalf("merge summary: %v", err)
+	}
+	if err := s.SetIngestMark(context.Background(), "t1", IngestMark{Size: 10, Offset: 10}); err != nil {
+		t.Fatalf("set mark: %v", err)
 	}
 	if err := s.InsertCheckpointsBatch(context.Background(), []CheckpointRow{
 		{TaskID: "t1", JobID: "j1", Path: "/p", Step: ptrInt64(1), TS: 1},
@@ -171,11 +185,12 @@ func TestMetricsCascadeDelete(t *testing.T) {
 		t.Fatalf("DeleteTask: %v", err)
 	}
 
-	var mc, cc int
-	s.DB().QueryRow(`SELECT COUNT(*) FROM metrics WHERE task_id='t1'`).Scan(&mc)
+	var sc, ic, cc int
+	s.DB().QueryRow(`SELECT COUNT(*) FROM metric_summary WHERE task_id='t1'`).Scan(&sc)
+	s.DB().QueryRow(`SELECT COUNT(*) FROM metrics_ingest WHERE task_id='t1'`).Scan(&ic)
 	s.DB().QueryRow(`SELECT COUNT(*) FROM checkpoints WHERE task_id='t1'`).Scan(&cc)
-	if mc != 0 || cc != 0 {
-		t.Errorf("ON DELETE CASCADE should have removed dependents; got metrics=%d, checkpoints=%d", mc, cc)
+	if sc != 0 || ic != 0 || cc != 0 {
+		t.Errorf("ON DELETE CASCADE should have removed dependents; got summaries=%d, marks=%d, checkpoints=%d", sc, ic, cc)
 	}
 }
 

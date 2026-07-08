@@ -22,7 +22,7 @@
 //
 // The physical path is what gets persisted in the DB (task_dir), so config
 // changes never orphan running tasks. Both daemon and HPC call ResolveRoot;
-// downstream code (workspace.Write, ingest.ReapOutputs, submitplan.Build) is
+// downstream code (workspace.Write, ingest.ReapIncremental, submitplan.Build) is
 // unaware of which mode is active.
 package config
 

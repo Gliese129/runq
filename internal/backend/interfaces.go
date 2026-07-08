@@ -5,6 +5,7 @@ import (
 
 	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/project"
+	"github.com/gliese129/runq/internal/workspace"
 )
 
 // Backend is the uniform interface consumed by the dashboard HTTP server
@@ -38,6 +39,12 @@ type Backend interface {
 	// MetricKeys is the discovery half of the metrics dual-mode (spec §5.4:
 	// GET /jobs/{id}/metrics without ?key=).
 	MetricKeys(ctx context.Context, jobID string) ([]string, error)
+	// TaskMetricBuckets is the chart's bucket mode (spec §6.4): one key,
+	// [fromTS, toTS] (0,0 = full), ≤ maxBuckets aggregated buckets.
+	// Terminal tasks read the on-target pyramid (1–O(log n) ranged
+	// reads); running / not-yet-built fall back to tail-window
+	// aggregation. source reports which path answered ("pyramid"|"tail").
+	TaskMetricBuckets(ctx context.Context, taskID, key string, fromTS, toTS int64, maxBuckets int) (buckets []workspace.PyramidBucket, source string, err error)
 
 	// ── RQ-44: log access through the OWNING target's filesystem ─────────
 	//

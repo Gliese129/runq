@@ -19,6 +19,7 @@ import (
 	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/logfile"
 	"github.com/gliese129/runq/internal/project"
+	"github.com/gliese129/runq/internal/workspace"
 )
 
 // backgroundReconciler is the optional capability for HPC backends that can
@@ -30,7 +31,6 @@ type backgroundReconciler interface {
 
 type Server struct {
 	backend      backend.Backend
-	mode         string
 	cfg          *config.GlobalConfig
 	mux          *http.ServeMux
 	static       fs.FS
@@ -48,15 +48,16 @@ type Server struct {
 	startedAt time.Time // /health uptime_seconds
 }
 
-func NewServer(be backend.Backend, mode string, cfg *config.GlobalConfig) *Server {
-	return NewServerWithAssets(be, mode, cfg, "")
+// NewServer builds the v1 server. mode is gone (D5/D9): capabilities are
+// declared per-target, never inferred.
+func NewServer(be backend.Backend, cfg *config.GlobalConfig) *Server {
+	return NewServerWithAssets(be, cfg, "")
 }
 
-func NewServerWithAssets(be backend.Backend, mode string, cfg *config.GlobalConfig, assetsDir string) *Server {
+func NewServerWithAssets(be backend.Backend, cfg *config.GlobalConfig, assetsDir string) *Server {
 	static := ResolveStaticAssets(assetsDir)
 	s := &Server{
 		backend:      be,
-		mode:         mode,
 		cfg:          cfg,
 		mux:          http.NewServeMux(),
 		static:       static.FS,
@@ -855,11 +856,36 @@ func (s *Server) handleTaskLogStream(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleTaskMetrics — GET /tasks/{id}/metrics?after= → {points,
-// refreshed_at} (spec §5.5). ?after= is the incremental chart pull.
+// handleTaskMetrics — GET /tasks/{id}/metrics, dual-mode (spec §5.5/§6.4):
+// without ?key= → {points, refreshed_at} (all-key tail points; ?after=
+// incremental); with ?key=&buckets=&from=&to= → {buckets, source}
+// (terminal → pyramid, otherwise tail aggregation).
 func (s *Server) handleTaskMetrics(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	if key := q.Get("key"); key != "" {
+		parse := func(name string) int64 {
+			n, _ := strconv.ParseInt(q.Get(name), 10, 64)
+			return n
+		}
+		maxBuckets := 2000
+		if n, e := strconv.Atoi(q.Get("buckets")); e == nil && n > 0 {
+			maxBuckets = n
+		}
+		buckets, source, err := s.backend.TaskMetricBuckets(
+			r.Context(), r.PathValue("id"), key, parse("from"), parse("to"), maxBuckets)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		if buckets == nil {
+			buckets = []workspace.PyramidBucket{}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"buckets": buckets, "source": source})
+		return
+	}
+
 	after := int64(0)
-	if v := r.URL.Query().Get("after"); v != "" {
+	if v := q.Get("after"); v != "" {
 		if n, e := strconv.ParseInt(v, 10, 64); e == nil && n > 0 {
 			after = n
 		}

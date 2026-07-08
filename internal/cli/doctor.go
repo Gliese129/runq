@@ -5,15 +5,31 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/gliese129/runq/internal/api"
+	"github.com/gliese129/runq/internal/app"
 	"github.com/gliese129/runq/internal/config"
 	"github.com/gliese129/runq/internal/utils"
 
 	"github.com/spf13/cobra"
 )
+
+// ── runq doctor（无 daemon，静态 × 本机）──
+//
+// doctor 检查的对象是"这台机器"，不是某个进程：静态配置 + 本机资源，
+// 不碰网络（可达性是 /health 的运行时领域；主动探测是 `runq config
+// check --live` 的显式动作）。按机器扮演的角色分节：
+//
+//	client 节    永远显示——config.yaml、targets 静态校验、data dir/DB、
+//	             client daemon socket、ssh key 文件存在性
+//	executor 节  本机有 executor 痕迹时显示（runqd binary / local target /
+//	             runqd socket）——GPU 可见性、runqd socket、执行环境
+//
+// 同一命令，视角跟着机器走：笔记本上查 client（+本地 executor），
+// cp 到 HPC 的二进制在登录节点上查的就是登录节点。mode 二分已死。
 
 func init() {
 	doctorCmd.GroupID = groupDiag
@@ -22,7 +38,7 @@ func init() {
 
 var doctorCmd = &cobra.Command{
 	Use:   "doctor",
-	Short: "Check system health for the configured mode (daemon or hpc)",
+	Short: "Static self-check of THIS machine (client + executor roles)",
 	RunE:  runDoctor,
 }
 
@@ -55,100 +71,77 @@ func (d *doctorChecks) summary() {
 }
 
 func runDoctor(cmd *cobra.Command, args []string) error {
-	cfg, cfgErr := config.Load()
-	mode := config.ModeDaemon
-	if cfgErr == nil {
-		mode = config.ConfigMode(cfg)
-	}
 	d := &doctorChecks{}
-	if mode == config.ModeHPC {
-		runDoctorHPC(d)
-	} else {
-		runDoctorDaemon(d)
+
+	fmt.Println("== client ==")
+	cfg := doctorClient(d)
+
+	if hasExecutorRole(cfg) {
+		fmt.Println()
+		fmt.Println("== executor ==")
+		doctorExecutor(d)
 	}
-	checkModeConsistency(d)
+
 	d.summary()
 	return nil
 }
 
-// runDoctorHPC checks what HPC mode actually uses: everything lives under
-// ~/.runq (config.yaml, runq.db, logs), scheduling is delegated to the
-// cluster CLI. GPU and daemon checks are SKIPPED, not failed — a login node
-// without nvidia-smi is normal, not broken.
-func runDoctorHPC(d *doctorChecks) {
-	dir := config.ConfigDir()
-
-	fmt.Println("GPU:")
-	d.skip("hpc mode — GPUs live on compute nodes, not here")
-
-	fmt.Println("Config dir:")
-	if info, err := os.Stat(dir); err != nil {
-		d.check(false, "", fmt.Sprintf("%s: %v — add a target: `runq config add <name> --template=<scheduler>`", dir, err))
-	} else if !info.IsDir() {
-		d.check(false, "", fmt.Sprintf("%s: exists but is not a directory", dir))
-	} else {
-		d.check(true, fmt.Sprintf("%s (%s)", dir, info.Mode()), "")
-	}
-
-	fmt.Println("HPC config:")
-	hpcCfg, err := config.LoadHPCConfig()
+// doctorClient checks the client role: static config + local resources.
+// Never touches the network — a broken laptop must be diagnosable offline.
+func doctorClient(d *doctorChecks) *config.GlobalConfig {
+	fmt.Println("Config:")
+	cfg, err := config.Load()
 	if err != nil {
-		d.check(false, "", fmt.Sprintf("%s: %v — add a target: `runq config add <name> --template=<scheduler>`", config.ConfigPath(), err))
+		d.check(false, "", fmt.Sprintf("%s: %v", config.ConfigPath(), err))
 	} else {
-		d.check(true, fmt.Sprintf("%s (validate with `runq config check <name>`)", config.ConfigPath()), "")
+		d.check(true, config.ConfigPath(), "")
 	}
 
-	fmt.Println("Scheduler CLI:")
-	if hpcCfg == nil || strings.TrimSpace(hpcCfg.SubmitTemplate) == "" {
-		d.skip("no submit_template configured yet")
+	// Targets: static template validation per target (same rules as
+	// `runq config check <name>`), plus ssh key file existence — file
+	// checks only, no dialing.
+	fmt.Println("Targets:")
+	if cfg == nil || len(cfg.ResolveTargets()) == 0 {
+		d.skip("no targets configured — add one: `runq config add <name> --template=<scheduler>`")
 	} else {
-		bin := strings.Fields(hpcCfg.SubmitTemplate)[0]
-		if path, err := exec.LookPath(bin); err != nil {
-			d.check(false, "", fmt.Sprintf("%s: not found in PATH (submit_template's first word)", bin))
-		} else {
-			d.check(true, fmt.Sprintf("%s → %s", bin, path), "")
+		for _, t := range cfg.ResolveTargets() {
+			issues := 0
+			for _, r := range t.CheckHPC() {
+				if r.Status == "fail" {
+					issues++
+				}
+			}
+			label := fmt.Sprintf("%s (%s", t.Name, t.Type())
+			if t.Scheduler != "" {
+				label += "/" + t.Scheduler
+			}
+			label += ")"
+			if issues > 0 {
+				d.check(false, "", fmt.Sprintf("%s: %d template issue(s) — details: `runq config check %s`", label, issues, t.Name))
+			} else {
+				d.check(true, label, "")
+			}
+			if t.SSH != nil && t.SSH.Key != "" {
+				key := t.SSH.Key
+				if strings.HasPrefix(key, "~/") {
+					if home, herr := os.UserHomeDir(); herr == nil {
+						key = filepath.Join(home, key[2:])
+					}
+				}
+				if _, err := os.Stat(key); err != nil {
+					d.check(false, "", fmt.Sprintf("%s: ssh key %s: %v", t.Name, t.SSH.Key, err))
+				} else {
+					d.check(true, fmt.Sprintf("%s: ssh key %s", t.Name, t.SSH.Key), "")
+				}
+			}
 		}
 	}
 
-	fmt.Println("Database:")
-	dbPath := config.DBPath()
-	if info, err := os.Stat(dbPath); os.IsNotExist(err) {
-		d.skip(fmt.Sprintf("%s does not exist yet — created on first submit", dbPath))
-	} else if err != nil {
-		d.check(false, "", fmt.Sprintf("%s: %v", dbPath, err))
-	} else if f, err := os.OpenFile(dbPath, os.O_RDWR, 0); err != nil {
-		d.check(false, "", fmt.Sprintf("%s: not writable: %v", dbPath, err))
-	} else {
-		f.Close()
-		d.check(true, fmt.Sprintf("%s (%d bytes)", dbPath, info.Size()), "")
-	}
-
-	fmt.Println("Daemon:")
-	d.skip("hpc mode — the cluster scheduler runs the tasks")
-
-	fmt.Println("Logs:")
-	logDir := config.HPCLogDir()
-	if info, err := os.Stat(logDir); os.IsNotExist(err) {
-		d.skip(fmt.Sprintf("%s does not exist yet — created on first submit", logDir))
-	} else if err != nil {
-		d.check(false, "", fmt.Sprintf("%s: %v", logDir, err))
-	} else {
-		d.check(true, fmt.Sprintf("%s (%s) — operation log: %s", logDir, info.Mode(), config.HPCOpLogPath()), "")
-	}
-}
-
-// runDoctorDaemon is the original daemon-mode health check.
-func runDoctorDaemon(d *doctorChecks) {
 	_, dataDir := utils.ResolveDataDir()
 	paths := utils.PathsFromDataDir(dataDir)
 
-	fmt.Println("GPU:")
-	gpuCount, gpuErr := checkNvidiaSmi()
-	d.check(gpuErr == nil, fmt.Sprintf("nvidia-smi found (%d GPUs detected)", gpuCount), fmt.Sprintf("nvidia-smi: %v", gpuErr))
-
 	fmt.Println("Data dir:")
-	info, err := os.Stat(paths.DataDir)
-	if err != nil {
+	if info, err := os.Stat(paths.DataDir); err != nil {
 		d.check(false, "", fmt.Sprintf("%s: %v", paths.DataDir, err))
 	} else if !info.IsDir() {
 		d.check(false, "", fmt.Sprintf("%s: exists but is not a directory", paths.DataDir))
@@ -157,60 +150,69 @@ func runDoctorDaemon(d *doctorChecks) {
 	}
 
 	fmt.Println("Database:")
-	dbInfo, err := os.Stat(paths.DBPath)
-	if err != nil {
+	if dbInfo, err := os.Stat(paths.DBPath); os.IsNotExist(err) {
+		d.skip(fmt.Sprintf("%s does not exist yet — created on first submit", paths.DBPath))
+	} else if err != nil {
 		d.check(false, "", fmt.Sprintf("%s: %v", paths.DBPath, err))
+	} else if f, ferr := os.OpenFile(paths.DBPath, os.O_RDWR, 0); ferr != nil {
+		d.check(false, "", fmt.Sprintf("%s: not writable: %v", paths.DBPath, ferr))
 	} else {
-		f, err := os.OpenFile(paths.DBPath, os.O_RDWR, 0)
-		if err != nil {
-			d.check(false, "", fmt.Sprintf("%s: not writable: %v", paths.DBPath, err))
-		} else {
-			f.Close()
-			d.check(true, fmt.Sprintf("%s (%s, %d bytes)", paths.DBPath, dbInfo.Mode(), dbInfo.Size()), "")
-		}
+		f.Close()
+		d.check(true, fmt.Sprintf("%s (%d bytes)", paths.DBPath, dbInfo.Size()), "")
 	}
 
-	fmt.Println("Daemon:")
-	if checkDaemonAlive(paths.SocketPath) {
-		d.check(true, "daemon is running and responding", "")
+	// Socket dial is local IPC, not network — allowed in doctor.
+	fmt.Println("Client daemon:")
+	if checkSocketAlive(paths.SocketPath) {
+		d.check(true, "running and answering on the socket", "")
 	} else {
 		d.check(false, "", api.DiagnoseDaemon(paths.SocketPath, paths.PIDPath))
 	}
 
-	fmt.Println("Logs:")
-	logInfo, err := os.Stat(paths.LogDir)
-	if err != nil {
-		d.check(false, "", fmt.Sprintf("%s: %v", paths.LogDir, err))
-	} else {
-		tmpPath := paths.LogDir + "/.doctor-check"
-		if err := os.WriteFile(tmpPath, []byte("ok"), 0o644); err != nil {
-			d.check(false, "", fmt.Sprintf("%s: not writable: %v", paths.LogDir, err))
-		} else {
-			os.Remove(tmpPath)
-			d.check(true, fmt.Sprintf("%s (%s)", paths.LogDir, logInfo.Mode()), "")
-		}
-	}
+	return cfg
 }
 
-// checkModeConsistency: an hpc: section with mode=daemon almost always means
-// a forgotten `runq config set mode=hpc` after `hpc init`.
-func checkModeConsistency(d *doctorChecks) {
-	fmt.Println("Mode:")
-	cfg, err := config.Load()
-	if err != nil {
-		d.check(false, "", fmt.Sprintf("config.yaml: %v", err))
-		return
+// hasExecutorRole reports whether THIS machine shows executor traces:
+// a local-GPUs target, a runqd sibling binary, or a live runqd socket.
+func hasExecutorRole(cfg *config.GlobalConfig) bool {
+	if cfg != nil {
+		for _, t := range cfg.ResolveTargets() {
+			if t.Type() != config.TargetTypeHPC {
+				return true
+			}
+		}
 	}
-	mode := config.ConfigMode(cfg)
-	_, hpcErr := config.LoadHPCConfig()
-	hpcConfigured := hpcErr == nil
-	switch {
-	case hpcConfigured && mode != config.ModeHPC:
-		d.check(false, "", fmt.Sprintf("hpc: section is configured but mode is %q — run `runq config set mode=hpc` (or use --mode)", mode))
-	case !hpcConfigured && mode == config.ModeHPC:
-		d.check(false, "", "mode is hpc but the hpc: section is missing — add a target: `runq config add <name> --template=<scheduler>`")
-	default:
-		d.check(true, fmt.Sprintf("mode %s, config consistent", mode), "")
+	if app.FindRunqd() != "" {
+		return true
+	}
+	_, dataDir := utils.ResolveDataDir()
+	return checkSocketAlive(utils.RunqdPathsFromDataDir(dataDir).SocketPath)
+}
+
+// doctorExecutor checks the executor role: can this machine RUN tasks.
+func doctorExecutor(d *doctorChecks) {
+	fmt.Println("GPU:")
+	gpuCount, gpuErr := checkNvidiaSmi()
+	if gpuErr != nil {
+		d.check(false, "", fmt.Sprintf("nvidia-smi: %v", gpuErr))
+	} else {
+		d.check(true, fmt.Sprintf("nvidia-smi found (%d GPUs detected)", gpuCount), "")
+	}
+
+	fmt.Println("runqd binary:")
+	if bin := app.FindRunqd(); bin != "" {
+		d.check(true, bin, "")
+	} else {
+		d.check(false, "", "not found next to runq or on PATH — local targets cannot execute")
+	}
+
+	fmt.Println("runqd daemon:")
+	_, dataDir := utils.ResolveDataDir()
+	socket := utils.RunqdPathsFromDataDir(dataDir).SocketPath
+	if checkSocketAlive(socket) {
+		d.check(true, "running and answering on the socket", "")
+	} else {
+		d.skip("not running — the client daemon auto-starts it on demand (ensure-running)")
 	}
 }
 
@@ -232,8 +234,8 @@ func checkNvidiaSmi() (int, error) {
 	return count, nil
 }
 
-// checkDaemonAlive tries to connect to the daemon socket.
-func checkDaemonAlive(socketPath string) bool {
+// checkSocketAlive tries to connect to a unix socket (local IPC).
+func checkSocketAlive(socketPath string) bool {
 	conn, err := net.DialTimeout("unix", socketPath, 2*time.Second)
 	if err != nil {
 		return false

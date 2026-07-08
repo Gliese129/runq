@@ -6,6 +6,7 @@ import (
 
 	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/project"
+	"github.com/gliese129/runq/internal/workspace"
 )
 
 type UnavailableBackend struct {
@@ -61,6 +62,10 @@ func (b *UnavailableBackend) TaskMetrics(ctx context.Context, taskID string, aft
 
 func (b *UnavailableBackend) MetricKeys(ctx context.Context, jobID string) ([]string, error) {
 	return nil, b.wrap()
+}
+
+func (b *UnavailableBackend) TaskMetricBuckets(ctx context.Context, taskID, key string, fromTS, toTS int64, maxBuckets int) ([]workspace.PyramidBucket, string, error) {
+	return nil, "", b.wrap()
 }
 
 func (b *UnavailableBackend) TaskLogRead(ctx context.Context, taskID string, offset int64, maxLines int) (*LogPage, error) {

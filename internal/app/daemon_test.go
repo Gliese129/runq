@@ -267,9 +267,10 @@ func TestL2CStage1EndToEnd(t *testing.T) {
 	}
 
 	// ── verify reap landed data in metrics + checkpoints ──
-	metrics, _ := st.ListMetrics(ctx, taskID, "")
+	taskRow, _ := st.GetTask(ctx, taskID)
+	metrics, _ := st.ListMetricSummaries(ctx, taskRow.JobID, "")
 	if len(metrics) != 1 {
-		t.Errorf("expected 1 metric row, got %d (%+v)", len(metrics), metrics)
+		t.Errorf("expected 1 summary row, got %d (%+v)", len(metrics), metrics)
 	} else if metrics[0].Key != "loss" {
 		t.Errorf("metric key = %q, want %q", metrics[0].Key, "loss")
 	}

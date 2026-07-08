@@ -57,60 +57,19 @@ type checkpointEvent struct {
 	TS        int64  `json:"ts"`
 }
 
-// ReapOutputs reads <target.Dir>/metrics.jsonl, parses each line as a typed
-// event, and batch-inserts metric / checkpoint rows into the store.
+// NOTE: the legacy ReapOutputs (markless full-file reap) is GONE. Its
+// "idempotent via INSERT OR IGNORE" contract silently broke when the
+// point table died: streaming summaries ACCUMULATE, so a markless re-read
+// double-counts. ReapIncremental's (size, parsed_offset) mark is what
+// makes re-reading safe now — every caller must go through it.
 //
-// Recognized event shapes (line-delimited JSON):
-//
-//	{"type":"metric",     ...metricEvent fields...}
-//	{"type":"checkpoint", ...checkpointEvent fields...}
-//
-// `type` is required; any other value is logged at debug and skipped for
-// forward compatibility. Per-line JSON parse errors are logged at warn and the
-// line is skipped; the rest of the file still gets processed.
-//
-// Notes:
-//   - Missing file -> (Result{}, nil). Empty / no-SDK tasks are normal.
-//   - bufio.Scanner buffer is raised to 10 MB to tolerate long metric rows.
-//   - INSERT OR IGNORE in the store batch methods makes re-reaping idempotent.
-//     This is a hard dependency for future daemonless status refresh, which may
-//     reread the same jsonl multiple times.
-//   - `ts` from the SDK is preserved as-is; ingest does not re-stamp.
-//   - Reap MUST NOT propagate errors that would change the task's terminal
-//     status. Callers should treat returned errors as warn-only.
-//
-// disk_low events are NOT consumed here. In the SDK-driven freeze model the SDK
-// posts /api/internal/freeze-self at runtime; by the time metrics.jsonl is
-// reaped the freeze decision is long gone. If an old jsonl from a pre-pivot
-// task still has a disk_low line, it falls through to the "unknown type" branch.
-func ReapOutputs(ctx context.Context, st *store.Store, target Target) (Result, error) {
-	fsys := target.FS
-	if fsys == nil {
-		fsys = rfs.NewLocalFS()
-	}
-	path := workspace.MetricsPath(target.Dir)
-	f, err := fsys.Open(path)
-	if errors.Is(err, fs.ErrNotExist) {
-		return Result{}, nil
-	}
-	if err != nil {
-		return Result{}, err
-	}
-	defer f.Close()
-
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 64*1024), 10*1024*1024)
-
-	c := collector{target: target, path: path}
-	for scanner.Scan() {
-		c.line(scanner.Bytes())
-	}
-	if err := scanner.Err(); err != nil {
-		logger.Warnf("reap %s: scanner error (partial result): %v", path, err)
-	}
-	c.flush(ctx, st)
-	return c.result, nil
-}
+// SDK event vocabulary and error posture (unchanged):
+//   - {"type":"metric"|"checkpoint", ...}; unknown types are debug-logged
+//     and skipped (forward compatibility), bad JSON lines warn + skip.
+//   - Reap MUST NOT propagate errors that would change a task's terminal
+//     status: verdict-path callers treat returned errors as warn-only.
+//   - disk_low events fall through to "unknown type": the SDK-driven
+//     freeze model handles them at runtime via /internal/freeze-self.
 
 // collector performs the STREAMING REDUCTION over metrics.jsonl lines —
 // the ONE parsing path shared by the full reap and the incremental reap.
@@ -184,17 +143,13 @@ func (c *collector) line(lineBytes []byte) {
 	}
 }
 
-func (c *collector) flush(ctx context.Context, st *store.Store) {
+// summaryRows materializes the per-key reductions for the atomic apply.
+func (c *collector) summaryRows() []store.MetricSummaryRow {
 	rows := make([]store.MetricSummaryRow, 0, len(c.aggs))
 	for _, a := range c.aggs {
 		rows = append(rows, *a)
 	}
-	if err := st.MergeMetricSummaries(ctx, rows); err != nil {
-		logger.Warnf("reap %s: MergeMetricSummaries failed (%d keys): %v", c.path, len(rows), err)
-	}
-	if err := st.InsertCheckpointsBatch(ctx, c.ckpts); err != nil {
-		logger.Warnf("reap %s: InsertCheckpointsBatch failed (%d rows): %v", c.path, len(c.ckpts), err)
-	}
+	return rows
 }
 
 // ReapIncremental ingests only the bytes appended since the last pass,
@@ -209,7 +164,7 @@ func (c *collector) flush(ctx context.Context, st *store.Store) {
 // final marks the terminal pass: the tail is consumed even without a
 // trailing newline, and the mark is frozen — settled tasks are never
 // stat'ed again. Errors are warn-only for callers on verdict paths (same
-// contract as ReapOutputs).
+// contract as the old full reap).
 func ReapIncremental(ctx context.Context, st *store.Store, target Target, final bool) (Result, error) {
 	fsys := target.FS
 	if fsys == nil {
@@ -237,10 +192,13 @@ func ReapIncremental(ctx context.Context, st *store.Store, target Target, final 
 
 	size := info.Size()
 	offset := mark.Offset
+	rebuild := false
 	if size < mark.Size {
-		if err := st.DeleteTaskMetrics(ctx, target.TaskID); err != nil {
-			return Result{}, err
-		}
+		// Rewritten file (retry rerun): re-read from 0. The DELETE of the
+		// old summaries is DEFERRED into the atomic apply below — reading
+		// happens against a still-consistent store, and a crash at any
+		// point leaves either the old state or the new, never a mix.
+		rebuild = true
 		offset = 0
 	} else if size == mark.Size && !final {
 		return Result{}, nil // zero transfer
@@ -274,7 +232,13 @@ func ReapIncremental(ctx context.Context, st *store.Store, target Target, final 
 			break
 		}
 	}
-	c.flush(ctx, st)
-	_ = st.SetIngestMark(ctx, target.TaskID, store.IngestMark{Size: size, Offset: consumed, Final: final})
+	// ONE transaction: rebuild delete + summary merges + checkpoints + the
+	// mark. "Counted" and "accounted" are inseparable — a crash between
+	// them would replay this delta next pass and inflate count/sum.
+	if err := st.ApplyIngestDelta(ctx, target.TaskID, rebuild,
+		c.summaryRows(), c.ckpts,
+		store.IngestMark{Size: size, Offset: consumed, Final: final}); err != nil {
+		return Result{}, err
+	}
 	return c.result, nil
 }

@@ -13,6 +13,7 @@ import (
 	"github.com/gliese129/runq/internal/backend"
 	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/project"
+	"github.com/gliese129/runq/internal/workspace"
 )
 
 // proxySubmitTimeout is the client-side timeout for the submit RPC,
@@ -380,6 +381,29 @@ func (p *Proxy) TaskMetrics(ctx context.Context, taskID string, afterTS int64) (
 		return nil, err
 	}
 	return resp.Points, nil
+}
+
+// TaskMetricBuckets — GET /tasks/{id}/metrics?key=&buckets=&from=&to= →
+// {buckets, source} (spec §6.4 bucket-mode chart).
+func (p *Proxy) TaskMetricBuckets(ctx context.Context, taskID, key string, fromTS, toTS int64, maxBuckets int) ([]workspace.PyramidBucket, string, error) {
+	q := url.Values{"key": {key}}
+	if maxBuckets > 0 {
+		q.Set("buckets", strconv.Itoa(maxBuckets))
+	}
+	if fromTS != 0 {
+		q.Set("from", strconv.FormatInt(fromTS, 10))
+	}
+	if toTS != 0 {
+		q.Set("to", strconv.FormatInt(toTS, 10))
+	}
+	var resp struct {
+		Buckets []workspace.PyramidBucket `json:"buckets"`
+		Source  string                    `json:"source"`
+	}
+	if err := p.do(ctx, "GET", "/api/v1/tasks/"+url.PathEscape(taskID)+"/metrics?"+q.Encode(), nil, &resp); err != nil {
+		return nil, "", err
+	}
+	return resp.Buckets, resp.Source, nil
 }
 
 // ── Task logs (RQ-44) ───────────────────────────────────────────────────

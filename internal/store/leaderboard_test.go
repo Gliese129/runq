@@ -29,10 +29,10 @@ func TestMetricLeaderboard(t *testing.T) {
 		t.Fatalf("InsertJobWithTasks: %v", err)
 	}
 	// t1: loss {0.3, 0.2} → min 0.2, max 0.3.  t2: loss 0.5.  t3: no loss metric.
-	if err := st.InsertMetricsBatch(ctx, []MetricRow{
-		{TaskID: "t1", JobID: "j", Key: "loss", Value: 0.3, TS: 1},
-		{TaskID: "t1", JobID: "j", Key: "loss", Value: 0.2, TS: 2},
-		{TaskID: "t2", JobID: "j", Key: "loss", Value: 0.5, TS: 1},
+	// (summary era: the streaming reduction already produced min/max.)
+	if err := st.MergeMetricSummaries(ctx, []MetricSummaryRow{
+		{TaskID: "t1", JobID: "j", Key: "loss", Min: 0.2, Max: 0.3, Last: 0.2, LastTS: 2, Count: 2},
+		{TaskID: "t2", JobID: "j", Key: "loss", Min: 0.5, Max: 0.5, Last: 0.5, LastTS: 1, Count: 1},
 	}); err != nil {
 		t.Fatal(err)
 	}

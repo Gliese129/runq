@@ -10,6 +10,7 @@ import (
 	"github.com/gliese129/runq/internal/project"
 	"github.com/gliese129/runq/internal/rfs"
 	"github.com/gliese129/runq/internal/store"
+	"github.com/gliese129/runq/internal/workspace"
 )
 
 // MultiBackend routes operations to per-target backends. ListJobs aggregates
@@ -222,6 +223,14 @@ func (m *MultiBackend) MetricKeys(ctx context.Context, jobID string) ([]string, 
 		return nil, err
 	}
 	return be.MetricKeys(ctx, jobID)
+}
+
+func (m *MultiBackend) TaskMetricBuckets(ctx context.Context, taskID, key string, fromTS, toTS int64, maxBuckets int) ([]workspace.PyramidBucket, string, error) {
+	be, err := m.resolveTask(ctx, taskID)
+	if err != nil {
+		return nil, "", err
+	}
+	return be.TaskMetricBuckets(ctx, taskID, key, fromTS, toTS, maxBuckets)
 }
 
 // ── RQ-44: log access — pure ownership routing ────────────────────────────

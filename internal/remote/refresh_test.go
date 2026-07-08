@@ -91,7 +91,7 @@ func TestIngestErrorDoesNotCacheAsFresh(t *testing.T) {
 
 	// Write an unreadable metrics.jsonl to trigger an ingest error.
 	metricsPath := filepath.Join(dir, "metrics.jsonl")
-	if err := os.WriteFile(metricsPath, []byte(`{"type":"metric","key":"loss","value":0.5,"step":1,"ts":1700000000}`), 0o644); err != nil {
+	if err := os.WriteFile(metricsPath, []byte("{\"type\":\"metric\",\"key\":\"loss\",\"value\":0.5,\"step\":1,\"ts\":1700000000}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chmod(metricsPath, 0o000); err != nil {
@@ -134,9 +134,9 @@ func TestIngestErrorDoesNotCacheAsFresh(t *testing.T) {
 	if got.Status != "success" {
 		t.Errorf("within-TTL call must pick up wrapper status: got %s, want success", got.Status)
 	}
-	metrics, _ := st.ListMetrics(context.Background(), taskID, "loss")
+	metrics, _ := st.ListMetricSummaries(context.Background(), jobID, "loss")
 	if len(metrics) != 1 {
-		t.Errorf("within-TTL call must re-ingest fixed metrics: got %d, want 1", len(metrics))
+		t.Errorf("within-TTL call must re-ingest fixed metrics: got %d summaries, want 1", len(metrics))
 	}
 }
 

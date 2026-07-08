@@ -21,7 +21,7 @@ func writeTemp(t *testing.T, content string) string {
 
 func mustOpen(t *testing.T, path string) *Reader {
 	t.Helper()
-	r, err := Open(path)
+	r, err := Open(path, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,7 +32,7 @@ func mustOpen(t *testing.T, path string) *Reader {
 // ── Open / Close ─────────────────────────────────────────────────────────────
 
 func TestOpen_NonExistent(t *testing.T) {
-	_, err := Open("/tmp/logfile_does_not_exist_12345.log")
+	_, err := Open("/tmp/logfile_does_not_exist_12345.log", nil)
 	if err == nil {
 		t.Fatal("expected error for missing file")
 	}
@@ -112,8 +112,8 @@ func TestReadLines_EmptyFile(t *testing.T) {
 	if len(page.Lines) != 0 {
 		t.Fatalf("expected 0 lines, got %d", len(page.Lines))
 	}
-	if page.TotalBytes != 0 {
-		t.Fatalf("expected TotalBytes=0, got %d", page.TotalBytes)
+	if page.Size != 0 {
+		t.Fatalf("expected TotalBytes=0, got %d", page.Size)
 	}
 }
 
@@ -130,8 +130,8 @@ func TestReadLines_FromStart(t *testing.T) {
 	if page.Lines[0] != "line0" || page.Lines[1] != "line1" || page.Lines[2] != "line2" {
 		t.Fatalf("unexpected lines: %v", page.Lines)
 	}
-	if page.StartOffset != 0 {
-		t.Fatalf("expected StartOffset=0, got %d", page.StartOffset)
+	if page.Offset != 0 {
+		t.Fatalf("expected StartOffset=0, got %d", page.Offset)
 	}
 }
 
@@ -151,8 +151,8 @@ func TestReadLines_SnapToLineBoundary(t *testing.T) {
 	if page.Lines[0] != "line0" {
 		t.Fatalf("expected first line 'line0' after backward snap, got %q", page.Lines[0])
 	}
-	if page.StartOffset != 0 {
-		t.Fatalf("expected StartOffset=0 (start of line0), got %d", page.StartOffset)
+	if page.Offset != 0 {
+		t.Fatalf("expected StartOffset=0 (start of line0), got %d", page.Offset)
 	}
 }
 
@@ -167,8 +167,8 @@ func TestReadLines_ExactLineBoundary(t *testing.T) {
 	if len(page.Lines) != 1 || page.Lines[0] != "line1" {
 		t.Fatalf("expected [line1], got %v", page.Lines)
 	}
-	if page.StartOffset != 6 {
-		t.Fatalf("expected StartOffset=6, got %d", page.StartOffset)
+	if page.Offset != 6 {
+		t.Fatalf("expected StartOffset=6, got %d", page.Offset)
 	}
 }
 
@@ -222,10 +222,10 @@ func TestReadLines_EndOffsetProgresses(t *testing.T) {
 	r := mustOpen(t, writeTemp(t, content))
 
 	p1, _ := r.ReadLines(0, 2)
-	p2, _ := r.ReadLines(p1.EndOffset, 2)
+	p2, _ := r.ReadLines(p1.NextOffset, 2)
 
-	if p2.StartOffset != p1.EndOffset {
-		t.Fatalf("page2 start (%d) != page1 end (%d)", p2.StartOffset, p1.EndOffset)
+	if p2.Offset != p1.NextOffset {
+		t.Fatalf("page2 start (%d) != page1 end (%d)", p2.Offset, p1.NextOffset)
 	}
 	if len(p2.Lines) < 1 || p2.Lines[0] != "ccc" {
 		t.Fatalf("page2: expected [ccc], got %v", p2.Lines)

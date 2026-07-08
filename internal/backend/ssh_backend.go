@@ -27,6 +27,7 @@ import (
 	"github.com/gliese129/runq/internal/rfs"
 	"github.com/gliese129/runq/internal/scheduler"
 	"github.com/gliese129/runq/internal/store"
+	"github.com/gliese129/runq/internal/workspace"
 )
 
 // Sensor cadences for the remote lane. Both loops are gated on HasInFlight —
@@ -446,7 +447,8 @@ func (b *SSHBackend) GetJob(ctx context.Context, jobID string) (*JobDetail, erro
 	if err != nil {
 		return nil, err
 	}
-	detail := BuildJobDetail(*j, tasks)
+	keys, _ := b.store.MetricKeys(ctx, jobID) // summaries: exact, remote-safe
+	detail := BuildJobDetail(*j, tasks, keys)
 	if cfg, err := b.reg.Get(ctx, j.ProjectName); err == nil && cfg.Wandb != nil {
 		detail.Wandb = &WandbInfo{
 			Entity:  cfg.Wandb.Entity,
@@ -571,7 +573,28 @@ func (b *SSHBackend) TaskMetrics(ctx context.Context, taskID string, afterTS int
 	_, _ = ingest.ReapIncremental(ctx, b.store, ingest.Target{
 		TaskID: task.ID, JobID: task.JobID, Dir: task.TaskDir, FS: b.backend.FS,
 	}, false)
-	return readTailMetricPoints(b.backend.FS, task.TaskDir, 2000, afterTS), nil
+	return readTailMetricPoints(b.backend.FS, task.TaskDir, "", 2000, afterTS), nil
+}
+
+// TaskMetricBuckets — bucket-mode chart (spec §6.4): terminal tasks read
+// the on-target pyramid (1–O(log n) rfs ranged reads); pyramid absent
+// (running / builder not configured) falls back to tail-window
+// aggregation with the SAME merge operator.
+func (b *SSHBackend) TaskMetricBuckets(ctx context.Context, taskID, key string, fromTS, toTS int64, maxBuckets int) ([]workspace.PyramidBucket, string, error) {
+	b.touchActivity()
+	task, err := b.store.GetTask(ctx, taskID)
+	if err != nil || task == nil {
+		return nil, "", fmt.Errorf("task %q: %w", taskID, ErrNotFound)
+	}
+	buckets, err := workspace.QueryPyramid(ctx, b.backend.FS, task.TaskDir, key, fromTS, toTS, maxBuckets)
+	switch {
+	case err == nil:
+		return buckets, "pyramid", nil
+	case errors.Is(err, workspace.ErrPyramidNotBuilt):
+		return tailMetricBuckets(b.backend.FS, task.TaskDir, key, fromTS, toTS, maxBuckets), "tail", nil
+	default:
+		return nil, "", err // e.g. key not indexed — a real answer, not a fallback case
+	}
 }
 
 func (b *SSHBackend) reconcileTask(ctx context.Context, taskID string, fallback *store.TaskRow) *store.TaskRow {

@@ -60,9 +60,9 @@ func TestReapNormal(t *testing.T) {
 	})
 	st := openMemoryStoreAndSeed(t, "t1", "j1", taskDir)
 
-	res, err := ReapOutputs(context.Background(), st, Target{TaskID: "t1", JobID: "j1", Dir: taskDir})
+	res, err := ReapIncremental(context.Background(), st, Target{TaskID: "t1", JobID: "j1", Dir: taskDir}, false)
 	if err != nil {
-		t.Fatalf("ReapOutputs: %v", err)
+		t.Fatalf("ReapIncremental: %v", err)
 	}
 	if res.MetricCount != 1 {
 		t.Errorf("MetricCount = %d, want 1", res.MetricCount)
@@ -71,9 +71,9 @@ func TestReapNormal(t *testing.T) {
 		t.Errorf("CheckpointCount = %d, want 1", res.CheckpointCount)
 	}
 
-	got, _ := st.ListMetrics(context.Background(), "t1", "loss")
-	if len(got) != 1 || got[0].Value != 0.42 {
-		t.Errorf("metrics row mismatch: %+v", got)
+	got, _ := st.ListMetricSummaries(context.Background(), "j1", "loss")
+	if len(got) != 1 || got[0].Min != 0.42 || got[0].Max != 0.42 || got[0].Count != 1 {
+		t.Errorf("summary row mismatch: %+v", got)
 	}
 	ckpts, _ := st.ListCheckpoints(context.Background(), "t1")
 	if len(ckpts) != 1 {
@@ -99,9 +99,9 @@ func TestReapBrokenLine(t *testing.T) {
 	})
 	st := openMemoryStoreAndSeed(t, "t1", "j1", taskDir)
 
-	res, err := ReapOutputs(context.Background(), st, Target{TaskID: "t1", JobID: "j1", Dir: taskDir})
+	res, err := ReapIncremental(context.Background(), st, Target{TaskID: "t1", JobID: "j1", Dir: taskDir}, false)
 	if err != nil {
-		t.Fatalf("ReapOutputs: %v", err)
+		t.Fatalf("ReapIncremental: %v", err)
 	}
 	if res.MetricCount != 2 {
 		t.Errorf("MetricCount = %d, want 2 (broken line skipped)", res.MetricCount)
@@ -117,9 +117,9 @@ func TestReapUnknownType(t *testing.T) {
 	})
 	st := openMemoryStoreAndSeed(t, "t1", "j1", taskDir)
 
-	res, err := ReapOutputs(context.Background(), st, Target{TaskID: "t1", JobID: "j1", Dir: taskDir})
+	res, err := ReapIncremental(context.Background(), st, Target{TaskID: "t1", JobID: "j1", Dir: taskDir}, false)
 	if err != nil {
-		t.Fatalf("ReapOutputs: %v", err)
+		t.Fatalf("ReapIncremental: %v", err)
 	}
 	if res.MetricCount != 1 {
 		t.Errorf("MetricCount = %d, want 1 (other types ignored)", res.MetricCount)
@@ -134,9 +134,9 @@ func TestReapDiskLowIgnored(t *testing.T) {
 	})
 	st := openMemoryStoreAndSeed(t, "t1", "j1", taskDir)
 
-	res, err := ReapOutputs(context.Background(), st, Target{TaskID: "t1", JobID: "j1", Dir: taskDir})
+	res, err := ReapIncremental(context.Background(), st, Target{TaskID: "t1", JobID: "j1", Dir: taskDir}, false)
 	if err != nil {
-		t.Fatalf("ReapOutputs: %v", err)
+		t.Fatalf("ReapIncremental: %v", err)
 	}
 	if res.MetricCount != 1 {
 		t.Errorf("MetricCount = %d, want 1 (disk_low must be ignored, metric must still land)", res.MetricCount)
@@ -147,7 +147,7 @@ func TestReapMissingFile(t *testing.T) {
 	taskDir := t.TempDir()
 	st := openMemoryStoreAndSeed(t, "t1", "j1", taskDir)
 
-	res, err := ReapOutputs(context.Background(), st, Target{TaskID: "t1", JobID: "j1", Dir: taskDir})
+	res, err := ReapIncremental(context.Background(), st, Target{TaskID: "t1", JobID: "j1", Dir: taskDir}, false)
 	if err != nil {
 		t.Errorf("missing file should be silent, got %v", err)
 	}
@@ -164,16 +164,15 @@ func TestReapIdempotent(t *testing.T) {
 	st := openMemoryStoreAndSeed(t, "t1", "j1", taskDir)
 	target := Target{TaskID: "t1", JobID: "j1", Dir: taskDir}
 
-	if _, err := ReapOutputs(context.Background(), st, target); err != nil {
+	if _, err := ReapIncremental(context.Background(), st, target, false); err != nil {
 		t.Fatalf("first reap: %v", err)
 	}
-	if _, err := ReapOutputs(context.Background(), st, target); err != nil {
+	if _, err := ReapIncremental(context.Background(), st, target, false); err != nil {
 		t.Fatalf("second reap: %v", err)
 	}
-	var n int
-	st.DB().QueryRow(`SELECT COUNT(*) FROM metrics WHERE task_id='t1'`).Scan(&n)
-	if n != 1 {
-		t.Errorf("expected 1 row after double-reap (INSERT OR IGNORE), got %d", n)
+	got, _ := st.ListMetricSummaries(context.Background(), "j1", "loss")
+	if len(got) != 1 || got[0].Count != 1 {
+		t.Errorf("double-reap must not double-count (the (size,offset) mark makes pass 2 a zero-transfer no-op): %+v", got)
 	}
 }
 

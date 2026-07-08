@@ -3,6 +3,7 @@ package backend
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -228,7 +229,8 @@ func (b *LocalBackend) GetJob(ctx context.Context, jobID string) (*JobDetail, er
 	if err != nil {
 		return nil, err
 	}
-	detail := BuildJobDetail(*j, tasks)
+	keys, _ := b.store.MetricKeys(ctx, jobID) // summaries: exact, remote-safe
+	detail := BuildJobDetail(*j, tasks, keys)
 	if cfg, err := b.reg.Get(ctx, j.ProjectName); err == nil && cfg.Wandb != nil {
 		detail.Wandb = &WandbInfo{
 			Entity:  cfg.Wandb.Entity,
@@ -310,7 +312,28 @@ func (b *LocalBackend) TaskMetrics(ctx context.Context, taskID string, afterTS i
 	_, _ = ingest.ReapIncremental(ctx, b.store, ingest.Target{
 		TaskID: task.ID, JobID: task.JobID, Dir: task.TaskDir,
 	}, false)
-	return readTailMetricPoints(nil, task.TaskDir, 2000, afterTS), nil
+	return readTailMetricPoints(nil, task.TaskDir, "", 2000, afterTS), nil
+}
+
+// TaskMetricBuckets — bucket-mode chart; local disk, same pyramid/tail
+// split as the lanes.
+func (b *LocalBackend) TaskMetricBuckets(ctx context.Context, taskID, key string, fromTS, toTS int64, maxBuckets int) ([]workspace.PyramidBucket, string, error) {
+	task, err := b.store.GetTask(ctx, taskID)
+	if err != nil {
+		return nil, "", err
+	}
+	if task == nil {
+		return nil, "", fmt.Errorf("task %q: %w", taskID, ErrNotFound)
+	}
+	buckets, err := workspace.QueryPyramid(ctx, nil, task.TaskDir, key, fromTS, toTS, maxBuckets)
+	switch {
+	case err == nil:
+		return buckets, "pyramid", nil
+	case errors.Is(err, workspace.ErrPyramidNotBuilt):
+		return tailMetricBuckets(nil, task.TaskDir, key, fromTS, toTS, maxBuckets), "tail", nil
+	default:
+		return nil, "", err
+	}
 }
 
 // MetricKeys — SELECT DISTINCT over ingested rows (spec §5.4 dual-mode).

@@ -34,7 +34,6 @@ func newClientDaemon(dataDir string, paths utils.DataDirPaths, logger *slog.Logg
 	if err != nil {
 		return nil, fmt.Errorf("load global config: %w", err)
 	}
-	mode := config.ConfigMode(storageCfg)
 	defaultTarget := storageCfg.ResolveDefaultTarget()
 
 	targets := make(map[string]backend.Backend)
@@ -89,7 +88,7 @@ func newClientDaemon(dataDir string, paths utils.DataDirPaths, logger *slog.Logg
 	// The dashboard mux is the client's ONLY server surface: always built
 	// (the CLI socket needs it); TCP listening is what dashboard.enabled
 	// gates.
-	d.Dashboard = dashboard.NewServer(multiBe, mode, storageCfg)
+	d.Dashboard = dashboard.NewServer(multiBe, storageCfg)
 	dashCfg := storageCfg.Dashboard
 	if dashCfg == nil || dashCfg.Enabled {
 		listen := "127.0.0.1:8077"
@@ -149,7 +148,7 @@ func ensureRunqd(logger *slog.Logger, dataDir string) {
 		return
 	}
 
-	bin := findRunqd()
+	bin := FindRunqd()
 	if bin == "" {
 		logger.Warn("runqd binary not found (looked next to runq and on PATH) — local target will fail until runqd is started manually")
 		return
@@ -192,9 +191,9 @@ func ensureRunqd(logger *slog.Logger, dataDir string) {
 		"pid", cmd.Process.Pid, "socket", socket)
 }
 
-// findRunqd locates the runqd binary: sibling of the current executable
+// FindRunqd locates the runqd binary: sibling of the current executable
 // first (the normal install layout), then PATH.
-func findRunqd() string {
+func FindRunqd() string {
 	if self, err := os.Executable(); err == nil {
 		sibling := filepath.Join(filepath.Dir(self), "runqd")
 		if st, err := os.Stat(sibling); err == nil && !st.IsDir() {

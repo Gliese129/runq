@@ -471,6 +471,15 @@ func QueryPyramid(ctx context.Context, fsys rfs.FS, taskDir, key string, fromTS,
 	}
 }
 
+// MergeBucketsToBudget is the exported re-bucketing entry: the tail-window
+// fallback path builds 1-point buckets from raw points and merges them
+// down with the SAME operator the pyramid uses — one aggregation semantic
+// everywhere ("pyramid" and "tail" sources are indistinguishable except
+// in precision of raw ranges).
+func MergeBucketsToBudget(buckets []PyramidBucket, budget int) []PyramidBucket {
+	return mergeToBudget(buckets, budget)
+}
+
 // mergeToBudget re-buckets n buckets into exactly ≤ budget buckets with
 // near-equal group sizes (first `remainder` groups take one extra). Same
 // associative ops as the builder's fold — lossless aggregation.

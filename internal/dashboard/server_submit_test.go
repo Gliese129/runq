@@ -38,13 +38,18 @@ func (b *renameCaptureBackend) RenameProject(_ context.Context, oldName, newName
 }
 
 func TestHandleSubmitJobPropagatesPreflightOption(t *testing.T) {
+	// v1: options ride the BODY (D12) — {config, target?, skip_preflight?}.
 	tests := []struct {
 		name     string
-		path     string
+		body     string
 		wantSkip bool
 	}{
-		{name: "default preflight", path: "/api/dashboard/jobs", wantSkip: false},
-		{name: "skip preflight", path: "/api/dashboard/jobs?no_preflight=1", wantSkip: true},
+		{name: "default preflight",
+			body:     `{"config":{"project":"pytrain-example","fixed_params":{"epochs":30},"sweep":[]}}`,
+			wantSkip: false},
+		{name: "skip preflight",
+			body:     `{"config":{"project":"pytrain-example","fixed_params":{"epochs":30},"sweep":[]},"skip_preflight":true}`,
+			wantSkip: true},
 	}
 
 	for _, tt := range tests {
@@ -52,10 +57,9 @@ func TestHandleSubmitJobPropagatesPreflightOption(t *testing.T) {
 			backend := &submitCaptureBackend{
 				UnavailableBackend: backend.NewUnavailableBackend(errors.New("unused")),
 			}
-			server := NewServer(backend, config.ModeDaemon, &config.GlobalConfig{})
+			server := NewServer(backend, &config.GlobalConfig{})
 
-			body := `{"project":"pytrain-example","fixed_params":{"epochs":30},"sweep":[]}`
-			req := httptest.NewRequest(http.MethodPost, tt.path, strings.NewReader(body))
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/jobs", strings.NewReader(tt.body))
 			req.Header.Set("Content-Type", "application/json")
 			rec := httptest.NewRecorder()
 
@@ -78,9 +82,9 @@ func TestHandleRenameProjectRoutesToBackend(t *testing.T) {
 	backend := &renameCaptureBackend{
 		UnavailableBackend: backend.NewUnavailableBackend(errors.New("unused")),
 	}
-	server := NewServer(backend, config.ModeDaemon, &config.GlobalConfig{})
+	server := NewServer(backend, &config.GlobalConfig{})
 
-	req := httptest.NewRequest(http.MethodPost, "/api/dashboard/projects/old-name/rename", strings.NewReader(`{"new_name":"new-name"}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/old-name/rename", strings.NewReader(`{"new_name":"new-name"}`))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 

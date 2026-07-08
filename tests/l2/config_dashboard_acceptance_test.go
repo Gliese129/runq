@@ -107,7 +107,7 @@ func TestDashboardConfigAPIUsesDashboardNamespace(t *testing.T) {
 		t.Fatal("dashboard config_path should be present")
 	}
 
-	errRes, err := http.Get(baseURL + "/api/dashboard/does-not-exist")
+	errRes, err := http.Get(baseURL + "/api/v1/does-not-exist")
 	if err != nil {
 		t.Fatalf("request dashboard API error route: %v", err)
 	}
@@ -117,12 +117,12 @@ func TestDashboardConfigAPIUsesDashboardNamespace(t *testing.T) {
 	}
 	var apiErr struct {
 		Error string `json:"error"`
-		Code  int    `json:"code"`
+		Code  string `json:"code"`
 	}
 	if err := json.NewDecoder(errRes.Body).Decode(&apiErr); err != nil {
 		t.Fatalf("dashboard API error should be JSON: %v", err)
 	}
-	if apiErr.Error == "" || apiErr.Code == 0 {
+	if apiErr.Error == "" || apiErr.Code == "" {
 		t.Fatalf("dashboard API error should include error and code fields: %+v", apiErr)
 	}
 
@@ -224,7 +224,7 @@ func waitForDashboardConfig(t *testing.T, baseURL string, exited chan error, out
 			t.Fatalf("dashboard exited before config API became available: %v\n%s", err, output.String())
 		default:
 		}
-		res, err := http.Get(baseURL + "/api/dashboard/config")
+		res, err := http.Get(baseURL + "/api/v1/config")
 		if err != nil {
 			lastErr = err
 			time.Sleep(50 * time.Millisecond)

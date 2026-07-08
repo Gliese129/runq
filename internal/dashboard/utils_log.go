@@ -123,7 +123,7 @@ func randomID() string {
 
 // handleUtilsLogUpload accepts a raw log body and returns a session ID.
 //
-//	POST /api/dashboard/utils/log
+//	POST /api/v1/log-sessions
 //	Body: raw log text
 //	Response: { "id": "xxx", "total_bytes": N }
 func (s *Server) handleUtilsLogUpload(w http.ResponseWriter, r *http.Request) {
@@ -141,7 +141,7 @@ func (s *Server) handleUtilsLogUpload(w http.ResponseWriter, r *http.Request) {
 
 // handleUtilsLogRead reads a page of log lines from an uploaded log.
 //
-//	GET /api/dashboard/utils/log/{id}
+//	GET /api/v1/log-sessions/{id}
 //	Query: offset, lines — same as handleTaskLog
 //	Response: logfile.Page
 func (s *Server) handleUtilsLogRead(w http.ResponseWriter, r *http.Request) {
@@ -182,7 +182,7 @@ func (s *Server) handleUtilsLogRead(w http.ResponseWriter, r *http.Request) {
 
 // handleUtilsLogSearch searches an uploaded log (same as job log search).
 //
-//	GET /api/dashboard/utils/log/{id}/search
+//	GET /api/v1/log-sessions/{id}/search
 //	Query: q, offset
 //	Response: logfile.SearchResult
 func (s *Server) handleUtilsLogSearch(w http.ResponseWriter, r *http.Request) {
@@ -223,7 +223,7 @@ func (s *Server) handleUtilsLogSearch(w http.ResponseWriter, r *http.Request) {
 
 // handleUtilsLogDelete removes an uploaded log session.
 //
-//	DELETE /api/dashboard/utils/log/{id}
+//	DELETE /api/v1/log-sessions/{id}
 func (s *Server) handleUtilsLogDelete(w http.ResponseWriter, r *http.Request) {
 	s.utilsLogs.remove(r.PathValue("id"))
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
