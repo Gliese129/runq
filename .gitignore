@@ -13,6 +13,7 @@ CLAUDE.md
 demo/
 docs/
 scripts/
+data/
 
 # Go
 *.exe

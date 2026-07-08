@@ -366,14 +366,17 @@ func (p *Proxy) GetTask(ctx context.Context, taskID string) (*backend.TaskView, 
 	return &view, nil
 }
 
-// TaskMetrics is server-side: the daemon reads metrics.jsonl through the
-// owning target's FS (remote tasks included). v1 wraps points in an
-// envelope with refreshed_at (spec §5.5).
-func (p *Proxy) TaskMetrics(ctx context.Context, taskID string) ([]backend.MetricPoint, error) {
+// TaskMetrics is server-side: the daemon reads ingested metrics via the
+// owning lane (SQL). afterTS > 0 → ?after= incremental pull (spec §8.1.4).
+func (p *Proxy) TaskMetrics(ctx context.Context, taskID string, afterTS int64) ([]backend.MetricPoint, error) {
+	path := "/api/v1/tasks/" + url.PathEscape(taskID) + "/metrics"
+	if afterTS > 0 {
+		path += "?after=" + strconv.FormatInt(afterTS, 10)
+	}
 	var resp struct {
 		Points []backend.MetricPoint `json:"points"`
 	}
-	if err := p.do(ctx, "GET", "/api/v1/tasks/"+url.PathEscape(taskID)+"/metrics", nil, &resp); err != nil {
+	if err := p.do(ctx, "GET", path, nil, &resp); err != nil {
 		return nil, err
 	}
 	return resp.Points, nil

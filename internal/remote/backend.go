@@ -8,7 +8,7 @@
 // (status.json, metrics.jsonl); the DB is written exclusively client-side.
 //
 // The package reuses the shared kernel for everything that is "runq semantics":
-// submitplan.Build (plan), workspace.Write (file contract), runqenv.Base (env
+// submitplan.Build (plan), workspace.Write (file contract), workspace.BaseEnv (env
 // contract), ingest.ReapOutputs (metrics projection). The HPC-specific glue is
 // template rendering, run.sh generation, and DB reconciliation — the genuinely
 // algorithmic bits (shell-safe interpolation, id extraction, status reconcile)

@@ -7,11 +7,11 @@ import (
 
 	"github.com/gliese129/runq/internal/executor"
 	"github.com/gliese129/runq/internal/ingest"
-	"github.com/gliese129/runq/internal/runqenv"
+	"github.com/gliese129/runq/internal/workspace"
 )
 
 // buildTaskEnv merges task.Env with the RUNQ_* environment variables the SDK
-// expects to find. The shared RUNQ_* contract comes from runqenv.Base (the
+// expects to find. The shared RUNQ_* contract comes from workspace.BaseEnv (the
 // single source of truth, also used by the HPC wrapper); the daemon then layers
 // on RUNQ_SOCKET_PATH. RUNQ_* are written last so they win against any user-set
 // keys with the same name (RUNQ_* are an internal contract; user overrides of
@@ -23,8 +23,8 @@ func (s *Scheduler) buildTaskEnv(task *Task) map[string]string {
 	for k, v := range task.Env {
 		env[k] = v
 	}
-	for k, v := range runqenv.Base(
-		runqenv.Identity{
+	for k, v := range workspace.BaseEnv(
+		workspace.Identity{
 			TaskID:    task.ID,
 			JobID:     task.JobID,
 			Project:   task.ProjectName,
@@ -32,7 +32,7 @@ func (s *Scheduler) buildTaskEnv(task *Task) map[string]string {
 			SweepKeys: task.SweepKeys,
 			JobNote:   task.JobNote,
 		},
-		runqenv.Safety{
+		workspace.Safety{
 			FactorPercent: s.cfg.Disk.SafetyFactorPercent,
 			ExtraGB:       s.cfg.Disk.SafetyExtraGB,
 		},
@@ -261,11 +261,15 @@ func (s *Scheduler) completeTask(task *Task, status TaskStatus, extra map[string
 // defer and from MonitorReattached's defer, so any panic here would
 // orphan a task. Keep this function dumb.
 func (s *Scheduler) reapMetrics(task *Task) {
-	result, err := ingest.ReapOutputs(s.ctx, s.store, ingest.Target{
+	// final=false on purpose: this runs at each ATTEMPT's end, and a retry
+	// rewrites metrics.jsonl — the (size,offset) mark handles both the
+	// incremental append and the shrink-rebuild; freezing would block the
+	// next attempt's ingest.
+	result, err := ingest.ReapIncremental(s.ctx, s.store, ingest.Target{
 		TaskID: task.ID,
 		JobID:  task.JobID,
 		Dir:    task.TaskDir,
-	})
+	}, false)
 	if err != nil {
 		s.logger.Warn("reap failed", "task", task.ID, "error", err)
 		return

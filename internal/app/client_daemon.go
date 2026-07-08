@@ -131,6 +131,9 @@ func synthLocalRunqdTarget(tc config.TargetConfig, dataDir string) (config.Targe
 				*f = selfQ + strings.TrimPrefix(*f, "runq ")
 			}
 		}
+		// Same PATH-independence for compute-node work inside run.sh
+		// (pyramid build): a local task's "compute node" is this machine.
+		out.RunqBin = self
 	}
 	return out, nil
 }

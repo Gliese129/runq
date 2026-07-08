@@ -31,7 +31,13 @@ type Backend interface {
 	// <job_id>` and the WebUI task list). Pagination is SQL-level (D20);
 	// total is the unpaginated match count.
 	ListTasks(ctx context.Context, opts TaskListOptions) (items []TaskView, total int, err error)
-	TaskMetrics(ctx context.Context, taskID string) ([]MetricPoint, error) // returns all metric points
+	// TaskMetrics returns ingested metric points (pure SQL read, spec
+	// §8.1.4). afterTS > 0 returns only points newer than it — the ?after=
+	// incremental pull for charts.
+	TaskMetrics(ctx context.Context, taskID string, afterTS int64) ([]MetricPoint, error)
+	// MetricKeys is the discovery half of the metrics dual-mode (spec §5.4:
+	// GET /jobs/{id}/metrics without ?key=).
+	MetricKeys(ctx context.Context, jobID string) ([]string, error)
 
 	// ── RQ-44: log access through the OWNING target's filesystem ─────────
 	//

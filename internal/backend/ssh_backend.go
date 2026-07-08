@@ -19,6 +19,7 @@ import (
 	"golang.org/x/crypto/ssh/agent"
 
 	"github.com/gliese129/runq/internal/config"
+	"github.com/gliese129/runq/internal/ingest"
 	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/project"
 	"github.com/gliese129/runq/internal/remote"
@@ -53,6 +54,11 @@ const (
 	// hibernatedMarkerEvery: while hibernated, marker scan runs every Nth
 	// tick (N × markerScanInterval = 10min).
 	hibernatedMarkerEvery = 5
+
+	// metricsIngestInterval: background incremental metrics pass (spec
+	// §8.1.4) — long interval spreads the IO into a steady trickle; the
+	// (size,offset) mark makes each pass one stat per idle running task.
+	metricsIngestInterval = 5 * time.Minute
 )
 
 // SSHBackend implements Backend for a remote HPC cluster accessed via SSH.
@@ -268,7 +274,8 @@ func (b *SSHBackend) sensorLoop(ctx context.Context) {
 	defer b.loopWG.Done()
 	ticker := time.NewTicker(markerScanInterval)
 	defer ticker.Stop()
-	lastAlign := time.Now() // warm start: no immediate qstat on daemon boot
+	lastAlign := time.Now()  // warm start: no immediate qstat on daemon boot
+	lastIngest := time.Now() // metrics ingest rides the same loop, own cadence
 	tick := 0
 	for {
 		select {
@@ -290,6 +297,18 @@ func (b *SSHBackend) sensorLoop(ctx context.Context) {
 				b.logger.Warn("marker scan failed", "error", err)
 			}
 
+			// Metrics ingest (spec §8.1.4): long-interval background pass so
+			// running tasks' metrics land in SQLite as a steady trickle —
+			// reads are pure SQL, no cold-start parse spike. Runs while
+			// hibernated too (data collection needs no observer; each pass
+			// is a stat per running task + delta-only reads), at the
+			// hibernated marker cadence it already inherits from the gate
+			// above.
+			if time.Since(lastIngest) >= metricsIngestInterval {
+				lastIngest = time.Now()
+				b.ingestRunningMetrics(ctx)
+			}
+
 			// qstat alignment: user-present periods only.
 			if !active || time.Since(lastAlign) < probeAlignInterval {
 				continue
@@ -301,6 +320,26 @@ func (b *SSHBackend) sensorLoop(ctx context.Context) {
 			if err := b.backend.DetectOrphans(ctx, false); err != nil {
 				b.logger.Warn("orphan detection failed", "error", err)
 			}
+		}
+	}
+}
+
+// ingestRunningMetrics runs one incremental metrics pass over this lane's
+// running tasks. Each task costs one stat when idle, delta-only reads when
+// growing — the spread-out替代 of a read-time parse storm.
+func (b *SSHBackend) ingestRunningMetrics(ctx context.Context) {
+	rows, err := b.store.ListTasks(ctx, store.TaskFilter{Status: "running", Target: b.targetName})
+	if err != nil {
+		return
+	}
+	for _, r := range rows {
+		if r.TaskDir == "" {
+			continue
+		}
+		if _, err := ingest.ReapIncremental(ctx, b.store, ingest.Target{
+			TaskID: r.ID, JobID: r.JobID, Dir: r.TaskDir, FS: b.backend.FS,
+		}, false); err != nil {
+			b.logger.Debug("metrics ingest failed", "task", r.ID, "error", err)
 		}
 	}
 }
@@ -418,15 +457,21 @@ func (b *SSHBackend) GetJob(ctx context.Context, jobID string) (*JobDetail, erro
 	return &detail, nil
 }
 
+// CompareMetrics ranks tasks by their best ingested value — pure SQL over
+// the metrics table (spec §8.1.4); EnsureFresh keeps statuses honest and
+// its verdict path runs the final ingest for finished tasks.
 func (b *SSHBackend) CompareMetrics(ctx context.Context, jobID, key string, desc bool) ([]CompareRow, error) {
 	if err := b.backend.EnsureFresh(ctx, jobID, DefaultReadTTL); err != nil {
 		return nil, err
 	}
-	tasks, err := b.store.ListTasks(ctx, store.TaskFilter{JobID: jobID})
-	if err != nil {
-		return nil, err
-	}
-	return BuildCompareRows(tasks, key, desc), nil
+	return compareRowsFromDB(ctx, b.store, jobID, key, desc)
+}
+
+// MetricKeys is the discovery half of the metrics dual-mode (spec §5.4):
+// SELECT DISTINCT over ingested rows.
+func (b *SSHBackend) MetricKeys(ctx context.Context, jobID string) ([]string, error) {
+	b.touchActivity()
+	return b.store.MetricKeys(ctx, jobID)
 }
 
 // gpuCacheTTL bounds how often dashboard GPU-panel polling can turn into an
@@ -511,14 +556,22 @@ func (b *SSHBackend) ListTasks(ctx context.Context, opts TaskListOptions) ([]Tas
 	return listTasksFromStore(ctx, b.store, opts)
 }
 
-func (b *SSHBackend) TaskMetrics(ctx context.Context, taskID string) ([]MetricPoint, error) {
+// TaskMetrics serves the chart: the RAW TAIL WINDOW of metrics.jsonl (one
+// ranged read — recent data is small by construction). The incremental
+// catch-up keeps the summary warm as a side effect (one stat when idle;
+// TODO(L4): gate behind the 60s light TTL). Full-history multi-resolution
+// zoom will come from the on-target pyramid (TODO: wire pyramid.Query per
+// key once the builder lands). afterTS > 0 = ?after= incremental pull.
+func (b *SSHBackend) TaskMetrics(ctx context.Context, taskID string, afterTS int64) ([]MetricPoint, error) {
 	b.touchActivity()
 	task, err := b.store.GetTask(ctx, taskID)
 	if err != nil || task == nil {
 		return nil, fmt.Errorf("task %q: %w", taskID, ErrNotFound)
 	}
-	task = b.reconcileTask(ctx, taskID, task)
-	return ReadMetricPoints(b.backend.FS, task.TaskDir), nil
+	_, _ = ingest.ReapIncremental(ctx, b.store, ingest.Target{
+		TaskID: task.ID, JobID: task.JobID, Dir: task.TaskDir, FS: b.backend.FS,
+	}, false)
+	return readTailMetricPoints(b.backend.FS, task.TaskDir, 2000, afterTS), nil
 }
 
 func (b *SSHBackend) reconcileTask(ctx context.Context, taskID string, fallback *store.TaskRow) *store.TaskRow {
@@ -672,6 +725,13 @@ func (b *SSHBackend) RetryTask(ctx context.Context, taskID string) error {
 		// may be 0).
 		if err := b.backend.ResetWrapperState(ctx, row.TaskDir, taskID); err != nil {
 			return fmt.Errorf("reset wrapper state: %w", err)
+		}
+
+		// Fresh attempt = fresh metrics: drop ingested rows AND the ingest
+		// mark — a hard-final terminal froze it (Final=true), and without
+		// this reset the new attempt's metrics.jsonl would never be read.
+		if err := b.store.DeleteTaskMetrics(ctx, taskID); err != nil {
+			return fmt.Errorf("reset metrics ingest: %w", err)
 		}
 
 		if err := b.store.UpdateTaskStatus(ctx, taskID, "pending", map[string]any{

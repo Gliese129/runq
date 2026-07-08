@@ -219,11 +219,14 @@ func (b *Backend) reconcileWith(ctx context.Context, jobID string, probe bool, p
 	}
 	var ingestErrs []error
 	for _, tk := range tasks {
-		// Metrics/checkpoints: idempotent (INSERT OR IGNORE), run for every task
-		// so files that appear/grow after a status change still land.
-		if _, ierr := ingest.ReapOutputs(ctx, b.Store, ingest.Target{
+		// Metrics/checkpoints: incremental via the (size,offset) mark —
+		// growth ships only the delta, no growth is one stat. final only
+		// for hard-final terminals (wrapper/runq source): soft terminals
+		// can still be overturned and rerun.
+		hardFinal := isTerminal(tk.Status) && (tk.StatusSource == SourceWrapper || tk.StatusSource == SourceRunq)
+		if _, ierr := ingest.ReapIncremental(ctx, b.Store, ingest.Target{
 			TaskID: tk.ID, JobID: tk.JobID, Dir: tk.TaskDir, FS: b.FS,
-		}); ierr != nil {
+		}, hardFinal); ierr != nil {
 			ingestErrs = append(ingestErrs, fmt.Errorf("ingest task %s: %w", tk.ID, ierr))
 		}
 
@@ -318,13 +321,14 @@ func (b *Backend) reconcileWithBatch(ctx context.Context, jobID string, signals 
 	}
 	var ingestErrs []error
 	for _, tk := range tasks {
-		if _, ierr := ingest.ReapOutputs(ctx, b.Store, ingest.Target{
+		hardFinal := isTerminal(tk.Status) && (tk.StatusSource == SourceWrapper || tk.StatusSource == SourceRunq)
+		if _, ierr := ingest.ReapIncremental(ctx, b.Store, ingest.Target{
 			TaskID: tk.ID, JobID: tk.JobID, Dir: tk.TaskDir, FS: b.FS,
-		}); ierr != nil {
+		}, hardFinal); ierr != nil {
 			ingestErrs = append(ingestErrs, fmt.Errorf("ingest task %s: %w", tk.ID, ierr))
 		}
 
-		if isTerminal(tk.Status) && (tk.StatusSource == SourceWrapper || tk.StatusSource == SourceRunq) {
+		if hardFinal {
 			continue
 		}
 		// Requeued-but-not-relaunched: skip, same as reconcileWith.

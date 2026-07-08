@@ -1,4 +1,4 @@
-package runqenv
+package workspace
 
 import (
 	"os"
@@ -8,7 +8,7 @@ import (
 
 func TestBaseSharedKeys(t *testing.T) {
 	dir := t.TempDir()
-	env := Base(
+	env := BaseEnv(
 		Identity{TaskID: "t1", JobID: "j1", Project: "p1", TaskDir: dir},
 		Safety{FactorPercent: 10, ExtraGB: 5},
 	)
@@ -42,7 +42,7 @@ func TestBaseWandbOnlyWhenFileExists(t *testing.T) {
 	dir := t.TempDir()
 
 	// No wandb file → key absent.
-	if _, ok := Base(Identity{TaskDir: dir}, Safety{})["RUNQ_WANDB_CONFIG_FILE"]; ok {
+	if _, ok := BaseEnv(Identity{TaskDir: dir}, Safety{})["RUNQ_WANDB_CONFIG_FILE"]; ok {
 		t.Fatal("RUNQ_WANDB_CONFIG_FILE should be absent when the file does not exist")
 	}
 
@@ -51,13 +51,13 @@ func TestBaseWandbOnlyWhenFileExists(t *testing.T) {
 	if err := os.WriteFile(wandb, []byte("{}"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if got := Base(Identity{TaskDir: dir}, Safety{})["RUNQ_WANDB_CONFIG_FILE"]; got != wandb {
+	if got := BaseEnv(Identity{TaskDir: dir}, Safety{})["RUNQ_WANDB_CONFIG_FILE"]; got != wandb {
 		t.Fatalf("RUNQ_WANDB_CONFIG_FILE = %q, want %q", got, wandb)
 	}
 }
 
 func TestBaseNoTaskDirOmitsPaths(t *testing.T) {
-	env := Base(Identity{TaskID: "t", JobID: "j", Project: "p"}, Safety{})
+	env := BaseEnv(Identity{TaskID: "t", JobID: "j", Project: "p"}, Safety{})
 	for _, k := range []string{"RUNQ_TASK_DIR", "RUNQ_PARAMS_FILE", "RUNQ_METRICS_FILE", "RUNQ_CHECKPOINT_DIR"} {
 		if _, ok := env[k]; ok {
 			t.Errorf("path var %q should be omitted when TaskDir is empty", k)

@@ -31,22 +31,27 @@ func (s *Store) MetricLeaderboard(ctx context.Context, jobID, key string, maximi
 		return nil, err
 	}
 
+	// Per-task best = summary lookup: the streaming reduction keeps
+	// min/max exact, so no point scans — O(tasks) rows total.
+	summaries, err := s.ListMetricSummaries(ctx, jobID, key)
+	if err != nil {
+		return nil, err
+	}
+	byTask := make(map[string]MetricSummaryRow, len(summaries))
+	for _, sm := range summaries {
+		byTask[sm.TaskID] = sm
+	}
+
 	scores := make([]TaskScore, 0, len(tasks))
 	for _, tk := range tasks {
 		sc := TaskScore{TaskID: tk.ID, Status: tk.Status, Source: tk.StatusSource}
 		_ = json.Unmarshal([]byte(tk.ParamsJSON), &sc.Params)
-
-		metrics, err := s.ListMetrics(ctx, tk.ID, key)
-		if err != nil {
-			return nil, err
-		}
-		for _, m := range metrics {
-			if !sc.HasValue {
-				sc.Value, sc.HasValue = m.Value, true
-				continue
-			}
-			if (maximize && m.Value > sc.Value) || (!maximize && m.Value < sc.Value) {
-				sc.Value = m.Value
+		if sm, ok := byTask[tk.ID]; ok && sm.Count > 0 {
+			sc.HasValue = true
+			if maximize {
+				sc.Value = sm.Max
+			} else {
+				sc.Value = sm.Min
 			}
 		}
 		scores = append(scores, sc)

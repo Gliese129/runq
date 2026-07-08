@@ -2,9 +2,11 @@ package ingest
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"io/fs"
 
 	"github.com/bytedance/gopkg/util/logger"
@@ -99,70 +101,180 @@ func ReapOutputs(ctx context.Context, st *store.Store, target Target) (Result, e
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 64*1024), 10*1024*1024)
 
-	metrics := make([]store.MetricRow, 0)
-	ckpts := make([]store.CheckpointRow, 0)
-	result := Result{}
-
-	type typeOnly struct {
-		Type string `json:"type"`
-	}
-
-	lineN := 0
+	c := collector{target: target, path: path}
 	for scanner.Scan() {
-		lineN++
-		lineBytes := scanner.Bytes()
-		if len(lineBytes) == 0 {
-			continue
-		}
-		var t typeOnly
-		if err := json.Unmarshal(lineBytes, &t); err != nil {
-			logger.Warnf("reap %s line %d: parse type discriminator failed: %v", path, lineN, err)
-			continue
-		}
-		switch t.Type {
-		case "metric":
-			var e metricEvent
-			if err := json.Unmarshal(lineBytes, &e); err != nil {
-				logger.Warnf("reap %s line %d: parse metric event failed: %v", path, lineN, err)
-				continue
-			}
-			metrics = append(metrics, store.MetricRow{
-				TaskID: target.TaskID,
-				JobID:  target.JobID,
-				Key:    e.Key,
-				Value:  e.Value,
-				Step:   e.Step,
-				TS:     e.TS,
-			})
-			result.MetricCount++
-		case "checkpoint":
-			var e checkpointEvent
-			if err := json.Unmarshal(lineBytes, &e); err != nil {
-				logger.Warnf("reap %s line %d: parse checkpoint event failed: %v", path, lineN, err)
-				continue
-			}
-			ckpts = append(ckpts, store.CheckpointRow{
-				TaskID:    target.TaskID,
-				JobID:     target.JobID,
-				Path:      e.Path,
-				SizeBytes: e.SizeBytes,
-				Step:      e.Step,
-				IsBest:    e.IsBest,
-				TS:        e.TS,
-			})
-			result.CheckpointCount++
-		default:
-			logger.Debugf("reap %s line %d: unknown event type %q (skipped)", path, lineN, t.Type)
-		}
+		c.line(scanner.Bytes())
 	}
 	if err := scanner.Err(); err != nil {
 		logger.Warnf("reap %s: scanner error (partial result): %v", path, err)
 	}
-	if err := st.InsertMetricsBatch(ctx, metrics); err != nil {
-		logger.Warnf("reap %s: InsertMetricsBatch failed (%d rows): %v", path, len(metrics), err)
+	c.flush(ctx, st)
+	return c.result, nil
+}
+
+// collector performs the STREAMING REDUCTION over metrics.jsonl lines —
+// the ONE parsing path shared by the full reap and the incremental reap.
+// Raw metric points are never stored (a chatty 3-day task is 10M+ points):
+// each point folds into its (key) summary on the fly; charts read the raw
+// tail window or the on-target pyramid index instead.
+type collector struct {
+	target Target
+	path   string
+	lineN  int
+	aggs   map[string]*store.MetricSummaryRow
+	ckpts  []store.CheckpointRow
+	result Result
+}
+
+func (c *collector) line(lineBytes []byte) {
+	c.lineN++
+	if len(lineBytes) == 0 {
+		return
 	}
-	if err := st.InsertCheckpointsBatch(ctx, ckpts); err != nil {
-		logger.Warnf("reap %s: InsertCheckpointsBatch failed (%d rows): %v", path, len(ckpts), err)
+	var t struct {
+		Type string `json:"type"`
 	}
-	return result, nil
+	if err := json.Unmarshal(lineBytes, &t); err != nil {
+		logger.Warnf("reap %s line %d: parse type discriminator failed: %v", c.path, c.lineN, err)
+		return
+	}
+	switch t.Type {
+	case "metric":
+		var e metricEvent
+		if err := json.Unmarshal(lineBytes, &e); err != nil {
+			logger.Warnf("reap %s line %d: parse metric event failed: %v", c.path, c.lineN, err)
+			return
+		}
+		if c.aggs == nil {
+			c.aggs = make(map[string]*store.MetricSummaryRow)
+		}
+		agg, ok := c.aggs[e.Key]
+		if !ok {
+			c.aggs[e.Key] = &store.MetricSummaryRow{
+				TaskID: c.target.TaskID, JobID: c.target.JobID, Key: e.Key,
+				Min: e.Value, Max: e.Value, Last: e.Value, LastTS: e.TS, Count: 1,
+			}
+		} else {
+			agg.Min = min(agg.Min, e.Value)
+			agg.Max = max(agg.Max, e.Value)
+			if e.TS >= agg.LastTS {
+				agg.Last, agg.LastTS = e.Value, e.TS
+			}
+			agg.Count++
+		}
+		c.result.MetricCount++
+	case "checkpoint":
+		var e checkpointEvent
+		if err := json.Unmarshal(lineBytes, &e); err != nil {
+			logger.Warnf("reap %s line %d: parse checkpoint event failed: %v", c.path, c.lineN, err)
+			return
+		}
+		c.ckpts = append(c.ckpts, store.CheckpointRow{
+			TaskID:    c.target.TaskID,
+			JobID:     c.target.JobID,
+			Path:      e.Path,
+			SizeBytes: e.SizeBytes,
+			Step:      e.Step,
+			IsBest:    e.IsBest,
+			TS:        e.TS,
+		})
+		c.result.CheckpointCount++
+	default:
+		logger.Debugf("reap %s line %d: unknown event type %q (skipped)", c.path, c.lineN, t.Type)
+	}
+}
+
+func (c *collector) flush(ctx context.Context, st *store.Store) {
+	rows := make([]store.MetricSummaryRow, 0, len(c.aggs))
+	for _, a := range c.aggs {
+		rows = append(rows, *a)
+	}
+	if err := st.MergeMetricSummaries(ctx, rows); err != nil {
+		logger.Warnf("reap %s: MergeMetricSummaries failed (%d keys): %v", c.path, len(rows), err)
+	}
+	if err := st.InsertCheckpointsBatch(ctx, c.ckpts); err != nil {
+		logger.Warnf("reap %s: InsertCheckpointsBatch failed (%d rows): %v", c.path, len(c.ckpts), err)
+	}
+}
+
+// ReapIncremental ingests only the bytes appended since the last pass,
+// tracked by the (size, parsed_offset) mark (spec §8.1.4):
+//
+//	size unchanged → zero transfer, zero parse (the common idle case)
+//	size grew      → seek to parsed_offset, parse the delta's COMPLETE
+//	                 lines (an unterminated tail waits for the next pass)
+//	size shrank    → the file was rewritten (retry rerun): drop the task's
+//	                 rows and rebuild from 0
+//
+// final marks the terminal pass: the tail is consumed even without a
+// trailing newline, and the mark is frozen — settled tasks are never
+// stat'ed again. Errors are warn-only for callers on verdict paths (same
+// contract as ReapOutputs).
+func ReapIncremental(ctx context.Context, st *store.Store, target Target, final bool) (Result, error) {
+	fsys := target.FS
+	if fsys == nil {
+		fsys = rfs.NewLocalFS()
+	}
+	mark, err := st.GetIngestMark(ctx, target.TaskID)
+	if err != nil {
+		return Result{}, err
+	}
+	if mark.Final {
+		return Result{}, nil
+	}
+
+	path := workspace.MetricsPath(target.Dir)
+	info, err := fsys.Stat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		if final { // no-SDK task: freeze so we never look again
+			_ = st.SetIngestMark(ctx, target.TaskID, store.IngestMark{Final: true})
+		}
+		return Result{}, nil
+	}
+	if err != nil {
+		return Result{}, err
+	}
+
+	size := info.Size()
+	offset := mark.Offset
+	if size < mark.Size {
+		if err := st.DeleteTaskMetrics(ctx, target.TaskID); err != nil {
+			return Result{}, err
+		}
+		offset = 0
+	} else if size == mark.Size && !final {
+		return Result{}, nil // zero transfer
+	}
+
+	f, err := fsys.Open(path)
+	if err != nil {
+		return Result{}, err
+	}
+	defer f.Close()
+	if offset > 0 {
+		if _, err := f.Seek(offset, io.SeekStart); err != nil {
+			return Result{}, err
+		}
+	}
+
+	br := bufio.NewReaderSize(f, 64*1024)
+	c := collector{target: target, path: path}
+	consumed := offset
+	for {
+		raw, rerr := br.ReadBytes('\n')
+		complete := rerr == nil
+		if len(raw) > 0 && (complete || final) {
+			c.line(bytes.TrimRight(raw, "\r\n"))
+			consumed += int64(len(raw))
+		}
+		if rerr != nil {
+			if rerr != io.EOF {
+				logger.Warnf("reap %s: read error (partial result): %v", path, rerr)
+			}
+			break
+		}
+	}
+	c.flush(ctx, st)
+	_ = st.SetIngestMark(ctx, target.TaskID, store.IngestMark{Size: size, Offset: consumed, Final: final})
+	return c.result, nil
 }

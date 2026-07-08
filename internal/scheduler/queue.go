@@ -60,7 +60,7 @@ type Task struct {
 	TaskDir string `json:"task_dir,omitempty"`
 
 	// P6: W&B integration — sweep key names and job note flow through to
-	// runqenv.Identity so Base() can emit WANDB_RUN_GROUP / WANDB_TAGS.
+	// workspace.Identity so BaseEnv() can emit WANDB_RUN_GROUP / WANDB_TAGS.
 	SweepKeys []string `json:"sweep_keys,omitempty"`
 	JobNote   string   `json:"job_note,omitempty"`
 

@@ -78,8 +78,42 @@ CREATE TABLE IF NOT EXISTS metrics (
     ts       INTEGER NOT NULL,               -- Unix timestamp from SDK at log time
     PRIMARY KEY (task_id, key, step, ts)
 );
+-- NOTE(pyramid pivot): the metrics point table above is LEGACY — the
+-- streaming-reduction design stores no raw points (metric_summary below +
+-- the on-target metrics.pyr index replace it). Kept so existing DBs open
+-- cleanly; drop in the dead-code cleanup batch alongside its indexes.
 CREATE INDEX IF NOT EXISTS idx_metrics_job_key  ON metrics(job_id, key);
 CREATE INDEX IF NOT EXISTS idx_metrics_task_key ON metrics(task_id, key, step);
+
+-- Streaming metric summaries: ONE row per (task, key), maintained by the
+-- incremental ingest's on-the-fly reduction — raw points are NOT stored
+-- (a 3-day chatty task is 10M+ points; charts read the raw tail window or
+-- the on-target pyramid index instead). min/max/count merge losslessly
+-- across delta passes; best/collect/leaderboard are O(keys) lookups.
+CREATE TABLE IF NOT EXISTS metric_summary (
+    task_id  TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    job_id   TEXT NOT NULL,
+    key      TEXT NOT NULL,
+    min      REAL NOT NULL,
+    max      REAL NOT NULL,
+    last     REAL NOT NULL,
+    last_ts  INTEGER NOT NULL,
+    count    INTEGER NOT NULL,
+    PRIMARY KEY (task_id, key)
+);
+CREATE INDEX IF NOT EXISTS idx_metric_summary_job ON metric_summary(job_id, key);
+
+-- Incremental ingest marks (spec §8.1.4): (size, parsed_offset) instead of
+-- a hash — hashing means reading the whole file, wasted IO. size grew →
+-- parse from parsed_offset; size shrank (retry rerun rewrote the file) →
+-- full rebuild. final=1 freezes the mark after the terminal pass: settled
+-- tasks are never stat'ed again.
+CREATE TABLE IF NOT EXISTS metrics_ingest (
+    task_id       TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+    file_size     INTEGER NOT NULL DEFAULT 0,  -- stat size at last pass
+    parsed_offset INTEGER NOT NULL DEFAULT 0,  -- consumed up to here (complete lines only)
+    final         INTEGER NOT NULL DEFAULT 0   -- 1 = terminal ingest done
+);
 
 CREATE TABLE IF NOT EXISTS checkpoints (
     task_id     TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,

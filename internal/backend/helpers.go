@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -90,6 +91,93 @@ func BuildJobDetail(job store.JobRow, tasks []store.TaskRow) JobDetail {
 		// template" in the GUI without a second endpoint.
 		Config: json.RawMessage(job.ConfigJSON),
 	}
+}
+
+// compareRowsFromDB builds CompareRows from INGESTED metrics — pure SQL,
+// no file IO (spec §8.1.4: the background ingest keeps the DB warm).
+func compareRowsFromDB(ctx context.Context, st *store.Store, jobID, key string, desc bool) ([]CompareRow, error) {
+	scores, err := st.MetricLeaderboard(ctx, jobID, key, desc)
+	if err != nil {
+		return nil, err
+	}
+	rows := make([]CompareRow, 0, len(scores))
+	for i, sc := range scores {
+		rows = append(rows, CompareRow{
+			TaskID:   sc.TaskID,
+			Status:   sc.Status,
+			Params:   sc.Params,
+			Best:     sc.Value,
+			HasValue: sc.HasValue,
+			Rank:     i + 1,
+		})
+	}
+	return rows, nil
+}
+
+// tailMetricWindowBytes bounds the raw tail read for task charts: recent
+// points come straight from metrics.jsonl's tail (raw points are never
+// stored in the DB — see metric_summary / the pyramid index).
+const tailMetricWindowBytes = 256 * 1024
+
+// readTailMetricPoints reads the tail window of metrics.jsonl through the
+// given FS and parses metric events — the chart path for running tasks
+// (and the fallback for finished ones until their pyramid is built).
+// Returns the newest ≤ maxPoints points; afterTS > 0 filters older ones
+// (?after= incremental pull).
+func readTailMetricPoints(fsys rfs.FS, taskDir string, maxPoints int, afterTS int64) []MetricPoint {
+	if taskDir == "" {
+		return nil
+	}
+	if fsys == nil {
+		fsys = rfs.NewLocalFS()
+	}
+	p := workspace.MetricsPath(taskDir)
+	info, err := fsys.Stat(p)
+	if err != nil {
+		return nil
+	}
+	start := info.Size() - tailMetricWindowBytes
+	if start < 0 {
+		start = 0
+	}
+	f, err := fsys.Open(p)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	if start > 0 {
+		if _, err := f.Seek(start, io.SeekStart); err != nil {
+			return nil
+		}
+	}
+
+	br := bufio.NewReaderSize(f, 64*1024)
+	if start > 0 {
+		_, _ = br.ReadBytes('\n') // mid-line entry: discard the partial first line
+	}
+	var points []MetricPoint
+	for {
+		raw, rerr := br.ReadBytes('\n')
+		if rerr == nil && len(raw) > 1 {
+			var e struct {
+				Type  string  `json:"type"`
+				Key   string  `json:"key"`
+				Value float64 `json:"value"`
+				Step  *int    `json:"step"`
+				TS    int64   `json:"ts"`
+			}
+			if json.Unmarshal(raw, &e) == nil && e.Type == "metric" && (afterTS == 0 || e.TS > afterTS) {
+				points = append(points, MetricPoint{Key: e.Key, Value: e.Value, Step: e.Step, TS: e.TS})
+			}
+		}
+		if rerr != nil {
+			break
+		}
+	}
+	if len(points) > maxPoints {
+		points = points[len(points)-maxPoints:]
+	}
+	return points
 }
 
 // listTasksFromStore is the shared ListTasks implementation: every lane and

@@ -13,7 +13,6 @@ import (
 	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/preflight"
 	"github.com/gliese129/runq/internal/project"
-	"github.com/gliese129/runq/internal/runqenv"
 	"github.com/gliese129/runq/internal/store"
 	"github.com/gliese129/runq/internal/submitplan"
 	"github.com/gliese129/runq/internal/utils"
@@ -355,10 +354,10 @@ func (b *Backend) buildRunScript(t submitplan.PlannedTask, plan submitplan.Plan)
 	// Even without freeze, the SDK's pre-flight disk check catches low-disk
 	// early and raises RunqDiskFullError instead of letting the save hit
 	// ENOSPC mid-write.
-	for k, v := range runqenv.Base(runqenv.Identity{
+	for k, v := range workspace.BaseEnv(workspace.Identity{
 		TaskID: t.TaskID, JobID: plan.JobID, Project: plan.Project, TaskDir: t.TaskDir,
 		SweepKeys: plan.SweepKeys, JobNote: plan.Note,
-	}, runqenv.Safety{FactorPercent: 110}) {
+	}, workspace.Safety{FactorPercent: 110}) {
 		env[k] = v
 	}
 	env["RUNQ_NO_DAEMON"] = "1"
@@ -367,6 +366,12 @@ func (b *Backend) buildRunScript(t submitplan.PlannedTask, plan submitplan.Plan)
 	// root; without it the daemon falls back to probe-only reconcile.
 	if dir := b.doneDir(); dir != "" {
 		env["RUNQ_DONE_DIR"] = dir
+	}
+	// runq binary on the target (absolute — batch environments have minimal
+	// PATH): enables compute-node work at task end, currently the metrics
+	// pyramid build. Absent = the step is skipped, everything else works.
+	if b.Cfg.RunqBin != "" {
+		env["RUNQ_BIN"] = b.Cfg.RunqBin
 	}
 
 	var s strings.Builder
@@ -429,6 +434,13 @@ func (b *Backend) buildRunScript(t submitplan.PlannedTask, plan submitplan.Plan)
 	s.WriteString("kill $_RUNQ_ACTIVITY_PID 2>/dev/null\n")
 	s.WriteString(`if [ "$code" -eq 0 ]; then _st=success; else _st=failed; fi` + "\n")
 	s.WriteString(`_runq_status "$(printf '{"status":"%s","exit_code":%s,"finished_at":%s}' "$_st" "$code" "$(date +%s)")"` + "\n")
+	// Metrics pyramid: built HERE, on the compute node, where metrics.jsonl
+	// lives — the login node never carries this. Before the done marker so
+	// a marker's presence implies the index (when configured) had its
+	// chance; `|| true` because an index is an accelerator and must never
+	// pollute the task's terminal status. Skipped in the TERM trap: the
+	// kill grace period is for the status write.
+	s.WriteString(`if [ -n "$RUNQ_BIN" ]; then "$RUNQ_BIN" metrics-index build --task-dir "$RUNQ_TASK_DIR" >/dev/null 2>&1 || true; fi` + "\n")
 	s.WriteString("_runq_done\n")
 	s.WriteString("exit $code\n")
 	return s.String()

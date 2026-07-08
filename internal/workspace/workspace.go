@@ -27,6 +27,12 @@ func MetricsPath(dir string) string {
 	return path.Join(dir, "metrics.jsonl")
 }
 
+// PyramidPath is the multi-resolution metrics index built next to
+// metrics.jsonl by `runq metrics-index build` (pyramid.go, this package).
+func PyramidPath(dir string) string {
+	return path.Join(dir, "metrics.pyr")
+}
+
 func CheckpointsDir(dir string) string {
 	return path.Join(dir, "checkpoints")
 }

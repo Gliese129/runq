@@ -592,8 +592,15 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleJobMetrics(w http.ResponseWriter, r *http.Request) {
 	key := r.URL.Query().Get("key")
 	if key == "" {
-		// Key discovery needs the metrics-in-SQLite layer (spec §8.1.4).
-		notImplemented(w, "metric key discovery") // TODO(L3): {keys: [...]}
+		keys, err := s.backend.MetricKeys(r.Context(), r.PathValue("id"))
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		if keys == nil {
+			keys = []string{}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"keys": keys})
 		return
 	}
 	desc := strings.EqualFold(r.URL.Query().Get("order"), "desc")
@@ -848,10 +855,16 @@ func (s *Server) handleTaskLogStream(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleTaskMetrics — GET /tasks/{id}/metrics → {points, refreshed_at}
-// (spec §5.5 envelope 化).
+// handleTaskMetrics — GET /tasks/{id}/metrics?after= → {points,
+// refreshed_at} (spec §5.5). ?after= is the incremental chart pull.
 func (s *Server) handleTaskMetrics(w http.ResponseWriter, r *http.Request) {
-	points, err := s.backend.TaskMetrics(r.Context(), r.PathValue("id"))
+	after := int64(0)
+	if v := r.URL.Query().Get("after"); v != "" {
+		if n, e := strconv.ParseInt(v, 10, 64); e == nil && n > 0 {
+			after = n
+		}
+	}
+	points, err := s.backend.TaskMetrics(r.Context(), r.PathValue("id"), after)
 	if err != nil {
 		writeError(w, err)
 		return

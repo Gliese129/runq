@@ -103,6 +103,14 @@ type TargetConfig struct {
 	// without forcing a central workspace root onto local projects.
 	DoneDir string `yaml:"done_dir,omitempty" json:"done_dir,omitempty"`
 
+	// RunqBin is the ABSOLUTE path of the runq binary on the target
+	// (install-on-*.sh puts it there). When set, run.sh gains compute-node
+	// work that needs runq locally — currently the metrics pyramid build
+	// (`metrics-index build`) before the done marker. An absolute path, not
+	// PATH: batch-job environments are minimal and non-interactive shells
+	// don't source the user's profile.
+	RunqBin string `yaml:"runq_bin,omitempty" json:"runq_bin,omitempty"`
+
 	// GPUTemplate is an optional command whose output is a JSON []GPUSlot —
 	// this target's GPU view for the client's aggregated (local ∪ remote)
 	// dashboard panel. The runq preset sets `runq gpu --json`; schedulers

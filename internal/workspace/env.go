@@ -1,23 +1,21 @@
-// Package runqenv builds the RUNQ_* environment variables that form the SDK
-// contract. It is the single source of truth for that contract, shared by every
-// backend so daemon and HPC never drift.
+// env.go — the RUNQ_* environment half of the SDK contract (formerly
+// package runqenv; merged: the env contract and the file contract are two
+// halves of one SDK surface, and this package is that surface).
 //
-// Base() returns only the variables both backends share. Backend-specific keys
-// are layered on top by the caller:
+// BaseEnv returns only the variables both backends share. Backend-specific
+// keys are layered on top by the caller:
 //   - daemon adds RUNQ_SOCKET_PATH (so the SDK can reach the daemon)
 //   - HPC adds RUNQ_NO_DAEMON=1 and sets no socket
 //
-// Path variables are derived from the workspace layout helpers, so the on-disk
-// file contract (params.json / metrics.jsonl / checkpoints/) lives in exactly
-// one place (internal/workspace).
-package runqenv
+// Path variables come from the layout helpers in workspace.go, so the
+// on-disk file contract lives in exactly one place.
+
+package workspace
 
 import (
 	"os"
 	"strconv"
 	"strings"
-
-	"github.com/gliese129/runq/internal/workspace"
 )
 
 // Identity is the task's stable identity plus its workspace directory.
@@ -38,10 +36,10 @@ type Safety struct {
 	ExtraGB       int
 }
 
-// Base returns the shared RUNQ_* variables. It does NOT set RUNQ_SOCKET_PATH or
+// BaseEnv returns the shared RUNQ_* variables. It does NOT set RUNQ_SOCKET_PATH or
 // RUNQ_NO_DAEMON. RUNQ_WANDB_CONFIG_FILE is only set when the file exists, so the
 // SDK can treat its presence as a binary "wandb configured" signal.
-func Base(id Identity, safety Safety) map[string]string {
+func BaseEnv(id Identity, safety Safety) map[string]string {
 	env := make(map[string]string, 10)
 	env["RUNQ_TASK_ID"] = id.TaskID
 	env["RUNQ_JOB_ID"] = id.JobID
@@ -49,11 +47,11 @@ func Base(id Identity, safety Safety) map[string]string {
 
 	if id.TaskDir != "" {
 		env["RUNQ_TASK_DIR"] = id.TaskDir
-		env["RUNQ_PARAMS_FILE"] = workspace.ParamsPath(id.TaskDir)
-		env["RUNQ_METRICS_FILE"] = workspace.MetricsPath(id.TaskDir)
-		env["RUNQ_CHECKPOINT_DIR"] = workspace.CheckpointsDir(id.TaskDir)
+		env["RUNQ_PARAMS_FILE"] = ParamsPath(id.TaskDir)
+		env["RUNQ_METRICS_FILE"] = MetricsPath(id.TaskDir)
+		env["RUNQ_CHECKPOINT_DIR"] = CheckpointsDir(id.TaskDir)
 
-		wandbCfg := workspace.WandbConfigPath(id.TaskDir)
+		wandbCfg := WandbConfigPath(id.TaskDir)
 		if _, err := os.Stat(wandbCfg); err == nil {
 			env["RUNQ_WANDB_CONFIG_FILE"] = wandbCfg
 		}

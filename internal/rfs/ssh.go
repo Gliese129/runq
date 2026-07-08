@@ -56,6 +56,19 @@ func (s *SSHFS) Stat(path string) (fi fs.FileInfo, err error) {
 	return sc.Stat(path)
 }
 
+// Rename is the optional atomic-replace extension (sftp PosixRename
+// where servers support it would be stricter; plain Rename is what the
+// tmp-then-rename writers need).
+func (s *SSHFS) Rename(oldPath, newPath string) (err error) {
+	s.conn.beginOp()
+	defer func() { s.conn.endOpErr(err) }()
+	sc, err := s.conn.getSFTP()
+	if err != nil {
+		return err
+	}
+	return sc.Rename(oldPath, newPath)
+}
+
 // Home returns the remote user's home directory (sftp Getwd — the
 // protocol's session start dir is the user home). Optional interface: the
 // fs browser uses it as the default start point.

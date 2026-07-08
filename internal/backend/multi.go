@@ -208,12 +208,20 @@ func (m *MultiBackend) GetTask(ctx context.Context, taskID string) (*TaskView, e
 	return be.GetTask(ctx, taskID)
 }
 
-func (m *MultiBackend) TaskMetrics(ctx context.Context, taskID string) ([]MetricPoint, error) {
+func (m *MultiBackend) TaskMetrics(ctx context.Context, taskID string, afterTS int64) ([]MetricPoint, error) {
 	be, err := m.resolveTask(ctx, taskID)
 	if err != nil {
 		return nil, err
 	}
-	return be.TaskMetrics(ctx, taskID)
+	return be.TaskMetrics(ctx, taskID, afterTS)
+}
+
+func (m *MultiBackend) MetricKeys(ctx context.Context, jobID string) ([]string, error) {
+	be, err := m.resolveJob(ctx, jobID)
+	if err != nil {
+		return nil, err
+	}
+	return be.MetricKeys(ctx, jobID)
 }
 
 // ── RQ-44: log access — pure ownership routing ────────────────────────────

@@ -40,6 +40,12 @@ func (l *LocalFS) WriteFile(path string, data []byte, perm os.FileMode) error {
 	return os.WriteFile(path, data, perm)
 }
 
+// Rename is the optional atomic-replace extension (asserted by callers
+// that write tmp-then-rename, e.g. the pyramid builder).
+func (l *LocalFS) Rename(oldPath, newPath string) error {
+	return os.Rename(oldPath, newPath)
+}
+
 func (l *LocalFS) MkdirAll(path string, perm os.FileMode) error {
 	return os.MkdirAll(path, perm)
 }

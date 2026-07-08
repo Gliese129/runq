@@ -10,6 +10,7 @@ import (
 
 	"github.com/gliese129/runq/internal/config"
 	"github.com/gliese129/runq/internal/executor"
+	"github.com/gliese129/runq/internal/ingest"
 	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/project"
 	"github.com/gliese129/runq/internal/resource"
@@ -239,11 +240,7 @@ func (b *LocalBackend) GetJob(ctx context.Context, jobID string) (*JobDetail, er
 }
 
 func (b *LocalBackend) CompareMetrics(ctx context.Context, jobID, key string, desc bool) ([]CompareRow, error) {
-	tasks, err := b.store.ListTasks(ctx, store.TaskFilter{JobID: jobID})
-	if err != nil {
-		return nil, err
-	}
-	return BuildCompareRows(tasks, key, desc), nil
+	return compareRowsFromDB(ctx, b.store, jobID, key, desc)
 }
 
 func (b *LocalBackend) GPUStatus(ctx context.Context) ([]GPUSlot, error) {
@@ -302,7 +299,7 @@ func (b *LocalBackend) ListTasks(ctx context.Context, opts TaskListOptions) ([]T
 	return listTasksFromStore(ctx, b.store, opts)
 }
 
-func (b *LocalBackend) TaskMetrics(ctx context.Context, taskID string) ([]MetricPoint, error) {
+func (b *LocalBackend) TaskMetrics(ctx context.Context, taskID string, afterTS int64) ([]MetricPoint, error) {
 	task, err := b.store.GetTask(ctx, taskID)
 	if err != nil {
 		return nil, err
@@ -310,7 +307,15 @@ func (b *LocalBackend) TaskMetrics(ctx context.Context, taskID string) ([]Metric
 	if task == nil {
 		return nil, fmt.Errorf("task %q: %w", taskID, ErrNotFound)
 	}
-	return ReadMetricPoints(nil, task.TaskDir), nil
+	_, _ = ingest.ReapIncremental(ctx, b.store, ingest.Target{
+		TaskID: task.ID, JobID: task.JobID, Dir: task.TaskDir,
+	}, false)
+	return readTailMetricPoints(nil, task.TaskDir, 2000, afterTS), nil
+}
+
+// MetricKeys — SELECT DISTINCT over ingested rows (spec §5.4 dual-mode).
+func (b *LocalBackend) MetricKeys(ctx context.Context, jobID string) ([]string, error) {
+	return b.store.MetricKeys(ctx, jobID)
 }
 
 // KillTask terminates a running or pending task.
