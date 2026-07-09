@@ -128,7 +128,7 @@ func (s *Server) handleFSList(w http.ResponseWriter, r *http.Request) {
 		return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
 	})
 	env := envelope(out)
-	now := time.Now().Unix() // TODO(L4): light-cache stamps
+	now := time.Now().Unix() // live readdir over FS: now IS the read time
 	stale := false
 	env.RefreshedAt, env.Stale = &now, &stale
 	writeJSON(w, http.StatusOK, env)

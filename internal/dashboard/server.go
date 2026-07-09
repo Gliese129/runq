@@ -11,6 +11,7 @@ import (
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -38,7 +39,7 @@ type Server struct {
 	staticErr    error
 	utilsLogs    *utilsLogStore
 
-	// Background reconcile (HPC mode only): the ticker runs EnsureAllFresh
+	// Background reconcile (HPC mode only): the ticker runs SchedulerProbe
 	// periodically so the frontend list endpoint is a pure DB read.
 	reconciler backgroundReconciler // nil in daemon mode
 	lastPoll   atomic.Int64         // unix timestamp of last frontend poll
@@ -46,7 +47,17 @@ type Server struct {
 
 	version   string    // /health; "dev" until release stamping exists
 	startedAt time.Time // /health uptime_seconds
+
+	// Per-job forced-refresh floor (D22): memory-only — a restart forgiving
+	// the throttle is harmless.
+	jobRefreshMu sync.Mutex
+	jobRefreshAt map[string]time.Time
 }
+
+// jobRefreshFloor is the per-job forced-probe floor. Shorter than the
+// target-level floor would be pointless (a job refresh IS a probe); 30s
+// keeps the button honest without making it feel broken.
+const jobRefreshFloor = 30 * time.Second
 
 // NewServer builds the v1 server. mode is gone (D5/D9): capabilities are
 // declared per-target, never inferred.
@@ -66,6 +77,7 @@ func NewServerWithAssets(be backend.Backend, cfg *config.GlobalConfig, assetsDir
 		utilsLogs:    newUtilsLogStore(),
 		version:      "dev", // TODO: release stamping (ldflags)
 		startedAt:    time.Now(),
+		jobRefreshAt: map[string]time.Time{},
 	}
 	s.registerRoutes()
 
@@ -126,7 +138,7 @@ const reconcileInterval = 30 * time.Second
 const pollActivityWindow = 60 * time.Second
 
 // reconcileLoop runs in a background goroutine (HPC mode only). It runs
-// EnsureAllFresh (batch probe) on a 30 s cadence — but ONLY when the
+// SchedulerProbe (batch) on a 30 s cadence — but ONLY when the
 // frontend has polled within the last 60 s (nobody watching = no work).
 //
 // ListJobs still does per-job EnsureFresh on every call, but the scheduler
@@ -160,7 +172,7 @@ func (s *Server) reconcileLoop(ctx context.Context) {
 				continue // frontend went idle
 			}
 			if err := s.reconciler.ReconcileAll(ctx); err != nil {
-				slog.Warn("reconcileLoop: EnsureAllFresh failed", "err", err)
+				slog.Warn("reconcileLoop: scheduler probe failed", "err", err)
 			}
 		}
 	}
@@ -322,17 +334,35 @@ func (s *Server) handleClean(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleRefreshJob — POST /jobs/{id}/refresh. Returns the D22 receipt so
-// the caller knows whether it actually refreshed. The 5min floor + honest
-// {refreshed:false, reason:"min_interval"} arrive with the cache layer
-// (L4); until then every call refreshes.
+// the caller knows whether it actually refreshed. Per-job floor: a second
+// forced probe for the SAME job within the window gets an honest
+// {refreshed:false, reason:"min_interval"} receipt instead of a qstat.
 func (s *Server) handleRefreshJob(w http.ResponseWriter, r *http.Request) {
-	if err := s.backend.RefreshJob(r.Context(), r.PathValue("id")); err != nil {
+	id := r.PathValue("id")
+
+	s.jobRefreshMu.Lock()
+	if last, ok := s.jobRefreshAt[id]; ok {
+		if since := time.Since(last); since < jobRefreshFloor {
+			s.jobRefreshMu.Unlock()
+			writeJSON(w, http.StatusOK, backend.RefreshReceipt{
+				RefreshedAt:       last.Unix(),
+				Refreshed:         false,
+				Reason:            "min_interval",
+				RetryAfterSeconds: int64((jobRefreshFloor - since).Seconds()) + 1,
+			})
+			return
+		}
+	}
+	s.jobRefreshAt[id] = time.Now()
+	s.jobRefreshMu.Unlock()
+
+	if err := s.backend.RefreshJob(r.Context(), id); err != nil {
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"refreshed_at": time.Now().Unix(),
-		"refreshed":    true, // TODO(L4): min_interval receipt
+	writeJSON(w, http.StatusOK, backend.RefreshReceipt{
+		RefreshedAt: time.Now().Unix(), // this probe JUST ran: now is the truth
+		Refreshed:   true,
 	})
 }
 
@@ -374,6 +404,7 @@ func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request) {
 	}
 	env := envelope(items)
 	env.Total = &total
+	stampFreshness(r.Context(), s.backend, opts.Target, &env.RefreshedAt, &env.Stale)
 	writeJSON(w, http.StatusOK, env)
 }
 
@@ -381,7 +412,7 @@ func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request) {
 // stream, capability event_stream. Push targets emit live; poll targets
 // emit on cache refresh. Lands with the cache layer + #49.
 func (s *Server) handleJobEvents(w http.ResponseWriter, r *http.Request) {
-	notImplemented(w, "job event stream") // TODO(L4): SSE `state` events
+	notImplemented(w, "job event stream") // TODO(#49): SSE `state` events
 }
 
 // handleListProjects — GET /projects?dir=&archived= (spec §5.3, D3).
@@ -553,9 +584,57 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 
 	total := len(jobs)
 	jobs = paginate(jobs, q.Get("limit"), q.Get("offset"))
+
+	// Per-job freshness (spec §6.1: jobs in one response may belong to
+	// DIFFERENT targets, so each row carries its own lane's timestamp).
+	// One SyncInfo per distinct target, not per job.
+	if sy, ok := s.backend.(interface {
+		SyncInfo(context.Context, string) (int64, bool, bool)
+	}); ok {
+		type fresh struct {
+			at    int64
+			known bool
+		}
+		byTarget := map[string]fresh{}
+		for i := range jobs {
+			t := jobs[i].Target
+			f, seen := byTarget[t]
+			if !seen {
+				at, _, known := sy.SyncInfo(r.Context(), t)
+				f = fresh{at: at, known: known}
+				byTarget[t] = f
+			}
+			if f.known && f.at > 0 {
+				at := f.at
+				jobs[i].RefreshedAt = &at
+			}
+		}
+	}
+
 	env := envelope(jobs)
 	env.Total = &total
+	stampFreshness(r.Context(), s.backend, target, &env.RefreshedAt, &env.Stale)
 	writeJSON(w, http.StatusOK, env)
+}
+
+// stampFreshness fills envelope refreshed_at/stale from the backend's L4
+// sync ledger (real persisted timestamps — never response time). Backends
+// without the concept leave the fields omitted, which the spec allows.
+// Reading SyncInfo doubles as the SWR trigger: soft-stale data nudges the
+// lane's sensor in the background; this request never waits.
+func stampFreshness(ctx context.Context, be backend.Backend, target string, refreshedAt **int64, stale **bool) {
+	sy, ok := be.(interface {
+		SyncInfo(context.Context, string) (int64, bool, bool)
+	})
+	if !ok {
+		return
+	}
+	at, st, known := sy.SyncInfo(ctx, target)
+	if !known {
+		return
+	}
+	*refreshedAt = &at
+	*stale = &st
 }
 
 // paginate applies limit/offset query semantics (default limit 200).
@@ -636,7 +715,9 @@ func (s *Server) handleTargetGPUs(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	env := envelope(kept)
-	now := time.Now().Unix() // TODO(L4): real cache timestamps + stale
+	// GPU status is a live exec (or the lane's ≤30s view cache) — "now"
+	// is honest within that TTL; no sync_state row needed.
+	now := time.Now().Unix()
 	stale := false
 	env.RefreshedAt, env.Stale = &now, &stale
 	writeJSON(w, http.StatusOK, env)
@@ -900,7 +981,7 @@ func (s *Server) handleTaskMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"points":       points,
-		"refreshed_at": time.Now().Unix(), // TODO(L4): cache stamp
+		"refreshed_at": time.Now().Unix(), // live tail-window read: now IS the read time
 	})
 }
 

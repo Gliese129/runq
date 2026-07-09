@@ -273,6 +273,58 @@ func (m *MultiBackend) PerTargetHealth() []TargetHealth {
 	return out
 }
 
+// ── L4: freshness routing ──────────────────────────────────────────────────
+
+// SyncInfo aggregates lane freshness for envelope stamping. target scoping:
+// named target → that lane's row; "" (aggregated list) → the OLDEST
+// refreshed_at and OR of stale — a mixed response is only as fresh as its
+// weakest ingredient.
+func (m *MultiBackend) SyncInfo(ctx context.Context, target string) (refreshedAt int64, stale bool, known bool) {
+	type syncer interface {
+		SyncInfo(context.Context) (int64, bool)
+	}
+	if target != "" {
+		be, err := m.resolve(target)
+		if err != nil {
+			return 0, false, false
+		}
+		if sy, ok := be.(syncer); ok {
+			at, st := sy.SyncInfo(ctx)
+			return at, st, true
+		}
+		return 0, false, false
+	}
+	first := true
+	for _, be := range m.targets {
+		sy, ok := be.(syncer)
+		if !ok {
+			continue
+		}
+		at, st := sy.SyncInfo(ctx)
+		if first || at < refreshedAt {
+			refreshedAt = at
+		}
+		first = false
+		stale = stale || st
+		known = true
+	}
+	return refreshedAt, stale, known
+}
+
+// ForceRefreshTarget routes an explicit refresh to the named lane (D22).
+func (m *MultiBackend) ForceRefreshTarget(ctx context.Context, target string) (*RefreshReceipt, error) {
+	be, err := m.resolve(target)
+	if err != nil {
+		return nil, fmt.Errorf("refresh: %w: %v", ErrNotFound, err)
+	}
+	if fr, ok := be.(interface {
+		ForceRefresh(context.Context) (*RefreshReceipt, error)
+	}); ok {
+		return fr.ForceRefresh(ctx)
+	}
+	return &RefreshReceipt{RefreshedAt: time.Now().Unix(), Refreshed: true}, nil
+}
+
 // ListTasks — flat table over the shared store (all lanes write here;
 // tasks.target scopes). No routing needed.
 func (m *MultiBackend) ListTasks(ctx context.Context, opts TaskListOptions) ([]TaskView, int, error) {

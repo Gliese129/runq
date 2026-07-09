@@ -35,7 +35,7 @@ import (
 //
 //   - markerScanInterval: one SFTP readdir of the done dir. Cheap, so it can
 //     run often; this is the PRIMARY completion path.
-//   - probeAlignInterval: a full EnsureAllFresh pass (batch qstat). Expensive
+//   - probeAlignInterval: a full SchedulerProbe pass (batch qstat). Expensive
 //     and visible to cluster admins — deliberately infrequent; it exists to
 //     catch tasks whose wrapper never wrote a marker (node fail, hard kill).
 //     User-triggered refreshes are separate and unaffected.
@@ -60,6 +60,36 @@ const (
 	// §8.1.4) — long interval spreads the IO into a steady trickle; the
 	// (size,offset) mark makes each pass one stat per idle running task.
 	metricsIngestInterval = 5 * time.Minute
+
+	// L4 freshness thresholds. Soft: a read older than this nudges the
+	// sensor for a background pass (SWR) — the read itself never waits.
+	// Hard: older than this (with tasks in flight) is reported stale=true.
+	// Hard sits above the hibernated marker cadence (5×2min) so normal
+	// hibernation never smears "stale" over healthy data.
+	syncSoftTTL = 5 * time.Minute
+	syncHardTTL = 30 * time.Minute
+
+	// Two-tier forced-refresh floors (D22/D23) — SSH and qstat cost
+	// DIFFERENT amounts and get different brakes:
+	//
+	//   refreshMinInterval (10s): floor on the whole forced pass. What it
+	//   throttles is SSH-level work (marker readdir + status.json reads) —
+	//   cheap, a double-clicked button just shouldn't stampede.
+	//
+	//   schedProbeFloor (5min): floor on the SCHEDULER PROBE inside the
+	//   pass. qstat/squeue on shared login nodes is the thing cluster
+	//   admins actually watch; a forced pass whose last probe is younger
+	//   than this reuses it (SchedulerProbe's floor gate) and still
+	//   resyncs markers/status — the primary completion path.
+	refreshMinInterval = 10 * time.Second
+	schedProbeFloor    = 5 * time.Minute
+
+	// taskSilenceAfter: a running task whose output streams (log,
+	// activity.tsv, metrics.jsonl) haven't advanced in this long is
+	// SUSPECTED dead-without-marker (node crash, OOM-killed wrapper) and
+	// earns an early scheduler consultation. Generous on purpose: long
+	// validation phases legitimately go quiet for minutes.
+	taskSilenceAfter = 15 * time.Minute
 )
 
 // SSHBackend implements Backend for a remote HPC cluster accessed via SSH.
@@ -101,6 +131,22 @@ type SSHBackend struct {
 	// counts: the user is watching). The sensor loop hibernates when it goes
 	// stale; see hibernateAfter.
 	lastActivity atomic.Int64
+
+	// ── L4 sync-cycle state (process-scoped; the DATA's freshness lives
+	// in the sync_state table) ──
+	//
+	// syncGen counts completed FULL passes (marker scan + forced probe).
+	// A ForceRefresh waiter records g0 at kick time and waits for
+	// gen > g0 — waiting for "any pass" would let a pass that STARTED
+	// before the kick satisfy the wait and hand back the old photo.
+	syncMu     sync.Mutex
+	syncGen    uint64
+	syncDone   chan struct{} // closed+replaced at each full-pass completion
+	lastForced time.Time     // min_interval throttle (memory: restart resets, fine)
+
+	// nudgeCh wakes the sensor loop for one forced full pass. Capacity 1 +
+	// non-blocking send = concurrent nudges coalesce by construction.
+	nudgeCh chan struct{}
 }
 
 // touchActivity records a user-driven interaction (wakes a hibernated sensor
@@ -206,6 +252,8 @@ func NewSSHBackend(cfg SSHBackendConfig) (*SSHBackend, error) {
 		launcher:   launcher,
 		logger:     logger,
 		targetName: t.Name,
+		syncDone:   make(chan struct{}),
+		nudgeCh:    make(chan struct{}, 1),
 	}
 	// Boot counts as activity: after a daemon restart the sensor gets one
 	// active window to re-align restored in-flight state before it may
@@ -282,6 +330,12 @@ func (b *SSHBackend) sensorLoop(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
+		case <-b.nudgeCh:
+			// Forced full pass (SWR nudge or explicit refresh): runs even
+			// with zero in-flight — the user asked, and a no-op pass is a
+			// cheap honest answer. Completes a sync generation so
+			// ForceRefresh waiters wake.
+			b.forcedSync(ctx)
 		case <-ticker.C:
 			tick++
 			if inflight, err := b.backend.HasInFlight(ctx); err != nil || !inflight {
@@ -296,6 +350,12 @@ func (b *SSHBackend) sensorLoop(ctx context.Context) {
 			}
 			if err := b.backend.ScanDoneMarkers(ctx); err != nil {
 				b.logger.Warn("marker scan failed", "error", err)
+				b.recordTasksSync(err)
+			} else {
+				// A successful marker scan IS an observation of the remote
+				// world (the primary completion path) — it advances the
+				// photo's timestamp.
+				b.recordTasksSync(nil)
 			}
 
 			// Metrics ingest (spec §8.1.4): long-interval background pass so
@@ -308,6 +368,20 @@ func (b *SSHBackend) sensorLoop(ctx context.Context) {
 			if time.Since(lastIngest) >= metricsIngestInterval {
 				lastIngest = time.Now()
 				b.ingestRunningMetrics(ctx)
+
+				// Heartbeat (file-stream liveness) rides the same cadence:
+				// ≤3 stats per running task. Silence is only a SUSPICION —
+				// the escalation asks the scheduler, and the etiquette
+				// floor still applies even to suspicions.
+				if silent, herr := b.backend.HeartbeatProbe(ctx, taskSilenceAfter); herr == nil && len(silent) > 0 {
+					b.logger.Info("heartbeat: silent tasks, consulting scheduler", "tasks", silent)
+					if perr := b.backend.SchedulerProbe(ctx, schedProbeFloor); perr != nil {
+						b.logger.Warn("heartbeat escalation probe failed", "error", perr)
+						b.recordTasksSync(perr)
+					} else {
+						b.recordTasksSync(nil)
+					}
+				}
 			}
 
 			// qstat alignment: user-present periods only.
@@ -315,8 +389,11 @@ func (b *SSHBackend) sensorLoop(ctx context.Context) {
 				continue
 			}
 			lastAlign = time.Now()
-			if err := b.backend.EnsureAllFresh(ctx, DefaultReadTTL); err != nil {
+			if err := b.backend.SchedulerProbe(ctx, DefaultReadTTL); err != nil {
 				b.logger.Warn("probe align failed", "error", err)
+				b.recordTasksSync(err)
+			} else {
+				b.recordTasksSync(nil)
 			}
 			if err := b.backend.DetectOrphans(ctx, false); err != nil {
 				b.logger.Warn("orphan detection failed", "error", err)
@@ -384,13 +461,15 @@ func (b *SSHBackend) Capabilities() Capabilities {
 
 func (b *SSHBackend) RefreshJob(ctx context.Context, jobID string) error {
 	b.touchActivity()
-	return b.backend.EnsureFresh(ctx, jobID, 0)
+	// Local reconcile (status.json, markers) always runs; the scheduler
+	// probe respects the qstat etiquette floor — same split as forcedSync.
+	return b.backend.EnsureFresh(ctx, jobID, schedProbeFloor)
 }
 
 // ReconcileAll runs a full reconcile pass over all active jobs. Called by
 // the dashboard's background ticker — never by the list endpoint itself.
 func (b *SSHBackend) ReconcileAll(ctx context.Context) error {
-	return b.backend.EnsureAllFresh(ctx, DefaultReadTTL)
+	return b.backend.SchedulerProbe(ctx, DefaultReadTTL)
 }
 
 // ── Job operations ────────────────────────────────────────────────────────
@@ -548,6 +627,122 @@ func (b *SSHBackend) TargetHealth() TargetHealth {
 	return h
 }
 
+// ── L4: freshness, SWR, forced refresh ────────────────────────────────────
+
+// recordTasksSync persists one 'tasks' sync outcome. Background context:
+// the recording must not die with the (possibly canceled) pass it records.
+func (b *SSHBackend) recordTasksSync(outcome error) {
+	if err := b.store.RecordSyncOutcome(context.Background(), b.targetName, "tasks", outcome); err != nil {
+		b.logger.Debug("sync_state write failed", "error", err)
+	}
+}
+
+// completeSyncCycle bumps the generation and wakes every waiter.
+func (b *SSHBackend) completeSyncCycle() {
+	b.syncMu.Lock()
+	b.syncGen++
+	close(b.syncDone)
+	b.syncDone = make(chan struct{})
+	b.syncMu.Unlock()
+}
+
+// forcedSync runs one full pass NOW (marker scan always; SchedulerProbe
+// respects schedProbeFloor — a forced refresh bypasses the 15min ALIGNMENT
+// cadence, never the qstat etiquette floor),
+// records the outcome, and completes a generation. Runs on the sensor
+// goroutine — serialized with regular ticks by construction.
+func (b *SSHBackend) forcedSync(ctx context.Context) {
+	err := b.backend.ScanDoneMarkers(ctx)
+	if perr := b.backend.SchedulerProbe(ctx, schedProbeFloor); err == nil {
+		err = perr
+	}
+	b.recordTasksSync(err)
+	b.completeSyncCycle()
+}
+
+// SyncInfo reports this lane's data freshness (envelope refreshed_at/stale)
+// and doubles as the SWR trigger: a read that finds soft-stale data nudges
+// the sensor and returns immediately — the CALLER never waits on SSH.
+//
+// stale semantics: with zero in-flight tasks the store is authoritative
+// (nothing remote can change it), so data is never stale no matter how old
+// the last sync — age only starts to matter when there is something to
+// observe.
+func (b *SSHBackend) SyncInfo(ctx context.Context) (refreshedAt int64, stale bool) {
+	row, err := b.store.GetSyncState(ctx, b.targetName, "tasks")
+	if err != nil || row == nil {
+		return 0, false
+	}
+	refreshedAt = row.LastSuccess
+	inflight, ierr := b.backend.HasInFlight(ctx)
+	if ierr != nil || !inflight {
+		return refreshedAt, false
+	}
+	age := time.Since(time.Unix(row.LastSuccess, 0))
+	if age > syncSoftTTL {
+		select {
+		case b.nudgeCh <- struct{}{}:
+		default: // a pass is already queued — coalesce
+		}
+	}
+	return refreshedAt, age > syncHardTTL || row.LastError != ""
+}
+
+// ForceRefresh kicks one full pass and blocks until the pass that STARTED
+// after the kick completes (generation fence), the min_interval floor
+// rejects it, or ctx times out. Every exit returns an honest receipt.
+func (b *SSHBackend) ForceRefresh(ctx context.Context) (*RefreshReceipt, error) {
+	b.touchActivity()
+
+	b.syncMu.Lock()
+	if since := time.Since(b.lastForced); since < refreshMinInterval {
+		b.syncMu.Unlock()
+		receipt := b.currentReceipt(ctx, false, "min_interval")
+		receipt.RetryAfterSeconds = int64((refreshMinInterval - since).Seconds()) + 1
+		return receipt, nil
+	}
+	b.lastForced = time.Now()
+	g0 := b.syncGen
+	done := b.syncDone
+	b.syncMu.Unlock()
+
+	select {
+	case b.nudgeCh <- struct{}{}:
+	default:
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return b.currentReceipt(context.Background(), false, "timeout"), nil
+		case <-done:
+		}
+		b.syncMu.Lock()
+		if b.syncGen > g0 {
+			b.syncMu.Unlock()
+			break
+		}
+		done = b.syncDone
+		b.syncMu.Unlock()
+	}
+
+	row, _ := b.store.GetSyncState(ctx, b.targetName, "tasks")
+	if row != nil && row.LastError != "" {
+		r := b.currentReceipt(ctx, false, row.LastError)
+		return r, nil
+	}
+	return b.currentReceipt(ctx, true, ""), nil
+}
+
+// currentReceipt assembles a receipt from the persisted freshness row.
+func (b *SSHBackend) currentReceipt(ctx context.Context, refreshed bool, reason string) *RefreshReceipt {
+	receipt := &RefreshReceipt{Refreshed: refreshed, Reason: reason}
+	if row, err := b.store.GetSyncState(ctx, b.targetName, "tasks"); err == nil && row != nil {
+		receipt.RefreshedAt = row.LastSuccess
+	}
+	return receipt
+}
+
 // ListTasks — the lane defaults the target scope to itself (its slice of
 // the shared store); an explicit opts.Target overrides.
 func (b *SSHBackend) ListTasks(ctx context.Context, opts TaskListOptions) ([]TaskView, int, error) {
@@ -560,8 +755,8 @@ func (b *SSHBackend) ListTasks(ctx context.Context, opts TaskListOptions) ([]Tas
 
 // TaskMetrics serves the chart: the RAW TAIL WINDOW of metrics.jsonl (one
 // ranged read — recent data is small by construction). The incremental
-// catch-up keeps the summary warm as a side effect (one stat when idle;
-// TODO(L4): gate behind the 60s light TTL). Full-history multi-resolution
+// catch-up keeps the summary warm as a side effect (one stat when idle —
+// cheap enough to run per read, no TTL gate needed). Full-history multi-resolution
 // zoom will come from the on-target pyramid (TODO: wire pyramid.Query per
 // key once the builder lands). afterTS > 0 = ?after= incremental pull.
 func (b *SSHBackend) TaskMetrics(ctx context.Context, taskID string, afterTS int64) ([]MetricPoint, error) {

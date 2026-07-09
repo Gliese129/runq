@@ -93,7 +93,7 @@ type Backend struct {
 	lastProbe map[string]time.Time
 
 	// Batch probe TTL: when status_list_template is configured,
-	// EnsureAllFresh skips the batch query if the last batch probe
+	// SchedulerProbe skips the batch query if the last batch probe
 	// completed within the TTL window.
 	lastBatchProbe time.Time
 
@@ -108,9 +108,15 @@ type Backend struct {
 	contactMu  sync.Mutex
 	contactAt  time.Time
 	contactErr string // "" = last contact succeeded
+	// Write-through debounce for the sync_state 'contact' row (L4): the
+	// record persists so /health and doctor can say "checked 2h ago"
+	// across daemon restarts instead of the lie "no contact yet".
+	contactWroteAt   time.Time
+	contactWroteErr  string
+	contactEverWrote bool
 
 	// lifecycleMu serializes every verdict-producing pass on this target —
-	// EnsureFresh / EnsureAllFresh / ScanDoneMarkers / Kill — plus manual
+	// EnsureFresh / SchedulerProbe / HeartbeatProbe / ScanDoneMarkers / Kill — plus manual
 	// retry (via WithLifecycleLock). THE staleness invariant of the remote
 	// lane rests on it: a requeue only ever happens inside a verdict
 	// delivery, so with all producers serialized, "read against attempt N,
@@ -165,14 +171,34 @@ func (b *Backend) recordContact(transportErr error) {
 	} else {
 		b.contactErr = ""
 	}
+	// Persist (debounced): state flips write immediately, steady state at
+	// most once a minute — recordContact fires per SSH command, and a
+	// contact timestamp precise to the minute is precise enough.
+	flip := b.contactErr != b.contactWroteErr
+	if b.Store != nil && (!b.contactEverWrote || flip || time.Since(b.contactWroteAt) > time.Minute) {
+		b.contactWroteAt = time.Now()
+		b.contactWroteErr = b.contactErr
+		b.contactEverWrote = true
+		_ = b.Store.RecordSyncOutcome(context.Background(), b.Cfg.Name, "contact", transportErr)
+	}
 }
 
 // LastContact returns the passive reachability snapshot for /health:
 // zero time = no contact since boot.
 func (b *Backend) LastContact() (at time.Time, ok bool, lastErr string) {
 	b.contactMu.Lock()
-	defer b.contactMu.Unlock()
-	return b.contactAt, b.contactErr == "", b.contactErr
+	at, ok, lastErr = b.contactAt, b.contactErr == "", b.contactErr
+	b.contactMu.Unlock()
+	if !at.IsZero() || b.Store == nil {
+		return at, ok, lastErr
+	}
+	// No contact THIS process — fall back to the persisted row: the fact
+	// "reached it 2h ago" belongs to the target, not to the process that
+	// observed it.
+	if row, err := b.Store.GetSyncState(context.Background(), b.Cfg.Name, "contact"); err == nil && row != nil && row.LastAttempt > 0 {
+		return time.Unix(row.LastAttempt, 0), row.LastError == "", row.LastError
+	}
+	return at, ok, lastErr
 }
 
 // shellRun is the collapsed convenience form for callers that treat any

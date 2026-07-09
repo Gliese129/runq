@@ -126,3 +126,18 @@ CREATE TABLE IF NOT EXISTS checkpoints (
     PRIMARY KEY (task_id, step)
 );
 CREATE INDEX IF NOT EXISTS idx_checkpoints_job ON checkpoints(job_id);
+
+-- L4 freshness ledger: one row per (target, resource) recording the sync
+-- loop's last outcome. refreshed_at is a property of the DATA (the photo's
+-- timestamp), not of the daemon process — so it lives here and survives
+-- restarts. Process state (in-flight flags, throttle timers) stays in
+-- memory. resource: 'contact' (passive reachability, D6) | 'tasks'
+-- (scheduler sync). last_success only advances on error-free passes.
+CREATE TABLE IF NOT EXISTS sync_state (
+    target       TEXT NOT NULL,
+    resource     TEXT NOT NULL,
+    last_success INTEGER NOT NULL DEFAULT 0,  -- unix; 0 = never succeeded
+    last_attempt INTEGER NOT NULL DEFAULT 0,  -- unix; 0 = never attempted
+    last_error   TEXT NOT NULL DEFAULT '',    -- '' = last attempt succeeded
+    PRIMARY KEY (target, resource)
+);

@@ -132,6 +132,17 @@ type TargetSummary struct {
 	// Cache TTLs (spec §3) land with the cache layer (L4).
 }
 
+// RefreshReceipt is the D22 refresh response: the caller ALWAYS learns
+// whether the refresh actually happened and, if not, why and when to
+// retry. refreshed_at is the persisted photo timestamp (sync_state), not
+// response time.
+type RefreshReceipt struct {
+	RefreshedAt       int64  `json:"refreshed_at"` // unix; 0 = never synced
+	Refreshed         bool   `json:"refreshed"`
+	Reason            string `json:"reason,omitempty"` // min_interval | timeout | <sync error>
+	RetryAfterSeconds int64  `json:"retry_after_seconds,omitempty"`
+}
+
 // TargetHealth is one row of GET /health's targets[] (spec §5.1, D6):
 // PASSIVE reachability — filled from the most recent sync/interaction
 // outcome, never an active probe.

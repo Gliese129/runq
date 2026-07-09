@@ -14,6 +14,7 @@ import (
 	"github.com/gliese129/runq/internal/scheduler"
 	"github.com/gliese129/runq/internal/store"
 	"github.com/gliese129/runq/internal/utils"
+	"github.com/gliese129/runq/internal/workspace"
 )
 
 // statusFile is the shape run.sh writes to <task_dir>/status.json.
@@ -58,13 +59,18 @@ func (b *Backend) EnsureFresh(ctx context.Context, jobID string, ttl time.Durati
 	return b.reconcile(ctx, jobID, probe)
 }
 
-// EnsureAllFresh reconciles all active (non-done) jobs within the TTL window.
+// SchedulerProbe is THE expensive verb of this backend — the one that
+// talks to qstat/squeue. It reconciles all active (non-done) jobs: local
+// wrapper reads always run; the scheduler query itself is floor-gated
+// (floor=0 forces). Name says the cost: if you don't need the scheduler's
+// opinion, you want HeartbeatProbe or ScanDoneMarkers instead.
 //
 // When status_list_template is configured, a single batch probe replaces all
 // per-job scheduler queries — one `qstat -u $USER` (or equivalent) call serves
 // every active job. Without it, a shared memoRunner still deduplicates
 // listing-style per-job commands (e.g. SGE/UGE bare `qstat`) across jobs.
-func (b *Backend) EnsureAllFresh(ctx context.Context, ttl time.Duration) error {
+func (b *Backend) SchedulerProbe(ctx context.Context, floor time.Duration) error {
+	ttl := floor
 	b.lifecycleMu.Lock()
 	defer b.lifecycleMu.Unlock()
 	jobs, err := b.Store.ListJobs(ctx, "", b.Cfg.Name)
@@ -123,6 +129,46 @@ func (b *Backend) EnsureAllFresh(ctx context.Context, ttl time.Duration) error {
 		}
 	}
 	return firstErr
+}
+
+// HeartbeatProbe is the FILE-STREAM liveness pass — zero scheduler
+// commands, stat only. A running task proves it is alive by writing:
+// stdout log, activity.tsv, metrics.jsonl. The freshest mtime across
+// those streams is the heartbeat; a task silent longer than silenceAfter
+// (baseline: its started_at) lands in the returned list, and the CALLER
+// decides whether that suspicion is worth a SchedulerProbe. Cost model:
+// N running tasks = ≤3N stats over the existing connection.
+func (b *Backend) HeartbeatProbe(ctx context.Context, silenceAfter time.Duration) (silent []string, err error) {
+	rows, err := b.Store.ListTasks(ctx, store.TaskFilter{Status: "running", Target: b.Cfg.Name})
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now()
+	for _, tk := range rows {
+		if tk.TaskDir == "" {
+			continue
+		}
+		var last time.Time
+		if tk.StartedAt != nil {
+			last = *tk.StartedAt
+		}
+		streams := []string{tk.LogPath, workspace.ActivityPath(tk.TaskDir), workspace.MetricsPath(tk.TaskDir)}
+		for _, p := range streams {
+			if p == "" {
+				continue
+			}
+			if fi, serr := b.FS.Stat(p); serr == nil && fi.ModTime().After(last) {
+				last = fi.ModTime()
+			}
+		}
+		if last.IsZero() {
+			continue // no baseline at all — cannot judge silence
+		}
+		if now.Sub(last) > silenceAfter {
+			silent = append(silent, tk.ID)
+		}
+	}
+	return silent, nil
 }
 
 // awaitingRelaunch reports whether the task was requeued by the scheduler
@@ -185,7 +231,7 @@ func (b *Backend) markBatchProbed() {
 }
 
 // reconcile is the core engine that advances task state. Creates a fresh
-// memoRunner for the single-job case; EnsureAllFresh calls reconcileWith
+// memoRunner for the single-job case; SchedulerProbe calls reconcileWith
 // directly with a shared runner.
 func (b *Backend) reconcile(ctx context.Context, jobID string, probe bool) error {
 	return b.reconcileWith(ctx, jobID, probe, memoRunner(b.shellRunClassified))
@@ -209,7 +255,7 @@ func (b *Backend) reconcile(ctx context.Context, jobID string, probe bool) error
 //
 // The DB is the (lazily-updated) source of truth and this is its only writer.
 //
-// The probeRun argument is a (possibly memo-cached) runner: EnsureAllFresh
+// The probeRun argument is a (possibly memo-cached) runner: SchedulerProbe
 // shares one across all jobs so listing-style commands (bare `qstat`) hit
 // the scheduler once; single-job callers pass memoRunner(b.shellRunClassified).
 func (b *Backend) reconcileWith(ctx context.Context, jobID string, probe bool, probeRun runner) error {

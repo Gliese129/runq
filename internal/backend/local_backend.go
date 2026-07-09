@@ -240,6 +240,16 @@ func (b *LocalBackend) Capabilities() Capabilities {
 // ── Job operations ────────────────────────────────────────────────────────
 
 // RefreshJob: push model — data is always current.
+// SyncInfo — the local lane's photo IS the live DB: always fresh (L4).
+func (b *LocalBackend) SyncInfo(_ context.Context) (int64, bool) {
+	return time.Now().Unix(), false
+}
+
+// ForceRefresh — nothing to sync; the receipt says so honestly.
+func (b *LocalBackend) ForceRefresh(_ context.Context) (*RefreshReceipt, error) {
+	return &RefreshReceipt{RefreshedAt: time.Now().Unix(), Refreshed: true}, nil
+}
+
 func (b *LocalBackend) RefreshJob(_ context.Context, _ string) error {
 	return fmt.Errorf("refresh job in local mode: %w", ErrNotSupported)
 }

@@ -1,8 +1,10 @@
 package dashboard
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"github.com/gliese129/runq/internal/backend"
 	"github.com/gliese129/runq/internal/config"
@@ -133,12 +135,27 @@ func (s *Server) handleCheckTarget(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, targetCheckResponse{Results: tc.CheckHPC()})
 }
 
-// handleRefreshTarget — POST /targets/{name}/refresh (spec §3 契约 3):
-// force-refresh every cache for the target, guarded by the 5min floor.
-// Returns the refresh receipt so the caller knows whether it actually
-// refreshed (D22). Needs the cache layer (L4).
+// handleRefreshTarget — POST /targets/{name}/refresh (spec §3 契约 3, D22):
+// kick the lane's sensor for one forced full pass and wait for the pass
+// that started AFTER the kick (generation fence in the lane), bounded by
+// the request timeout. min_interval throttling and honest receipts are
+// the lane's job; this handler only sets the wait budget.
 func (s *Server) handleRefreshTarget(w http.ResponseWriter, r *http.Request) {
-	notImplemented(w, "target refresh") // TODO(L4): {refreshed_at, refreshed, reason?}
+	fr, ok := s.backend.(interface {
+		ForceRefreshTarget(context.Context, string) (*backend.RefreshReceipt, error)
+	})
+	if !ok {
+		notImplemented(w, "target refresh")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	receipt, err := fr.ForceRefreshTarget(ctx, r.PathValue("name"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, receipt)
 }
 
 type globalConfigPayload struct {

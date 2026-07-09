@@ -86,13 +86,10 @@ func getList[T any](p *Proxy, ctx context.Context, path string) ([]T, error) {
 	return env.Items, nil
 }
 
-// RefreshReceipt is the D22 refresh response: the caller always learns
-// whether the refresh actually happened.
-type RefreshReceipt struct {
-	RefreshedAt int64  `json:"refreshed_at"`
-	Refreshed   bool   `json:"refreshed"`
-	Reason      string `json:"reason,omitempty"`
-}
+// RefreshReceipt is the D22 refresh response — the wire type IS the
+// backend type (one vocabulary, no translation layer; same move as
+// LogPage = logfile.Page).
+type RefreshReceipt = backend.RefreshReceipt
 
 // ── System ──────────────────────────────────────────────────────────────
 
