@@ -248,7 +248,7 @@ func BuildPyramid(ctx context.Context, fsys rfs.FS, taskDir string) (PyramidBuil
 		}
 		var pc int64
 		for _, lf := range kb.leaves {
-			pc += lf.Count
+			pc += lf.Count + lf.NaNCount
 		}
 		built[i] = keyLayers{pointCount: pc, levels: levels}
 	}
@@ -541,7 +541,7 @@ func mergeGroup(g []PyramidBucket) PyramidBucket {
 // slightly (non-monotonic writers), so scan — spans here are ≤ maxBuckets.
 func narrowByTS(buckets []PyramidBucket, fromTS, toTS int64) (int64, int64) {
 	lo, hi := int64(0), int64(len(buckets))
-	for lo < hi && toTS != 0 && buckets[lo].LastTS < fromTS {
+	for lo < hi && fromTS != 0 && buckets[lo].LastTS < fromTS {
 		lo++
 	}
 	for hi > lo && toTS != 0 && buckets[hi-1].FirstTS > toTS {

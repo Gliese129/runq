@@ -189,8 +189,6 @@ type CleanOptions struct {
 	Target string `json:"target,omitempty"`
 	// Time filter — optional when other selectors are present.
 	OlderThan *time.Time `json:"older_than,omitempty"` // only tasks finished before this time
-	// Partial cleanup: only delete checkpoints/, keep DB + other artifacts.
-	CkptOnly bool `json:"ckpt_only"`
 	// DryRun: preview what would be cleaned without deleting.
 	DryRun bool `json:"dry_run"`
 }
@@ -252,25 +250,35 @@ type QueueEntry struct {
 	Status string `json:"status"`
 }
 
-// CleanAction describes what kind of cleanup will happen for a task.
+// CleanAction DESCRIBES what deletion will touch — it is not a user
+// choice. Deletion is all-or-nothing by design (task dir + DB record,
+// irreversible); partial cleanup was a knob nobody used and everyone
+// feared — users who want surgery cd into the dir themselves.
 type CleanAction string
 
 const (
 	CleanActionAll    CleanAction = "all"     // delete DB record + all files
 	CleanActionDBOnly CleanAction = "db_only" // delete DB record (no files on disk)
-	CleanActionCkpt   CleanAction = "ckpt"    // delete checkpoints/ only
-	CleanActionCkptDB CleanAction = "no_ckpt" // ckpt-only requested but no checkpoints/ dir
 )
 
 type CleanPreviewItem struct {
 	TaskID     string      `json:"task_id"`
 	JobID      string      `json:"job_id"`
+	Project    string      `json:"project"`
 	Status     string      `json:"status"`
 	FinishedAt *int64      `json:"finished_at,omitempty"`
 	TaskDir    string      `json:"task_dir,omitempty"`
 	Reason     string      `json:"reason"` // why selected: orphan / archived / job / task / older-than
 	Action     CleanAction `json:"action"` // what will be cleaned
 	Orphan     bool        `json:"orphan"` // true if task dir is missing from disk
+
+	// Size preview — from the LEDGER, not the filesystem: checkpoint stats
+	// come from the checkpoints table, metrics size from the ingest mark.
+	// Zero SSH round trips at selection time; the FS is only touched after
+	// the user confirms.
+	CkptFiles    int   `json:"ckpt_files"`
+	CkptBytes    int64 `json:"ckpt_bytes"`
+	MetricsBytes int64 `json:"metrics_bytes"`
 }
 
 // DryRunResult is what DryRun returns: expanded tasks plus best-effort

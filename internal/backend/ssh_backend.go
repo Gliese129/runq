@@ -712,14 +712,11 @@ func (b *SSHBackend) TaskLogFollow(ctx context.Context, taskID string, offset in
 	return f, nil
 }
 
-// TODO(RQ-44): JobLogSearch — grep 在归属侧跑（CC 可代劳，属边角）。
-//
-//	· rows := ListTasks(JobID) → 收集 LogPath → 一条 FS.Exec:
-//	  grep -n -H -m <cap> -- <quoted query> <quoted paths...>
-//	· 解析 "path:line:text" → LogMatch（path→TaskID 反查表）
-//	· grep exit 1 = 无匹配（不是错误）；exit 2 = 真错
+// JobLogSearch greps the job's logs on the owning side (RQ-44): one
+// batched grep over FS.Exec — results travel, files don't.
 func (b *SSHBackend) JobLogSearch(ctx context.Context, jobID, query string) ([]LogMatch, error) {
-	return nil, fmt.Errorf("job log search: %w", ErrNotSupported) // TODO(RQ-44)
+	b.touchActivity()
+	return jobLogSearchViaExec(ctx, b.store, b.backend.FS, jobID, query)
 }
 
 func (b *SSHBackend) RetryTask(ctx context.Context, taskID string) error {

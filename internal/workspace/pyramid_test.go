@@ -168,6 +168,38 @@ func TestPyramidNaNCount(t *testing.T) {
 	}
 }
 
+func TestPyramidNaNCountAcrossLeaves(t *testing.T) {
+	lines := make([]string, 0, 40)
+	for i := 0; i < 40; i++ {
+		if i%3 == 0 {
+			lines = append(lines, fmt.Sprintf(`{"type":"metric","key":"loss","value":null,"step":%d,"ts":%d}`, i, 1000+i))
+			continue
+		}
+		lines = append(lines, metricLine("loss", float64(i), int64(i), 1000+int64(i)))
+	}
+	dir := writeMetrics(t, lines)
+	mustBuild(t, dir)
+
+	infos, err := InspectPyramid(context.Background(), nil, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := infos[0].PointCount; got != 40 {
+		t.Fatalf("point_count = %d, want 40", got)
+	}
+	buckets, err := QueryPyramid(context.Background(), nil, dir, "loss", 0, 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var total int64
+	for _, b := range buckets {
+		total += b.Count + b.NaNCount
+	}
+	if total != 40 {
+		t.Fatalf("bucketed points = %d, want 40", total)
+	}
+}
+
 // ── skipped-line accounting (bare NaN etc.) ─────────────────────────────
 
 func TestPyramidSkippedLines(t *testing.T) {

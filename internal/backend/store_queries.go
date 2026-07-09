@@ -87,7 +87,9 @@ func (b *storeQueries) DryRun(ctx context.Context, cfg job.JobConfig) (*DryRunRe
 // ── Clean / Thaw ─────────────────────────────────────────────────────────
 
 func (b *storeQueries) Clean(ctx context.Context, opts CleanOptions) (*CleanResult, error) {
-	return PerformClean(ctx, b.store, opts)
+	// Single-lane path (runqd's ledger, tests): everything is local.
+	// Cross-target FS routing lives in MultiBackend.Clean.
+	return PerformClean(ctx, b.store, nil, opts)
 }
 
 func (b *storeQueries) ThawTasks(_ context.Context, _ int, _ bool) (*ThawResponse, error) {

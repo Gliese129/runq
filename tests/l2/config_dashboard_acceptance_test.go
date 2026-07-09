@@ -23,16 +23,17 @@ type cliFixture struct {
 	env     []string
 }
 
-func TestConfigModeDefaultsAndRoundTrips(t *testing.T) {
+func TestConfigKeysDefaultsAndRoundTrips(t *testing.T) {
 	fx := newCLIFixture(t)
 
-	if got := strings.TrimSpace(fx.run("config", "get", "mode")); got != "daemon" {
-		t.Fatalf("missing mode should default to daemon, got %q", got)
+	// mode is dead (D9): the surviving keys are data_path + default_target.
+	if got := strings.TrimSpace(fx.run("config", "get", "default_target")); got != "local" {
+		t.Fatalf("missing config should default target to local, got %q", got)
 	}
 
-	fx.run("config", "set", "mode=hpc")
-	if got := strings.TrimSpace(fx.run("config", "get", "mode")); got != "hpc" {
-		t.Fatalf("mode should round-trip as hpc, got %q", got)
+	fx.run("config", "set", "default_target=my-lab")
+	if got := strings.TrimSpace(fx.run("config", "get", "default_target")); got != "my-lab" {
+		t.Fatalf("default_target should round-trip, got %q", got)
 	}
 
 	dataPath := filepath.Join(fx.dataDir, "custom-data")
@@ -42,7 +43,7 @@ func TestConfigModeDefaultsAndRoundTrips(t *testing.T) {
 	}
 
 	list := fx.run("config", "list")
-	for _, want := range []string{"mode", "hpc", "data_path", dataPath} {
+	for _, want := range []string{"default_target", "my-lab", "data_path", dataPath} {
 		if !strings.Contains(list, want) {
 			t.Fatalf("config list should contain %q; output:\n%s", want, list)
 		}
@@ -54,7 +55,6 @@ func TestConfigSetKeepsExistingHPCSection(t *testing.T) {
 	configPath := fx.configPath()
 
 	initial := strings.Join([]string{
-		"mode: daemon",
 		"data_path: " + filepath.ToSlash(filepath.Join(fx.dataDir, "data")),
 		"hpc:",
 		"  submit_template: sbatch --wrap '{{cmd}}'",
@@ -68,7 +68,7 @@ func TestConfigSetKeepsExistingHPCSection(t *testing.T) {
 		t.Fatalf("write config with hpc section: %v", err)
 	}
 
-	fx.run("config", "set", "mode=hpc")
+	fx.run("config", "set", "default_target=my-lab")
 	after, err := os.ReadFile(configPath)
 	if err != nil {
 		t.Fatalf("read config after set: %v", err)
@@ -85,18 +85,12 @@ func TestDashboardConfigAPIUsesDashboardNamespace(t *testing.T) {
 	dataPath := filepath.Join(fx.dataDir, "configured-data")
 	port := freePort(t)
 	configPath := fx.configPath()
-	writeConfig(t, configPath, "hpc", dataPath, port)
-	if got := strings.TrimSpace(fx.run("config", "get", "mode")); got != "hpc" {
-		t.Fatalf("config get mode = %q, want hpc", got)
-	}
+	writeConfig(t, configPath, dataPath, port)
 
 	exited, output, stop := fx.startDaemon()
 	defer stop()
 	baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
 	cfg := waitForDashboardConfig(t, baseURL, exited, output)
-	if cfg.Mode != "hpc" {
-		t.Fatalf("dashboard config mode = %q, want hpc", cfg.Mode)
-	}
 	if cfg.DataPath == "" {
 		t.Fatal("dashboard config should include data_path")
 	}
@@ -105,6 +99,12 @@ func TestDashboardConfigAPIUsesDashboardNamespace(t *testing.T) {
 	}
 	if cfg.ConfigPath == "" {
 		t.Fatal("dashboard config_path should be present")
+	}
+	if cfg.DefaultTarget == "" {
+		t.Fatal("dashboard config should include default_target")
+	}
+	if len(cfg.Targets) == 0 {
+		t.Fatalf("dashboard config should include targets: %+v", cfg)
 	}
 
 	errRes, err := http.Get(baseURL + "/api/v1/does-not-exist")
@@ -208,9 +208,13 @@ func (fx cliFixture) startDaemon() (chan error, *bytes.Buffer, func()) {
 }
 
 type dashboardConfig struct {
-	Mode       string `json:"mode"`
-	DataPath   string `json:"data_path"`
-	ConfigPath string `json:"config_path"`
+	DataPath      string `json:"data_path"`
+	ConfigPath    string `json:"config_path"`
+	DefaultTarget string `json:"default_target"`
+	Targets       []struct {
+		Name string `json:"name"`
+		Type string `json:"type"`
+	} `json:"targets"`
 }
 
 func waitForDashboardConfig(t *testing.T, baseURL string, exited chan error, output *bytes.Buffer) dashboardConfig {
@@ -244,8 +248,8 @@ func waitForDashboardConfig(t *testing.T, baseURL string, exited chan error, out
 			time.Sleep(50 * time.Millisecond)
 			continue
 		}
-		if cfg.Mode == "" {
-			t.Fatalf("dashboard config should include mode: %+v", cfg)
+		if cfg.DefaultTarget == "" {
+			t.Fatalf("dashboard config should include default_target: %+v", cfg)
 		}
 		return cfg
 	}
@@ -266,10 +270,9 @@ func freePort(t *testing.T) int {
 	return ln.Addr().(*net.TCPAddr).Port
 }
 
-func writeConfig(t *testing.T, configPath, mode, dataPath string, dashboardPort int) {
+func writeConfig(t *testing.T, configPath, dataPath string, dashboardPort int) {
 	t.Helper()
 	contents := strings.Join([]string{
-		"mode: " + mode,
 		"data_path: " + filepath.ToSlash(dataPath),
 		"dashboard:",
 		"  enabled: true",

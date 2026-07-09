@@ -9,13 +9,18 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/gliese129/runq/internal/rfs"
 	"github.com/gliese129/runq/internal/store"
+	"github.com/gliese129/runq/internal/utils"
 )
 
 // PerformClean removes tasks matching opts and cleans their on-disk artifacts.
 // If opts.DryRun is true it returns a preview without deleting.
-// Shared by HPCBackend.Clean (in-process) and the daemon API handler (over HTTP).
-func PerformClean(ctx context.Context, st *store.Store, opts CleanOptions) (*CleanResult, error) {
+//
+// fsFor resolves a task's TARGET to the filesystem its artifacts live on —
+// remote tasks' dirs are on the remote (rm over Exec), local ones here.
+// nil = everything is local (single-lane callers, tests).
+func PerformClean(ctx context.Context, st *store.Store, fsFor func(target string) rfs.FS, opts CleanOptions) (*CleanResult, error) {
 	tasks, reason, err := collectCleanTargets(ctx, st, opts)
 	if err != nil {
 		return nil, fmt.Errorf("query tasks: %w", err)
@@ -60,24 +65,44 @@ func PerformClean(ctx context.Context, st *store.Store, opts CleanOptions) (*Cle
 		unique = filtered
 	}
 
-	// Build preview.
+	// Build preview. Size stats come from the LEDGER (checkpoints table +
+	// ingest marks) — zero filesystem/SSH touches at selection time.
+	ids := make([]string, 0, len(unique))
+	for _, u := range unique {
+		ids = append(ids, u.task.ID)
+	}
+	stats, serr := st.TaskCleanStats(ctx, ids)
+	if serr != nil {
+		stats = map[string]store.TaskCleanStat{} // preview degrades, never blocks
+	}
+	resolveFS := func(target string) rfs.FS {
+		if fsFor == nil {
+			return nil // local semantics
+		}
+		return fsFor(target)
+	}
 	preview := make([]CleanPreviewItem, 0, len(unique))
 	for _, u := range unique {
-		action := classifyAction(u.task, opts.CkptOnly)
+		action := classifyAction(u.task, resolveFS(u.task.Target))
 		var finishedUnix *int64
 		if u.task.FinishedAt != nil {
 			ts := u.task.FinishedAt.Unix()
 			finishedUnix = &ts
 		}
+		stat := stats[u.task.ID]
 		preview = append(preview, CleanPreviewItem{
-			TaskID:     u.task.ID,
-			JobID:      u.task.JobID,
-			Status:     u.task.Status,
-			FinishedAt: finishedUnix,
-			TaskDir:    u.task.TaskDir,
-			Reason:     u.reason,
-			Action:     action,
-			Orphan:     u.reason == "orphan",
+			TaskID:       u.task.ID,
+			JobID:        u.task.JobID,
+			Project:      u.task.ProjectName,
+			Status:       u.task.Status,
+			FinishedAt:   finishedUnix,
+			TaskDir:      u.task.TaskDir,
+			Reason:       u.reason,
+			Action:       action,
+			Orphan:       u.reason == "orphan",
+			CkptFiles:    stat.CkptFiles,
+			CkptBytes:    stat.CkptBytes,
+			MetricsBytes: stat.MetricsBytes,
 		})
 	}
 
@@ -104,19 +129,12 @@ func PerformClean(ctx context.Context, st *store.Store, opts CleanOptions) (*Cle
 	var deleted []dbDeleted
 
 	for i, u := range unique {
-		action := preview[i].Action
-		switch action {
-		case CleanActionAll, CleanActionDBOnly:
-			if _, err := tx.ExecContext(ctx, "DELETE FROM tasks WHERE id = ?", u.task.ID); err != nil {
-				continue
-			}
-			deleted = append(deleted, dbDeleted{u.task, action})
-		case CleanActionCkpt:
-			// Checkpoint-only: no DB mutation, just file deletion in phase 2.
-			deleted = append(deleted, dbDeleted{u.task, action})
-		case CleanActionCkptDB:
+		// All-or-nothing by design: the DB record dies here, files die in
+		// phase 2. Partial modes are gone — surgical cleanup is a cd away.
+		if _, err := tx.ExecContext(ctx, "DELETE FROM tasks WHERE id = ?", u.task.ID); err != nil {
 			continue
 		}
+		deleted = append(deleted, dbDeleted{u.task, preview[i].Action})
 	}
 
 	// Delete orphan jobs (done jobs with no remaining tasks) within the same tx.
@@ -144,24 +162,32 @@ func PerformClean(ctx context.Context, st *store.Store, opts CleanOptions) (*Cle
 	}
 
 	// ── Phase 2: file deletion (after successful commit) ──
+	// Grouped by target: local dirs die via os.RemoveAll (exact freed
+	// bytes); remote dirs die via ONE batched `rm -rf` per chunk over the
+	// owning lane's Exec (freed bytes approximated from the ledger stats —
+	// per-dir du over SSH isn't worth the round trips).
 	var freedBytes int64
+	remoteByTarget := map[string][]store.TaskRow{}
 	for _, d := range deleted {
-		switch d.action {
-		case CleanActionAll:
-			cleaned, cerr := cleanTaskArtifacts(d.task)
-			if cerr != nil {
-				slog.Warn("clean: failed to remove task artifacts",
-					"task", d.task.ID, "err", cerr)
-			}
-			freedBytes += cleaned
-		case CleanActionCkpt:
-			ckptDir := filepath.Join(d.task.TaskDir, "checkpoints")
-			freedBytes += dirSize(ckptDir)
-			if err := os.RemoveAll(ckptDir); err != nil {
-				slog.Warn("clean: failed to remove checkpoints",
-					"task", d.task.ID, "err", err)
+		if d.action != CleanActionAll {
+			continue // db_only: nothing on disk
+		}
+		fsys := resolveFS(d.task.Target)
+		if fsys != nil {
+			if _, isLocal := fsys.(*rfs.LocalFS); !isLocal {
+				remoteByTarget[d.task.Target] = append(remoteByTarget[d.task.Target], d.task)
+				continue
 			}
 		}
+		cleaned, cerr := cleanTaskArtifacts(d.task)
+		if cerr != nil {
+			slog.Warn("clean: failed to remove task artifacts",
+				"task", d.task.ID, "err", cerr)
+		}
+		freedBytes += cleaned
+	}
+	for target, rows := range remoteByTarget {
+		freedBytes += cleanRemoteArtifacts(ctx, resolveFS(target), rows, stats)
 	}
 
 	return &CleanResult{
@@ -275,25 +301,61 @@ func collectCleanTargets(ctx context.Context, st *store.Store, opts CleanOptions
 	return tasks, reasons, nil
 }
 
-// classifyAction determines what the clean operation will do for a task.
-func classifyAction(t store.TaskRow, ckptOnly bool) CleanAction {
-	if ckptOnly {
-		if t.TaskDir == "" {
-			return CleanActionCkptDB // no dir, nothing to delete
-		}
-		ckptDir := filepath.Join(t.TaskDir, "checkpoints")
-		if info, err := os.Stat(ckptDir); err != nil || !info.IsDir() {
-			return CleanActionCkptDB
-		}
-		return CleanActionCkpt
-	}
+// classifyAction DESCRIBES what deletion will touch (all vs db_only) —
+// deletion itself is always all-or-nothing.
+//
+// Local dirs are stat'ed (cheap, exact). REMOTE dirs are NOT: a per-task
+// SSH stat at preview time would violate the zero-touch selection
+// contract — a remote task with a dir is assumed deletable; rm -rf on an
+// already-gone dir is a harmless no-op.
+func classifyAction(t store.TaskRow, fsys rfs.FS) CleanAction {
 	if t.TaskDir == "" {
 		return CleanActionDBOnly
+	}
+	if fsys != nil {
+		if _, isLocal := fsys.(*rfs.LocalFS); !isLocal {
+			return CleanActionAll // remote: no stat at selection time
+		}
 	}
 	if _, err := os.Stat(t.TaskDir); err != nil {
 		return CleanActionDBOnly // dir missing — nothing to delete on disk
 	}
 	return CleanActionAll
+}
+
+// cleanRemoteArtifacts removes remote tasks' dirs + stray log files with
+// batched `rm -rf --` over the lane's Exec (100 paths per invocation —
+// command-line budget). Freed bytes are the LEDGER's estimate
+// (checkpoints + metrics ingest size): honest enough for the summary
+// line, and per-dir du over SSH would cost a round trip per task.
+func cleanRemoteArtifacts(ctx context.Context, fsys rfs.FS, rows []store.TaskRow, stats map[string]store.TaskCleanStat) int64 {
+	var paths []string
+	var freed int64
+	for _, t := range rows {
+		if t.TaskDir != "" {
+			paths = append(paths, t.TaskDir)
+		}
+		if t.LogPath != "" && (t.TaskDir == "" || !strings.HasPrefix(t.LogPath, t.TaskDir)) {
+			paths = append(paths, t.LogPath)
+		}
+		st := stats[t.ID]
+		freed += st.CkptBytes + st.MetricsBytes
+	}
+	const batch = 100
+	for start := 0; start < len(paths); start += batch {
+		chunk := paths[start:min(start+batch, len(paths))]
+		var sb strings.Builder
+		sb.WriteString("rm -rf --")
+		for _, p := range chunk {
+			sb.WriteByte(' ')
+			sb.WriteString(utils.ShellQuote(p))
+		}
+		if _, _, code, err := fsys.Exec(ctx, "sh", "-c", sb.String()); err != nil || code != 0 {
+			slog.Warn("clean: remote artifact removal failed",
+				"paths", len(chunk), "exit", code, "err", err)
+		}
+	}
+	return freed
 }
 
 // cleanTaskArtifacts removes the task's workspace directory and log file.

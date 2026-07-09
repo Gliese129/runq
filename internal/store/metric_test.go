@@ -123,17 +123,31 @@ func TestIngestMarkRoundTrip(t *testing.T) {
 	if err := s.SetIngestMark(context.Background(), "t1", IngestMark{Size: 200, Offset: 200, Final: true}); err != nil {
 		t.Fatalf("upsert: %v", err)
 	}
+	if err := s.InsertCheckpointsBatch(context.Background(), []CheckpointRow{
+		{TaskID: "t1", JobID: "j1", Path: "/p/ckpt.pt", SizeBytes: 1024, Step: ptrInt64(1), TS: 1700000000},
+	}); err != nil {
+		t.Fatalf("checkpoint seed: %v", err)
+	}
 	m, _ = s.GetIngestMark(context.Background(), "t1")
 	if m.Size != 200 || m.Offset != 200 || !m.Final {
 		t.Errorf("mark = %+v", m)
 	}
-	// DeleteTaskMetrics unfreezes (retry path).
+	// DeleteTaskMetrics unfreezes (retry path). checkpoints survive: they
+	// are a task-lifetime log (freeze sizing, resume source), NOT a
+	// projection of the current metrics.jsonl.
 	if err := s.DeleteTaskMetrics(context.Background(), "t1"); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 	m, _ = s.GetIngestMark(context.Background(), "t1")
 	if m.Final || m.Size != 0 {
 		t.Errorf("mark after delete = %+v", m)
+	}
+	var ckptCount int
+	if err := s.DB().QueryRow(`SELECT COUNT(*) FROM checkpoints WHERE task_id='t1'`).Scan(&ckptCount); err != nil {
+		t.Fatal(err)
+	}
+	if ckptCount != 1 {
+		t.Errorf("checkpoints must SURVIVE retry unfreeze (task-lifetime log), got %d rows", ckptCount)
 	}
 }
 
@@ -159,6 +173,40 @@ func TestInsertCheckpointsBatch(t *testing.T) {
 	}
 	if !got[1].IsBest || got[0].IsBest {
 		t.Errorf("is_best mapped wrong: %+v", got)
+	}
+}
+
+func TestInsertCheckpointsBatchNewerTSWins(t *testing.T) {
+	s, _ := Open(":memory:")
+	defer s.Close()
+	seedJobAndTask(t, s, "t1", "j1")
+
+	step := ptrInt64(1)
+	if err := s.InsertCheckpointsBatch(context.Background(), []CheckpointRow{
+		{TaskID: "t1", JobID: "j1", Path: "/p/old.pt", SizeBytes: 1024, Step: step, IsBest: false, TS: 100},
+	}); err != nil {
+		t.Fatalf("insert old: %v", err)
+	}
+	if err := s.InsertCheckpointsBatch(context.Background(), []CheckpointRow{
+		{TaskID: "t1", JobID: "j1", Path: "/p/new.pt", SizeBytes: 2048, Step: step, IsBest: true, TS: 200},
+	}); err != nil {
+		t.Fatalf("insert newer: %v", err)
+	}
+	if err := s.InsertCheckpointsBatch(context.Background(), []CheckpointRow{
+		{TaskID: "t1", JobID: "j1", Path: "/p/stale.pt", SizeBytes: 4096, Step: step, IsBest: false, TS: 150},
+	}); err != nil {
+		t.Fatalf("insert stale: %v", err)
+	}
+
+	got, err := s.ListCheckpoints(context.Background(), "t1")
+	if err != nil {
+		t.Fatalf("ListCheckpoints: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected one checkpoint row after upserts, got %d: %+v", len(got), got)
+	}
+	if got[0].Path != "/p/new.pt" || got[0].SizeBytes != 2048 || !got[0].IsBest || got[0].TS != 200 {
+		t.Errorf("newer checkpoint did not win or stale row clobbered it: %+v", got[0])
 	}
 }
 

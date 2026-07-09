@@ -443,7 +443,17 @@ func (m *MultiBackend) Clean(ctx context.Context, opts CleanOptions) (*CleanResu
 			}
 		}
 	}
-	return m.defaultBackend().Clean(ctx, opts)
+	// Run clean HERE with per-target FS routing — remote tasks' artifacts
+	// live on their target's filesystem, and only the Multi knows every
+	// lane. (Delegating to the default lane would delete remote dirs with
+	// a local os.RemoveAll: silent no-op, artifacts left behind.)
+	return PerformClean(ctx, m.store, func(target string) rfs.FS {
+		fsys, err := m.TargetFS(target)
+		if err != nil {
+			return nil // unknown target: local semantics, worst case no-op
+		}
+		return fsys
+	}, opts)
 }
 
 func (m *MultiBackend) ThawTasks(ctx context.Context, owner int, force bool) (*ThawResponse, error) {

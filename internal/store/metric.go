@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"strings"
 )
 
 // MetricRow maps to one row in the `metrics` table.
@@ -76,6 +77,13 @@ func (s *Store) SetIngestMark(ctx context.Context, taskID string, m IngestMark) 
 // DeleteTaskMetrics drops a task's summaries and ingest mark — the rebuild
 // path when metrics.jsonl shrank (retry rerun rewrote it), and the retry
 // unfreeze.
+//
+// checkpoints are DELIBERATELY kept: they are a TASK-lifetime event log,
+// not a reduction of the current file. Freeze sizing (MaxCheckpointSize)
+// asks "how big does this task's checkpoints get" — attempt-independent,
+// and a retry often RESUMES from the previous attempt's checkpoint, whose
+// file is still on disk. PK (task_id, step) + newer-ts upsert makes
+// re-reads idempotent, so keeping rows costs nothing.
 func (s *Store) DeleteTaskMetrics(ctx context.Context, taskID string) error {
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM metric_summary WHERE task_id = ?`, taskID); err != nil {
 		return err
@@ -152,6 +160,9 @@ func (s *Store) ApplyIngestDelta(ctx context.Context, taskID string, rebuild boo
 	defer func() { _ = tx.Rollback() }()
 
 	if rebuild {
+		// Summaries only — checkpoints are a task-lifetime event log (see
+		// DeleteTaskMetrics), and re-reading the rewritten file re-inserts
+		// its events idempotently via PK (task_id, step).
 		if _, err := tx.ExecContext(ctx, `DELETE FROM metric_summary WHERE task_id = ?`, taskID); err != nil {
 			return err
 		}
@@ -203,6 +214,71 @@ func (s *Store) ListMetricSummaries(ctx context.Context, jobID, key string) ([]M
 	return out, rows.Err()
 }
 
+// TaskCleanStat is the ledger-known size preview for clean's TUI: what
+// deletion would free, WITHOUT touching the filesystem.
+type TaskCleanStat struct {
+	CkptFiles    int
+	CkptBytes    int64
+	MetricsBytes int64
+}
+
+// TaskCleanStats batch-fetches clean previews for the given task IDs
+// (chunked IN queries; checkpoints + ingest marks).
+func (s *Store) TaskCleanStats(ctx context.Context, taskIDs []string) (map[string]TaskCleanStat, error) {
+	out := make(map[string]TaskCleanStat, len(taskIDs))
+	const chunk = 500
+	for start := 0; start < len(taskIDs); start += chunk {
+		ids := taskIDs[start:min(start+chunk, len(taskIDs))]
+		ph := strings.Repeat("?,", len(ids)-1) + "?"
+		args := make([]any, len(ids))
+		for i, id := range ids {
+			args[i] = id
+		}
+
+		rows, err := s.db.QueryContext(ctx,
+			`SELECT task_id, COUNT(*), COALESCE(SUM(size_bytes), 0)
+			 FROM checkpoints WHERE task_id IN (`+ph+`) GROUP BY task_id`, args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var id string
+			var st TaskCleanStat
+			if err := rows.Scan(&id, &st.CkptFiles, &st.CkptBytes); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			out[id] = st
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+
+		mrows, err := s.db.QueryContext(ctx,
+			`SELECT task_id, file_size FROM metrics_ingest WHERE task_id IN (`+ph+`)`, args...)
+		if err != nil {
+			return nil, err
+		}
+		for mrows.Next() {
+			var id string
+			var size int64
+			if err := mrows.Scan(&id, &size); err != nil {
+				mrows.Close()
+				return nil, err
+			}
+			st := out[id]
+			st.MetricsBytes = size
+			out[id] = st
+		}
+		mrows.Close()
+		if err := mrows.Err(); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
 // MetricKeys is the key-discovery query (spec §5.4 dual-mode): DISTINCT
 // over summaries — O(tasks × keys) rows, tiny by construction.
 func (s *Store) MetricKeys(ctx context.Context, jobID string) ([]string, error) {
@@ -240,14 +316,26 @@ func (s *Store) InsertCheckpointsBatch(ctx context.Context, rows []CheckpointRow
 	return tx.Commit()
 }
 
+// insertCheckpointsTx upserts checkpoint events: PK (task_id, step),
+// NEWER ts wins. A retry rerun re-saving the same step must update
+// size/path/is_best (the old OR IGNORE kept the stale row — conservative
+// for MaxCheckpointSize but wrong for LatestCheckpoint's thaw display);
+// the ts guard keeps out-of-order re-reads from clobbering newer facts,
+// which also preserves re-read idempotence.
 func insertCheckpointsTx(ctx context.Context, tx *sql.Tx, rows []CheckpointRow) error {
 	if len(rows) == 0 {
 		return nil
 	}
 	stmt, err := tx.PrepareContext(ctx, `
-		INSERT OR IGNORE INTO checkpoints
+		INSERT INTO checkpoints
 			(task_id, job_id, path, size_bytes, step, is_best, ts)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(task_id, step) DO UPDATE SET
+			path       = excluded.path,
+			size_bytes = excluded.size_bytes,
+			is_best    = excluded.is_best,
+			ts         = excluded.ts
+		WHERE excluded.ts >= checkpoints.ts`)
 	if err != nil {
 		return err
 	}

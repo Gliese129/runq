@@ -443,12 +443,20 @@ func (p *Proxy) TaskLogFollow(ctx context.Context, taskID string, offset int64) 
 func (p *Proxy) JobLogSearch(ctx context.Context, jobID, query string) ([]backend.LogMatch, error) {
 	q := url.Values{"q": {query}}
 	var resp struct {
-		Matches []backend.LogMatch `json:"matches"`
+		Matches []struct {
+			TaskID string `json:"task_id"`
+			LineNo int    `json:"line_no"`
+			Text   string `json:"text"`
+		} `json:"matches"`
 	}
 	if err := p.do(ctx, "GET", "/api/v1/jobs/"+url.PathEscape(jobID)+"/log/search?"+q.Encode(), nil, &resp); err != nil {
 		return nil, err
 	}
-	return resp.Matches, nil
+	out := make([]backend.LogMatch, 0, len(resp.Matches))
+	for _, m := range resp.Matches {
+		out = append(out, backend.LogMatch{TaskID: m.TaskID, Line: m.LineNo, Text: m.Text})
+	}
+	return out, nil
 }
 
 // ── Actions ─────────────────────────────────────────────────────────────

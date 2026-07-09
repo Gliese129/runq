@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/gliese129/runq/internal/executor"
 	"github.com/gliese129/runq/internal/ingest"
 	"github.com/gliese129/runq/internal/job"
+	"github.com/gliese129/runq/internal/logfile"
 	"github.com/gliese129/runq/internal/project"
 	"github.com/gliese129/runq/internal/resource"
 	"github.com/gliese129/runq/internal/scheduler"
@@ -163,25 +165,63 @@ func (b *LocalBackend) DetectOrphansNow(ctx context.Context) error {
 	return err
 }
 
-// ── RQ-44: log access（runqd 侧本机实现）───────────────────────────────────
+// ── RQ-44: log access（runqd 本机实现）───────────────────────────────────
 //
-// TODO(RQ-44): 与 SSHBackend 共享读取核心（建议抽到共享 helper 或 logfile 包，
-// FS 参数化：这里传 rfs.NewLocalFS()），四个方法逐一实现。
+// runqd 的公开面已退役（D1），人类不经这里读日志——但接口合规实现依然
+// 给真的：logfile 走 nil FS（本机），与 SSHBackend 同一条读取核心，语义
+// 不可能分叉。
 
 func (b *LocalBackend) TaskLogRead(ctx context.Context, taskID string, offset int64, maxLines int) (*LogPage, error) {
-	return nil, fmt.Errorf("task log read: %w", ErrNotSupported) // TODO(RQ-44)
+	task, err := b.store.GetTask(ctx, taskID)
+	if err != nil {
+		return nil, err
+	}
+	if task == nil {
+		return nil, fmt.Errorf("task %q: %w", taskID, ErrNotFound)
+	}
+	r, err := logfile.Open(task.LogPath, nil)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return &LogPage{Lines: []string{}}, nil // pending: empty page
+		}
+		return nil, err
+	}
+	defer r.Close()
+	return r.ReadLines(offset, maxLines)
 }
 
 func (b *LocalBackend) TaskLogTail(ctx context.Context, taskID string, maxLines int) (*LogPage, error) {
-	return nil, fmt.Errorf("task log tail: %w", ErrNotSupported) // TODO(RQ-44)
+	task, err := b.store.GetTask(ctx, taskID)
+	if err != nil {
+		return nil, err
+	}
+	if task == nil {
+		return nil, fmt.Errorf("task %q: %w", taskID, ErrNotFound)
+	}
+	r, err := logfile.Open(task.LogPath, nil)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return &LogPage{Lines: []string{}}, nil
+		}
+		return nil, err
+	}
+	defer r.Close()
+	return r.TailLines(maxLines)
 }
 
 func (b *LocalBackend) TaskLogFollow(ctx context.Context, taskID string, offset int64) (LogFollower, error) {
-	return nil, fmt.Errorf("task log follow: %w", ErrNotSupported) // TODO(RQ-44)
+	task, err := b.store.GetTask(ctx, taskID)
+	if err != nil {
+		return nil, err
+	}
+	if task == nil {
+		return nil, fmt.Errorf("task %q: %w", taskID, ErrNotFound)
+	}
+	return logfile.Follow(task.LogPath, nil, offset)
 }
 
 func (b *LocalBackend) JobLogSearch(ctx context.Context, jobID, query string) ([]LogMatch, error) {
-	return nil, fmt.Errorf("job log search: %w", ErrNotSupported) // TODO(RQ-44)
+	return jobLogSearchViaExec(ctx, b.store, nil, jobID, query)
 }
 
 // ── Capabilities ──────────────────────────────────────────────────────────

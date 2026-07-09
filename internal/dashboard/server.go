@@ -770,7 +770,7 @@ func (s *Server) handlePreviewSubmit(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGetTask(w http.ResponseWriter, r *http.Request) {
 	view, err := s.backend.GetTask(r.Context(), r.PathValue("id"))
 	if err != nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		writeError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, view)
@@ -798,7 +798,7 @@ func (s *Server) handleTaskLog(w http.ResponseWriter, r *http.Request) {
 	if v := r.URL.Query().Get("offset"); v != "" {
 		offset, e := strconv.ParseInt(v, 10, 64)
 		if e != nil || offset < 0 {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid offset"})
+			writeErr(w, http.StatusBadRequest, backend.CodeBadRequest, "invalid offset")
 			return
 		}
 		page, err = s.backend.TaskLogRead(r.Context(), r.PathValue("id"), offset, lines)
@@ -806,7 +806,7 @@ func (s *Server) handleTaskLog(w http.ResponseWriter, r *http.Request) {
 		page, err = s.backend.TaskLogTail(r.Context(), r.PathValue("id"), lines)
 	}
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		writeError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, page)
@@ -823,7 +823,7 @@ func (s *Server) handleTaskLog(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleTaskLogStream(w http.ResponseWriter, r *http.Request) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		writeErr(w, http.StatusInternalServerError, backend.CodeInternal, "streaming not supported")
 		return
 	}
 
@@ -836,7 +836,7 @@ func (s *Server) handleTaskLogStream(w http.ResponseWriter, r *http.Request) {
 
 	f, err := s.backend.TaskLogFollow(r.Context(), r.PathValue("id"), offset)
 	if err != nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		writeError(w, err)
 		return
 	}
 	defer f.Close()
@@ -908,30 +908,7 @@ func (s *Server) handleTaskMetrics(w http.ResponseWriter, r *http.Request) {
 // The conversion from bytes to lines is deferred to the logfile package
 // once it's implemented (Step 4).
 func (s *Server) handleJobActivity(w http.ResponseWriter, r *http.Request) {
-	detail, err := s.backend.GetJob(r.Context(), r.PathValue("id"))
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	type activityPoint struct {
-		TS    int64 `json:"ts"`
-		Bytes int64 `json:"bytes"`
-		Lines int64 `json:"lines"`
-	}
-	type taskActivity struct {
-		TaskID string          `json:"task_id"`
-		Status string          `json:"status"`
-		Points []activityPoint `json:"points"`
-	}
-	tasks := make([]taskActivity, 0, len(detail.Tasks))
-	for _, t := range detail.Tasks {
-		ta := taskActivity{TaskID: t.ID, Status: t.Status, Points: []activityPoint{}}
-		// TODO(p6-step4): read activity.tsv from task dir + lazy bytes→lines
-		tasks = append(tasks, ta)
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"tasks": tasks,
-	})
+	notImplemented(w, "job activity")
 }
 
 // handleJobLogSearch searches across all task logs in a job.
@@ -939,14 +916,54 @@ func (s *Server) handleJobActivity(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleJobLogSearch(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query().Get("q")
 	if q == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "q parameter required"})
+		writeErr(w, http.StatusBadRequest, backend.CodeBadRequest, "q parameter required")
 		return
 	}
-	// TODO(p6-step5): iterate task log files using logfile.Reader.Search
+
+	// NOTE: limit/offset paginate the RESPONSE, not the grep — the lane
+	// greps up to its 500-match cap regardless, so paging here saves wire
+	// bytes only. Pushing offset into the grep would need per-batch
+	// cursors; not worth it while the cap bounds total work.
+	matches, err := s.backend.JobLogSearch(r.Context(), r.PathValue("id"), q)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	total := len(matches)
+	limit := 100
+	if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n > 0 {
+		limit = n
+	}
+	offset := 0
+	if n, err := strconv.Atoi(r.URL.Query().Get("offset")); err == nil && n > 0 {
+		offset = n
+	}
+	if offset > total {
+		offset = total
+	}
+	end := min(offset+limit, total)
+	truncated := end < total
+	nextOffset := 0
+	if truncated {
+		nextOffset = end
+	}
+	// Wire shape (spec §5.4): {task_id, line_no, text}. Deliberately NO
+	// byte offset — the grep source has none, and a permanent zero would
+	// bait the frontend into building jump-to-offset on it; jumps go
+	// through the log paging / pyramid raw ranges instead.
+	type searchMatch struct {
+		TaskID string `json:"task_id"`
+		LineNo int    `json:"line_no"`
+		Text   string `json:"text"`
+	}
+	out := make([]searchMatch, 0, end-offset)
+	for _, m := range matches[offset:end] {
+		out = append(out, searchMatch{TaskID: m.TaskID, LineNo: m.Line, Text: m.Text})
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"matches":     []any{},
-		"next_offset": 0,
-		"truncated":   false,
+		"matches":     out,
+		"next_offset": nextOffset,
+		"truncated":   truncated,
 	})
 }
 

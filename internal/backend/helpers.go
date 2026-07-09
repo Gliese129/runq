@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/url"
 	"os"
@@ -14,10 +15,12 @@ import (
 
 	"github.com/gliese129/runq/internal/config"
 	"github.com/gliese129/runq/internal/job"
+	"github.com/gliese129/runq/internal/logfile"
 	"github.com/gliese129/runq/internal/project"
 	"github.com/gliese129/runq/internal/rfs"
 	"github.com/gliese129/runq/internal/scheduler"
 	"github.com/gliese129/runq/internal/store"
+	"github.com/gliese129/runq/internal/utils"
 	"github.com/gliese129/runq/internal/workspace"
 )
 
@@ -209,6 +212,80 @@ func tailMetricBuckets(fsys rfs.FS, taskDir, key string, fromTS, toTS int64, bud
 		buckets = append(buckets, b)
 	}
 	return workspace.MergeBucketsToBudget(buckets, budget)
+}
+
+// jobLogSearchViaExec greps every task log of a job ON THE OWNING SIDE
+// (RQ-44: results travel, files don't — one grep beats N file transfers).
+// Fixed-string search (-F): the query is user text, not a regex — no
+// injection semantics to reason about. Batched to keep command lines
+// bounded on thousand-task sweeps.
+func jobLogSearchViaExec(ctx context.Context, st *store.Store, fsys rfs.FS, jobID, query string) ([]LogMatch, error) {
+	if query == "" {
+		return []LogMatch{}, nil
+	}
+	if fsys == nil {
+		fsys = rfs.NewLocalFS()
+	}
+	rows, err := st.ListTasks(ctx, store.TaskFilter{JobID: jobID})
+	if err != nil {
+		return nil, err
+	}
+
+	const (
+		maxMatches = 500 // mirrors logfile.MaxSearchMatches
+		batchSize  = 100 // paths per grep invocation (command-line budget)
+	)
+	byPath := make(map[string]string, len(rows)) // log path → task id
+	paths := make([]string, 0, len(rows))
+	for _, r := range rows {
+		if r.LogPath != "" {
+			byPath[r.LogPath] = r.ID
+			paths = append(paths, r.LogPath)
+		}
+	}
+
+	out := []LogMatch{}
+	for start := 0; start < len(paths) && len(out) < maxMatches; start += batchSize {
+		batch := paths[start:min(start+batchSize, len(paths))]
+		var sb strings.Builder
+		// -H force path prefix (even single file), -n line numbers,
+		// -F fixed string, -s suppress missing-file noise (pending tasks),
+		// -m per-file cap so one chatty log can't starve the others.
+		sb.WriteString("grep -H -n -s -F -m 50 -- ")
+		sb.WriteString(utils.ShellQuote(query))
+		for _, p := range batch {
+			sb.WriteByte(' ')
+			sb.WriteString(utils.ShellQuote(p))
+		}
+		stdout, _, code, err := fsys.Exec(ctx, "sh", "-c", sb.String())
+		if err != nil {
+			return nil, fmt.Errorf("job log search: %w", err) // transport: no fact learned
+		}
+		if code > 1 && len(stdout) == 0 {
+			return nil, fmt.Errorf("job log search: grep exit %d", code)
+		}
+		// exit 1 = no matches in this batch — a real answer, keep going.
+		for _, line := range strings.Split(string(stdout), "\n") {
+			if line == "" {
+				continue
+			}
+			// "path:lineno:text" — text may contain ':', split max 3.
+			parts := strings.SplitN(line, ":", 3)
+			if len(parts) != 3 {
+				continue
+			}
+			taskID, ok := byPath[parts[0]]
+			if !ok {
+				continue
+			}
+			n, _ := strconv.Atoi(parts[1])
+			out = append(out, LogMatch{TaskID: taskID, Line: n, Text: logfile.StripANSI(parts[2])})
+			if len(out) >= maxMatches {
+				break
+			}
+		}
+	}
+	return out, nil
 }
 
 // listTasksFromStore is the shared ListTasks implementation: every lane and

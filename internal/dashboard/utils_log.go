@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gliese129/runq/internal/backend"
 	"github.com/gliese129/runq/internal/logfile"
 	"github.com/gliese129/runq/internal/rfs"
 )
@@ -130,9 +131,9 @@ func (s *Server) handleUtilsLogUpload(w http.ResponseWriter, r *http.Request) {
 	id, n, err := s.utilsLogs.create(r.Body)
 	if err != nil {
 		if he, ok := err.(*httpErr); ok {
-			writeJSON(w, he.status, map[string]string{"error": he.msg})
+			writeErrorStatus(w, he.status, he)
 		} else {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			writeError(w, err)
 		}
 		return
 	}
@@ -148,7 +149,7 @@ func (s *Server) handleUtilsLogRead(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	path, ok := s.utilsLogs.get(id)
 	if !ok {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "session not found"})
+		writeErr(w, http.StatusNotFound, backend.CodeNotFound, "session not found")
 		return
 	}
 
@@ -167,14 +168,14 @@ func (s *Server) handleUtilsLogRead(w http.ResponseWriter, r *http.Request) {
 
 	lr, err := logfile.Open(path, rfs.NewLocalFS())
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		writeError(w, err)
 		return
 	}
 	defer lr.Close()
 
 	page, err := lr.ReadLines(offset, lines)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		writeError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, page)
@@ -189,13 +190,13 @@ func (s *Server) handleUtilsLogSearch(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	path, ok := s.utilsLogs.get(id)
 	if !ok {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "session not found"})
+		writeErr(w, http.StatusNotFound, backend.CodeNotFound, "session not found")
 		return
 	}
 
 	q := r.URL.Query().Get("q")
 	if q == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing query parameter q"})
+		writeErr(w, http.StatusBadRequest, backend.CodeBadRequest, "missing query parameter q")
 		return
 	}
 
@@ -208,14 +209,14 @@ func (s *Server) handleUtilsLogSearch(w http.ResponseWriter, r *http.Request) {
 
 	lr, err := logfile.Open(path, rfs.NewLocalFS())
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		writeError(w, err)
 		return
 	}
 	defer lr.Close()
 
 	result, err := lr.Search(q, offset, logfile.MaxSearchMatches)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		writeErr(w, http.StatusBadRequest, backend.CodeBadRequest, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, result)

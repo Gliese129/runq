@@ -382,7 +382,7 @@ func TestParseActivityTSV_ThreeColumns(t *testing.T) {
 	p := filepath.Join(dir, "activity.tsv")
 	os.WriteFile(p, []byte("1000\t4096\t102\n1060\t8192\t310\n"), 0o644)
 
-	records, err := ParseActivityTSV(p)
+	records, err := ParseActivityTSV(p, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -403,7 +403,7 @@ func TestParseActivityTSV_TwoColumnCompat(t *testing.T) {
 	p := filepath.Join(dir, "activity.tsv")
 	os.WriteFile(p, []byte("1000\t4096\n1060\t8192\n"), 0o644)
 
-	records, err := ParseActivityTSV(p)
+	records, err := ParseActivityTSV(p, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -419,7 +419,7 @@ func TestParseActivityTSV_TwoColumnCompat(t *testing.T) {
 }
 
 func TestParseActivityTSV_NotExist(t *testing.T) {
-	records, err := ParseActivityTSV("/tmp/no_such_activity_12345.tsv")
+	records, err := ParseActivityTSV("/tmp/no_such_activity_12345.tsv", nil)
 	if err != nil {
 		t.Fatal("should not error for missing file")
 	}

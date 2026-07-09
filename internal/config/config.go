@@ -43,12 +43,6 @@ type GlobalConfig struct {
 	// project's <working_dir>/.runq is a symlink pointing there. When empty,
 	// <working_dir>/.runq/ is the real storage location.
 	DataPath string `yaml:"data_path,omitempty"`
-	// Mode selects the default backend for unified CLI/dashboard commands.
-	// DEPRECATED: use DefaultTarget + Targets instead. Kept for backward
-	// compatibility — Load() synthesizes a single target from Mode when
-	// Targets is empty.
-	Mode string `yaml:"mode,omitempty"`
-
 	// DefaultTarget names the target to use when --target is omitted.
 	// Falls back to the first entry in Targets, then "local".
 	DefaultTarget string `yaml:"default_target,omitempty"`
@@ -59,11 +53,6 @@ type GlobalConfig struct {
 	// SSH section determines filesystem: present → SSHFS, absent → LocalFS.
 	Targets []TargetConfig `yaml:"targets,omitempty"`
 }
-
-const (
-	ModeDaemon = "daemon"
-	ModeHPC    = "hpc"
-)
 
 // ── Target configuration ───────────────────────────────────────────────────
 
@@ -170,19 +159,14 @@ func (t *TargetConfig) IsRemote() bool {
 	return t.SSH != nil
 }
 
-// ResolveTargets returns the configured targets, synthesizing from the
-// deprecated Mode field when Targets is empty (backward compatibility).
+// ResolveTargets returns the configured targets. An empty targets[] means
+// "just this machine": a single default local target. (mode is dead, D9 —
+// a stale `mode:` key in old config files parses as an ignored unknown.)
 func (cfg *GlobalConfig) ResolveTargets() []TargetConfig {
 	if len(cfg.Targets) > 0 {
 		return cfg.Targets
 	}
-	// Legacy: synthesize a single target from Mode.
-	switch cfg.Mode {
-	case ModeHPC:
-		return []TargetConfig{{Name: "hpc"}}
-	default:
-		return []TargetConfig{{Name: "local"}}
-	}
+	return []TargetConfig{{Name: "local"}}
 }
 
 // ResolveDefaultTarget returns the name of the default target.
@@ -226,9 +210,6 @@ func SaveGlobal(cfg *GlobalConfig) error {
 	if cfg.DefaultTarget != "" {
 		doc["default_target"] = cfg.DefaultTarget
 	}
-	if cfg.Mode != "" {
-		doc["mode"] = cfg.Mode
-	}
 	if cfg.DataPath != "" {
 		doc["data_path"] = cfg.DataPath
 	}
@@ -270,7 +251,7 @@ func DBPath() string { return filepath.Join(ConfigDir(), "runq.db") }
 func Load() (*GlobalConfig, error) {
 	buf, err := os.ReadFile(ConfigPath())
 	if os.IsNotExist(err) {
-		return &GlobalConfig{Mode: ModeDaemon}, nil
+		return &GlobalConfig{}, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", ConfigPath(), err)
@@ -279,60 +260,12 @@ func Load() (*GlobalConfig, error) {
 	if err := yaml.Unmarshal(buf, &f); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", ConfigPath(), err)
 	}
-	mode, err := NormalizeMode(f.GlobalConfig.Mode)
-	if err != nil {
-		return nil, fmt.Errorf("parse %s: %w", ConfigPath(), err)
-	}
-	f.GlobalConfig.Mode = mode
 	return &f.GlobalConfig, nil
-}
-
-// RawMode reports the mode value as literally present in config.yaml,
-// and whether it was explicitly set at all. Load() normalizes "" → daemon,
-// which is right for consumers but erases the "never chosen" state that
-// `hpc init` needs (it only flips the default, never an explicit choice).
-func RawMode() (mode string, explicit bool) {
-	buf, err := os.ReadFile(ConfigPath())
-	if err != nil {
-		return "", false
-	}
-	var f configFile
-	if yaml.Unmarshal(buf, &f) != nil {
-		return "", false
-	}
-	raw := strings.TrimSpace(f.GlobalConfig.Mode)
-	return raw, raw != ""
-}
-
-// NormalizeMode returns the canonical mode value accepted by the unified CLI.
-func NormalizeMode(mode string) (string, error) {
-	mode = strings.ToLower(strings.TrimSpace(mode))
-	if mode == "" {
-		return ModeDaemon, nil
-	}
-	switch mode {
-	case ModeDaemon, ModeHPC:
-		return mode, nil
-	default:
-		return "", fmt.Errorf("mode must be %q or %q, got %q", ModeDaemon, ModeHPC, mode)
-	}
-}
-
-// ConfigMode returns cfg.Mode with nil/empty values treated as daemon.
-func ConfigMode(cfg *GlobalConfig) string {
-	if cfg == nil {
-		return ModeDaemon
-	}
-	mode, err := NormalizeMode(cfg.Mode)
-	if err != nil {
-		return ModeDaemon
-	}
-	return mode
 }
 
 // Keys returns the supported top-level global config keys.
 func Keys() []string {
-	return []string{"mode", "data_path", "default_target"}
+	return []string{"data_path", "default_target"}
 }
 
 // GetKey reads one supported global config key.
@@ -342,8 +275,6 @@ func GetKey(key string) (string, error) {
 		return "", err
 	}
 	switch key {
-	case "mode":
-		return ConfigMode(cfg), nil
 	case "data_path":
 		return cfg.DataPath, nil
 	case "default_target":
@@ -360,7 +291,6 @@ func ListKeys() (map[string]string, error) {
 		return nil, err
 	}
 	return map[string]string{
-		"mode":           ConfigMode(cfg),
 		"data_path":      cfg.DataPath,
 		"default_target": cfg.ResolveDefaultTarget(),
 	}, nil
@@ -372,12 +302,6 @@ func SetKey(key, value string) error {
 	key = strings.TrimSpace(key)
 	value = strings.TrimSpace(value)
 	switch key {
-	case "mode":
-		mode, err := NormalizeMode(value)
-		if err != nil {
-			return err
-		}
-		value = mode
 	case "data_path":
 		// No extra validation: users may point at paths not mounted on this host.
 	case "default_target":
