@@ -24,6 +24,7 @@ import (
 	"github.com/gliese129/runq/internal/scheduler"
 	"github.com/gliese129/runq/internal/store"
 	"github.com/gliese129/runq/internal/utils"
+	"github.com/gliese129/runq/internal/version"
 )
 
 // DefaultPaths returns the standard daemon file paths based on ResolveDataDir().
@@ -297,5 +298,38 @@ func (c *Client) do(ctx context.Context, httpc *http.Client, method, path string
 	if body != nil {
 		httpReq.Header.Set("Content-Type", "application/json")
 	}
-	return httpc.Do(httpReq)
+	// Every request self-identifies its build (one line covers all CLI
+	// commands) — the daemon's 426 gate and skew warning both key off this.
+	httpReq.Header.Set("X-Runq-Version", version.Version)
+	resp, err := httpc.Do(httpReq)
+	if err != nil {
+		// Remote CLI (RUNQ_SOCKET points at a forwarded socket): a dead
+		// socket almost always means the workstation side is gone, and
+		// "connection refused" alone sends people debugging the wrong host.
+		if os.Getenv("RUNQ_SOCKET") != "" {
+			return nil, fmt.Errorf("%w\n(RUNQ_SOCKET is set — if this socket is forwarded from another machine, the runq daemon there may be offline or the tunnel down)", err)
+		}
+		return nil, err
+	}
+	warnVersionSkew(resp.Header.Get("X-Runq-Version"))
+	return resp, nil
+}
+
+// warnVersionSkew prints one stderr line per process when the daemon and
+// this CLI are both stamped builds and disagree. Mild skew still works
+// (same /api/v1), so this warns and proceeds; the daemon's 426 gate handles
+// skew too large to tolerate.
+var warnSkewOnce sync.Once
+
+func warnVersionSkew(daemonVersion string) {
+	if daemonVersion == "" || daemonVersion == version.Version {
+		return
+	}
+	if _, ok := version.Compare(daemonVersion, version.Version); !ok {
+		return // a dev build on either side is deliberate, not skew
+	}
+	warnSkewOnce.Do(func() {
+		fmt.Fprintf(os.Stderr, "warning: runq %s talking to daemon %s — rerun `runq connect` (remote) or reinstall to match\n",
+			version.Version, daemonVersion)
+	})
 }

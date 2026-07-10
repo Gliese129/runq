@@ -157,7 +157,7 @@ func doctorClient(d *doctorChecks) (*config.GlobalConfig, map[string]targetHealt
 func doctorTargets(d *doctorChecks, cfg *config.GlobalConfig, dataDir string, daemonUp bool, health map[string]targetHealthLine) {
 	fmt.Println("Targets:")
 	if cfg == nil || len(cfg.ResolveTargets()) == 0 {
-		d.skip("no targets configured — add one: `runq config add <name> --template=<scheduler>`")
+		d.skip("no targets configured — add one: `runq target add <name> --template=<scheduler>`")
 		return
 	}
 

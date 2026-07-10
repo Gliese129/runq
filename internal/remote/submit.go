@@ -13,6 +13,7 @@ import (
 	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/preflight"
 	"github.com/gliese129/runq/internal/project"
+	"github.com/gliese129/runq/internal/rfs"
 	"github.com/gliese129/runq/internal/store"
 	"github.com/gliese129/runq/internal/submitplan"
 	"github.com/gliese129/runq/internal/utils"
@@ -134,11 +135,35 @@ func resolveNote(ctx context.Context, st *store.Store, cfg job.JobConfig) (strin
 // run.sh, submit.cmd, and the pending task row. The returned rows are ready
 // to be queued; the actual submission happens per task in Launcher.Launch
 // (scheduler lane) or inline in Submit (legacy lane).
+//
+// WorkspaceRoot is THE single decision point for where this target puts
+// job workspaces (RQ-65): a configured target workspace WINS — it is a
+// path on the TARGET's filesystem, composed as POSIX and materialized via
+// b.FS. The global data_path/working_dir resolution is the on-target /
+// legacy fallback only. Prepare (real submit), PreviewSubmit and dry-run
+// ALL call this — preview computing its own root is how dry-run ends up
+// confirming a path the submit never uses.
+//
+// materialize=false is the read-only twin (preview): same branch, no mkdir.
+func (b *Backend) WorkspaceRoot(proj *project.Config, materialize bool) (string, error) {
+	if b.Cfg.Workspace != "" {
+		return b.Cfg.Workspace, nil
+	}
+	if materialize {
+		return config.ResolveRoot(b.StorageCfg, proj.WorkingDir, proj.ProjectName)
+	}
+	return config.ProspectiveRoot(b.StorageCfg, proj.WorkingDir, proj.ProjectName), nil
+}
 func (b *Backend) Prepare(ctx context.Context, jobCfg job.JobConfig, proj *project.Config, opts SubmitOpts) (jobID string, rows []store.TaskRow, err error) {
 	// Satisfy the jobs.project_name foreign key: ensure the project exists in
 	// the HPC store. Add-if-missing covers both "resolved from registry" and
 	// "loaded from a file" callers.
-	reg := project.NewRegistry(b.Store.DB())
+	reg := project.NewRegistry(b.Store.DB()).WithFSRouter(func(target string) rfs.FS {
+		if target == b.Cfg.Name {
+			return b.FS
+		}
+		return nil // not ours: local fallback (fault-tolerant)
+	})
 	if _, gerr := reg.Get(ctx, proj.ProjectName); gerr != nil {
 		if aerr := reg.Add(ctx, *proj); aerr != nil {
 			return "", nil, fmt.Errorf("register project %q: %w", proj.ProjectName, aerr)
@@ -151,20 +176,9 @@ func (b *Backend) Prepare(ctx context.Context, jobCfg job.JobConfig, proj *proje
 	}
 
 	jobID = utils.GenerateJobID()
-	// Workspace root: a configured target workspace WINS — it is a path on
-	// the TARGET's filesystem, composed as POSIX and materialized via b.FS.
-	// ResolveRoot is the on-target/legacy fallback only; it resolves against
-	// the CLIENT machine (and even mkdirs locally), which is wrong for any
-	// remote target.
-	var wsRoot string
-	if b.Cfg.Workspace != "" {
-		wsRoot = b.Cfg.Workspace
-	} else {
-		var rerr error
-		wsRoot, rerr = config.ResolveRoot(b.StorageCfg, proj.WorkingDir, proj.ProjectName)
-		if rerr != nil {
-			return "", nil, fmt.Errorf("resolve workspace root: %w", rerr)
-		}
+	wsRoot, err := b.WorkspaceRoot(proj, true)
+	if err != nil {
+		return "", nil, fmt.Errorf("resolve workspace root: %w", err)
 	}
 
 	// Resolved note for display (job row, workspace files); ConfigJSON keeps

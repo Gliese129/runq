@@ -86,7 +86,7 @@ job.yaml in the current directory.`,
 
 			// ── dry-run ──
 			if dryRun || dryRunAlias {
-				return submitDryRun(ctx, be, jobCfg, noPreflight)
+				return submitDryRun(ctx, be, jobCfg, noPreflight, jsonOut)
 			}
 
 			// ── submit ──
@@ -132,6 +132,12 @@ func ensureProjectRegistered(cmd *cobra.Command, be backend.Backend, jobProject 
 	if cfg.ProjectName == "" {
 		cfg.ProjectName = jobProject
 	}
+	// Home target (RQ-65): --target / $RUNQ_TARGET / .active-target wins;
+	// empty stays empty and the daemon fills its default_target — either
+	// way the registered project carries an EXPLICIT home.
+	if cfg.Target == "" {
+		cfg.Target = resolveTarget(cmd)
+	}
 	ctx := context.Background()
 	if _, err := be.GetProject(ctx, cfg.ProjectName); err != nil {
 		return be.CreateProject(ctx, cfg)
@@ -145,10 +151,16 @@ func ensureProjectRegistered(cmd *cobra.Command, be backend.Backend, jobProject 
 // The preview attempt is always made — the daemon routes to the correct
 // target backend and returns ErrNotSupported for backends without a
 // submit template.
-func submitDryRun(ctx context.Context, be backend.Backend, jobCfg job2.JobConfig, noPreflight bool) error {
+func submitDryRun(ctx context.Context, be backend.Backend, jobCfg job2.JobConfig, noPreflight, jsonOut bool) error {
 	// Try full submit preview (HPC targets render run.sh + submit command).
 	out, err := be.PreviewSubmit(ctx, jobCfg, noPreflight)
 	if err == nil {
+		if jsonOut {
+			printJSON(struct {
+				Preview string `json:"preview"`
+			}{Preview: out})
+			return nil
+		}
 		fmt.Println(out)
 		return nil
 	}
@@ -160,6 +172,10 @@ func submitDryRun(ctx context.Context, be backend.Backend, jobCfg job2.JobConfig
 	result, err := be.DryRun(ctx, jobCfg)
 	if err != nil {
 		return err
+	}
+	if jsonOut {
+		printJSON(result)
+		return nil
 	}
 	if len(result.Tasks) == 0 {
 		fmt.Println("No tasks would be generated.")

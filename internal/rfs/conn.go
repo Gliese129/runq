@@ -17,9 +17,16 @@ import (
 // SSHConfig holds the parameters needed to establish an SSH connection.
 // Populated from the target config (see internal/config.TargetConfig).
 type SSHConfig struct {
-	Host       string // "login.cluster.edu" or "login.cluster.edu:22"
-	User       string
-	AuthMethod ssh.AuthMethod // from agent, key file, or password
+	Host string // "login.cluster.edu" or "login.cluster.edu:22"
+	User string
+	// AuthMethods are tried in order. Convention (RQ-45): ssh-agent first
+	// (the daemon never touches key plaintext), key file second. Build
+	// with ResolveAuthMethods.
+	AuthMethods []ssh.AuthMethod
+	// HostKeyCallback: nil = STRICT known_hosts verification (the daemon
+	// default). `runq connect` passes a TOFU callback with a human on the
+	// other end. InsecureIgnoreHostKey never appears in this codebase.
+	HostKeyCallback ssh.HostKeyCallback
 
 	// IdleTimeout controls how long a connection survives with no in-flight
 	// operations before sshConn tears it down. Zero means never idle-close.
@@ -157,10 +164,17 @@ func (c *sshConn) getConn() (*ssh.Client, error) {
 	}
 
 	if c.client == nil {
+		hostKeys := c.cfg.HostKeyCallback
+		if hostKeys == nil {
+			var err error
+			if hostKeys, err = StrictHostKeyCallback(); err != nil {
+				return nil, err
+			}
+		}
 		client, err := ssh.Dial("tcp", c.cfg.addr(), &ssh.ClientConfig{
 			User:            c.cfg.User,
-			Auth:            []ssh.AuthMethod{c.cfg.AuthMethod},
-			HostKeyCallback: ssh.InsecureIgnoreHostKey(), // Phase 6: real verification
+			Auth:            c.cfg.AuthMethods,
+			HostKeyCallback: hostKeys,
 			Timeout:         10 * time.Second,
 		})
 		if err != nil {

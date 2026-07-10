@@ -11,7 +11,7 @@ bash pipeline, the most common failure is wrapping it instead of replacing it.
 **The mapping rule:** one runq task = one real unit of work (one training
 run, one model×benchmark evaluation). The `for` loop / ENV-override layer /
 task list at the bottom of the user's script — that's the sweep. The
-qsub/sbatch line — that's `hpc: submit_template`. The actual workload
+qsub/sbatch line — that's the target's `submit_template`. The actual workload
 command — that's `command_template`, called **directly**.
 
 **Anti-patterns (all observed in real migrations — do NOT do these):**
@@ -51,7 +51,7 @@ command — that's `command_template`, called **directly**.
 ENV_* override layers (→ sweep), tmux/nohup for local runs (→ daemon mode),
 job-name sanitizers (→ project `job_name` template; `{{name}}` in
 submit_template is pre-sanitized, never digit-first), qstat watch scripts
-(→ `runq hpc status`), pre-download blocks (→ project `setup_command`,
+(→ `runq status`), pre-download blocks (→ project `setup_command`,
 runs once per submit on the login node), `.env` sourcing (→ automatic:
 `working_dir/.env` is sourced at task start; explicit env always wins;
 runq never stores its values).
@@ -116,7 +116,8 @@ ad-hoc-signed binaries that sync tools touch). Verify with `runq --help`.
 Before touching any config, ask the user these questions:
 
 1. **Environment**: Local GPU machine, or HPC cluster (Slurm/PBS/SGE)?
-   → Determines daemon mode vs `runq hpc` mode.
+   → Determines whether you add a local target (gpus) or a remote one
+   (scheduler + ssh). Same commands either way — only the target differs.
 
 2. **Training command**: What does their training invocation look like?
    (e.g. `python train.py --lr 0.01 --batch_size 32`)
@@ -133,7 +134,7 @@ Before touching any config, ask the user these questions:
 
 6. **Cluster details** (HPC only): Which scheduler? Any special flags for
    submit (partition, account, QOS, time limit)?
-   → Drives `hpc:` section in `~/.runq/config.yaml`.
+   → Drives the target's entry in `targets:` (`~/.runq/config.yaml`).
 
 ## Step 3: Configure & Submit
 
@@ -145,23 +146,24 @@ Before touching any config, ask the user these questions:
 4. `runq project add .`
 5. `runq submit --dry-run .` → confirm with user → `runq submit .`
 
-### HPC mode
+### HPC cluster (remote target)
 
-1. `runq hpc init --scheduler <slurm|pbs|sge|tsubame|abci>`
-   (also sets `mode: hpc` when mode was unset)
-2. Edit templates: `runq hpc config edit`, then **always**
-   `runq hpc config check` — renders every template with sample values,
+1. `runq target add <name> --template=<slurm|pbs|sge|tsubame|abci> --host=<login-node> --user=<user>`
+2. Edit templates: `runq target edit <name>`, then **always**
+   `runq target check <name>` — renders every template with sample values,
    validates placeholders and the submit_id_regex capture group, zero cost.
-3. Write `project.yaml` and `job.yaml` (same format as daemon).
+3. `runq connect <name>` — verifies SSH + host key with the user, installs
+   the remote CLI on the login node, enables the socket forward.
+4. Write `project.yaml` and `job.yaml` (same format as local).
    Per-task scheduler knobs (h_rt, queue) = catalog params declared
    `scope: scheduler` (+ `strict: true` with `choices` when the vocabulary
    is finite), referenced via `{{param.*}}` in submit_template.
-4. `runq hpc submit job.yaml --project-file project.yaml --dry-run`
+5. `runq submit job.yaml --project-file project.yaml --target <name> --dry-run`
    → shows preflight (three-state), the rendered submit command and run.sh,
    writes nothing. Confirm with the user, then drop `--dry-run`.
 
 Useful: `note: "{{model}}-{{version}}"` auto-numbers re-runs (-v2, -v3);
-`runq hpc status <id> --json` includes a `capabilities` block for scripting.
+`runq status <id> --json` includes a `capabilities` block for scripting.
 
 ## Where to Find Answers
 
@@ -172,11 +174,11 @@ user-facing surfaces below, and source-diving wastes time.
 |---|---|
 | Understand project.yaml schema | `examples/project.yaml` + README "Configuration" |
 | Understand job.yaml / sweep syntax | `examples/job.yaml`, `examples/job_simple.yaml` |
-| Understand HPC config fields | comments in the generated `~/.runq/config.yaml`, then `runq hpc config check` |
-| See all CLI commands and flags | `runq --help`, `runq hpc --help`, `runq <cmd> --help` |
-| Validate anything | `runq hpc config check`, `runq hpc submit --dry-run`, `runq doctor` |
+| Understand target config fields | comments in `~/.runq/config.yaml`, then `runq target check <name>` |
+| See all CLI commands and flags | `runq --help`, `runq target --help`, `runq <cmd> --help` |
+| Validate anything | `runq target check <name>`, `runq submit --dry-run`, `runq doctor` |
 | Debug a failed/rejected submit | `~/.runq/logs/runq.log` — every submit/kill logs the rendered command + scheduler output |
-| Inspect machine-readable state | `runq hpc status <id> --json`, `runq hpc ls --json` |
+| Inspect machine-readable state | `runq status <id> --json`, `runq ps --json` |
 
 ## Python SDK (`sdk/python/runq/`)
 
@@ -222,8 +224,8 @@ Same rule as above: don't read SDK source. Use:
 ## Pitfalls
 
 - Daemon mode needs `nvidia-smi` on PATH and the daemon running.
-- HPC `runq hpc init` writes a **template** — user must customize it, then
-  validate with `runq hpc config check`.
+- `runq target add` fills a **preset** — user must customize it, then
+  validate with `runq target check <name>`.
 - On HPC, login node may differ from compute node — preflight results are
   three-state (passed/failed/skipped) and label local checks with their
   scope; set `hpc: preflight_local: false` for strict login nodes instead

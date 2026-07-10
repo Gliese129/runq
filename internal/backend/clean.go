@@ -332,11 +332,20 @@ func cleanRemoteArtifacts(ctx context.Context, fsys rfs.FS, rows []store.TaskRow
 	var paths []string
 	var freed int64
 	for _, t := range rows {
+		// RQ-45: structural guard before anything reaches `rm -rf`.
 		if t.TaskDir != "" {
-			paths = append(paths, t.TaskDir)
+			if err := utils.SafeDeletePath(t.TaskDir); err != nil {
+				slog.Warn("clean: refusing suspicious path", "task", t.ID, "error", err)
+			} else {
+				paths = append(paths, t.TaskDir)
+			}
 		}
 		if t.LogPath != "" && (t.TaskDir == "" || !strings.HasPrefix(t.LogPath, t.TaskDir)) {
-			paths = append(paths, t.LogPath)
+			if err := utils.SafeDeletePath(t.LogPath); err != nil {
+				slog.Warn("clean: refusing suspicious log path", "task", t.ID, "error", err)
+			} else {
+				paths = append(paths, t.LogPath)
+			}
 		}
 		st := stats[t.ID]
 		freed += st.CkptBytes + st.MetricsBytes
@@ -364,15 +373,23 @@ func cleanTaskArtifacts(t store.TaskRow) (int64, error) {
 	var freed int64
 	var firstErr error
 	if t.TaskDir != "" {
-		size := dirSize(t.TaskDir)
-		if err := os.RemoveAll(t.TaskDir); err != nil {
+		if err := utils.SafeDeletePath(t.TaskDir); err != nil {
 			firstErr = err
 		} else {
-			freed += size
+			size := dirSize(t.TaskDir)
+			if err := os.RemoveAll(t.TaskDir); err != nil {
+				firstErr = err
+			} else {
+				freed += size
+			}
 		}
 	}
 	if t.LogPath != "" && (t.TaskDir == "" || !strings.HasPrefix(t.LogPath, t.TaskDir)) {
-		if info, err := os.Stat(t.LogPath); err == nil {
+		if err := utils.SafeDeletePath(t.LogPath); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+		} else if info, err := os.Stat(t.LogPath); err == nil {
 			logSize := info.Size()
 			if err := os.Remove(t.LogPath); err != nil {
 				if firstErr == nil {

@@ -319,6 +319,7 @@ const (
 	CodeInvalidState      = "invalid_state"      // 409: action illegal in current state
 	CodeNotSupported      = "not_supported"      // 409: target lacks the capability
 	CodeNotImplemented    = "not_implemented"    // 501: spec-first stub, pending implementation
+	CodeForbidden         = "forbidden"          // 403: refused by the remote-CLI forward guard (RQ-45)
 	CodeTargetUnreachable = "target_unreachable" // 502
 	CodeMinInterval       = "min_interval"       // 429: refresh blocked by the 5min floor
 	CodeInternal          = "internal"           // 500

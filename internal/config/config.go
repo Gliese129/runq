@@ -80,6 +80,14 @@ type TargetConfig struct {
 	// not-yet-submitted tasks cancellable at zero cost. 0 = unlimited.
 	MaxInflight int `yaml:"max_inflight,omitempty" json:"max_inflight,omitempty"`
 
+	// RemoteCLI enables the reverse socket forward for this target: the
+	// daemon keeps ~/.runq/runq.sock listening on the remote host, so a
+	// `runq` CLI there (installed by `runq connect`) talks to THIS daemon —
+	// users whose code lives on the login node get the full CLI without a
+	// second deployment. The forward lives and dies with the daemon; when
+	// this machine is offline the remote CLI reports the tunnel as down.
+	RemoteCLI bool `yaml:"remote_cli,omitempty" json:"remote_cli,omitempty"`
+
 	// TrustEmptyList declares that an EMPTY status_list output is a real
 	// answer ("no jobs"), not a parse suspicion. runqd targets set it (their
 	// squeue reads a local SQLite); dialect schedulers leave it off so the
@@ -199,6 +207,28 @@ type configFile struct {
 
 // SaveGlobal writes the entire GlobalConfig back to config.yaml, preserving
 // the hpc: section if present.
+// CheckConfigPermissions enforces the RQ-45 startup gate on config.yaml:
+// world-writable is a refusal (anyone on the machine could inject ssh
+// hosts or submit templates the daemon will EXECUTE); group-writable is a
+// warning. A missing file is fine — nothing to tamper with.
+func CheckConfigPermissions() (warning string, err error) {
+	fi, statErr := os.Stat(ConfigPath())
+	if statErr != nil {
+		if os.IsNotExist(statErr) {
+			return "", nil
+		}
+		return "", statErr
+	}
+	mode := fi.Mode().Perm()
+	if mode&0o002 != 0 {
+		return "", fmt.Errorf("%s is world-writable (%s) — refusing to start; fix with: chmod 600 %s", ConfigPath(), mode, ConfigPath())
+	}
+	if mode&0o020 != 0 {
+		warning = fmt.Sprintf("%s is group-writable (%s) — consider chmod 600", ConfigPath(), mode)
+	}
+	return warning, nil
+}
+
 func SaveGlobal(cfg *GlobalConfig) error {
 	path := ConfigPath()
 	// Preserve unmanaged YAML sections (e.g. hpc:) by reading the existing

@@ -332,6 +332,17 @@ func (b *Backend) reconcileWith(ctx context.Context, jobID string, probe bool, p
 			fields["finished_at"] = nil
 		}
 
+		// Hard-final adoption is the LAST write this task will ever see
+		// (wrapper/runq terminals skip all future probes) — a stale
+		// native_state "running" would be frozen forever (RQ-65 #5).
+		// "gone" is the honest scheduler answer: it no longer knows this job.
+		if isTerminal(d.Status) && (d.Source == SourceWrapper || d.Source == SourceRunq) {
+			if !probe || pr.NativeState == "" {
+				fields["native_state"] = "gone"
+			}
+			fields["queue"] = ""
+		}
+
 		if err := b.persistDecision(ctx, tk, d, fields); err != nil {
 			return fmt.Errorf("update task %s: %w", tk.ID, err)
 		}
@@ -426,6 +437,15 @@ func (b *Backend) reconcileWithBatch(ctx context.Context, jobID string, signals 
 			}
 		case !isTerminal(d.Status) && isTerminal(tk.Status):
 			fields["finished_at"] = nil
+		}
+
+		// Hard-final adoption freezes fields forever — leave an honest
+		// native_state behind (RQ-65 #5; see reconcileWith).
+		if isTerminal(d.Status) && (d.Source == SourceWrapper || d.Source == SourceRunq) {
+			if pr.NativeState == "" {
+				fields["native_state"] = "gone"
+			}
+			fields["queue"] = ""
 		}
 
 		if err := b.persistDecision(ctx, tk, d, fields); err != nil {

@@ -5,21 +5,41 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/gliese129/runq/internal/rfs"
 	"github.com/gliese129/runq/internal/store"
 	"gopkg.in/yaml.v3"
+	"path"
 )
 
 // Registry manages the set of registered projects, backed by SQLite.
 type Registry struct {
-	db *sql.DB
+	db    *sql.DB
+	fsFor func(target string) rfs.FS // nil = everything local
 }
 
 // NewRegistry creates a Registry using the given database connection.
+// WithFSRouter injects the target→filesystem router (RQ-65): a project's
+// yaml lives on its home target's filesystem, and every read/write of it
+// must go there. nil router (or nil result) = local filesystem.
+func (r *Registry) WithFSRouter(fn func(target string) rfs.FS) *Registry {
+	r.fsFor = fn
+	return r
+}
+
+// fs resolves the filesystem owning a project with the given home target.
+func (r *Registry) fs(target string) rfs.FS {
+	if r.fsFor != nil {
+		if fsys := r.fsFor(target); fsys != nil {
+			return fsys
+		}
+	}
+	return rfs.NewLocalFS()
+}
+
 func NewRegistry(db *sql.DB) *Registry {
 	return &Registry{db: db}
 }
@@ -39,7 +59,7 @@ func (r *Registry) Add(ctx context.Context, cfg Config) error {
 	}
 
 	// Write project.yaml — hard failure (file is source of truth)
-	if err := cfg.WriteYAML(); err != nil {
+	if err := cfg.WriteYAML(r.fs(cfg.Target)); err != nil {
 		return fmt.Errorf("write project.yaml: %w", err)
 	}
 
@@ -88,7 +108,10 @@ func (r *Registry) syncFromYAML(ctx context.Context, name string, dbCfg *Config)
 	if dbCfg.WorkingDir == "" {
 		return dbCfg
 	}
-	buf, err := os.ReadFile(filepath.Join(dbCfg.WorkingDir, "project.yaml"))
+	// Read through the project's HOME filesystem (RQ-65) — for a remote
+	// project this reuses the lane's warm SSH connection. Fault-tolerant
+	// as ever: unreachable target = fall back to the DB cache.
+	buf, err := r.fs(dbCfg.Target).ReadFile(path.Join(dbCfg.WorkingDir, "project.yaml"))
 	if err != nil {
 		return dbCfg
 	}
@@ -163,8 +186,8 @@ func (r *Registry) Update(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("query project %q: %w", cfg.ProjectName, err)
 	}
 
-	// Rewrite project.yaml (explicit update)
-	if err := cfg.OverwriteYAML(); err != nil {
+	// Rewrite project.yaml (explicit update) — on the project's home FS.
+	if err := cfg.OverwriteYAML(r.fs(cfg.Target)); err != nil {
 		return fmt.Errorf("write project.yaml: %w", err)
 	}
 
@@ -261,8 +284,8 @@ func (r *Registry) Rename(ctx context.Context, oldName, newName string) error {
 		return fmt.Errorf("commit rename: %w", err)
 	}
 
-	// Rewrite project.yaml with new name
-	_ = cfg.OverwriteYAML()
+	// Rewrite project.yaml with new name — on the project's home FS.
+	_ = cfg.OverwriteYAML(r.fs(cfg.Target))
 
 	return nil
 }

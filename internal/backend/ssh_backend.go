@@ -8,15 +8,11 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
-	"net"
-	"os"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/gliese129/runq/internal/logfile"
-	"golang.org/x/crypto/ssh"
-	"golang.org/x/crypto/ssh/agent"
 
 	"github.com/gliese129/runq/internal/config"
 	"github.com/gliese129/runq/internal/ingest"
@@ -193,21 +189,25 @@ func NewSSHBackend(cfg SSHBackendConfig) (*SSHBackend, error) {
 		if t.SSH == nil {
 			return nil, fmt.Errorf("target %q: ssh section is required for scheduler targets", t.Name)
 		}
-		// Build SSH config from target.
-		host := t.SSH.Host
-		if t.SSH.Port > 0 {
-			host = fmt.Sprintf("%s:%d", t.SSH.Host, t.SSH.Port)
+		// Build SSH config from target. The host may be an ~/.ssh/config
+		// alias ("tsubame") — resolve it the way OpenSSH would; explicit
+		// target fields win over ssh_config values.
+		sshHost, sshPort, sshUser, sshKey := rfs.ResolveSSHConfigDefaults(
+			t.SSH.Host, t.SSH.Port, t.SSH.User, t.SSH.Key)
+		host := sshHost
+		if sshPort > 0 {
+			host = fmt.Sprintf("%s:%d", sshHost, sshPort)
 		}
 
-		auth, err := resolveSSHAuth(t.SSH)
+		auth, err := rfs.ResolveAuthMethods(sshKey)
 		if err != nil {
 			return nil, fmt.Errorf("target %q: ssh auth: %w", t.Name, err)
 		}
 
 		sshCfg := rfs.SSHConfig{
-			Host:       host,
-			User:       t.SSH.User,
-			AuthMethod: auth,
+			Host:        host,
+			User:        sshUser,
+			AuthMethods: auth,
 			// Idle disconnect: with the sensor loops running every ~2min
 			// while tasks are in flight, the connection stays warm during
 			// activity and closes ~10min after the queue drains — a normal
@@ -455,6 +455,19 @@ func (b *SSHBackend) Capabilities() Capabilities {
 		KillAsync:     true,                            // qdel/scancel forwarded
 		SubmitPreview: true,                            // zero-disk dry-run via submit code path
 	}
+}
+
+// DryRun overrides storeQueries: the workspace-root preview must come from
+// THIS lane's decision point (target workspace), not the client's global
+// config (RQ-65 — dry-run confirming /tmp/.runq while submit writes to the
+// cluster's runq-workspaces).
+func (b *SSHBackend) DryRun(ctx context.Context, cfg job.JobConfig) (*DryRunResult, error) {
+	return BuildDryRunResult(cfg, func(name string) (*project.Config, error) {
+		return b.reg.Get(ctx, name)
+	}, func(proj *project.Config) string {
+		root, _ := b.backend.WorkspaceRoot(proj, false)
+		return root
+	})
 }
 
 // ── Reconcile ─────────────────────────────────────────────────────────────
@@ -1088,39 +1101,6 @@ func (b *SSHBackend) ListProjects(ctx context.Context) ([]ProjectSummary, error)
 		return nil, err
 	}
 	return b.configsToSummaries(ctx, configs)
-}
-
-// ── SSH auth helper ───────────────────────────────────────────────────────
-
-// resolveSSHAuth builds an ssh.AuthMethod from the target's SSH config.
-// If Key is set, reads the private key file. Otherwise falls back to
-// the SSH agent (SSH_AUTH_SOCK).
-func resolveSSHAuth(cfg *config.SSHTargetConfig) (ssh.AuthMethod, error) {
-	if cfg.Key != "" {
-		keyBytes, err := os.ReadFile(cfg.Key)
-		if err != nil {
-			return nil, fmt.Errorf("read key %q: %w", cfg.Key, err)
-		}
-		signer, err := ssh.ParsePrivateKey(keyBytes)
-		if err != nil {
-			return nil, fmt.Errorf("parse key %q: %w", cfg.Key, err)
-		}
-		return ssh.PublicKeys(signer), nil
-	}
-
-	// Fall back to ssh-agent.
-	sock := os.Getenv("SSH_AUTH_SOCK")
-	if sock == "" {
-		return nil, fmt.Errorf("no key file and SSH_AUTH_SOCK not set")
-	}
-	conn, err := net.Dial("unix", sock)
-	if err != nil {
-		return nil, fmt.Errorf("connect to ssh-agent: %w", err)
-	}
-	// Note: conn is intentionally not closed here — the agent client holds
-	// it for the lifetime of the SSH connection. The OS reclaims it on exit.
-	agentClient := agent.NewClient(conn)
-	return ssh.PublicKeysCallback(agentClient.Signers), nil
 }
 
 // compile-time interface check

@@ -357,7 +357,11 @@ func BuildTaskView(task store.TaskRow) TaskView {
 
 // BuildDryRunResult expands tasks and adds best-effort preview info.
 // getProject is the backend-specific project lookup.
-func BuildDryRunResult(cfg job.JobConfig, getProject func(string) (*project.Config, error)) (*DryRunResult, error) {
+// BuildDryRunResult compiles the cheap plan view. wsRootFor overrides the
+// workspace-root preview with the OWNING backend's decision (RQ-65) — nil
+// falls back to the local global-config resolution, which is only correct
+// for local targets.
+func BuildDryRunResult(cfg job.JobConfig, getProject func(string) (*project.Config, error), wsRootFor func(*project.Config) string) (*DryRunResult, error) {
 	tasks, err := job.Expand(&cfg)
 	if err != nil {
 		return nil, err
@@ -370,7 +374,9 @@ func BuildDryRunResult(cfg job.JobConfig, getProject func(string) (*project.Conf
 					result.SampleCommand = cmd
 				}
 			}
-			if storageCfg, cerr := config.Load(); cerr == nil {
+			if wsRootFor != nil {
+				result.WorkspaceRoot = wsRootFor(proj)
+			} else if storageCfg, cerr := config.Load(); cerr == nil {
 				result.WorkspaceRoot = config.ProspectiveRoot(storageCfg, proj.WorkingDir, proj.ProjectName)
 			}
 		}

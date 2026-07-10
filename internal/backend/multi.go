@@ -28,11 +28,32 @@ func NewMultiBackend(targets map[string]Backend, st *store.Store, defaultTarget 
 	if _, ok := targets[defaultTarget]; !ok {
 		return nil, fmt.Errorf("default target %q not in targets map", defaultTarget)
 	}
-	return &MultiBackend{
+	m := &MultiBackend{
 		targets:       targets,
 		store:         st,
 		defaultTarget: defaultTarget,
-	}, nil
+	}
+	// ONE routed project registry shared by every lane (RQ-65): a
+	// project's yaml lives on its home target's filesystem, and only the
+	// multi-backend can route across targets. Lanes embed storeQueries;
+	// swapping their reg pointer gives every project code path — CRUD,
+	// self-healing sync, rename — the same router.
+	reg := project.NewRegistry(st.DB()).WithFSRouter(func(target string) rfs.FS {
+		if target == "" {
+			return nil // local machine
+		}
+		fsys, err := m.TargetFS(target)
+		if err != nil {
+			return nil // unknown target: fall back to local (fault-tolerant read path)
+		}
+		return fsys
+	})
+	for _, be := range m.targets {
+		if sq, ok := be.(interface{ setProjectRegistry(*project.Registry) }); ok {
+			sq.setProjectRegistry(reg)
+		}
+	}
+	return m, nil
 }
 
 // ── Routing helpers ────────────────────────────────────────────────────────
@@ -271,6 +292,26 @@ func (m *MultiBackend) PerTargetHealth() []TargetHealth {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
+}
+
+// ── Ownership lookups (remote-CLI guard, RQ-45) ───────────────────────────
+// Store-level point reads: the guard must resolve WHOSE job/task an id
+// names before letting a forwarded request act on it. "" = not found.
+
+func (m *MultiBackend) JobTarget(ctx context.Context, jobID string) (string, error) {
+	j, err := m.store.GetJob(ctx, jobID)
+	if err != nil || j == nil {
+		return "", err
+	}
+	return j.Target, nil
+}
+
+func (m *MultiBackend) TaskTarget(ctx context.Context, taskID string) (string, error) {
+	t, err := m.store.GetTask(ctx, taskID)
+	if err != nil || t == nil {
+		return "", err
+	}
+	return t.Target, nil
 }
 
 // ── L4: freshness routing ──────────────────────────────────────────────────
@@ -527,6 +568,12 @@ func (m *MultiBackend) MatchProjects(ctx context.Context, dir string) ([]Project
 }
 
 func (m *MultiBackend) CreateProject(ctx context.Context, cfg project.Config) error {
+	// Fill the home target explicitly at birth (empty = wherever the user
+	// is aimed by default). A project registered "against tsubame" must
+	// SAY tsubame — implicit defaults rot when default_target changes.
+	if cfg.Target == "" {
+		cfg.Target = m.defaultTarget
+	}
 	return m.defaultBackend().CreateProject(ctx, cfg)
 }
 

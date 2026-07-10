@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"fmt"
 	"os"
 	"text/template"
 
@@ -45,6 +46,15 @@ var rootCmd = &cobra.Command{
   Or skip YAML entirely:
 
     runq sweep --project myproj lr=1e-4,3e-4 batch=32,64`,
+	// main() prints the returned error; without this cobra prints it too
+	// and every failure shows up twice.
+	SilenceErrors: true,
+	// Business errors (preflight failed, target unreachable) are not usage
+	// errors — burying them under 30 lines of flags helps nobody (RQ-65
+	// #6). Cobra checks Root().SilenceUsage, so this covers every command;
+	// genuine usage errors (unknown flag) get a --help hint via the
+	// FlagErrorFunc below instead of the full usage dump.
+	SilenceUsage: true,
 }
 
 func init() {
@@ -59,6 +69,11 @@ func init() {
 		&cobra.Group{ID: groupManagement, Title: "Management:"},
 		&cobra.Group{ID: groupDiag, Title: "Setup & Diagnostics:"},
 	)
+
+	// Flag errors ARE usage errors — point at --help without the dump.
+	rootCmd.SetFlagErrorFunc(func(c *cobra.Command, err error) error {
+		return fmt.Errorf("%w\nRun '%s --help' for usage", err, c.CommandPath())
+	})
 
 	// Custom help template with bold headers and underlined section titles.
 	rootCmd.SetUsageTemplate(usageTemplate)
@@ -78,11 +93,10 @@ func Execute() error {
 
 // usageTemplate is a customized Cobra usage template with grouped commands
 // and ANSI formatting.
-const usageTemplate = `{{bold .Short}}
-
-{{if .Long}}{{.Long}}
-{{end}}
-{{if .Runnable}}{{underline "Usage:"}}
+// usageTemplate renders USAGE ONLY — no .Short/.Long here: cobra's help
+// template already prints LongOrShort before calling usage, so including
+// them again double-prints every description (RQ-65 #6).
+const usageTemplate = `{{if .Runnable}}{{underline "Usage:"}}
   {{.UseLine}}
 {{end}}
 {{- if .HasAvailableSubCommands}}

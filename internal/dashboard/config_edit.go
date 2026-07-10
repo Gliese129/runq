@@ -3,12 +3,19 @@ package dashboard
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"time"
 
 	"github.com/gliese129/runq/internal/backend"
 	"github.com/gliese129/runq/internal/config"
 )
+
+// ErrForwardRestartRequired is returned (wrapped) by the forward starter
+// when the target has no lane in the running daemon — the one case where
+// only a restart helps. Declared here so the hook's provider (app) and
+// consumer (this handler) agree without an import cycle.
+var ErrForwardRestartRequired = errors.New("restart required")
 
 // Targets management endpoints (spec §5.2, D10): /hpc-config* is retired,
 // scheduler templates belong to targets. GET /targets is the management
@@ -133,6 +140,49 @@ func (s *Server) handleCheckTarget(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, targetCheckResponse{Results: tc.CheckHPC()})
+}
+
+// SetForwardStarter installs the runtime forward hook (client daemon only).
+func (s *Server) SetForwardStarter(fn func(name string) error) { s.forwardStarter = fn }
+
+// SetForwardStopper wires the client daemon's runtime forward teardown
+// (POST /targets/{name}/disconnect).
+func (s *Server) SetForwardStopper(fn func(name string) error) { s.forwardStopper = fn }
+
+// handleDisconnectTarget — POST /targets/{name}/disconnect: stop the remote
+// CLI forward at runtime. Idempotent; config (remote_cli: false) is the
+// CLI's job, this endpoint only handles the live daemon state.
+func (s *Server) handleDisconnectTarget(w http.ResponseWriter, r *http.Request) {
+	if s.forwardStopper == nil {
+		notImplemented(w, "remote CLI forward")
+		return
+	}
+	if err := s.forwardStopper(r.PathValue("name")); err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, backend.ActionResponse{OK: true})
+}
+
+// handleConnectTarget — POST /targets/{name}/connect: start or replace the
+// target's remote CLI forward NOW, against the just-saved config. This is
+// what lets `runq connect` take effect without a daemon restart. The one
+// genuine restart case — the target has no lane because it was added after
+// daemon start — comes back as 409 with the restart instruction.
+func (s *Server) handleConnectTarget(w http.ResponseWriter, r *http.Request) {
+	if s.forwardStarter == nil {
+		notImplemented(w, "remote CLI forward")
+		return
+	}
+	if err := s.forwardStarter(r.PathValue("name")); err != nil {
+		status := http.StatusBadRequest
+		if errors.Is(err, ErrForwardRestartRequired) {
+			status = http.StatusConflict
+		}
+		writeErr(w, status, backend.CodeInvalidState, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, backend.ActionResponse{OK: true})
 }
 
 // handleRefreshTarget — POST /targets/{name}/refresh (spec §3 契约 3, D22):

@@ -20,6 +20,7 @@ import (
 	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/logfile"
 	"github.com/gliese129/runq/internal/project"
+	"github.com/gliese129/runq/internal/version"
 	"github.com/gliese129/runq/internal/workspace"
 )
 
@@ -45,8 +46,14 @@ type Server struct {
 	lastPoll   atomic.Int64         // unix timestamp of last frontend poll
 	stopLoop   context.CancelFunc   // cancels the reconcileLoop goroutine
 
-	version   string    // /health; "dev" until release stamping exists
+	version   string    // /health; stamped via internal/version (ldflags)
 	startedAt time.Time // /health uptime_seconds
+
+	// forwardStarter is the client daemon's runtime hook for POST
+	// /targets/{name}/connect (start/replace a remote CLI forward without
+	// a restart). nil on deployments without forwards (runqd) → 501.
+	forwardStarter func(name string) error
+	forwardStopper func(name string) error
 
 	// Per-job forced-refresh floor (D22): memory-only — a restart forgiving
 	// the throttle is harmless.
@@ -75,7 +82,7 @@ func NewServerWithAssets(be backend.Backend, cfg *config.GlobalConfig, assetsDir
 		staticSource: static.Source,
 		staticErr:    static.Err,
 		utilsLogs:    newUtilsLogStore(),
-		version:      "dev", // TODO: release stamping (ldflags)
+		version:      version.Version,
 		startedAt:    time.Now(),
 		jobRefreshAt: map[string]time.Time{},
 	}
@@ -97,7 +104,30 @@ func NewServerWithAssets(be backend.Backend, cfg *config.GlobalConfig, assetsDir
 }
 
 func (s *Server) Handler() http.Handler {
-	return recoverMiddleware(corsMiddleware(s.mux))
+	return recoverMiddleware(corsMiddleware(versionGateMiddleware(s.mux)))
+}
+
+// versionGateMiddleware is the client-version guardrail: a runq client that
+// self-identifies (X-Runq-Version) as older than version.MinClient gets a
+// 426 with upgrade instructions instead of a confusing downstream failure.
+// It fires only when BOTH sides are stamped builds — dev builds and
+// browsers (no header) pass through, and version echo happens on every
+// response so the client can warn about mild skew (see api.warnVersionSkew).
+// Protocol-shape compatibility is owned by /api/v1 path versioning, not here.
+func versionGateMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Runq-Version", version.Version)
+		clientV := r.Header.Get("X-Runq-Version")
+		if clientV != "" && version.MinClient != "" {
+			if cmp, ok := version.Compare(clientV, version.MinClient); ok && cmp < 0 {
+				writeErr(w, http.StatusUpgradeRequired, backend.CodeBadRequest,
+					fmt.Sprintf("runq client %s is older than the daemon's minimum %s (daemon %s) — rerun `runq connect` on your workstation to update the remote CLI, or reinstall runq",
+						clientV, version.MinClient, version.Version))
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // recoverMiddleware turns a handler panic into a logged 500 instead of a
@@ -218,6 +248,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("PUT /api/v1/targets/{name}", s.handlePutTarget)
 	s.mux.HandleFunc("DELETE /api/v1/targets/{name}", s.handleDeleteTarget)
 	s.mux.HandleFunc("POST /api/v1/targets/{name}/check", s.handleCheckTarget)
+	s.mux.HandleFunc("POST /api/v1/targets/{name}/connect", s.handleConnectTarget)
+	s.mux.HandleFunc("POST /api/v1/targets/{name}/disconnect", s.handleDisconnectTarget)
 	s.mux.HandleFunc("POST /api/v1/targets/{name}/refresh", s.handleRefreshTarget)
 	s.mux.HandleFunc("GET /api/v1/targets/{name}/gpus", s.handleTargetGPUs)
 	s.mux.HandleFunc("GET /api/v1/targets/{name}/fs/list", s.handleFSList)

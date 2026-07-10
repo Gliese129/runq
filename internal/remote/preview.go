@@ -39,7 +39,7 @@ func (b *Backend) Preview(ctx context.Context, jobCfg job.JobConfig, proj *proje
 	fmt.Fprintf(&s, "dry-run: %d task(s) would be submitted\n", len(plan.Tasks))
 	// Where <workspace> will actually live — shown read-only (nothing is
 	// created here); ids are regenerated at real submit.
-	root := config.ProspectiveRoot(b.StorageCfg, proj.WorkingDir, proj.ProjectName)
+	root, _ := b.WorkspaceRoot(proj, false) // same decision point as Prepare (RQ-65)
 	fmt.Fprintf(&s, "workspace root: %s/<note>-<job_id> — <workspace> below means that job dir (ids regenerate at submit)\n\n", root)
 	for _, c := range plan.Preflight.Results {
 		mark := map[string]string{"passed": "✓", "failed": "✗", "warning": "!"}[c.Status]

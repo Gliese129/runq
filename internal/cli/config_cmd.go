@@ -80,18 +80,19 @@ var configAddCmd = &cobra.Command{
 and signal maps for common HPC schedulers.
 
 Examples:
-  runq config add tsubame --template=slurm --host=login.tsubame.titech.ac.jp --user=alice
-  runq config add local-a100 --gpus=0,1,2,3
-  runq config add abci --template=abci --host=es.abci.local`,
+  runq target add tsubame --template=slurm --host=login.tsubame.titech.ac.jp --user=alice
+  runq target add local-a100 --gpus=0,1,2,3
+  runq target add abci --template=abci --host=es.abci.local`,
 	Args: cobra.ExactArgs(1),
 	RunE: runConfigAdd,
 }
 
 var configShowCmd = &cobra.Command{
-	Use:   "show [<name>]",
-	Short: "Show target configuration (all targets or a specific one)",
-	Args:  cobra.MaximumNArgs(1),
-	RunE:  runConfigShow,
+	Use:     "show [<name>]",
+	Aliases: []string{"ls"},
+	Short:   "Show target configuration (all targets or a specific one)",
+	Args:    cobra.MaximumNArgs(1),
+	RunE:    runConfigShow,
 }
 
 var configEditCmd = &cobra.Command{
@@ -106,18 +107,6 @@ var configCheckCmd = &cobra.Command{
 	Short: "Validate target templates: placeholders, regex, sample render",
 	Args:  cobra.MaximumNArgs(1),
 	RunE:  runConfigCheck,
-}
-
-var configSetTargetCmd = &cobra.Command{
-	Use:   "set-target <name>",
-	Short: "Set the active compute target for this session (or persistently with -p)",
-	Long: `Set the active compute target. Without -p, writes to ~/.runq/.active-target
-(session-scoped, overridden by $RUNQ_TARGET or --target flag). With -p,
-writes to config.yaml default_target (persists across sessions).`,
-	Example: `  runq config set-target tsubame       # session-scoped
-  runq config set-target tsubame -p    # persistent default`,
-	Args: cobra.ExactArgs(1),
-	RunE: runConfigSetTarget,
 }
 
 func runConfigAdd(cmd *cobra.Command, args []string) error {
@@ -235,7 +224,7 @@ func runConfigShow(cmd *cobra.Command, args []string) error {
 func runConfigEdit(cmd *cobra.Command, args []string) error {
 	path := config.ConfigPath()
 	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return fmt.Errorf("no config at %s — run `runq config add <name>` first", path)
+		return fmt.Errorf("no config at %s — run `runq target add <name>` first", path)
 	}
 
 	editor := os.Getenv("VISUAL")
@@ -342,10 +331,7 @@ func init() {
 	configAddCmd.Flags().String("host", "", "SSH host for remote targets")
 	configAddCmd.Flags().String("user", "", "SSH user for remote targets")
 	configAddCmd.Flags().String("gpus", "", "Comma-separated GPU indices for local targets (e.g. 0,1,2,3)")
-	configSetTargetCmd.Flags().BoolP("persist", "p", false, "Write to config default_target instead of session file")
-
 	configCmd.AddCommand(configSetCmd, configGetCmd, configListCmd)
-	configCmd.AddCommand(configAddCmd, configShowCmd, configEditCmd, configCheckCmd, configSetTargetCmd)
 	configCmd.GroupID = groupManagement
 	rootCmd.AddCommand(configCmd)
 }

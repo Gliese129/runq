@@ -56,9 +56,12 @@ func (s *SSHFS) Stat(path string) (fi fs.FileInfo, err error) {
 	return sc.Stat(path)
 }
 
-// Rename is the optional atomic-replace extension (sftp PosixRename
-// where servers support it would be stricter; plain Rename is what the
-// tmp-then-rename writers need).
+// Rename is the atomic-replace extension the tmp-then-rename writers rely
+// on. Plain SSH_FXP_RENAME REFUSES to overwrite an existing target on
+// openssh — so try posix-rename@openssh.com first (true atomic overwrite,
+// openssh always offers it); only if the server lacks the extension fall
+// back to delete-then-rename, which trades a tiny non-atomic window for
+// working at all.
 func (s *SSHFS) Rename(oldPath, newPath string) (err error) {
 	s.conn.beginOp()
 	defer func() { s.conn.endOpErr(err) }()
@@ -66,6 +69,13 @@ func (s *SSHFS) Rename(oldPath, newPath string) (err error) {
 	if err != nil {
 		return err
 	}
+	if err := sc.PosixRename(oldPath, newPath); err == nil {
+		return nil
+	}
+	if err := sc.Rename(oldPath, newPath); err == nil {
+		return nil
+	}
+	_ = sc.Remove(newPath)
 	return sc.Rename(oldPath, newPath)
 }
 

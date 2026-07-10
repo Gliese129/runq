@@ -2,7 +2,9 @@ package submitplan
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	posixpath "path"
 	"sort"
@@ -109,10 +111,12 @@ func validateStrictChoices(proj *project.Config, tasks []job.TaskParams) error {
 
 // resolveEnvFile applies the project's env_file semantics: nil = auto-use
 // <working_dir>/.env when present; "" = disabled; other = required path.
-func resolveEnvFile(proj *project.Config) (string, error) {
+// Existence questions go to fsys — the TARGET's filesystem (RQ-65): the
+// .env lives next to the code, and the code lives on the target.
+func resolveEnvFile(proj *project.Config, fsys rfs.FS) (string, error) {
 	if proj.EnvFile == nil {
 		auto := posixpath.Join(proj.WorkingDir, ".env")
-		if _, err := os.Stat(auto); err == nil {
+		if _, err := fsys.Stat(auto); err == nil {
 			return auto, nil
 		}
 		return "", nil
@@ -124,7 +128,7 @@ func resolveEnvFile(proj *project.Config) (string, error) {
 	if !posixpath.IsAbs(path) {
 		path = posixpath.Join(proj.WorkingDir, path)
 	}
-	if _, err := os.Stat(path); err != nil {
+	if _, err := fsys.Stat(path); err != nil {
 		return "", fmt.Errorf("env_file %q: %w", path, err)
 	}
 	return path, nil
@@ -184,9 +188,15 @@ func Build(ctx context.Context, cfg job.JobConfig, proj *project.Config, d Deps)
 		}
 	}
 
-	if _, err := os.Stat(proj.WorkingDir); err != nil {
-		if os.IsNotExist(err) {
-			return Plan{}, fmt.Errorf("working_dir %q does not exist", proj.WorkingDir)
+	// working_dir existence is the TARGET filesystem's question (RQ-65) —
+	// a Mac daemon statting a TSUBAME path answers about the wrong world.
+	fsys := d.PreflightFS
+	if fsys == nil {
+		fsys = rfs.NewLocalFS()
+	}
+	if _, err := fsys.Stat(proj.WorkingDir); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return Plan{}, fmt.Errorf("working_dir %q does not exist on target", proj.WorkingDir)
 		}
 		return Plan{}, fmt.Errorf("stat working_dir %q: %w", proj.WorkingDir, err)
 	}
@@ -195,7 +205,7 @@ func Build(ctx context.Context, cfg job.JobConfig, proj *project.Config, d Deps)
 	// flows through EnvJSON persistence / daemon recovery untouched. The
 	// shell sources it AT TASK START (executor prologue / run.sh header) —
 	// runq never reads its values. Precedence: .env < explicit env.
-	envFile, err := resolveEnvFile(proj)
+	envFile, err := resolveEnvFile(proj, fsys)
 	if err != nil {
 		return Plan{}, err
 	}

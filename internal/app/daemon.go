@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	"github.com/gliese129/runq/internal/executor"
 	"github.com/gliese129/runq/internal/project"
 	"github.com/gliese129/runq/internal/resource"
+	"github.com/gliese129/runq/internal/rfs"
 	"github.com/gliese129/runq/internal/scheduler"
 	"github.com/gliese129/runq/internal/store"
 	"github.com/gliese129/runq/internal/utils"
@@ -42,6 +44,20 @@ type Daemon struct {
 
 	// sshBackends holds SSHBackend references for cleanup on shutdown.
 	sshBackends []*backend.SSHBackend
+
+	// forwards are the remote socket forwards (targets with remote_cli),
+	// keyed by target name: each keeps ~/.runq/runq.sock on its login node
+	// routed to this daemon's mux, so a remote `runq` CLI is just another
+	// socket client. fwdMu guards the map — `runq connect` can start or
+	// replace forwards at runtime via StartRemoteForward.
+	fwdMu    sync.Mutex
+	forwards map[string]*rfs.RemoteForward
+
+	// laneNames records which targets got a lane at assembly time. Lanes
+	// are NOT hot-reloaded (restart-bound by design); StartRemoteForward
+	// uses this to tell "start the forward now" apart from "the whole
+	// target is new — a restart is genuinely needed".
+	laneNames map[string]bool
 
 	// pidPath is this deployment's PID file (client: daemon.pid,
 	// runqd: runqd.pid) — the two daemons coexist on one machine.
@@ -93,6 +109,13 @@ func NewDaemonWith(opts DaemonOptions) (*Daemon, error) {
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	logger.Info("initializing daemon", "data_dir", dataDir)
+
+	// RQ-45 startup gate (same rationale as the client daemon).
+	if warn, perr := config.CheckConfigPermissions(); perr != nil {
+		return nil, perr
+	} else if warn != "" {
+		logger.Warn(warn)
+	}
 
 	// Open DB (auto-migrates schema).
 	st, err := store.Open(paths.DBPath)
@@ -279,6 +302,13 @@ func (d *Daemon) Run() error {
 	for _, sshBe := range d.sshBackends {
 		sshBe.Start(context.Background())
 	}
+	// Remote CLI forwards (targets with remote_cli): each supervises its
+	// own reconnect loop; failures never block the daemon.
+	d.fwdMu.Lock()
+	for _, fwd := range d.forwards {
+		go fwd.Run(context.Background())
+	}
+	d.fwdMu.Unlock()
 	if d.dashboardListen != "" {
 		go d.serveDashboard()
 	}
@@ -418,6 +448,75 @@ func (d *Daemon) localRestoreTargets() []string {
 }
 
 // Shutdown gracefully stops all daemon components.
+// errLaneRestartRequired distinguishes "target added after daemon start"
+// from forward-level problems: lanes are restart-bound by design, so this
+// is the one case where `runq connect` must still say "restart". Wraps the
+// dashboard sentinel so the /connect handler can map it to 409.
+var errLaneRestartRequired = fmt.Errorf("%w: target has no lane in the running daemon — `runq daemon restart` to build one", dashboard.ErrForwardRestartRequired)
+
+// StartRemoteForward (re)establishes the remote CLI forward for one target
+// at runtime — the path behind POST /targets/{name}/connect, so `runq
+// connect` takes effect without a daemon restart. It re-reads config.yaml
+// (connect just wrote it); an existing forward for the target is torn down
+// and replaced (idempotent — reconnect ceremony semantics).
+func (d *Daemon) StartRemoteForward(name string) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	var tc *config.TargetConfig
+	targets := cfg.ResolveTargets()
+	for i := range targets {
+		if targets[i].Name == name {
+			tc = &targets[i]
+			break
+		}
+	}
+	switch {
+	case tc == nil:
+		return fmt.Errorf("target %q not found", name)
+	case tc.SSH == nil:
+		return fmt.Errorf("target %q has no ssh section", name)
+	case !tc.RemoteCLI:
+		return fmt.Errorf("target %q does not have remote_cli enabled", name)
+	case !d.laneNames[name]:
+		return errLaneRestartRequired
+	}
+
+	// RemoteCLIHandler, not Handler: the runtime path must wear the same
+	// guard as the boot path — an unguarded forward is the RQ-45 escalation.
+	fwd, err := newRemoteCLIForward(*tc, d.Dashboard.RemoteCLIHandler(name), d.Logger)
+	if err != nil {
+		return err
+	}
+	d.fwdMu.Lock()
+	if old, ok := d.forwards[name]; ok {
+		_ = old.Close()
+	}
+	if d.forwards == nil {
+		d.forwards = map[string]*rfs.RemoteForward{}
+	}
+	d.forwards[name] = fwd
+	d.fwdMu.Unlock()
+	go fwd.Run(context.Background())
+	d.Logger.Info("remote CLI forward (re)started at runtime", "target", name)
+	return nil
+}
+
+// StopRemoteForward tears down one target's remote CLI forward at runtime
+// — the path behind POST /targets/{name}/disconnect. Idempotent: no
+// forward is a success, not an error.
+func (d *Daemon) StopRemoteForward(name string) error {
+	d.fwdMu.Lock()
+	defer d.fwdMu.Unlock()
+	if fwd, ok := d.forwards[name]; ok {
+		_ = fwd.Close()
+		delete(d.forwards, name)
+		d.Logger.Info("remote CLI forward stopped", "target", name)
+	}
+	return nil
+}
+
 func (d *Daemon) Shutdown(_ context.Context) {
 	d.Logger.Info("shutdown signal received")
 	if err := d.PidFile.Close(); err != nil {
@@ -426,6 +525,13 @@ func (d *Daemon) Shutdown(_ context.Context) {
 	if d.Dashboard != nil {
 		d.Dashboard.Close()
 	}
+	// Remote CLI forwards go first: they feed requests INTO the mux, so
+	// stop accepting remote traffic before draining the lanes below it.
+	d.fwdMu.Lock()
+	for _, fwd := range d.forwards {
+		_ = fwd.Close()
+	}
+	d.fwdMu.Unlock()
 	// Close lanes before the scheduler and store — outstanding SSH
 	// operations should drain before the DB is closed.
 	for _, sshBe := range d.sshBackends {

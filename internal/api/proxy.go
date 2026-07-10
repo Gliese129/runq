@@ -534,9 +534,12 @@ func (p *Proxy) PlanJob(ctx context.Context, cfg job.JobConfig) (tasks []job.Tas
 }
 
 func (p *Proxy) DryRun(ctx context.Context, cfg job.JobConfig) (*backend.DryRunResult, error) {
+	// nil wsRootFor: the CLI-side fallback has no target filesystem; the
+	// daemon's /jobs/plan (and the lane's DryRun override) own the real
+	// workspace-root answer.
 	return backend.BuildDryRunResult(cfg, func(name string) (*project.Config, error) {
 		return p.GetProject(ctx, name)
-	})
+	}, nil)
 }
 
 // ResolveNote rides /jobs/plan (the standalone endpoint is retired, D12) —

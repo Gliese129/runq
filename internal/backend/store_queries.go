@@ -19,6 +19,10 @@ type storeQueries struct {
 	reg   *project.Registry
 }
 
+// setProjectRegistry swaps in the multi-backend's routed registry (RQ-65)
+// so every lane resolves project yaml on the project's home filesystem.
+func (b *storeQueries) setProjectRegistry(reg *project.Registry) { b.reg = reg }
+
 // ── Project CRUD ─────────────────────────────────────────────────────────
 
 func (b *storeQueries) GetProject(ctx context.Context, name string) (*project.Config, error) {
@@ -81,7 +85,7 @@ func (b *storeQueries) configsToSummaries(ctx context.Context, configs []project
 func (b *storeQueries) DryRun(ctx context.Context, cfg job.JobConfig) (*DryRunResult, error) {
 	return BuildDryRunResult(cfg, func(name string) (*project.Config, error) {
 		return b.reg.Get(ctx, name)
-	})
+	}, nil)
 }
 
 // ── Clean / Thaw ─────────────────────────────────────────────────────────

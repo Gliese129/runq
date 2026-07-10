@@ -1,9 +1,11 @@
 package app
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -30,6 +32,14 @@ import (
 // The client serves ONE route table (the dashboard mux) on two listeners:
 // the unix socket for the CLI and TCP for the browser.
 func newClientDaemon(dataDir string, paths utils.DataDirPaths, logger *slog.Logger, st *store.Store) (*Daemon, error) {
+	// RQ-45 startup gate: a tamperable config file feeds ssh hosts and
+	// submit templates to a daemon that EXECUTES them.
+	if warn, perr := config.CheckConfigPermissions(); perr != nil {
+		return nil, perr
+	} else if warn != "" {
+		logger.Warn(warn)
+	}
+
 	storageCfg, err := config.Load()
 	if err != nil {
 		return nil, fmt.Errorf("load global config: %w", err)
@@ -89,6 +99,34 @@ func newClientDaemon(dataDir string, paths utils.DataDirPaths, logger *slog.Logg
 	// (the CLI socket needs it); TCP listening is what dashboard.enabled
 	// gates.
 	d.Dashboard = dashboard.NewServer(multiBe, storageCfg)
+
+	// Remote CLI forwards (remote_cli targets): a dedicated SSH connection
+	// per target keeps ~/.runq/runq.sock on the login node routed straight
+	// into the mux above — the remote `runq` is just another socket client.
+	// Serve reuses the full middleware chain (version gate included).
+	d.forwards = map[string]*rfs.RemoteForward{}
+	d.laneNames = map[string]bool{}
+	for name := range targets {
+		d.laneNames[name] = true
+	}
+	for _, tc := range storageCfg.ResolveTargets() {
+		if !tc.RemoteCLI || tc.SSH == nil {
+			continue
+		}
+		fwd, ferr := newRemoteCLIForward(tc, d.Dashboard.RemoteCLIHandler(tc.Name), logger)
+		if ferr != nil {
+			// Non-fatal by design: the lane itself still works; the user
+			// just doesn't get the remote CLI until the config is fixed.
+			logger.Warn("remote CLI forward not started", "target", tc.Name, "error", ferr)
+			continue
+		}
+		d.forwards[tc.Name] = fwd
+		logger.Info("remote CLI forward registered", "target", tc.Name, "host", tc.SSH.Host)
+	}
+	// `runq connect` starts/replaces forwards at runtime through this hook
+	// (POST /targets/{name}/connect) — no daemon restart for the forward.
+	d.Dashboard.SetForwardStarter(d.StartRemoteForward)
+	d.Dashboard.SetForwardStopper(d.StopRemoteForward)
 	dashCfg := storageCfg.Dashboard
 	if dashCfg == nil || dashCfg.Enabled {
 		listen := "127.0.0.1:8077"
@@ -97,8 +135,46 @@ func newClientDaemon(dataDir string, paths utils.DataDirPaths, logger *slog.Logg
 		}
 		d.dashboardListen = listen
 		logger.Info("dashboard enabled", "listen", listen)
+		if h, _, err := net.SplitHostPort(listen); err == nil && h != "127.0.0.1" && h != "localhost" && h != "::1" {
+			logger.Warn("dashboard bound to a non-loopback address — the API has NO authentication; prefer 127.0.0.1 + ssh -L tunneling", "listen", listen)
+		}
 	}
 	return d, nil
+}
+
+// newRemoteCLIForward builds the reverse socket forward for one remote_cli
+// target. SSH construction mirrors backend.NewSSHBackend (same host:port and
+// auth resolution) but deliberately NOT the same connection: the forward is
+// a persistent service, exempt from the lane's idle-disconnect etiquette
+// (see rfs.RemoteForward).
+func newRemoteCLIForward(tc config.TargetConfig, handler http.Handler, logger *slog.Logger) (*rfs.RemoteForward, error) {
+	// Same alias resolution as the lane: `host:` may be an ~/.ssh/config
+	// alias; explicit target fields win over ssh_config values.
+	sshHost, sshPort, sshUser, sshKey := rfs.ResolveSSHConfigDefaults(
+		tc.SSH.Host, tc.SSH.Port, tc.SSH.User, tc.SSH.Key)
+	host := sshHost
+	if sshPort > 0 {
+		host = fmt.Sprintf("%s:%d", sshHost, sshPort)
+	}
+	auth, err := rfs.ResolveAuthMethods(sshKey)
+	if err != nil {
+		return nil, fmt.Errorf("ssh auth: %w", err)
+	}
+	return rfs.NewRemoteForward(rfs.RemoteForwardConfig{
+		SSH: rfs.SSHConfig{
+			Host:        host,
+			User:        sshUser,
+			AuthMethods: auth,
+		},
+		Serve: func(ln net.Listener) error {
+			err := (&http.Server{Handler: handler}).Serve(ln)
+			if errors.Is(err, http.ErrServerClosed) || errors.Is(err, net.ErrClosed) {
+				return nil // orderly teardown, not a failure
+			}
+			return err
+		},
+		Logger: logger.With("target", tc.Name),
+	}), nil
 }
 
 // synthLocalRunqdTarget expands the runq preset for a local-GPUs target: the
