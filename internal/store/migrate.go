@@ -49,6 +49,13 @@ func (s *Store) addMissingColumns(ctx context.Context) error {
 	if err := addColumnIfMissing(ctx, s.db, "jobs", "note", "TEXT"); err != nil {
 		return fmt.Errorf("add jobs.note: %w", err)
 	}
+	// orphaned_at: set when the task's task_dir has been confirmed missing
+	// (rfs.FS-based detection with guardrails; see remote.DetectOrphans).
+	// Reversible metadata — detection marks, only `runq clean --orphan`
+	// deletes. NULL = not orphaned.
+	if err := addColumnIfMissing(ctx, s.db, "tasks", "orphaned_at", "INTEGER"); err != nil {
+		return fmt.Errorf("add tasks.orphaned_at: %w", err)
+	}
 	// refreshed_at: last reconcile of job state from external sources.
 	// HPC mode only (hpc.Refresh is the sole writer); always NULL in daemon
 	// mode — the daemon is the source of truth, there is nothing to reconcile.
@@ -63,6 +70,15 @@ func (s *Store) addMissingColumns(ctx context.Context) error {
 	}
 	if err := addColumnIfMissing(ctx, s.db, "projects", "archived_at", "INTEGER"); err != nil {
 		return fmt.Errorf("add projects.archived_at: %w", err)
+	}
+	// Phase 1: target column for MultiBackend routing. Every job and task
+	// records which compute target it was submitted to (e.g. "local",
+	// "tsubame"). Defaults to "local" for pre-Phase-1 rows.
+	if err := addColumnIfMissing(ctx, s.db, "jobs", "target", "TEXT NOT NULL DEFAULT 'local'"); err != nil {
+		return fmt.Errorf("add jobs.target: %w", err)
+	}
+	if err := addColumnIfMissing(ctx, s.db, "tasks", "target", "TEXT NOT NULL DEFAULT 'local'"); err != nil {
+		return fmt.Errorf("add tasks.target: %w", err)
 	}
 	// Phase 2D: HPC scheduler native state (e.g. Slurm CONFIGURING, COMPLETING).
 	// Preserved from probe output before ParseSignal collapses it to a signal enum.

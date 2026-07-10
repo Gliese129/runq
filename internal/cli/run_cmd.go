@@ -54,7 +54,7 @@ var runCmd = &cobra.Command{
 			},
 		}
 
-		return withBackend(func(be backend.Backend) error {
+		return withBackend(cmd, func(be backend.Backend) error {
 			jobID, n, err := be.SubmitJob(cmd.Context(), jobCfg, backend.SubmitOptions{})
 			if err != nil {
 				return err
@@ -68,6 +68,7 @@ var runCmd = &cobra.Command{
 func init() {
 	runCmd.Flags().Int("gpus", 0, "Number of GPUs (overrides project default)")
 	runCmd.Flags().Int("max-retry", 1, "max try count for a task, default 1")
+	runCmd.Flags().StringP("target", "t", "", "Compute target to submit to (default: config default_target)")
 
 	runCmd.GroupID = groupCore
 	rootCmd.AddCommand(runCmd)

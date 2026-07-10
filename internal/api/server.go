@@ -19,14 +19,12 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gliese129/runq/internal/backend"
-	"github.com/gliese129/runq/internal/executor"
-	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/project"
 	"github.com/gliese129/runq/internal/resource"
 	"github.com/gliese129/runq/internal/scheduler"
-	"github.com/gliese129/runq/internal/service"
 	"github.com/gliese129/runq/internal/store"
 	"github.com/gliese129/runq/internal/utils"
+	"github.com/gliese129/runq/internal/version"
 )
 
 // DefaultPaths returns the standard daemon file paths based on ResolveDataDir().
@@ -35,41 +33,38 @@ func DefaultPaths() utils.DataDirPaths {
 	return utils.PathsFromDataDir(dataDir)
 }
 
-// DefaultSocketPath returns the resolved unix socket path.
+// DefaultSocketPath returns the CLIENT daemon's unix socket path.
 func DefaultSocketPath() string { return DefaultPaths().SocketPath }
 
-// DefaultPIDPath returns the resolved PID file path.
+// DefaultRunqdSocketPath returns the EXECUTION daemon's (runqd) socket path.
+// Plumbing commands (sbatch/squeue/scancel, gpu --json) default here — on
+// any machine they mean "this machine's executor", which also makes the
+// runq-preset templates loop-proof: a client's local lane can never end up
+// talking to the client itself.
+func DefaultRunqdSocketPath() string {
+	_, dataDir := utils.ResolveDataDir()
+	return utils.RunqdPathsFromDataDir(dataDir).SocketPath
+}
+
+// DefaultPIDPath returns the client daemon's PID file path.
 func DefaultPIDPath() string { return DefaultPaths().PIDPath }
 
 // Deps holds all dependencies the API handlers need.
 type Deps struct {
-	Store     *store.Store
-	Registry  *project.Registry
-	Scheduler *scheduler.Scheduler
-	Queue     *scheduler.Queue
-	Pool      resource.Allocator
-	Executor  *executor.Executor
-	Logger    *slog.Logger
+	Store    *store.Store
+	Registry *project.Registry
+	Queue    *scheduler.Queue
+	Pool     resource.Allocator
+	Logger   *slog.Logger
 
-	// Service layer — handlers delegate business logic here.
-	JobService interface {
-		SubmitJob(ctx context.Context, jobCfg job.JobConfig) (string, int, error)
-		SubmitJobWithOpts(ctx context.Context, jobCfg job.JobConfig, opts service.SubmitJobOpts) (string, int, error)
-		ResolveNote(ctx context.Context, jobCfg job.JobConfig) (string, error)
-		ListJobs(ctx context.Context, project string) ([]backend.JobSummary, error)
-		ListArchivedJobs(ctx context.Context, project string) ([]backend.JobSummary, error)
-		ProjectSummaries(ctx context.Context) ([]service.ProjectSummary, error)
-		ArchiveJob(ctx context.Context, jobID string) error
-		UnarchiveJob(ctx context.Context, jobID string) error
-		ShowJob(ctx context.Context, jobID string) (*backend.JobDetail, error)
-		KillJob(ctx context.Context, jobID string) (int, error)
-		PauseJob(ctx context.Context, jobID string) error
-		ResumeJob(ctx context.Context, jobID string) error
-	}
-	TaskService interface {
-		KillTask(ctx context.Context, taskID string) error
-		RetryTask(ctx context.Context, taskID string) error
-	}
+	// LocalBackend — handlers delegate business logic here. Holds the
+	// daemon's queue, scheduler, executor, and pool directly (no
+	// intermediate service layer).
+	Local *backend.LocalBackend
+
+	// Multi routes operations across all configured targets (local + SSH).
+	// Used by handlers that must be target-aware (submit, list, kill, etc.).
+	Multi *backend.MultiBackend
 
 	// L2-C: optional FreezeState wired by the daemon. nil disables the
 	// thaw endpoint (returns 503). Same instance lives on Scheduler.
@@ -303,5 +298,38 @@ func (c *Client) do(ctx context.Context, httpc *http.Client, method, path string
 	if body != nil {
 		httpReq.Header.Set("Content-Type", "application/json")
 	}
-	return httpc.Do(httpReq)
+	// Every request self-identifies its build (one line covers all CLI
+	// commands) — the daemon's 426 gate and skew warning both key off this.
+	httpReq.Header.Set("X-Runq-Version", version.Version)
+	resp, err := httpc.Do(httpReq)
+	if err != nil {
+		// Remote CLI (RUNQ_SOCKET points at a forwarded socket): a dead
+		// socket almost always means the workstation side is gone, and
+		// "connection refused" alone sends people debugging the wrong host.
+		if os.Getenv("RUNQ_SOCKET") != "" {
+			return nil, fmt.Errorf("%w\n(RUNQ_SOCKET is set — if this socket is forwarded from another machine, the runq daemon there may be offline or the tunnel down)", err)
+		}
+		return nil, err
+	}
+	warnVersionSkew(resp.Header.Get("X-Runq-Version"))
+	return resp, nil
+}
+
+// warnVersionSkew prints one stderr line per process when the daemon and
+// this CLI are both stamped builds and disagree. Mild skew still works
+// (same /api/v1), so this warns and proceeds; the daemon's 426 gate handles
+// skew too large to tolerate.
+var warnSkewOnce sync.Once
+
+func warnVersionSkew(daemonVersion string) {
+	if daemonVersion == "" || daemonVersion == version.Version {
+		return
+	}
+	if _, ok := version.Compare(daemonVersion, version.Version); !ok {
+		return // a dev build on either side is deliberate, not skew
+	}
+	warnSkewOnce.Do(func() {
+		fmt.Fprintf(os.Stderr, "warning: runq %s talking to daemon %s — rerun `runq connect` (remote) or reinstall to match\n",
+			version.Version, daemonVersion)
+	})
 }

@@ -63,11 +63,17 @@ func TestGetSyncsFromYAML(t *testing.T) {
 		t.Fatalf("broken yaml must fall back to DB: %v %+v", err, got)
 	}
 
-	// Hand-edited project_name must NOT change identity (FK safety).
+	// POLICY (deep-test P2 fix): a yaml declaring a DIFFERENT project_name
+	// does not sync AT ALL. Multiple projects legitimately share a
+	// working_dir (--project-file submissions), and the old behavior —
+	// adopt the file's content, force the identity back to the DB key —
+	// was exactly the cross-project config clobber. Renames go through
+	// Rename(); a mismatched file is simply not ours, so the DB copy
+	// (still python b.py from the sync above) stands untouched.
 	os.WriteFile(yamlPath, []byte("project_name: renamed\nworking_dir: "+dir+"\ncommand_template: python c.py {{args}}\n"), 0o644)
 	got, _ = r.Get(ctx, "p")
-	if got.ProjectName != "p" || got.CmdTemplate != "python c.py {{args}}" {
-		t.Fatalf("identity must stay with DB key: %+v", got)
+	if got.ProjectName != "p" || got.CmdTemplate != "python b.py {{args}}" {
+		t.Fatalf("differently-named yaml must not sync: %+v", got)
 	}
 }
 

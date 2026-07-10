@@ -38,11 +38,18 @@ func ScanArgparse(filePath string) ([]ArgInfo, error) {
 	if err != nil {
 		return nil, err
 	}
+	return ScanArgparseBytes(content)
+}
+
+// ScanArgparseBytes scans already-read script content — the content may
+// come from any rfs.FS (remote targets included), so parsing must not
+// touch the local filesystem.
+func ScanArgparseBytes(content []byte) ([]ArgInfo, error) {
 	argReg := regexp.MustCompile(`\.add_argument\(`)
 	flagReg := regexp.MustCompile(`"--([\w-]+)"|'--([\w-]+)'`)
 	typeReg := regexp.MustCompile(`type\s*=\s*(\w+)`)
 	defaultReg := regexp.MustCompile(`default\s*=\s*(.+?)\s*[,)]`)
-	storeReg := regexp.MustCompile(`action="store_true"`)
+	storeReg := regexp.MustCompile(`action\s*=\s*["']store_true["']`)
 	matches := argReg.FindAllIndex(content, -1)
 
 	args := make([]ArgInfo, 0)

@@ -6,6 +6,7 @@ import (
 
 	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/project"
+	"github.com/gliese129/runq/internal/workspace"
 )
 
 type UnavailableBackend struct {
@@ -51,7 +52,35 @@ func (b *UnavailableBackend) GetTask(ctx context.Context, taskID string) (*TaskV
 	return nil, b.wrap()
 }
 
-func (b *UnavailableBackend) TaskMetrics(ctx context.Context, taskID string) ([]MetricPoint, error) {
+func (b *UnavailableBackend) ListTasks(ctx context.Context, opts TaskListOptions) ([]TaskView, int, error) {
+	return nil, 0, b.wrap()
+}
+
+func (b *UnavailableBackend) TaskMetrics(ctx context.Context, taskID string, afterTS int64) ([]MetricPoint, error) {
+	return nil, b.wrap()
+}
+
+func (b *UnavailableBackend) MetricKeys(ctx context.Context, jobID string) ([]string, error) {
+	return nil, b.wrap()
+}
+
+func (b *UnavailableBackend) TaskMetricBuckets(ctx context.Context, taskID, key string, fromTS, toTS int64, maxBuckets int) ([]workspace.PyramidBucket, string, error) {
+	return nil, "", b.wrap()
+}
+
+func (b *UnavailableBackend) TaskLogRead(ctx context.Context, taskID string, offset int64, maxLines int) (*LogPage, error) {
+	return nil, b.wrap()
+}
+
+func (b *UnavailableBackend) TaskLogTail(ctx context.Context, taskID string, maxLines int) (*LogPage, error) {
+	return nil, b.wrap()
+}
+
+func (b *UnavailableBackend) TaskLogFollow(ctx context.Context, taskID string, offset int64) (LogFollower, error) {
+	return nil, b.wrap()
+}
+
+func (b *UnavailableBackend) JobLogSearch(ctx context.Context, jobID, query string) ([]LogMatch, error) {
 	return nil, b.wrap()
 }
 

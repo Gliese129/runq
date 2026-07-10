@@ -11,7 +11,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gliese129/runq/internal/backend"
 	"github.com/gliese129/runq/internal/logfile"
+	"github.com/gliese129/runq/internal/rfs"
 )
 
 // utilsLogSession tracks a single uploaded log file for the log viewer.
@@ -122,16 +124,16 @@ func randomID() string {
 
 // handleUtilsLogUpload accepts a raw log body and returns a session ID.
 //
-//	POST /api/dashboard/utils/log
+//	POST /api/v1/log-sessions
 //	Body: raw log text
 //	Response: { "id": "xxx", "total_bytes": N }
 func (s *Server) handleUtilsLogUpload(w http.ResponseWriter, r *http.Request) {
 	id, n, err := s.utilsLogs.create(r.Body)
 	if err != nil {
 		if he, ok := err.(*httpErr); ok {
-			writeJSON(w, he.status, map[string]string{"error": he.msg})
+			writeErrorStatus(w, he.status, he)
 		} else {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			writeError(w, err)
 		}
 		return
 	}
@@ -140,14 +142,14 @@ func (s *Server) handleUtilsLogUpload(w http.ResponseWriter, r *http.Request) {
 
 // handleUtilsLogRead reads a page of log lines from an uploaded log.
 //
-//	GET /api/dashboard/utils/log/{id}
+//	GET /api/v1/log-sessions/{id}
 //	Query: offset, lines — same as handleTaskLog
 //	Response: logfile.Page
 func (s *Server) handleUtilsLogRead(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	path, ok := s.utilsLogs.get(id)
 	if !ok {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "session not found"})
+		writeErr(w, http.StatusNotFound, backend.CodeNotFound, "session not found")
 		return
 	}
 
@@ -164,16 +166,16 @@ func (s *Server) handleUtilsLogRead(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	lr, err := logfile.Open(path)
+	lr, err := logfile.Open(path, rfs.NewLocalFS())
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		writeError(w, err)
 		return
 	}
 	defer lr.Close()
 
 	page, err := lr.ReadLines(offset, lines)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		writeError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, page)
@@ -181,20 +183,20 @@ func (s *Server) handleUtilsLogRead(w http.ResponseWriter, r *http.Request) {
 
 // handleUtilsLogSearch searches an uploaded log (same as job log search).
 //
-//	GET /api/dashboard/utils/log/{id}/search
+//	GET /api/v1/log-sessions/{id}/search
 //	Query: q, offset
 //	Response: logfile.SearchResult
 func (s *Server) handleUtilsLogSearch(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	path, ok := s.utilsLogs.get(id)
 	if !ok {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "session not found"})
+		writeErr(w, http.StatusNotFound, backend.CodeNotFound, "session not found")
 		return
 	}
 
 	q := r.URL.Query().Get("q")
 	if q == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing query parameter q"})
+		writeErr(w, http.StatusBadRequest, backend.CodeBadRequest, "missing query parameter q")
 		return
 	}
 
@@ -205,16 +207,16 @@ func (s *Server) handleUtilsLogSearch(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	lr, err := logfile.Open(path)
+	lr, err := logfile.Open(path, rfs.NewLocalFS())
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		writeError(w, err)
 		return
 	}
 	defer lr.Close()
 
 	result, err := lr.Search(q, offset, logfile.MaxSearchMatches)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		writeErr(w, http.StatusBadRequest, backend.CodeBadRequest, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
@@ -222,7 +224,7 @@ func (s *Server) handleUtilsLogSearch(w http.ResponseWriter, r *http.Request) {
 
 // handleUtilsLogDelete removes an uploaded log session.
 //
-//	DELETE /api/dashboard/utils/log/{id}
+//	DELETE /api/v1/log-sessions/{id}
 func (s *Server) handleUtilsLogDelete(w http.ResponseWriter, r *http.Request) {
 	s.utilsLogs.remove(r.PathValue("id"))
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})

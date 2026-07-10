@@ -2,11 +2,15 @@ package ingest
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
-	"os"
+	"errors"
+	"io"
+	"io/fs"
 
 	"github.com/bytedance/gopkg/util/logger"
+	"github.com/gliese129/runq/internal/rfs"
 	"github.com/gliese129/runq/internal/store"
 	"github.com/gliese129/runq/internal/workspace"
 )
@@ -16,6 +20,12 @@ type Target struct {
 	TaskID string
 	JobID  string
 	Dir    string
+
+	// FS is the filesystem Dir lives on. nil = local (os semantics). Remote
+	// backends pass their rfs.SSHFS so metrics.jsonl on the cluster is
+	// actually readable — a bare os.Open of a remote path silently reads
+	// nothing.
+	FS rfs.FS
 }
 
 // Result summarizes what was ingested from <task_dir>/metrics.jsonl.
@@ -47,110 +57,188 @@ type checkpointEvent struct {
 	TS        int64  `json:"ts"`
 }
 
-// ReapOutputs reads <target.Dir>/metrics.jsonl, parses each line as a typed
-// event, and batch-inserts metric / checkpoint rows into the store.
+// NOTE: the legacy ReapOutputs (markless full-file reap) is GONE. Its
+// "idempotent via INSERT OR IGNORE" contract silently broke when the
+// point table died: streaming summaries ACCUMULATE, so a markless re-read
+// double-counts. ReapIncremental's (size, parsed_offset) mark is what
+// makes re-reading safe now — every caller must go through it.
 //
-// Recognized event shapes (line-delimited JSON):
+// SDK event vocabulary and error posture (unchanged):
+//   - {"type":"metric"|"checkpoint", ...}; unknown types are debug-logged
+//     and skipped (forward compatibility), bad JSON lines warn + skip.
+//   - Reap MUST NOT propagate errors that would change a task's terminal
+//     status: verdict-path callers treat returned errors as warn-only.
+//   - disk_low events fall through to "unknown type": the SDK-driven
+//     freeze model handles them at runtime via /internal/freeze-self.
+
+// collector performs the STREAMING REDUCTION over metrics.jsonl lines —
+// the ONE parsing path shared by the full reap and the incremental reap.
+// Raw metric points are never stored (a chatty 3-day task is 10M+ points):
+// each point folds into its (key) summary on the fly; charts read the raw
+// tail window or the on-target pyramid index instead.
+type collector struct {
+	target Target
+	path   string
+	lineN  int
+	aggs   map[string]*store.MetricSummaryRow
+	ckpts  []store.CheckpointRow
+	result Result
+}
+
+func (c *collector) line(lineBytes []byte) {
+	c.lineN++
+	if len(lineBytes) == 0 {
+		return
+	}
+	var t struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(lineBytes, &t); err != nil {
+		logger.Warnf("reap %s line %d: parse type discriminator failed: %v", c.path, c.lineN, err)
+		return
+	}
+	switch t.Type {
+	case "metric":
+		var e metricEvent
+		if err := json.Unmarshal(lineBytes, &e); err != nil {
+			logger.Warnf("reap %s line %d: parse metric event failed: %v", c.path, c.lineN, err)
+			return
+		}
+		if c.aggs == nil {
+			c.aggs = make(map[string]*store.MetricSummaryRow)
+		}
+		agg, ok := c.aggs[e.Key]
+		if !ok {
+			c.aggs[e.Key] = &store.MetricSummaryRow{
+				TaskID: c.target.TaskID, JobID: c.target.JobID, Key: e.Key,
+				Min: e.Value, Max: e.Value, Last: e.Value, LastTS: e.TS, Count: 1,
+			}
+		} else {
+			agg.Min = min(agg.Min, e.Value)
+			agg.Max = max(agg.Max, e.Value)
+			if e.TS >= agg.LastTS {
+				agg.Last, agg.LastTS = e.Value, e.TS
+			}
+			agg.Count++
+		}
+		c.result.MetricCount++
+	case "checkpoint":
+		var e checkpointEvent
+		if err := json.Unmarshal(lineBytes, &e); err != nil {
+			logger.Warnf("reap %s line %d: parse checkpoint event failed: %v", c.path, c.lineN, err)
+			return
+		}
+		c.ckpts = append(c.ckpts, store.CheckpointRow{
+			TaskID:    c.target.TaskID,
+			JobID:     c.target.JobID,
+			Path:      e.Path,
+			SizeBytes: e.SizeBytes,
+			Step:      e.Step,
+			IsBest:    e.IsBest,
+			TS:        e.TS,
+		})
+		c.result.CheckpointCount++
+	default:
+		logger.Debugf("reap %s line %d: unknown event type %q (skipped)", c.path, c.lineN, t.Type)
+	}
+}
+
+// summaryRows materializes the per-key reductions for the atomic apply.
+func (c *collector) summaryRows() []store.MetricSummaryRow {
+	rows := make([]store.MetricSummaryRow, 0, len(c.aggs))
+	for _, a := range c.aggs {
+		rows = append(rows, *a)
+	}
+	return rows
+}
+
+// ReapIncremental ingests only the bytes appended since the last pass,
+// tracked by the (size, parsed_offset) mark (spec §8.1.4):
 //
-//	{"type":"metric",     ...metricEvent fields...}
-//	{"type":"checkpoint", ...checkpointEvent fields...}
+//	size unchanged → zero transfer, zero parse (the common idle case)
+//	size grew      → seek to parsed_offset, parse the delta's COMPLETE
+//	                 lines (an unterminated tail waits for the next pass)
+//	size shrank    → the file was rewritten (retry rerun): drop the task's
+//	                 rows and rebuild from 0
 //
-// `type` is required; any other value is logged at debug and skipped for
-// forward compatibility. Per-line JSON parse errors are logged at warn and the
-// line is skipped; the rest of the file still gets processed.
-//
-// Notes:
-//   - Missing file -> (Result{}, nil). Empty / no-SDK tasks are normal.
-//   - bufio.Scanner buffer is raised to 10 MB to tolerate long metric rows.
-//   - INSERT OR IGNORE in the store batch methods makes re-reaping idempotent.
-//     This is a hard dependency for future daemonless status refresh, which may
-//     reread the same jsonl multiple times.
-//   - `ts` from the SDK is preserved as-is; ingest does not re-stamp.
-//   - Reap MUST NOT propagate errors that would change the task's terminal
-//     status. Callers should treat returned errors as warn-only.
-//
-// disk_low events are NOT consumed here. In the SDK-driven freeze model the SDK
-// posts /api/internal/freeze-self at runtime; by the time metrics.jsonl is
-// reaped the freeze decision is long gone. If an old jsonl from a pre-pivot
-// task still has a disk_low line, it falls through to the "unknown type" branch.
-func ReapOutputs(ctx context.Context, st *store.Store, target Target) (Result, error) {
+// final marks the terminal pass: the tail is consumed even without a
+// trailing newline, and the mark is frozen — settled tasks are never
+// stat'ed again. Errors are warn-only for callers on verdict paths (same
+// contract as the old full reap).
+func ReapIncremental(ctx context.Context, st *store.Store, target Target, final bool) (Result, error) {
+	fsys := target.FS
+	if fsys == nil {
+		fsys = rfs.NewLocalFS()
+	}
+	mark, err := st.GetIngestMark(ctx, target.TaskID)
+	if err != nil {
+		return Result{}, err
+	}
+	if mark.Final {
+		return Result{}, nil
+	}
+
 	path := workspace.MetricsPath(target.Dir)
-	f, err := os.Open(path)
-	if os.IsNotExist(err) {
+	info, err := fsys.Stat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		if final { // no-SDK task: freeze so we never look again
+			_ = st.SetIngestMark(ctx, target.TaskID, store.IngestMark{Final: true})
+		}
 		return Result{}, nil
 	}
 	if err != nil {
 		return Result{}, err
 	}
+
+	size := info.Size()
+	offset := mark.Offset
+	rebuild := false
+	if size < mark.Size {
+		// Rewritten file (retry rerun): re-read from 0. The DELETE of the
+		// old summaries is DEFERRED into the atomic apply below — reading
+		// happens against a still-consistent store, and a crash at any
+		// point leaves either the old state or the new, never a mix.
+		rebuild = true
+		offset = 0
+	} else if size == mark.Size && !final {
+		return Result{}, nil // zero transfer
+	}
+
+	f, err := fsys.Open(path)
+	if err != nil {
+		return Result{}, err
+	}
 	defer f.Close()
-
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 64*1024), 10*1024*1024)
-
-	metrics := make([]store.MetricRow, 0)
-	ckpts := make([]store.CheckpointRow, 0)
-	result := Result{}
-
-	type typeOnly struct {
-		Type string `json:"type"`
+	if offset > 0 {
+		if _, err := f.Seek(offset, io.SeekStart); err != nil {
+			return Result{}, err
+		}
 	}
 
-	lineN := 0
-	for scanner.Scan() {
-		lineN++
-		lineBytes := scanner.Bytes()
-		if len(lineBytes) == 0 {
-			continue
+	br := bufio.NewReaderSize(f, 64*1024)
+	c := collector{target: target, path: path}
+	consumed := offset
+	for {
+		raw, rerr := br.ReadBytes('\n')
+		complete := rerr == nil
+		if len(raw) > 0 && (complete || final) {
+			c.line(bytes.TrimRight(raw, "\r\n"))
+			consumed += int64(len(raw))
 		}
-		var t typeOnly
-		if err := json.Unmarshal(lineBytes, &t); err != nil {
-			logger.Warnf("reap %s line %d: parse type discriminator failed: %v", path, lineN, err)
-			continue
-		}
-		switch t.Type {
-		case "metric":
-			var e metricEvent
-			if err := json.Unmarshal(lineBytes, &e); err != nil {
-				logger.Warnf("reap %s line %d: parse metric event failed: %v", path, lineN, err)
-				continue
+		if rerr != nil {
+			if rerr != io.EOF {
+				logger.Warnf("reap %s: read error (partial result): %v", path, rerr)
 			}
-			metrics = append(metrics, store.MetricRow{
-				TaskID: target.TaskID,
-				JobID:  target.JobID,
-				Key:    e.Key,
-				Value:  e.Value,
-				Step:   e.Step,
-				TS:     e.TS,
-			})
-			result.MetricCount++
-		case "checkpoint":
-			var e checkpointEvent
-			if err := json.Unmarshal(lineBytes, &e); err != nil {
-				logger.Warnf("reap %s line %d: parse checkpoint event failed: %v", path, lineN, err)
-				continue
-			}
-			ckpts = append(ckpts, store.CheckpointRow{
-				TaskID:    target.TaskID,
-				JobID:     target.JobID,
-				Path:      e.Path,
-				SizeBytes: e.SizeBytes,
-				Step:      e.Step,
-				IsBest:    e.IsBest,
-				TS:        e.TS,
-			})
-			result.CheckpointCount++
-		default:
-			logger.Debugf("reap %s line %d: unknown event type %q (skipped)", path, lineN, t.Type)
+			break
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		logger.Warnf("reap %s: scanner error (partial result): %v", path, err)
+	// ONE transaction: rebuild delete + summary merges + checkpoints + the
+	// mark. "Counted" and "accounted" are inseparable — a crash between
+	// them would replay this delta next pass and inflate count/sum.
+	if err := st.ApplyIngestDelta(ctx, target.TaskID, rebuild,
+		c.summaryRows(), c.ckpts,
+		store.IngestMark{Size: size, Offset: consumed, Final: final}); err != nil {
+		return Result{}, err
 	}
-	if err := st.InsertMetricsBatch(ctx, metrics); err != nil {
-		logger.Warnf("reap %s: InsertMetricsBatch failed (%d rows): %v", path, len(metrics), err)
-	}
-	if err := st.InsertCheckpointsBatch(ctx, ckpts); err != nil {
-		logger.Warnf("reap %s: InsertCheckpointsBatch failed (%d rows): %v", path, len(ckpts), err)
-	}
-	return result, nil
+	return c.result, nil
 }

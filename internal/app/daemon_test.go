@@ -8,12 +8,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gliese129/runq/internal/backend"
 	"github.com/gliese129/runq/internal/executor"
 	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/project"
 	"github.com/gliese129/runq/internal/resource"
 	"github.com/gliese129/runq/internal/scheduler"
-	"github.com/gliese129/runq/internal/service"
 	"github.com/gliese129/runq/internal/store"
 )
 
@@ -53,7 +53,7 @@ func TestRestoreRuntimeStateRestoresPausedJobsBeforeScheduling(t *testing.T) {
 		cfg,
 		queue,
 		resource.NewMockAllocator(1),
-		exec,
+		scheduler.NewLocalLauncher(exec),
 		st,
 		slog.New(slog.NewTextHandler(os.Stderr, nil)),
 		nil, // FIFO prioritizer
@@ -89,6 +89,60 @@ func TestRestoreRuntimeStateRestoresPausedJobsBeforeScheduling(t *testing.T) {
 	}
 	if row.Status != "pending" {
 		t.Fatalf("DB task should remain pending, got %s", row.Status)
+	}
+}
+
+func TestRestoreRuntimeStateOnlyRestoresLocalTargets(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+
+	if _, err := st.DB().Exec(`INSERT INTO projects (name, config_json) VALUES ('test', '{}')`); err != nil {
+		t.Fatalf("insert project: %v", err)
+	}
+	now := time.Now()
+	for _, row := range []store.JobRow{
+		{ID: "j-workstation", ProjectName: "test", ConfigJSON: "{}", Status: "pending", TotalTasks: 1, Target: "workstation", CreatedAt: now},
+		{ID: "j-lab", ProjectName: "test", ConfigJSON: "{}", Status: "pending", TotalTasks: 1, Target: "lab", CreatedAt: now},
+		{ID: "j-hpc", ProjectName: "test", ConfigJSON: "{}", Status: "pending", TotalTasks: 1, Target: "tsubame", CreatedAt: now},
+	} {
+		if err := st.InsertJob(ctx, &row); err != nil {
+			t.Fatalf("insert job %s: %v", row.ID, err)
+		}
+	}
+	for _, row := range []store.TaskRow{
+		{ID: "t-workstation", JobID: "j-workstation", ProjectName: "test", Command: "echo local", ParamsJSON: "{}", Status: "pending", Target: "workstation", EnqueuedAt: now},
+		{ID: "t-lab", JobID: "j-lab", ProjectName: "test", Command: "echo lab", ParamsJSON: "{}", Status: "pending", Target: "lab", EnqueuedAt: now},
+		{ID: "t-hpc", JobID: "j-hpc", ProjectName: "test", Command: "echo hpc", ParamsJSON: "{}", Status: "pending", Target: "tsubame", EnqueuedAt: now},
+	} {
+		if err := st.InsertTask(ctx, &row); err != nil {
+			t.Fatalf("insert task %s: %v", row.ID, err)
+		}
+	}
+
+	queue := scheduler.NewQueue()
+	d := &Daemon{
+		Store:            st,
+		Logger:           slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		Executor:         executor.New(),
+		Queue:            queue,
+		localTargetNames: []string{"workstation", "lab"},
+	}
+
+	if err := d.restoreRuntimeState(); err != nil {
+		t.Fatalf("restoreRuntimeState: %v", err)
+	}
+	if queue.Get("t-workstation") == nil {
+		t.Fatal("expected workstation task restored")
+	}
+	if queue.Get("t-lab") == nil {
+		t.Fatal("expected lab task restored")
+	}
+	if queue.Get("t-hpc") != nil {
+		t.Fatal("HPC task should not be restored into local queue")
 	}
 }
 
@@ -142,16 +196,21 @@ func TestL2CStage1EndToEnd(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	freeze := scheduler.NewFreezeState()
 	sched := scheduler.New(
-		cfg, queue, pool, exec, st, logger, nil,
+		cfg, queue, pool, scheduler.NewLocalLauncher(exec), st, logger, nil,
 		"/tmp/runq-test.sock", freeze,
 	)
 
-	jobSvc := &service.JobService{
-		Store: st, Queue: queue, Scheduler: sched, Exec: exec, Registry: reg, Pool: pool,
-	}
+	localBe := backend.NewLocalBackend(backend.LocalBackendDeps{
+		Store:     st,
+		Reg:       reg,
+		Queue:     queue,
+		Scheduler: sched,
+		Exec:      exec,
+		Pool:      pool,
+	})
 
 	// ── submit a 1-task job ──
-	jobID, n, err := jobSvc.SubmitJobWithOpts(
+	jobID, n, err := localBe.SubmitJobRaw(
 		ctx,
 		job.JobConfig{
 			Project: "p",
@@ -164,7 +223,7 @@ func TestL2CStage1EndToEnd(t *testing.T) {
 				},
 			},
 		},
-		service.SubmitJobOpts{SkipPreflight: true},
+		true, // skipPreflight
 	)
 	if err != nil {
 		t.Fatalf("SubmitJob: %v", err)
@@ -208,9 +267,10 @@ func TestL2CStage1EndToEnd(t *testing.T) {
 	}
 
 	// ── verify reap landed data in metrics + checkpoints ──
-	metrics, _ := st.ListMetrics(ctx, taskID, "")
+	taskRow, _ := st.GetTask(ctx, taskID)
+	metrics, _ := st.ListMetricSummaries(ctx, taskRow.JobID, "")
 	if len(metrics) != 1 {
-		t.Errorf("expected 1 metric row, got %d (%+v)", len(metrics), metrics)
+		t.Errorf("expected 1 summary row, got %d (%+v)", len(metrics), metrics)
 	} else if metrics[0].Key != "loss" {
 		t.Errorf("metric key = %q, want %q", metrics[0].Key, "loss")
 	}

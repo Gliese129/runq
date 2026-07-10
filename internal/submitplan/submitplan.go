@@ -2,15 +2,18 @@ package submitplan
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
-	"path/filepath"
+	posixpath "path"
 	"sort"
 	"strings"
 
 	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/preflight"
 	"github.com/gliese129/runq/internal/project"
+	"github.com/gliese129/runq/internal/rfs"
 	"github.com/gliese129/runq/internal/utils"
 	"github.com/gliese129/runq/internal/workspace"
 )
@@ -36,6 +39,10 @@ type Deps struct {
 	PreflightDisableLocal bool
 	// PreflightScope labels where local checks ran (e.g. "on login node").
 	PreflightScope string
+	// PreflightFS is the filesystem preflight checks run against — the
+	// TARGET's rfs.FS for remote targets (paths statted remotely, script
+	// read remotely, probes executed on the login node). nil = local os.
+	PreflightFS rfs.FS
 	// SchedulerParams are param names consumed by the HPC submit_template
 	// ({{param.*}}): exempt from the command renderer's unconsumed check
 	// and excluded from {{args}} injection.
@@ -104,10 +111,12 @@ func validateStrictChoices(proj *project.Config, tasks []job.TaskParams) error {
 
 // resolveEnvFile applies the project's env_file semantics: nil = auto-use
 // <working_dir>/.env when present; "" = disabled; other = required path.
-func resolveEnvFile(proj *project.Config) (string, error) {
+// Existence questions go to fsys — the TARGET's filesystem (RQ-65): the
+// .env lives next to the code, and the code lives on the target.
+func resolveEnvFile(proj *project.Config, fsys rfs.FS) (string, error) {
 	if proj.EnvFile == nil {
-		auto := filepath.Join(proj.WorkingDir, ".env")
-		if _, err := os.Stat(auto); err == nil {
+		auto := posixpath.Join(proj.WorkingDir, ".env")
+		if _, err := fsys.Stat(auto); err == nil {
 			return auto, nil
 		}
 		return "", nil
@@ -116,10 +125,10 @@ func resolveEnvFile(proj *project.Config) (string, error) {
 	if path == "" {
 		return "", nil // explicitly disabled
 	}
-	if !filepath.IsAbs(path) {
-		path = filepath.Join(proj.WorkingDir, path)
+	if !posixpath.IsAbs(path) {
+		path = posixpath.Join(proj.WorkingDir, path)
 	}
-	if _, err := os.Stat(path); err != nil {
+	if _, err := fsys.Stat(path); err != nil {
 		return "", fmt.Errorf("env_file %q: %w", path, err)
 	}
 	return path, nil
@@ -179,9 +188,15 @@ func Build(ctx context.Context, cfg job.JobConfig, proj *project.Config, d Deps)
 		}
 	}
 
-	if _, err := os.Stat(proj.WorkingDir); err != nil {
-		if os.IsNotExist(err) {
-			return Plan{}, fmt.Errorf("working_dir %q does not exist", proj.WorkingDir)
+	// working_dir existence is the TARGET filesystem's question (RQ-65) —
+	// a Mac daemon statting a TSUBAME path answers about the wrong world.
+	fsys := d.PreflightFS
+	if fsys == nil {
+		fsys = rfs.NewLocalFS()
+	}
+	if _, err := fsys.Stat(proj.WorkingDir); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return Plan{}, fmt.Errorf("working_dir %q does not exist on target", proj.WorkingDir)
 		}
 		return Plan{}, fmt.Errorf("stat working_dir %q: %w", proj.WorkingDir, err)
 	}
@@ -190,7 +205,7 @@ func Build(ctx context.Context, cfg job.JobConfig, proj *project.Config, d Deps)
 	// flows through EnvJSON persistence / daemon recovery untouched. The
 	// shell sources it AT TASK START (executor prologue / run.sh header) —
 	// runq never reads its values. Precedence: .env < explicit env.
-	envFile, err := resolveEnvFile(proj)
+	envFile, err := resolveEnvFile(proj, fsys)
 	if err != nil {
 		return Plan{}, err
 	}
@@ -220,6 +235,7 @@ func Build(ctx context.Context, cfg job.JobConfig, proj *project.Config, d Deps)
 	pf.DisableLocal = d.PreflightDisableLocal
 	pf.Scope = d.PreflightScope
 	pf.ExcludeParams = schedParams
+	pf.FS = d.PreflightFS
 	pfReport, err := pf.Run(ctx, proj, taskParams)
 	if err != nil {
 		return Plan{}, err
@@ -262,7 +278,7 @@ func Build(ctx context.Context, cfg job.JobConfig, proj *project.Config, d Deps)
 			GPUsNeeded:    gpusPerTask,
 			MaxRetry:      maxRetry,
 			Timeout:       timeoutSec,
-			LogPath:       filepath.Join(d.Paths.LogRoot, taskID+".log"),
+			LogPath:       posixpath.Join(d.Paths.LogRoot, taskID+".log"),
 			WorkingDir:    proj.WorkingDir,
 			Resumable:     proj.Resume.Enabled,
 			ExtraArgs:     proj.Resume.ExtraArgs,

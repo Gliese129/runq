@@ -4,48 +4,55 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
+	"path"
 	"strings"
 
 	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/project"
+	"github.com/gliese129/runq/internal/rfs"
 	"github.com/gliese129/runq/internal/utils"
 )
 
 // TaskDir returns the task workspace path under an already-selected root.
 // Root selection is a backend concern; this helper only joins mechanically.
 func TaskDir(root, taskID string) string {
-	return filepath.Join(root, taskID)
+	return path.Join(root, taskID)
 }
 
 func ParamsPath(dir string) string {
-	return filepath.Join(dir, "params.json")
+	return path.Join(dir, "params.json")
 }
 
 func MetricsPath(dir string) string {
-	return filepath.Join(dir, "metrics.jsonl")
+	return path.Join(dir, "metrics.jsonl")
+}
+
+// PyramidPath is the multi-resolution metrics index built next to
+// metrics.jsonl by `runq metrics-index build` (pyramid.go, this package).
+func PyramidPath(dir string) string {
+	return path.Join(dir, "metrics.pyr")
 }
 
 func CheckpointsDir(dir string) string {
-	return filepath.Join(dir, "checkpoints")
+	return path.Join(dir, "checkpoints")
 }
 
 func WandbConfigPath(dir string) string {
-	return filepath.Join(dir, "wandb_config.json")
+	return path.Join(dir, "wandb_config.json")
 }
 
 func NotePath(dir string) string {
-	return filepath.Join(dir, "note.txt")
+	return path.Join(dir, "note.txt")
 }
 
 func ActivityPath(dir string) string {
-	return filepath.Join(dir, "activity.tsv")
+	return path.Join(dir, "activity.tsv")
 }
 
 // TaskMetaPath returns the path to task.meta, a JSON file holding derived
 // post-mortem metadata (future fields like TotalLines, ErrorCount, etc.).
 func TaskMetaPath(dir string) string {
-	return filepath.Join(dir, "task.meta")
+	return path.Join(dir, "task.meta")
 }
 
 // TaskMeta is the JSON schema for task.meta. Add new fields here as needed;
@@ -119,6 +126,47 @@ func Write(dir string, params job.TaskParams, wandb *project.WandbConfig, note s
 
 	if note != "" {
 		if err := utils.AtomicWriteFile(NotePath(dir), []byte(note), 0o644); err != nil {
+			return fmt.Errorf("write note.txt: %w", err)
+		}
+	}
+	return nil
+}
+
+// WriteFS is Write through an explicit filesystem — the remote-target path:
+// task workspaces live on the TARGET's filesystem (rfs.SSHFS), not the
+// client's. nil falls back to the local, atomic-write implementation.
+//
+// Remote note: sftp has no atomic rename-write. Ordering makes this safe
+// anyway — everything here lands BEFORE the task is submitted, so the SDK on
+// the compute node can never observe a half-written file.
+func WriteFS(fsys rfs.FS, dir string, params job.TaskParams, wandb *project.WandbConfig, note string) error {
+	if fsys == nil {
+		return Write(dir, params, wandb, note)
+	}
+	if err := fsys.MkdirAll(CheckpointsDir(dir), 0o755); err != nil {
+		return fmt.Errorf("mkdir %s: %w", dir, err)
+	}
+
+	paramsJSON, err := json.MarshalIndent(params, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal params: %w", err)
+	}
+	if err := fsys.WriteFile(ParamsPath(dir), paramsJSON, 0o644); err != nil {
+		return fmt.Errorf("write params.json: %w", err)
+	}
+
+	if wandb != nil {
+		wandbJSON, err := json.MarshalIndent(wandb, "", "  ")
+		if err != nil {
+			return fmt.Errorf("marshal wandb config: %w", err)
+		}
+		if err := fsys.WriteFile(WandbConfigPath(dir), wandbJSON, 0o644); err != nil {
+			return fmt.Errorf("write wandb_config.json: %w", err)
+		}
+	}
+
+	if note != "" {
+		if err := fsys.WriteFile(NotePath(dir), []byte(note), 0o644); err != nil {
 			return fmt.Errorf("write note.txt: %w", err)
 		}
 	}

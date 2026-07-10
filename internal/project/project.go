@@ -2,8 +2,9 @@ package project
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
+	"path"
+
+	"github.com/gliese129/runq/internal/rfs"
 
 	"gopkg.in/yaml.v3"
 )
@@ -13,53 +14,55 @@ const yamlHeader = `# runq project configuration
 #
 `
 
-// WriteYAML writes the Config as a project.yaml file into the WorkingDir.
-// If the file already exists, it is left untouched (user may have comments
-// or custom formatting). Use OverwriteYAML to force-write.
-// Returns an error if WorkingDir does not exist or is not a directory.
-func (c *Config) WriteYAML() error {
-	if err := c.checkWorkingDir(); err != nil {
-		return err
+// WriteYAML writes the Config as a project.yaml file into the WorkingDir
+// ON THE PROJECT'S OWN FILESYSTEM (fsys; nil = local). If the file already
+// exists there, it is left untouched (user may have comments or custom
+// formatting). Use OverwriteYAML to force-write.
+//
+// No pre-flight stat of WorkingDir (RQ-65): registration is registration,
+// not a health check — and the only machine entitled to answer "does this
+// dir exist" is the project's own target. A write to a missing dir fails
+// loudly with the target's error, which is the honest signal.
+func (c *Config) WriteYAML(fsys rfs.FS) error {
+	if c.WorkingDir == "" {
+		return fmt.Errorf("working_dir is required")
 	}
-	path := filepath.Join(c.WorkingDir, "project.yaml")
-	if _, err := os.Stat(path); err == nil {
+	if fsys == nil {
+		fsys = rfs.NewLocalFS()
+	}
+	yamlPath := path.Join(c.WorkingDir, "project.yaml")
+	if _, err := fsys.Stat(yamlPath); err == nil {
 		return nil // already exists, don't clobber
 	}
-	return c.OverwriteYAML()
+	return c.OverwriteYAML(fsys)
 }
 
-// OverwriteYAML writes the Config as project.yaml, replacing any existing file.
-// Returns an error if WorkingDir does not exist or is not a directory.
-func (c *Config) OverwriteYAML() error {
-	if err := c.checkWorkingDir(); err != nil {
-		return err
+// OverwriteYAML writes the Config as project.yaml on the project's own
+// filesystem, replacing any existing file.
+func (c *Config) OverwriteYAML(fsys rfs.FS) error {
+	if c.WorkingDir == "" {
+		return fmt.Errorf("working_dir is required")
 	}
-	path := filepath.Join(c.WorkingDir, "project.yaml")
+	if fsys == nil {
+		fsys = rfs.NewLocalFS()
+	}
 	data, err := yaml.Marshal(c)
 	if err != nil {
 		return fmt.Errorf("marshal project config: %w", err)
 	}
 	content := yamlHeader + string(data)
-	return os.WriteFile(path, []byte(content), 0o644)
-}
-
-func (c *Config) checkWorkingDir() error {
-	if c.WorkingDir == "" {
-		return fmt.Errorf("working_dir is required")
-	}
-	info, err := os.Stat(c.WorkingDir)
-	if err != nil {
-		return fmt.Errorf("working_dir %q: %w", c.WorkingDir, err)
-	}
-	if !info.IsDir() {
-		return fmt.Errorf("working_dir %q is not a directory", c.WorkingDir)
-	}
-	return nil
+	return fsys.WriteFile(path.Join(c.WorkingDir, "project.yaml"), []byte(content), 0o644)
 }
 
 // Config represents a parsed project.yaml file.
 type Config struct {
-	ProjectName string            `yaml:"project_name" json:"project_name"`
+	ProjectName string `yaml:"project_name" json:"project_name"`
+	// Target is the project's home: the compute target whose filesystem
+	// owns WorkingDir and every other path in this config (RQ-65). All
+	// path semantics — yaml sync, preflight, workspace layout — resolve
+	// on that machine, never on whichever machine happens to run the
+	// daemon. Empty = the local machine.
+	Target      string            `yaml:"target,omitempty" json:"target,omitempty"`
 	WorkingDir  string            `yaml:"working_dir" json:"working_dir"`
 	CmdTemplate string            `yaml:"command_template" json:"command_template"`
 	Environment map[string]string `yaml:"environment,omitempty" json:"environment,omitempty"`

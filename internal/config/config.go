@@ -6,7 +6,7 @@
 //   - ~/.runq (always per-user; the daemon's *runtime* dir is separate)
 //
 // The file has two sections: top-level keys are global (read by all backends),
-// and the `hpc:` section is HPC-specific (parsed by internal/hpcconfig).
+// remote-target templates live on each targets[] entry (internal/remote).
 //
 // # Storage model
 //
@@ -22,7 +22,7 @@
 //
 // The physical path is what gets persisted in the DB (task_dir), so config
 // changes never orphan running tasks. Both daemon and HPC call ResolveRoot;
-// downstream code (workspace.Write, ingest.ReapOutputs, submitplan.Build) is
+// downstream code (workspace.Write, ingest.ReapIncremental, submitplan.Build) is
 // unaware of which mode is active.
 package config
 
@@ -43,20 +43,220 @@ type GlobalConfig struct {
 	// project's <working_dir>/.runq is a symlink pointing there. When empty,
 	// <working_dir>/.runq/ is the real storage location.
 	DataPath string `yaml:"data_path,omitempty"`
-	// Mode selects the default backend for unified CLI/dashboard commands.
-	// Empty is accepted on disk and normalized to daemon when loaded.
-	Mode string `yaml:"mode,omitempty"`
+	// DefaultTarget names the target to use when --target is omitted.
+	// Falls back to the first entry in Targets, then "local".
+	DefaultTarget string `yaml:"default_target,omitempty"`
+	// Dashboard configures the embedded dashboard server.
+	Dashboard *DashboardConfig `yaml:"dashboard,omitempty"`
+	// Targets lists the compute backends this instance manages.
+	// Target type is inferred from fields: gpus → local, scheduler → HPC.
+	// SSH section determines filesystem: present → SSHFS, absent → LocalFS.
+	Targets []TargetConfig `yaml:"targets,omitempty"`
 }
 
+// ── Target configuration ───────────────────────────────────────────────────
+
+// DashboardConfig controls the embedded dashboard HTTP server.
+type DashboardConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	Listen  string `yaml:"listen,omitempty"` // default "127.0.0.1:8077"
+}
+
+// TargetConfig describes a single compute target. Type is inferred:
+//   - gpus present   → LocalBackend (daemon-managed GPU scheduling)
+//   - scheduler set  → SSHBackend   (cluster job submission via SSH)
+//   - ssh present    → SSHFS        (remote filesystem); absent → LocalFS
+type TargetConfig struct {
+	Name      string           `yaml:"name"`
+	GPUs      []int            `yaml:"gpus,omitempty"`
+	Scheduler string           `yaml:"scheduler,omitempty"` // e.g. "slurm", "pbs"
+	Workspace string           `yaml:"workspace,omitempty"` // HPC workspace root on the target
+	SSH       *SSHTargetConfig `yaml:"ssh,omitempty"`
+
+	// MaxInflight caps how many of this target's tasks may be in flight on
+	// the external scheduler at once (submitted and not yet terminal); tasks
+	// beyond the cap wait in runq's own queue. Protects against per-user
+	// submit limits (e.g. Slurm MaxSubmitJobs) on huge sweeps, and keeps
+	// not-yet-submitted tasks cancellable at zero cost. 0 = unlimited.
+	MaxInflight int `yaml:"max_inflight,omitempty" json:"max_inflight,omitempty"`
+
+	// RemoteCLI enables the reverse socket forward for this target: the
+	// daemon keeps ~/.runq/runq.sock listening on the remote host, so a
+	// `runq` CLI there (installed by `runq connect`) talks to THIS daemon —
+	// users whose code lives on the login node get the full CLI without a
+	// second deployment. The forward lives and dies with the daemon; when
+	// this machine is offline the remote CLI reports the tunnel as down.
+	RemoteCLI bool `yaml:"remote_cli,omitempty" json:"remote_cli,omitempty"`
+
+	// TrustEmptyList declares that an EMPTY status_list output is a real
+	// answer ("no jobs"), not a parse suspicion. runqd targets set it (their
+	// squeue reads a local SQLite); dialect schedulers leave it off so the
+	// conservative per-job fallback still guards against silent breakage.
+	TrustEmptyList bool `yaml:"trust_empty_list,omitempty" json:"trust_empty_list,omitempty"`
+
+	// DoneDir overrides the done-marker directory (default:
+	// <workspace>/.runq-done). The client's synthesized localhost-runqd lane
+	// sets this to a data-dir location so marker-based completion works
+	// without forcing a central workspace root onto local projects.
+	DoneDir string `yaml:"done_dir,omitempty" json:"done_dir,omitempty"`
+
+	// RunqBin is the ABSOLUTE path of the runq binary on the target
+	// (install-on-*.sh puts it there). When set, run.sh gains compute-node
+	// work that needs runq locally — currently the metrics pyramid build
+	// (`metrics-index build`) before the done marker. An absolute path, not
+	// PATH: batch-job environments are minimal and non-interactive shells
+	// don't source the user's profile.
+	RunqBin string `yaml:"runq_bin,omitempty" json:"runq_bin,omitempty"`
+
+	// GPUTemplate is an optional command whose output is a JSON []GPUSlot —
+	// this target's GPU view for the client's aggregated (local ∪ remote)
+	// dashboard panel. The runq preset sets `runq gpu --json`; schedulers
+	// without a meaningful per-user GPU view (slurm login nodes) leave it
+	// empty and simply contribute nothing to the panel.
+	GPUTemplate string `yaml:"gpu_template,omitempty" json:"gpu_template,omitempty"`
+
+	// ── HPC scheduler templates (scheduler-type targets only) ──────────────
+
+	// SubmitTemplate is the shell command that queues a task.
+	// Vars: {{run_sh}} {{gpus}} {{job_id}} {{task_id}} {{task_dir}} {{name}} {{param.*}}.
+	SubmitTemplate string `yaml:"submit_template,omitempty" json:"submit_template,omitempty"`
+	// SubmitIDRegex extracts the external job ID from submit output.
+	// Must contain exactly one capture group.
+	SubmitIDRegex string `yaml:"submit_id_regex,omitempty" json:"submit_id_regex,omitempty"`
+	// StatusTemplate probes a single task's scheduler state. Var: {{ext_id}}.
+	StatusTemplate string `yaml:"status_template,omitempty" json:"status_template,omitempty"`
+	// StatusParser is an optional pipeline that normalizes status_template output.
+	StatusParser []string `yaml:"status_parser,omitempty" json:"status_parser,omitempty"`
+	// StatusListTemplate is a batch probe returning ALL user jobs at once.
+	StatusListTemplate string `yaml:"status_list_template,omitempty" json:"status_list_template,omitempty"`
+	// StatusListParser normalizes batch probe output into "ext_id signal" lines.
+	StatusListParser []string `yaml:"status_list_parser,omitempty" json:"status_list_parser,omitempty"`
+	// SignalMap maps scheduler-native tokens to canonical signals.
+	SignalMap map[string]string `yaml:"signal_map,omitempty" json:"signal_map,omitempty"`
+	// KillTemplate cancels a queued/running job. Var: {{ext_id}}.
+	KillTemplate string `yaml:"kill_template,omitempty" json:"kill_template,omitempty"`
+	// PreflightLocal controls whether local preflight checks run on the submit node.
+	PreflightLocal *bool `yaml:"preflight_local,omitempty" json:"preflight_local,omitempty"`
+}
+
+// SSHTargetConfig holds SSH connection parameters for a remote target.
+type SSHTargetConfig struct {
+	Host      string `yaml:"host"`
+	User      string `yaml:"user"`
+	Key       string `yaml:"key,omitempty"`        // path to private key; empty → agent
+	Port      int    `yaml:"port,omitempty"`       // default 22
+	ProxyJump string `yaml:"proxy_jump,omitempty"` // SSH ProxyJump host
+}
+
+// Target type constants.
 const (
-	ModeDaemon = "daemon"
-	ModeHPC    = "hpc"
+	TargetTypeLocal = "local"
+	TargetTypeHPC   = "hpc"
 )
+
+// Type returns the inferred backend type for this target.
+func (t *TargetConfig) Type() string {
+	if t.Scheduler != "" {
+		return TargetTypeHPC
+	}
+	return TargetTypeLocal
+}
+
+// IsRemote reports whether this target uses SSH (remote filesystem).
+func (t *TargetConfig) IsRemote() bool {
+	return t.SSH != nil
+}
+
+// ResolveTargets returns the configured targets. An empty targets[] means
+// "just this machine": a single default local target. (mode is dead, D9 —
+// a stale `mode:` key in old config files parses as an ignored unknown.)
+func (cfg *GlobalConfig) ResolveTargets() []TargetConfig {
+	if len(cfg.Targets) > 0 {
+		return cfg.Targets
+	}
+	return []TargetConfig{{Name: "local"}}
+}
+
+// ResolveDefaultTarget returns the name of the default target.
+func (cfg *GlobalConfig) ResolveDefaultTarget() string {
+	if cfg.DefaultTarget != "" {
+		return cfg.DefaultTarget
+	}
+	targets := cfg.ResolveTargets()
+	if len(targets) > 0 {
+		return targets[0].Name
+	}
+	return "local"
+}
+
+// FindTarget looks up a target by name. Returns an error if not found.
+func (cfg *GlobalConfig) FindTarget(name string) (*TargetConfig, error) {
+	for i := range cfg.Targets {
+		if cfg.Targets[i].Name == name {
+			return &cfg.Targets[i], nil
+		}
+	}
+	return nil, fmt.Errorf("target %q not found in config", name)
+}
 
 // configFile is the on-disk shape: global keys at the top, plus an opaque hpc
 // section that this package does NOT parse (hpcconfig owns that).
 type configFile struct {
 	GlobalConfig `yaml:",inline"`
+}
+
+// SaveGlobal writes the entire GlobalConfig back to config.yaml, preserving
+// the hpc: section if present.
+// CheckConfigPermissions enforces the RQ-45 startup gate on config.yaml:
+// world-writable is a refusal (anyone on the machine could inject ssh
+// hosts or submit templates the daemon will EXECUTE); group-writable is a
+// warning. A missing file is fine — nothing to tamper with.
+func CheckConfigPermissions() (warning string, err error) {
+	fi, statErr := os.Stat(ConfigPath())
+	if statErr != nil {
+		if os.IsNotExist(statErr) {
+			return "", nil
+		}
+		return "", statErr
+	}
+	mode := fi.Mode().Perm()
+	if mode&0o002 != 0 {
+		return "", fmt.Errorf("%s is world-writable (%s) — refusing to start; fix with: chmod 600 %s", ConfigPath(), mode, ConfigPath())
+	}
+	if mode&0o020 != 0 {
+		warning = fmt.Sprintf("%s is group-writable (%s) — consider chmod 600", ConfigPath(), mode)
+	}
+	return warning, nil
+}
+
+func SaveGlobal(cfg *GlobalConfig) error {
+	path := ConfigPath()
+	// Preserve unmanaged YAML sections (e.g. hpc:) by reading the existing
+	// file as a generic map, then overlaying our fields.
+	doc := map[string]any{}
+	if buf, err := os.ReadFile(path); err == nil {
+		_ = yaml.Unmarshal(buf, &doc)
+	}
+	if cfg.DefaultTarget != "" {
+		doc["default_target"] = cfg.DefaultTarget
+	}
+	if cfg.DataPath != "" {
+		doc["data_path"] = cfg.DataPath
+	}
+	if cfg.Dashboard != nil {
+		doc["dashboard"] = cfg.Dashboard
+	}
+	if len(cfg.Targets) > 0 {
+		doc["targets"] = cfg.Targets
+	}
+	out, err := yaml.Marshal(doc)
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+	if err := os.MkdirAll(ConfigDir(), 0o755); err != nil {
+		return fmt.Errorf("create config dir: %w", err)
+	}
+	return os.WriteFile(path, out, 0o644)
 }
 
 // ConfigDir resolves the directory that holds config.yaml (and, for HPC, the
@@ -81,7 +281,7 @@ func DBPath() string { return filepath.Join(ConfigDir(), "runq.db") }
 func Load() (*GlobalConfig, error) {
 	buf, err := os.ReadFile(ConfigPath())
 	if os.IsNotExist(err) {
-		return &GlobalConfig{Mode: ModeDaemon}, nil
+		return &GlobalConfig{}, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", ConfigPath(), err)
@@ -90,60 +290,12 @@ func Load() (*GlobalConfig, error) {
 	if err := yaml.Unmarshal(buf, &f); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", ConfigPath(), err)
 	}
-	mode, err := NormalizeMode(f.GlobalConfig.Mode)
-	if err != nil {
-		return nil, fmt.Errorf("parse %s: %w", ConfigPath(), err)
-	}
-	f.GlobalConfig.Mode = mode
 	return &f.GlobalConfig, nil
-}
-
-// RawMode reports the mode value as literally present in config.yaml,
-// and whether it was explicitly set at all. Load() normalizes "" → daemon,
-// which is right for consumers but erases the "never chosen" state that
-// `hpc init` needs (it only flips the default, never an explicit choice).
-func RawMode() (mode string, explicit bool) {
-	buf, err := os.ReadFile(ConfigPath())
-	if err != nil {
-		return "", false
-	}
-	var f configFile
-	if yaml.Unmarshal(buf, &f) != nil {
-		return "", false
-	}
-	raw := strings.TrimSpace(f.GlobalConfig.Mode)
-	return raw, raw != ""
-}
-
-// NormalizeMode returns the canonical mode value accepted by the unified CLI.
-func NormalizeMode(mode string) (string, error) {
-	mode = strings.ToLower(strings.TrimSpace(mode))
-	if mode == "" {
-		return ModeDaemon, nil
-	}
-	switch mode {
-	case ModeDaemon, ModeHPC:
-		return mode, nil
-	default:
-		return "", fmt.Errorf("mode must be %q or %q, got %q", ModeDaemon, ModeHPC, mode)
-	}
-}
-
-// ConfigMode returns cfg.Mode with nil/empty values treated as daemon.
-func ConfigMode(cfg *GlobalConfig) string {
-	if cfg == nil {
-		return ModeDaemon
-	}
-	mode, err := NormalizeMode(cfg.Mode)
-	if err != nil {
-		return ModeDaemon
-	}
-	return mode
 }
 
 // Keys returns the supported top-level global config keys.
 func Keys() []string {
-	return []string{"mode", "data_path"}
+	return []string{"data_path", "default_target"}
 }
 
 // GetKey reads one supported global config key.
@@ -153,10 +305,10 @@ func GetKey(key string) (string, error) {
 		return "", err
 	}
 	switch key {
-	case "mode":
-		return ConfigMode(cfg), nil
 	case "data_path":
 		return cfg.DataPath, nil
+	case "default_target":
+		return cfg.ResolveDefaultTarget(), nil
 	default:
 		return "", fmt.Errorf("unsupported config key %q", key)
 	}
@@ -169,8 +321,8 @@ func ListKeys() (map[string]string, error) {
 		return nil, err
 	}
 	return map[string]string{
-		"mode":      ConfigMode(cfg),
-		"data_path": cfg.DataPath,
+		"data_path":      cfg.DataPath,
+		"default_target": cfg.ResolveDefaultTarget(),
 	}, nil
 }
 
@@ -180,14 +332,10 @@ func SetKey(key, value string) error {
 	key = strings.TrimSpace(key)
 	value = strings.TrimSpace(value)
 	switch key {
-	case "mode":
-		mode, err := NormalizeMode(value)
-		if err != nil {
-			return err
-		}
-		value = mode
 	case "data_path":
 		// No extra validation: users may point at paths not mounted on this host.
+	case "default_target":
+		// Accept any name; actual validation happens when targets are resolved.
 	default:
 		return fmt.Errorf("unsupported config key %q", key)
 	}

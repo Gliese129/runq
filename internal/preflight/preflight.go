@@ -6,13 +6,14 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
+	"path"
 	"regexp"
 	"strings"
 	"time"
 
 	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/project"
+	"github.com/gliese129/runq/internal/rfs"
 	"github.com/gliese129/runq/internal/utils"
 )
 
@@ -64,6 +65,44 @@ type Preflight struct {
 	// ExcludeParams are scheduler-consumed params (submit_template's
 	// {{param.*}}) — the sample command renders without demanding them.
 	ExcludeParams map[string]bool
+
+	// FS is the filesystem THE TASK will run against. nil = local os
+	// semantics (current machine). For remote targets this is the target's
+	// rfs.FS: path/writability checks stat the REMOTE filesystem, the
+	// script is read from it, and interpreter probes execute on the remote
+	// login node — checking the client machine would answer a question
+	// nobody asked. GPU checks are skipped for remote (login nodes have no
+	// GPUs; the probe would only produce noise).
+	FS rfs.FS
+}
+
+// fsys returns the filesystem checks run against (local when unset).
+func (p Preflight) fsys() rfs.FS {
+	if p.FS != nil {
+		return p.FS
+	}
+	return rfs.NewLocalFS()
+}
+
+// runShell executes a probe command where the task will run: locally via
+// bash, remotely via FS.Exec. Returns (combined output, exit code, err).
+// err non-nil means the probe COULD NOT RUN (transport/env problem) — no
+// fact was learned, and per the no-false-positive discipline that is never
+// a finding. A non-zero exit code is the probe's own verdict.
+func (p Preflight) runShell(ctx context.Context, cmd string) (string, int, error) {
+	if p.FS == nil {
+		out, err := exec.CommandContext(ctx, "bash", "-c", cmd).CombinedOutput()
+		if err != nil {
+			var ee *exec.ExitError
+			if errors.As(err, &ee) {
+				return string(out), ee.ExitCode(), nil
+			}
+			return string(out), -1, err
+		}
+		return string(out), 0, nil
+	}
+	stdout, stderr, code, err := p.FS.Exec(ctx, "sh", "-c", cmd)
+	return string(stdout) + string(stderr), code, err
 }
 
 // DefaultPreflight returns a preflight runner with sane defaults.
@@ -95,13 +134,14 @@ func (f PreflightFinding) String() string {
 	return fmt.Sprintf("  - %s: %s", f.Kind, f.Detail)
 }
 
-// CheckResult is one check in the three-state grammar shared with
-// hpcconfig.Check: passed / failed / skipped. skipped means "could not be
-// checked HERE" (missing prerequisite, disabled by config) — it never
-// blocks a submit and must never be presented as a failure.
+// CheckResult is one check in the four-state grammar: passed / failed /
+// warning / skipped. skipped means "could not be checked HERE" (missing
+// prerequisite, disabled by config); warning means "found something, but it
+// correlates too weakly with task runnability to block" (pip check). Only
+// "failed" blocks a submit.
 type CheckResult struct {
 	Name   string `json:"name"`   // writable | paths | imports | pip_check | gpu
-	Status string `json:"status"` // passed | failed | skipped
+	Status string `json:"status"` // passed | failed | warning | skipped
 	Detail string `json:"detail,omitempty"`
 }
 
@@ -153,6 +193,16 @@ func fold(name string, findings []PreflightFinding, scope string) CheckResult {
 	return CheckResult{name, "passed", detail}
 }
 
+// foldAdvisory is fold for checks whose findings should be SEEN but never
+// block a submit: status "warning" is excluded from Report.OK()/Err().
+func foldAdvisory(name string, findings []PreflightFinding, scope string) CheckResult {
+	r := fold(name, findings, scope)
+	if r.Status == "failed" {
+		r.Status = "warning"
+	}
+	return r
+}
+
 // RunPreflight executes all four checks against the project config + a
 // **sample rendered command** (the first task's command is the natural
 // choice — all tasks in a sweep share the same script + same env, only
@@ -172,9 +222,9 @@ func (p Preflight) RunPreflight(ctx context.Context, proj *project.Config, sampl
 	}
 	var results []CheckResult
 
-	// Tier free: pure filesystem — runs anywhere, no scope caveat.
-	results = append(results, fold("writable", checkWritable(proj.WorkingDir, "working_dir"), ""))
-	results = append(results, fold("paths", checkPathArgs(sampleCmd), ""))
+	// Tier free: filesystem checks — against the TARGET's filesystem.
+	results = append(results, fold("writable", p.checkWritable(proj.WorkingDir, "working_dir"), p.Scope))
+	results = append(results, fold("paths", p.checkPathArgs(sampleCmd), p.Scope))
 
 	// Tier cheap: local subprocesses (python imports, pip). Skippable by
 	// cluster policy; scope-labelled because "here" may not be the
@@ -184,17 +234,33 @@ func (p Preflight) RunPreflight(ctx context.Context, proj *project.Config, sampl
 			CheckResult{"imports", "skipped", "disabled by hpc preflight_local"},
 			CheckResult{"pip_check", "skipped", "disabled by hpc preflight_local"})
 	} else {
-		scriptPath, importNames, _ := extractImports(sampleCmd, proj.WorkingDir)
+		// Probe with THE interpreter the task will run — never a hardcoded
+		// "python". A `python3`-only environment (most modern distros ship
+		// no bare `python`) would otherwise fail every import probe and
+		// train users to always pass --no-preflight.
+		interp := pythonInterpreter(sampleCmd)
+		scriptPath, importNames, _ := p.extractImports(sampleCmd, proj.WorkingDir)
 		if scriptPath == "" {
 			results = append(results, CheckResult{"imports", "skipped", "no python script in command"})
 		} else {
-			results = append(results, fold("imports", checkImports(ctx, proj, importNames, p.ImportTimeout), p.Scope))
+			results = append(results, fold("imports", p.checkImports(ctx, proj, interp, importNames, p.ImportTimeout), p.Scope))
 		}
-		results = append(results, fold("pip_check", checkPipCheck(ctx, proj, p.PipCheckTimeout), p.Scope))
+		// pip check is ADVISORY: its findings (env-wide dependency
+		// inconsistencies) correlate weakly with whether THIS task can run —
+		// a broken global stub package must not block a runnable job.
+		// Warnings display but never fail the submit (imports stay blocking:
+		// they directly predict a crash).
+		results = append(results, foldAdvisory("pip_check", p.checkPipCheck(ctx, proj, interp, p.PipCheckTimeout), p.Scope))
 	}
 
 	// GPU smoke test: probe-don't-enumerate (C2). No driver here ≠ failure.
-	results = append(results, checkGPU(ctx, proj, p.Scope))
+	// Remote targets skip outright: GPUs live on compute nodes, and probing
+	// a login node's nvidia-smi would only produce noise.
+	if p.FS != nil {
+		results = append(results, CheckResult{"gpu", "skipped", "remote target: GPUs live on compute nodes"})
+	} else {
+		results = append(results, checkGPU(ctx, proj, p.Scope))
+	}
 
 	return Report{Results: results}
 }
@@ -236,14 +302,15 @@ func checkGPU(ctx context.Context, proj *project.Config, scope string) CheckResu
 //   - doesn't exist → "create it"
 //   - exists but read-only → "chmod / chown it"
 //
-// We probe writability with a real “os.CreateTemp“ because
-// “os.Access(W_OK)“ is platform-specific (no stdlib helper) and
-// unreliable on FUSE / NFS where ACLs lie.
-func checkWritable(dir, label string) []PreflightFinding {
+// We probe writability with a real file write because access(W_OK)-style
+// checks are platform-specific and unreliable on FUSE / NFS where ACLs lie.
+// The probe runs on the check filesystem: local CreateTemp, or a remote
+// WriteFile + rm through rfs.FS.
+func (p Preflight) checkWritable(dir, label string) []PreflightFinding {
 	if dir == "" {
 		return []PreflightFinding{{Kind: "writable", Detail: fmt.Sprintf("%s is empty", label)}}
 	}
-	info, err := os.Stat(dir)
+	info, err := p.fsys().Stat(dir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return []PreflightFinding{{
@@ -262,16 +329,27 @@ func checkWritable(dir, label string) []PreflightFinding {
 			Detail: fmt.Sprintf("%s is not a directory: %s", label, dir),
 		}}
 	}
-	tmp, err := os.CreateTemp(dir, ".runq-preflight-*")
-	if err != nil {
+	if p.FS == nil {
+		tmp, err := os.CreateTemp(dir, ".runq-preflight-*")
+		if err != nil {
+			return []PreflightFinding{{
+				Kind:   "writable",
+				Detail: fmt.Sprintf("%s not writable: %s (%v)", label, dir, err),
+			}}
+		}
+		tmpPath := tmp.Name()
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		return nil
+	}
+	probe := path.Join(dir, fmt.Sprintf(".runq-preflight-%d", time.Now().UnixNano()))
+	if err := p.FS.WriteFile(probe, []byte("ok"), 0o644); err != nil {
 		return []PreflightFinding{{
 			Kind:   "writable",
 			Detail: fmt.Sprintf("%s not writable: %s (%v)", label, dir, err),
 		}}
 	}
-	tmpPath := tmp.Name()
-	_ = tmp.Close()
-	_ = os.Remove(tmpPath)
+	_, _, _, _ = p.FS.Exec(context.Background(), "rm", "-f", probe)
 	return nil
 }
 
@@ -310,29 +388,30 @@ var pathArgIgnore = map[string]bool{
 }
 
 // checkPathArgs scans the rendered command for absolute-path tokens
-// and refuses submission if any of them point at non-existent files.
+// and refuses submission if any of them point at non-existent files —
+// statted on the TARGET's filesystem, where the task will actually look.
 // "Looks like a path" is heuristic; pathArgRegex documents the scope.
-func checkPathArgs(cmd string) []PreflightFinding {
+func (p Preflight) checkPathArgs(cmd string) []PreflightFinding {
 	var findings []PreflightFinding
+	fsys := p.fsys()
 	seen := map[string]bool{}
 	for _, match := range pathArgRegex.FindAllStringSubmatch(cmd, -1) {
-		p := match[1]
-		if seen[p] || pathArgIgnore[p] {
+		tok := match[1]
+		if seen[tok] || pathArgIgnore[tok] {
 			continue
 		}
-		seen[p] = true
+		seen[tok] = true
 		// Trim trailing punctuation the regex might have grabbed.
-		p = strings.TrimRight(p, ".,;:")
-		if _, err := os.Stat(p); err != nil {
+		tok = strings.TrimRight(tok, ".,;:")
+		if _, err := fsys.Stat(tok); err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				findings = append(findings, PreflightFinding{
 					Kind:   "path",
-					Detail: fmt.Sprintf("path does not exist: %s", p),
+					Detail: fmt.Sprintf("path does not exist: %s", tok),
 				})
 			}
-			// Permission errors on stat are ambiguous — could be a
-			// real path that runqd can't see. Don't fail submission
-			// over those.
+			// Stat errors other than not-exist are ambiguous (permissions,
+			// transport) — no fact learned, never a finding.
 		}
 	}
 	return findings
@@ -377,16 +456,18 @@ var topLevelImportRegex = regexp.MustCompile(
 // at the file's outer scope). Imports inside functions / classes /
 // `if TYPE_CHECKING:` are intentionally not checked — they may be
 // conditional and we'd produce false-positive failures.
-func extractImports(sampleCmd, workingDir string) (string, []string, error) {
+func (p Preflight) extractImports(sampleCmd, workingDir string) (string, []string, error) {
 	m := scriptRegex.FindStringSubmatch(sampleCmd)
 	if len(m) < 2 {
 		return "", nil, nil
 	}
 	scriptPath := m[1]
-	if !filepath.IsAbs(scriptPath) {
-		scriptPath = filepath.Join(workingDir, scriptPath)
+	// POSIX join: task paths are POSIX on every target runq supports (and
+	// on a Windows client the remote path must never see a backslash).
+	if !strings.HasPrefix(scriptPath, "/") {
+		scriptPath = path.Join(workingDir, scriptPath)
 	}
-	src, err := os.ReadFile(scriptPath)
+	src, err := p.fsys().ReadFile(scriptPath)
 	if err != nil {
 		// Not finding the script is a finding in its own right; the
 		// path-args check above usually catches it first, but we
@@ -435,17 +516,32 @@ func topLevelModule(name string) string {
 	return name
 }
 
-// checkImports probes each module with `python -c "import X"` inside
-// the project env. Failure → finding with the actual import error
-// message (interpreter stderr). Skips modules that look like local
-// modules of the project (same basename as a .py sibling).
-func checkImports(ctx context.Context, proj *project.Config, modules []string, timeout time.Duration) []PreflightFinding {
+// pythonInterpreterRegex captures the python executable token in a command
+// (`python`, `python3`, `python3.11`).
+var pythonInterpreterRegex = regexp.MustCompile(`\b(python[\d.]*)\b`)
+
+// pythonInterpreter returns the interpreter the sample command actually
+// invokes, falling back to "python" when the command doesn't mention one.
+func pythonInterpreter(sampleCmd string) string {
+	if m := pythonInterpreterRegex.FindStringSubmatch(sampleCmd); len(m) > 1 {
+		return m[1]
+	}
+	return "python"
+}
+
+// checkImports probes each module with `<interp> -c "import X"` inside
+// the project env, ON the target (locally, or over FS.Exec on a remote
+// login node). A non-zero exit → finding with the actual import error;
+// a probe that could not run at all (transport) is silently no-fact.
+// Skips modules that look like local modules of the project.
+func (p Preflight) checkImports(ctx context.Context, proj *project.Config, interp string, modules []string, timeout time.Duration) []PreflightFinding {
 	if len(modules) == 0 {
 		return nil
 	}
 	// Build a Set of plausible local module names so we don't try to
-	// resolve them via pip / site-packages.
-	local := localModuleNames(proj.WorkingDir)
+	// resolve them via pip / site-packages. Read from the target FS:
+	// the project lives where the task runs.
+	local := p.localModuleNames(proj.WorkingDir)
 
 	var findings []PreflightFinding
 	for _, mod := range modules {
@@ -455,15 +551,18 @@ func checkImports(ctx context.Context, proj *project.Config, modules []string, t
 		cctx, cancel := context.WithTimeout(ctx, timeout)
 		cmd := utils.WrapCommand(
 			proj.PythonEnv.Type, proj.PythonEnv.Path, proj.PythonEnv.Name,
-			fmt.Sprintf("python -c %q", "import "+mod),
+			fmt.Sprintf("%s -c %q", interp, "import "+mod),
 			proj.WorkingDir,
 		)
-		out, err := exec.CommandContext(cctx, "bash", "-c", cmd).CombinedOutput()
+		out, code, rerr := p.runShell(cctx, cmd)
 		cancel()
-		if err != nil {
+		if rerr != nil {
+			continue // probe couldn't run — no fact learned, never a finding
+		}
+		if code != 0 {
 			findings = append(findings, PreflightFinding{
 				Kind:   "import",
-				Detail: fmt.Sprintf("cannot import %q in env: %s", mod, lastLine(string(out))),
+				Detail: fmt.Sprintf("cannot import %q in env: %s", mod, lastLine(out)),
 			})
 		}
 	}
@@ -473,9 +572,9 @@ func checkImports(ctx context.Context, proj *project.Config, modules []string, t
 // localModuleNames returns the set of top-level identifiers that the
 // project itself defines, so the import probe doesn't fail on
 // "cannot import 'mylib'" for files that live alongside the script.
-func localModuleNames(workingDir string) map[string]bool {
+func (p Preflight) localModuleNames(workingDir string) map[string]bool {
 	out := map[string]bool{}
-	entries, err := os.ReadDir(workingDir)
+	entries, err := p.fsys().ReadDir(workingDir)
 	if err != nil {
 		return out
 	}
@@ -515,22 +614,21 @@ func lastLine(s string) string {
 // generic failures are NOT treated as preflight failures (we don't
 // know if it's a pip-was-busy situation vs. a real env break); they're
 // silently dropped so this check stays advisory.
-func checkPipCheck(ctx context.Context, proj *project.Config, timeout time.Duration) []PreflightFinding {
+func (p Preflight) checkPipCheck(ctx context.Context, proj *project.Config, interp string, timeout time.Duration) []PreflightFinding {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	cmd := utils.WrapCommand(
 		proj.PythonEnv.Type, proj.PythonEnv.Path, proj.PythonEnv.Name,
-		"python -m pip check",
+		interp+" -m pip check",
 		proj.WorkingDir,
 	)
-	out, err := exec.CommandContext(cctx, "bash", "-c", cmd).CombinedOutput()
-	if cctx.Err() != nil {
-		return nil
+	out, _, rerr := p.runShell(cctx, cmd)
+	if cctx.Err() != nil || rerr != nil {
+		return nil // advisory check: timeout / can't-run is never a finding
 	}
-	// pip exits non-zero when it finds issues; the stdout content is
+	// pip exits non-zero when it finds issues; the output content is
 	// what we care about, not the exit code.
-	_ = err
-	text := strings.TrimSpace(string(out))
+	text := strings.TrimSpace(out)
 	if text == "" || text == "No broken requirements found." {
 		return nil
 	}

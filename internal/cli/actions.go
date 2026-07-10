@@ -34,7 +34,7 @@ func init() {
 }
 
 func runJobAction(cmd *cobra.Command, jobID, action string) error {
-	return withBackend(func(be backend.Backend) error {
+	return withBackend(cmd, func(be backend.Backend) error {
 		ctx := cmd.Context()
 		var err error
 		switch action {

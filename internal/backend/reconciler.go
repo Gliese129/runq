@@ -26,7 +26,7 @@ const DefaultReadTTL = 30 * time.Second
 // Reconciler ensures backend data is fresh before reads and writes.
 //
 // The contract: every Backend method that reads or mutates job/task state
-// calls EnsureFresh (or EnsureAllFresh) BEFORE touching the store. This
+// calls EnsureFresh (or SchedulerProbe) BEFORE touching the store. This
 // makes the Backend interface's semantic guarantee uniform: data is fresh,
 // operations are real — regardless of whether the backend is push-model
 // (daemon) or poll-model (HPC).
@@ -39,8 +39,9 @@ type Reconciler interface {
 	// EnsureFresh ensures jobID's data is no older than ttl. ttl=0 forces
 	// a full reconcile (scheduler probe included).
 	EnsureFresh(ctx context.Context, jobID string, ttl time.Duration) error
-	// EnsureAllFresh reconciles all active (non-done) jobs within the TTL.
-	EnsureAllFresh(ctx context.Context, ttl time.Duration) error
+	// SchedulerProbe reconciles all active jobs; the scheduler query is
+	// floor-gated (the name says the cost — see remote.Backend).
+	SchedulerProbe(ctx context.Context, floor time.Duration) error
 }
 
 // NoopReconciler satisfies Reconciler for push-model backends where data
@@ -48,4 +49,4 @@ type Reconciler interface {
 type NoopReconciler struct{}
 
 func (NoopReconciler) EnsureFresh(context.Context, string, time.Duration) error { return nil }
-func (NoopReconciler) EnsureAllFresh(context.Context, time.Duration) error      { return nil }
+func (NoopReconciler) SchedulerProbe(context.Context, time.Duration) error      { return nil }

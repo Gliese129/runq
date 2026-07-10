@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/gliese129/runq/internal/api"
 	"github.com/gliese129/runq/internal/backend"
 	job2 "github.com/gliese129/runq/internal/job"
 	"github.com/olekukonko/tablewriter"
@@ -42,6 +43,7 @@ func init() {
 	sweepCmd.Flags().StringP("note", "n", "", "Experiment note")
 	sweepCmd.Flags().Bool("list", false, "Use list (zip) mode instead of grid")
 	sweepCmd.Flags().Bool("dry", false, "Expand sweep and print tasks without submitting")
+	sweepCmd.Flags().StringP("target", "t", "", "Compute target to submit to (default: config default_target)")
 
 	sweepCmd.GroupID = groupCore
 	rootCmd.AddCommand(sweepCmd)
@@ -103,7 +105,6 @@ func runSweep(cmd *cobra.Command, args []string) error {
 	note, _ := cmd.Flags().GetString("note")
 	listMode, _ := cmd.Flags().GetBool("list")
 	dryRun, _ := cmd.Flags().GetBool("dry")
-
 	method := "grid"
 	if listMode {
 		method = "list"
@@ -114,7 +115,9 @@ func runSweep(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Dry-run is pure-local expansion — no backend needed.
+	// --dry → POST /jobs/plan（spec §7.2, D12）：与 submit 同源的展开 + note
+	// 解析，daemon 权威。daemon 不可达时降级为纯本地展开（plan 本就是廉价
+	// 本地操作，降级只少 note 解析）。
 	if dryRun {
 		jobCfg := job2.JobConfig{
 			Project:     projectName,
@@ -122,11 +125,32 @@ func runSweep(cmd *cobra.Command, args []string) error {
 			Note:        note,
 			Sweep:       []job2.SweepBlock{block},
 		}
-		return printSweepPreview(jobCfg, method)
+		err := withBackend(cmd, func(be backend.Backend) error {
+			p, ok := be.(*api.Proxy)
+			if !ok {
+				return backend.ErrNotSupported
+			}
+			tasks, noteResolved, warnings, err := p.PlanJob(cmd.Context(), jobCfg)
+			if err != nil {
+				return err
+			}
+			if noteResolved != "" {
+				fmt.Printf("Note: %s\n", noteResolved)
+			}
+			for _, warn := range warnings {
+				fmt.Fprintf(os.Stderr, "warning: %s\n", warn)
+			}
+			return printTaskTable(tasks, method)
+		})
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "daemon unavailable, falling back to local expansion")
+			return printSweepPreview(jobCfg, method)
+		}
+		return nil
 	}
 
 	// Submit requires a backend for project detection and job submission.
-	return withBackend(func(be backend.Backend) error {
+	return withBackend(cmd, func(be backend.Backend) error {
 		ctx := cmd.Context()
 
 		// Auto-detect project from current directory.
@@ -165,6 +189,12 @@ func printSweepPreview(jobCfg job2.JobConfig, method string) error {
 	if err != nil {
 		return err
 	}
+	return printTaskTable(tasks, method)
+}
+
+// printTaskTable renders expanded task params — shared by the plan path
+// (daemon-authoritative) and the local fallback.
+func printTaskTable(tasks []job2.TaskParams, method string) error {
 	if len(tasks) == 0 {
 		fmt.Println("No tasks generated.")
 		return nil

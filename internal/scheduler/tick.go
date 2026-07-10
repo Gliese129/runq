@@ -120,16 +120,36 @@ func (s *Scheduler) tick() {
 	}
 }
 
-// dispatch allocates GPUs, persists the running state, then launches the task.
-// Order: allocate GPU → write DB → update queue → start process.
-// If DB write fails, GPU is released and the task stays pending for next tick.
+// dispatch allocates resources, persists the running state, then launches the
+// task. Order: allocate → write DB → update queue → start.
+// If DB write fails, the allocation is released and the task stays pending
+// for the next tick.
 func (s *Scheduler) dispatch(task *Task) {
 	gpus, err := s.pool.Allocate(task.GPUsNeeded, task.ID)
 	if err != nil {
-		s.logger.Warn("GPU allocation failed", "task", task.ID, "need", task.GPUsNeeded, "free", s.pool.FreeCount())
+		s.logger.Warn("allocation failed", "task", task.ID, "need", task.GPUsNeeded, "free", s.pool.FreeCount())
 		return
 	}
 	task.GPUs = gpus
+
+	// Unsupervised (remote) lane: the task is handed to an external scheduler,
+	// which may queue it for hours — so its DB status stays "pending" and
+	// reconcile owns every subsequent transition. Queue-wise it occupies a
+	// slot (MarkRunning) until FinishTask releases it.
+	if !s.launcher.Supervised() {
+		if err := s.queue.MarkRunning(task.ID); err != nil {
+			s.logger.Error("mark running in queue failed", "task", task.ID, "error", err)
+			s.pool.Release(task.ID)
+			return
+		}
+		s.logger.Info("task handed to remote scheduler", "task", task.ID, "job", task.JobID)
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			s.launchAsync(task)
+		}()
+		return
+	}
 
 	now := time.Now()
 	dbCtx, cancel := context.WithTimeout(s.ctx, 5*time.Second)

@@ -41,6 +41,10 @@ type TaskRow struct {
 	// Created by service.JobService.SubmitJob, read by SDK via RUNQ_TASK_DIR env.
 	TaskDir string
 
+	// Target is the compute target this task was submitted to (e.g. "local",
+	// "tsubame"). Phase 1: MultiBackend routing key.
+	Target string
+
 	// L2-E: HPC scheduler job id (sbatch/qsub). Empty for daemon-managed tasks.
 	// Set by the HPC backend after submit; used by refresh to map a task back to
 	// its cluster job for status/kill.
@@ -65,6 +69,9 @@ type TaskRow struct {
 type TaskFilter struct {
 	Status string // filter by status; empty = no filter
 	JobID  string // filter by job; empty = no filter
+	Target string // filter by target; empty = no filter
+	Limit  int    // page size; 0 = no limit (D20: SQL-level pagination)
+	Offset int    // page start; only applied when Limit > 0
 }
 
 // allTaskColumns lists every column in the tasks table.
@@ -73,7 +80,7 @@ const allTaskColumns = `id, job_id, project_name, command, params_json,
 	gpus_needed, gpus, status, retry_count, max_retry,
 	pid, start_time, log_path, working_dir, env_json,
 	resumable, extra_args, uid, timeout,
-	enqueued_at, started_at, finished_at, task_dir, external_id, status_source,
+	enqueued_at, started_at, finished_at, task_dir, target, external_id, status_source,
 	native_state, queue`
 
 // scanTask reads one result row into a TaskRow.
@@ -101,12 +108,13 @@ func scanTask(scanner interface{ Scan(dest ...any) error }) (*TaskRow, error) {
 		queue        sql.NullString
 	)
 
+	var target sql.NullString
 	err := scanner.Scan(
 		&t.ID, &t.JobID, &t.ProjectName, &t.Command, &t.ParamsJSON,
 		&t.GPUsNeeded, &gpus, &t.Status, &t.RetryCount, &t.MaxRetry,
 		&pid, &startTime, &logPath, &workingDir, &envJSON,
 		&resumable, &extraArgs, &uid, &timeout, &enqueuedAt, &startedAt, &finishedAt,
-		&taskDir, &externalID, &statusSource,
+		&taskDir, &target, &externalID, &statusSource,
 		&nativeState, &queue,
 	)
 	if err != nil {
@@ -127,6 +135,10 @@ func scanTask(scanner interface{ Scan(dest ...any) error }) (*TaskRow, error) {
 	t.StartedAt = unixToNullTime(startedAt)
 	t.FinishedAt = unixToNullTime(finishedAt)
 	t.TaskDir = taskDir.String
+	t.Target = target.String
+	if t.Target == "" {
+		t.Target = "local"
+	}
 	t.ExternalID = externalID.String
 	t.StatusSource = statusSource.String
 	t.NativeState = nativeState.String
@@ -142,9 +154,9 @@ func (s *Store) InsertTask(ctx context.Context, t *TaskRow) error {
 		gpus_needed, gpus, status, retry_count, max_retry,
 		pid, start_time, log_path, working_dir, env_json,
 		resumable, extra_args, uid, timeout,
-		enqueued_at, started_at, finished_at, task_dir, external_id, status_source,
+		enqueued_at, started_at, finished_at, task_dir, target, external_id, status_source,
 		native_state, queue
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	resumable := 0
 	if t.Resumable {
@@ -159,7 +171,7 @@ func (s *Store) InsertTask(ctx context.Context, t *TaskRow) error {
 		resumable, t.ExtraArgs, nullInt(t.UID), nullInt(t.Timeout),
 		t.EnqueuedAt.Unix(),
 		nullTimeToUnix(t.StartedAt), nullTimeToUnix(t.FinishedAt),
-		nullString(t.TaskDir), nullString(t.ExternalID), nullString(t.StatusSource),
+		nullString(t.TaskDir), targetOrDefault(t.Target), nullString(t.ExternalID), nullString(t.StatusSource),
 		nullString(t.NativeState), nullString(t.Queue),
 	)
 	return err
@@ -172,9 +184,9 @@ func (s *Store) InsertTaskTx(ctx context.Context, tx *sql.Tx, t *TaskRow) error 
 		gpus_needed, gpus, status, retry_count, max_retry,
 		pid, start_time, log_path, working_dir, env_json,
 		resumable, extra_args, uid, timeout,
-		enqueued_at, started_at, finished_at, task_dir, external_id, status_source,
+		enqueued_at, started_at, finished_at, task_dir, target, external_id, status_source,
 		native_state, queue
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	resumable := 0
 	if t.Resumable {
@@ -189,7 +201,7 @@ func (s *Store) InsertTaskTx(ctx context.Context, tx *sql.Tx, t *TaskRow) error 
 		resumable, t.ExtraArgs, nullInt(t.UID), nullInt(t.Timeout),
 		t.EnqueuedAt.Unix(),
 		nullTimeToUnix(t.StartedAt), nullTimeToUnix(t.FinishedAt),
-		nullString(t.TaskDir), nullString(t.ExternalID), nullString(t.StatusSource),
+		nullString(t.TaskDir), targetOrDefault(t.Target), nullString(t.ExternalID), nullString(t.StatusSource),
 		nullString(t.NativeState), nullString(t.Queue),
 	)
 	return err
@@ -252,6 +264,53 @@ func (s *Store) UpdateTaskStatus(ctx context.Context, taskID string, status stri
 	return nil
 }
 
+// ── Orphan marking ─────────────────────────────────────────────────────────
+//
+// A task is "orphaned" when its task_dir has been confirmed missing (deleted
+// by the user, or purged by a cluster scratch policy). Marking is REVERSIBLE
+// metadata — detection marks, only an explicit `runq clean --orphan` deletes.
+
+// MarkTaskOrphaned stamps orphaned_at (idempotent: keeps the first stamp).
+func (s *Store) MarkTaskOrphaned(ctx context.Context, taskID string, at time.Time) error {
+	_, err := s.db.ExecContext(ctx,
+		"UPDATE tasks SET orphaned_at = ? WHERE id = ? AND orphaned_at IS NULL",
+		at.Unix(), taskID)
+	return err
+}
+
+// ClearTaskOrphaned removes the orphan mark (the directory reappeared —
+// e.g. restored from backup, or the earlier observation was wrong).
+func (s *Store) ClearTaskOrphaned(ctx context.Context, taskID string) error {
+	_, err := s.db.ExecContext(ctx,
+		"UPDATE tasks SET orphaned_at = NULL WHERE id = ?", taskID)
+	return err
+}
+
+// ListOrphanedTasks returns tasks currently marked orphaned, optionally
+// scoped to one target.
+func (s *Store) ListOrphanedTasks(ctx context.Context, target string) ([]TaskRow, error) {
+	query := fmt.Sprintf("SELECT %s FROM tasks WHERE orphaned_at IS NOT NULL", allTaskColumns)
+	var args []any
+	if target != "" {
+		query += " AND target = ?"
+		args = append(args, target)
+	}
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []TaskRow
+	for rows.Next() {
+		t, serr := scanTask(rows)
+		if serr != nil {
+			return nil, serr
+		}
+		result = append(result, *t)
+	}
+	return result, rows.Err()
+}
+
 // GetTask returns a single task by ID. Returns (nil, nil) if not found.
 func (s *Store) GetTask(ctx context.Context, taskID string) (*TaskRow, error) {
 	query := fmt.Sprintf("SELECT %s FROM tasks WHERE id = ?", allTaskColumns)
@@ -280,12 +339,20 @@ func (s *Store) ListTasks(ctx context.Context, filter TaskFilter) ([]TaskRow, er
 		where = append(where, "job_id = ?")
 		args = append(args, filter.JobID)
 	}
+	if filter.Target != "" {
+		where = append(where, "target = ?")
+		args = append(args, filter.Target)
+	}
 
 	query := fmt.Sprintf("SELECT %s FROM tasks", allTaskColumns)
 	if len(where) > 0 {
 		query += " WHERE " + strings.Join(where, " AND ")
 	}
 	query += " ORDER BY enqueued_at ASC"
+	if filter.Limit > 0 {
+		query += " LIMIT ? OFFSET ?"
+		args = append(args, filter.Limit, filter.Offset)
+	}
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -302,6 +369,34 @@ func (s *Store) ListTasks(ctx context.Context, filter TaskFilter) ([]TaskRow, er
 		result = append(result, *t)
 	}
 	return result, rows.Err()
+}
+
+// CountTasks returns the number of tasks matching the filter (ignoring
+// Limit/Offset) — the pagination envelope's `total` (D20).
+func (s *Store) CountTasks(ctx context.Context, filter TaskFilter) (int, error) {
+	var where []string
+	var args []any
+	if filter.Status != "" {
+		where = append(where, "status = ?")
+		args = append(args, filter.Status)
+	}
+	if filter.JobID != "" {
+		where = append(where, "job_id = ?")
+		args = append(args, filter.JobID)
+	}
+	if filter.Target != "" {
+		where = append(where, "target = ?")
+		args = append(args, filter.Target)
+	}
+	query := "SELECT COUNT(*) FROM tasks"
+	if len(where) > 0 {
+		query += " WHERE " + strings.Join(where, " AND ")
+	}
+	var n int
+	if err := s.db.QueryRowContext(ctx, query, args...).Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, nil
 }
 
 // ListTasksForJobs returns tasks belonging to the given job IDs.

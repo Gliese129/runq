@@ -4,11 +4,16 @@ import type { CompareRow, JobActivityResponse, JobConfigPayload, JobDetail, JobL
 export interface SubmitJobOptions extends RequestOptions {
   preflightEnabled?: boolean
   forceSkipPreflight?: unknown
+  target?: string
 }
 
-export function submitJobPath(preflightEnabled = true, forceSkipPreflight: unknown = false): string {
+export function submitJobPath(preflightEnabled = true, forceSkipPreflight: unknown = false, target?: string): string {
+  const params = new URLSearchParams()
   const skipPreflight = forceSkipPreflight === true || !preflightEnabled
-  return skipPreflight ? '/jobs?no_preflight=1' : '/jobs'
+  if (skipPreflight) params.set('no_preflight', '1')
+  if (target) params.set('target', target)
+  const qs = params.toString()
+  return qs ? `/jobs?${qs}` : '/jobs'
 }
 
 export const jobsApi = {
@@ -39,7 +44,7 @@ export const jobsApi = {
 
   submit: (cfg: JobConfigPayload, opts: SubmitJobOptions = {}) =>
     api.post<JobSubmitResponse>(
-      submitJobPath(opts.preflightEnabled, opts.forceSkipPreflight),
+      submitJobPath(opts.preflightEnabled, opts.forceSkipPreflight, opts.target),
       cfg,
       { silent: opts.silent, timeoutMs: opts.timeoutMs },
     ),

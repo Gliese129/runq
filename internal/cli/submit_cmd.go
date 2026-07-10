@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"os"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/gliese129/runq/internal/backend"
 	job2 "github.com/gliese129/runq/internal/job"
+	"github.com/gliese129/runq/internal/project"
 	"github.com/gliese129/runq/internal/utils"
 	"github.com/gosuri/uilive"
 	"github.com/olekukonko/tablewriter"
@@ -74,7 +76,7 @@ job.yaml in the current directory.`,
 			jobCfg.Note = noteOverride
 		}
 
-		return withBackend(func(be backend.Backend) error {
+		return withBackend(cmd, func(be backend.Backend) error {
 			ctx := cmd.Context()
 
 			// HPC may need project registration from --project-file.
@@ -84,11 +86,13 @@ job.yaml in the current directory.`,
 
 			// ── dry-run ──
 			if dryRun || dryRunAlias {
-				return submitDryRun(ctx, be, jobCfg, noPreflight)
+				return submitDryRun(ctx, be, jobCfg, noPreflight, jsonOut)
 			}
 
 			// ── submit ──
-			jobID, n, err := be.SubmitJob(ctx, jobCfg, backend.SubmitOptions{SkipPreflight: noPreflight})
+			jobID, n, err := be.SubmitJob(ctx, jobCfg, backend.SubmitOptions{
+				SkipPreflight: noPreflight,
+			})
 			if err != nil {
 				return err
 			}
@@ -110,25 +114,68 @@ job.yaml in the current directory.`,
 	},
 }
 
+// ensureProjectRegistered registers a project from --project-file if provided.
+// The project is registered in the DB so SubmitJob can find it by name.
+func ensureProjectRegistered(cmd *cobra.Command, be backend.Backend, jobProject string) error {
+	pf, _ := cmd.Flags().GetString("project-file")
+	if pf == "" {
+		return nil
+	}
+	buf, err := os.ReadFile(pf)
+	if err != nil {
+		return err
+	}
+	var cfg project.Config
+	if err := yaml.Unmarshal(buf, &cfg); err != nil {
+		return fmt.Errorf("parse %s: %w", pf, err)
+	}
+	if cfg.ProjectName == "" {
+		cfg.ProjectName = jobProject
+	}
+	// Home target (RQ-65): --target / $RUNQ_TARGET / .active-target wins;
+	// empty stays empty and the daemon fills its default_target — either
+	// way the registered project carries an EXPLICIT home.
+	if cfg.Target == "" {
+		cfg.Target = resolveTarget(cmd)
+	}
+	ctx := context.Background()
+	if _, err := be.GetProject(ctx, cfg.ProjectName); err != nil {
+		return be.CreateProject(ctx, cfg)
+	}
+	return be.UpdateProject(ctx, cfg)
+}
+
 // submitDryRun shows the task expansion table plus optional preview info.
-// HPC backends with SubmitPreview get the full render (run.sh + submit
-// command); other backends get a parameter table + command preview from
-// the enriched DryRunResult.
-func submitDryRun(ctx context.Context, be backend.Backend, jobCfg job2.JobConfig, noPreflight bool) error {
-	// HPC-specific: full submit preview (run.sh + submit command).
-	if be.Capabilities().SubmitPreview {
-		out, err := be.PreviewSubmit(ctx, jobCfg, noPreflight)
-		if err != nil {
-			return err
+// HPC backends render the full run.sh + submit command via PreviewSubmit;
+// other backends get a parameter table + command preview from DryRun.
+// The preview attempt is always made — the daemon routes to the correct
+// target backend and returns ErrNotSupported for backends without a
+// submit template.
+func submitDryRun(ctx context.Context, be backend.Backend, jobCfg job2.JobConfig, noPreflight, jsonOut bool) error {
+	// Try full submit preview (HPC targets render run.sh + submit command).
+	out, err := be.PreviewSubmit(ctx, jobCfg, noPreflight)
+	if err == nil {
+		if jsonOut {
+			printJSON(struct {
+				Preview string `json:"preview"`
+			}{Preview: out})
+			return nil
 		}
 		fmt.Println(out)
 		return nil
 	}
+	if !errors.Is(err, backend.ErrNotSupported) {
+		return err
+	}
 
-	// Common dry-run: task expansion + command preview.
+	// Fall back to common dry-run: task expansion + command preview.
 	result, err := be.DryRun(ctx, jobCfg)
 	if err != nil {
 		return err
+	}
+	if jsonOut {
+		printJSON(result)
+		return nil
 	}
 	if len(result.Tasks) == 0 {
 		fmt.Println("No tasks would be generated.")
@@ -219,6 +266,7 @@ func init() {
 		"Skip submit-time checks (imports, pip check, path args, writability). "+
 			"Use when the daemon misclassifies a runtime-only path or conditional import.",
 	)
+	submitCmd.Flags().StringP("target", "t", "", "Compute target to submit to (default: config default_target)")
 
 	submitCmd.GroupID = groupCore
 	rootCmd.AddCommand(submitCmd)

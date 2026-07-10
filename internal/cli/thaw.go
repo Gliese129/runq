@@ -5,6 +5,7 @@ import (
 	"os"
 	"sort"
 
+	"github.com/gliese129/runq/internal/api"
 	"github.com/gliese129/runq/internal/backend"
 	"github.com/spf13/cobra"
 )
@@ -37,14 +38,15 @@ will likely re-trigger the freeze immediately if disk hasn't recovered —
 use this only when you know what you're doing (or want to kill the task
 afterward with 'runq kill').`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return withBackend(func(be backend.Backend) error {
-			result, err := be.ThawTasks(cmd.Context(), os.Getuid(), thawForce)
-			if err != nil {
-				return err
-			}
-			printThawResult(result)
-			return nil
-		})
+		// Freeze/thaw is a machine-local concern: frozen processes live
+		// under THIS machine's executor. Plumbing socket → runqd.
+		p := api.NewProxy(getPlumbingSocketPath())
+		result, err := p.ThawTasks(cmd.Context(), os.Getuid(), thawForce)
+		if err != nil {
+			return err
+		}
+		printThawResult(result)
+		return nil
 	},
 }
 

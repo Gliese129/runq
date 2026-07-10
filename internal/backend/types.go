@@ -1,10 +1,12 @@
 package backend
 
 import (
+	"context"
 	"encoding/json"
 	"time"
 
 	"github.com/gliese129/runq/internal/job"
+	"github.com/gliese129/runq/internal/logfile"
 )
 
 // View types shared by HTTP responses and CLI --json output.
@@ -15,6 +17,7 @@ type JobSummary struct {
 	Project   string         `json:"project"`
 	Note      string         `json:"note"`
 	Status    string         `json:"status"`
+	Target    string         `json:"target"`
 	Archived  bool           `json:"archived"`
 	CreatedAt int64          `json:"created_at"`
 	Tasks     TaskCountGroup `json:"tasks"`
@@ -97,17 +100,57 @@ type GPUSlot struct {
 	UtilPercent int    `json:"util_percent"`
 	TaskID      string `json:"task_id,omitempty"`
 	JobID       string `json:"job_id,omitempty"`
+	// Target is the compute target these GPUs belong to — the aggregated
+	// dashboard panel (local ∪ remote) groups by it. Stamped by
+	// MultiBackend during aggregation.
+	Target string `json:"target,omitempty"`
 }
 
 type ActionResponse struct {
 	OK bool `json:"ok"`
 }
 
+// ConfigResponse is the v1 bootstrap summary (spec §4): the frontend pulls
+// it once at startup — paths, default target, and each target's
+// type/capabilities. NOT the management view (/targets has full
+// TargetConfig fields). mode is gone from the wire (D5/D9).
 type ConfigResponse struct {
-	Mode         string       `json:"mode"`
-	DataPath     string       `json:"data_path"`
-	ConfigPath   string       `json:"config_path"`
+	DataPath      string          `json:"data_path"`
+	ConfigPath    string          `json:"config_path"`
+	DefaultTarget string          `json:"default_target"`
+	Targets       []TargetSummary `json:"targets"`
+}
+
+// TargetSummary is one target's bootstrap entry (spec §4): identity +
+// capability bits, no scheduler template details. Type is inferred from
+// config fields (no ssh/scheduler → local), matching state_model 1:1.
+type TargetSummary struct {
+	Name         string       `json:"name"`
+	Type         string       `json:"type"`      // "local" | "remote"
+	Scheduler    string       `json:"scheduler"` // slurm | pbs | ... | runq | ""
 	Capabilities Capabilities `json:"capabilities"`
+	// Cache TTLs (spec §3) land with the cache layer (L4).
+}
+
+// RefreshReceipt is the D22 refresh response: the caller ALWAYS learns
+// whether the refresh actually happened and, if not, why and when to
+// retry. refreshed_at is the persisted photo timestamp (sync_state), not
+// response time.
+type RefreshReceipt struct {
+	RefreshedAt       int64  `json:"refreshed_at"` // unix; 0 = never synced
+	Refreshed         bool   `json:"refreshed"`
+	Reason            string `json:"reason,omitempty"` // min_interval | timeout | <sync error>
+	RetryAfterSeconds int64  `json:"retry_after_seconds,omitempty"`
+}
+
+// TargetHealth is one row of GET /health's targets[] (spec §5.1, D6):
+// PASSIVE reachability — filled from the most recent sync/interaction
+// outcome, never an active probe.
+type TargetHealth struct {
+	Name        string `json:"name"`
+	Reachable   bool   `json:"reachable"`
+	LastError   string `json:"last_error,omitempty"`
+	LastChecked int64  `json:"last_checked"` // unix; 0 = no contact yet
 }
 
 // Capabilities is each backend's self-description, in three dimensions
@@ -146,14 +189,17 @@ type Capabilities struct {
 // when combined with other selectors.
 type CleanOptions struct {
 	// Selectors — at least one must be true/non-empty.
-	Orphan   bool   `json:"orphan"`   // detect tasks whose taskDir is missing (on-demand os.Stat)
+	Orphan   bool   `json:"orphan"`   // tasks MARKED orphaned (rfs.FS detection, see remote.DetectOrphans)
 	Archived bool   `json:"archived"` // tasks belonging to archived jobs
 	JobID    string `json:"job_id"`   // specific job
 	TaskID   string `json:"task_id"`  // specific task
+	// TaskIDs selects an exact set of tasks — the execute phase of the
+	// interactive clean flow (user multi-selected from the preview).
+	TaskIDs []string `json:"task_ids,omitempty"`
+	// Target scopes the clean to a single compute target. Empty = all targets.
+	Target string `json:"target,omitempty"`
 	// Time filter — optional when other selectors are present.
 	OlderThan *time.Time `json:"older_than,omitempty"` // only tasks finished before this time
-	// Partial cleanup: only delete checkpoints/, keep DB + other artifacts.
-	CkptOnly bool `json:"ckpt_only"`
 	// DryRun: preview what would be cleaned without deleting.
 	DryRun bool `json:"dry_run"`
 }
@@ -166,25 +212,84 @@ type CleanResult struct {
 	Preview    []CleanPreviewItem `json:"preview,omitempty"` // populated only in dry-run
 }
 
-// CleanAction describes what kind of cleanup will happen for a task.
+// TaskListOptions filters the flat task table (spec §5.5). Zero values
+// mean "no filter"; Limit 0 means unpaginated.
+type TaskListOptions struct {
+	JobID  string
+	Status string
+	Target string
+	Limit  int
+	Offset int
+}
+
+// LogMatch is one grep hit from JobLogSearch: which task's log, where, and
+// the matching line (owning-side grep — results travel, files don't).
+type LogMatch struct {
+	TaskID string `json:"task_id"`
+	Line   int    `json:"line"`
+	Text   string `json:"text"`
+}
+
+// LogPage is one page of a task log: byte-anchored, line-quantified. The
+// log-paging vocabulary is owned by the logfile package (single domain,
+// single spelling); this alias only re-exports it for Backend signatures.
+type LogPage = logfile.Page
+
+// LogFollower is a pull-based LogPage iterator over a growing log — the
+// return type of TaskLogFollow. Content arrives as pages (stripped lines +
+// byte anchors), never raw bytes, so consumers inherit the positional read
+// path's clamping/stripping instead of re-implementing it.
+// *logfile.Follower satisfies this natively — no adapter.
+//
+// Next blocks until new data is available, then returns one page and
+// advances. It returns promptly with ctx.Err() on cancellation. After a
+// rotation the next page's Offset is 0 (view reset signal). Next never
+// returns an empty page: it waits instead.
+//
+// Close releases the underlying file handle and must be idempotent; a
+// blocked Next must not deadlock Close.
+type LogFollower interface {
+	Next(ctx context.Context) (*LogPage, error)
+	Close() error
+}
+
+// QueueEntry is one row of the squeue output (runq preset): a non-terminal
+// task's id and status, in runq's own status vocabulary (which doubles as
+// remote.ParseSignal's canonical vocabulary — no SignalMap needed).
+type QueueEntry struct {
+	ID     string `json:"id"`
+	Status string `json:"status"`
+}
+
+// CleanAction DESCRIBES what deletion will touch — it is not a user
+// choice. Deletion is all-or-nothing by design (task dir + DB record,
+// irreversible); partial cleanup was a knob nobody used and everyone
+// feared — users who want surgery cd into the dir themselves.
 type CleanAction string
 
 const (
 	CleanActionAll    CleanAction = "all"     // delete DB record + all files
 	CleanActionDBOnly CleanAction = "db_only" // delete DB record (no files on disk)
-	CleanActionCkpt   CleanAction = "ckpt"    // delete checkpoints/ only
-	CleanActionCkptDB CleanAction = "no_ckpt" // ckpt-only requested but no checkpoints/ dir
 )
 
 type CleanPreviewItem struct {
 	TaskID     string      `json:"task_id"`
 	JobID      string      `json:"job_id"`
+	Project    string      `json:"project"`
 	Status     string      `json:"status"`
 	FinishedAt *int64      `json:"finished_at,omitempty"`
 	TaskDir    string      `json:"task_dir,omitempty"`
 	Reason     string      `json:"reason"` // why selected: orphan / archived / job / task / older-than
 	Action     CleanAction `json:"action"` // what will be cleaned
 	Orphan     bool        `json:"orphan"` // true if task dir is missing from disk
+
+	// Size preview — from the LEDGER, not the filesystem: checkpoint stats
+	// come from the checkpoints table, metrics size from the ingest mark.
+	// Zero SSH round trips at selection time; the FS is only touched after
+	// the user confirms.
+	CkptFiles    int   `json:"ckpt_files"`
+	CkptBytes    int64 `json:"ckpt_bytes"`
+	MetricsBytes int64 `json:"metrics_bytes"`
 }
 
 // DryRunResult is what DryRun returns: expanded tasks plus best-effort
@@ -197,10 +302,28 @@ type DryRunResult struct {
 	WorkspaceRoot string           `json:"workspace_root,omitempty"`
 }
 
+// ErrorResponse is the v1 error envelope (spec §2): Error is for humans,
+// Code is the stable machine enum — CLI/WebUI branch ONLY on Code.
 type ErrorResponse struct {
-	Error string `json:"error"`
-	Code  int    `json:"code"`
+	Error             string `json:"error"`
+	Code              string `json:"code"`
+	Details           string `json:"details,omitempty"`
+	RetryAfterSeconds int    `json:"retry_after_seconds,omitempty"`
 }
+
+// v1 error codes (spec §2) × HTTP status. Keep in sync with the protocol
+// spec — additions must be reflected there first (spec-first).
+const (
+	CodeBadRequest        = "bad_request"        // 400
+	CodeNotFound          = "not_found"          // 404
+	CodeInvalidState      = "invalid_state"      // 409: action illegal in current state
+	CodeNotSupported      = "not_supported"      // 409: target lacks the capability
+	CodeNotImplemented    = "not_implemented"    // 501: spec-first stub, pending implementation
+	CodeForbidden         = "forbidden"          // 403: refused by the remote-CLI forward guard (RQ-45)
+	CodeTargetUnreachable = "target_unreachable" // 502
+	CodeMinInterval       = "min_interval"       // 429: refresh blocked by the 5min floor
+	CodeInternal          = "internal"           // 500
+)
 
 // Project summary for sidebar.
 

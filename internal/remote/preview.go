@@ -1,0 +1,59 @@
+package remote
+
+import (
+	"context"
+	"fmt"
+	"path"
+	"strings"
+
+	"github.com/gliese129/runq/internal/job"
+	"github.com/gliese129/runq/internal/project"
+	"github.com/gliese129/runq/internal/submitplan"
+	"github.com/gliese129/runq/internal/utils"
+)
+
+// Preview compiles the job and renders what WOULD be submitted — the
+// representative run.sh (first task) and its submit command — with zero
+// side effects: nothing written, nothing persisted, nothing queued.
+// The dry-run contract: preview is truth, disk stays untouched (C5/U1).
+func (b *Backend) Preview(ctx context.Context, jobCfg job.JobConfig, proj *project.Config, skipPreflight bool) (string, error) {
+	deps := b.planDeps(skipPreflight)
+	deps.JobID = utils.GenerateJobID()
+	// Placeholder roots: nothing is written (the dry-run contract).
+	deps.Paths = submitplan.Paths{WorkspaceRoot: "<workspace>", LogRoot: "<workspace>"}
+	plan, err := submitplan.Build(ctx, jobCfg, proj, deps)
+	if err != nil {
+		return "", err
+	}
+
+	var s strings.Builder
+	fmt.Fprintf(&s, "dry-run: %d task(s) would be submitted\n", len(plan.Tasks))
+	// Where <workspace> will actually live — shown read-only (nothing is
+	// created here); ids are regenerated at real submit.
+	root, _ := b.WorkspaceRoot(proj, false) // same decision point as Prepare (RQ-65)
+	fmt.Fprintf(&s, "workspace root: %s/<note>-<job_id> — <workspace> below means that job dir (ids regenerate at submit)\n\n", root)
+	for _, c := range plan.Preflight.Results {
+		mark := map[string]string{"passed": "✓", "failed": "✗", "warning": "!"}[c.Status]
+		if mark == "" {
+			mark = "-"
+		}
+		fmt.Fprintf(&s, "%s %-10s %s\n", mark, c.Name, c.Detail)
+	}
+
+	if len(plan.Tasks) == 0 {
+		return "", fmt.Errorf("sweep expands to zero tasks — check sweep parameters (nothing would be submitted)")
+	}
+	t := plan.Tasks[0]
+	runsh := path.Join(t.TaskDir, runScriptName)
+	// Render through THE submit renderer — a private copy of its vars map is
+	// how preview and submit drift apart (deep-test P1: preview missed the
+	// {{project}}/{{log_path}} vars the runq preset requires).
+	cmd, err := renderSubmitCmd(b.Cfg.SubmitTemplate, t, plan, runsh)
+	if err != nil {
+		return "", fmt.Errorf("render submit_template: %w", err)
+	}
+
+	fmt.Fprintf(&s, "\n── submit command (task 1 of %d) ──\n%s%s\n", len(plan.Tasks), submitEnvPrefix(proj.Environment), cmd)
+	fmt.Fprintf(&s, "\n── run.sh (task 1 of %d) ──\n%s", len(plan.Tasks), b.buildRunScript(t, plan))
+	return s.String(), nil
+}

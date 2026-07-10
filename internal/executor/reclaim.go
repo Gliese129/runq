@@ -28,9 +28,10 @@ type AliveTask struct {
 // monitoring channels and lets the scheduler handle cleanup (GPU release, queue
 // update, job status refresh) through the same path as normally dispatched tasks.
 type Reclaimer struct {
-	Store  *store.Store
-	Exec   *Executor
-	Logger *slog.Logger
+	Store        *store.Store
+	Exec         *Executor
+	Logger       *slog.Logger
+	TargetFilter string // only reclaim tasks belonging to this target; empty = all
 }
 
 // Reclaim processes all previously-running tasks.
@@ -41,7 +42,7 @@ func (r *Reclaimer) Reclaim(ctx context.Context) ([]AliveTask, error) {
 	dbCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	tasks, err := r.Store.ListTasks(dbCtx, store.TaskFilter{Status: "running"})
+	tasks, err := r.Store.ListTasks(dbCtx, store.TaskFilter{Status: "running", Target: r.TargetFilter})
 	if err != nil {
 		return nil, err
 	}

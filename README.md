@@ -1,6 +1,6 @@
 # runq
 
-**If you are an AI agent, please read [AI_README.md](./AI_README.md)**
+**If you are an AI agent, please read [SKILLS.md](./SKILLS.md)**
 
 A lightweight GPU job scheduler for research labs.
 
@@ -119,31 +119,31 @@ That's it. runq expands the parameter sweep, queues the tasks, assigns GPUs, and
 On a shared cluster, runq compiles your sweep, writes per-task workspaces, and delegates scheduling to the cluster's native job manager. No resident daemon needed.
 
 ```bash
-# 1. Generate config (edit it for your cluster, then validate)
-runq hpc init --scheduler slurm     # also: pbs | sge | tsubame | abci
-runq hpc config check               # renders every template with sample values
+# 1. Add the cluster as a target (presets fill the scheduler templates), then validate
+runq target add tsubame --template=tsubame --host=login.t4.gsic.titech.ac.jp --user=alice
+runq target check tsubame           # renders every template with sample values
 
-# 2. Write project.yaml + job.yaml (same format as daemon mode)
-#    See examples/ for templates
+# 2. Connect: verify the host key with you, install the remote CLI, start the forward
+runq connect tsubame
 
-# 3. Preview, then submit
-runq hpc submit job.yaml --project-file project.yaml --dry-run
-runq hpc submit job.yaml --project-file project.yaml
+# 3. Write project.yaml + job.yaml (see examples/), preview, then submit
+runq submit job.yaml --project-file project.yaml --target tsubame --dry-run
+runq submit job.yaml --project-file project.yaml --target tsubame
 
-# 4. Monitor
-runq hpc ls                          # list jobs
-runq hpc status <job_id>             # refresh from disk + show tasks
-runq hpc best <job_id> --key loss    # best task by metric
-runq hpc collect <job_id> --key loss # all tasks ranked by metric
+# 4. Monitor (same commands as local — target-aware)
+runq ps                              # jobs; `runq ps <job_id>` for its tasks
+runq status <job_id>                 # refresh + show tasks
+runq best <job_id> --key loss        # best task by metric
+runq collect <job_id> --key loss     # all tasks ranked by metric
 ```
 
-After `runq hpc init`, edit `~/.runq/config.yaml` to match your cluster — the `submit_template`, `submit_id_regex`, and `kill_template` fields must be correct for your scheduler (also editable in the dashboard Settings page, with presets, placeholder hints and a built-in checker). Presets for Slurm, PBS, SGE, TSUBAME and ABCI are provided as starting points.
+After `runq target add`, edit `~/.runq/config.yaml` to match your cluster — the `submit_template`, `submit_id_regex`, and `kill_template` fields must be correct for your scheduler (also editable in the dashboard Settings page, with presets, placeholder hints and a built-in checker). Presets for Slurm, PBS, SGE, TSUBAME and ABCI are provided as starting points.
 
 Per-task scheduler knobs (walltime, queue) can live in the sweep and be referenced from `submit_template` as `{{param.h_rt}}`, `{{param.node_kind}}` — one job can carry per-benchmark time limits. Declare them with `scope: scheduler` in project.yaml so they're consumed by the submit command, not your training command (see Configuration).
 
 ### How runq behaves on the login node
 
-runq is a polite login-node citizen. Task state comes primarily from each task's `status.json`, written by the generated run.sh at start, at exit, and — via a signal trap — when the scheduler kills the task (walltime, `qdel`): those are local file reads, not scheduler queries. The `status_template` probe only covers tasks that died without last words, is rate-limited per job (20s floor for the dashboard's automatic polling; explicit `runq hpc status` / the Refresh button always probe), and listing-style templates like the presets' full `qstat` cost ONE scheduler call per pass regardless of task count. When nothing asks, nothing polls.
+runq is a polite login-node citizen. Task state comes primarily from each task's `status.json`, written by the generated run.sh at start, at exit, and — via a signal trap — when the scheduler kills the task (walltime, `qdel`): those are local file reads, not scheduler queries. The `status_template` probe only covers tasks that died without last words, is rate-limited per job (20s floor for the dashboard's automatic polling; explicit `runq status` / the Refresh button always probe), and listing-style templates like the presets' full `qstat` cost ONE scheduler call per pass regardless of task count. When nothing asks, nothing polls.
 
 Each task runs **from the project's `working_dir`** (relative paths in your command just work), with all output redirected to its own log (`runq logs <task_id>` and the dashboard read it; `-o/-e` in your submit_template only catches scheduler-level noise). Workspaces live under `.runq/<note>-<job id>/<task id>/` — ids carry `jb`/`tk` prefixes, and the job dir starts with your note so `ls .runq/` reads like an experiment log. runq's own operation log (every submit/kill with the rendered command and scheduler output) is at `~/.runq/logs/runq.log`; `runq doctor` checks the right paths per mode.
 
@@ -310,15 +310,16 @@ runq is designed for the "submit before going home" workflow:
 
 | Command | Description |
 |---|---|
-| `runq hpc init [--scheduler slurm\|pbs\|sge]` | Generate `~/.runq/config.yaml` template |
-| `runq hpc submit <job.yaml> [--note "..."]` | Compile sweep + submit each task to the cluster |
-| `runq hpc status <job_id>` | Refresh from disk and show task status |
-| `runq hpc kill <job_id\|task_id>` | Cancel via kill_template |
-| `runq hpc ls` | List HPC jobs (DB state) |
-| `runq hpc best <job_id> --key <metric>` | Show the task with the best metric value |
-| `runq hpc collect <job_id> --key <metric>` | Per-task params + best metric, ranked |
-| `runq hpc rm <job_id>` | Remove a completed job from DB |
-| `runq hpc clean --older-than <dur>` | Delete old tasks, workspaces, and empty jobs |
+| `runq target add <name> --template=<scheduler>` | Add a cluster target (presets: slurm\|pbs\|sge\|tsubame\|abci) |
+| `runq target check <name>` | Validate templates: placeholders, regex, sample render |
+| `runq connect <name>...` | Verify SSH + host key, install remote CLI, start socket forward |
+| `runq target disconnect <name>...` | Stop the forward, disable remote_cli |
+| `runq submit <job.yaml> --target <name>` | Compile sweep + submit each task to the cluster |
+| `runq status <job_id>` | Refresh and show task status |
+| `runq kill <job_id\|task_id>` | Cancel via kill_template |
+| `runq best <job_id> --key <metric>` | Show the task with the best metric value |
+| `runq collect <job_id> --key <metric>` | Per-task params + best metric, ranked |
+| `runq clean` | Interactive cleanup (all-or-nothing per selection) |
 
 </details>
 
@@ -327,7 +328,7 @@ runq is designed for the "submit before going home" workflow:
 
 | Path | Description |
 |---|---|
-| `~/.runq/config.yaml` | Global config (`data_path`) + HPC config (`hpc:` section) |
+| `~/.runq/config.yaml` | Global config (`data_path`, `default_target`) + `targets:` list (scheduler templates per target) |
 | `~/.runq/runq.db` | SQLite database (daemon) |
 | `~/.runq/runq.sock` | Unix domain socket (daemon) |
 | `~/.runq/daemon.pid` | PID file (daemon) |

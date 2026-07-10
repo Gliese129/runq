@@ -163,9 +163,6 @@ func TestLoad_MissingFile(t *testing.T) {
 	if cfg.DataPath != "" {
 		t.Errorf("DataPath = %q, want empty", cfg.DataPath)
 	}
-	if cfg.Mode != ModeDaemon {
-		t.Errorf("Mode = %q, want %q", cfg.Mode, ModeDaemon)
-	}
 }
 
 func TestLoad_WithDataPath(t *testing.T) {
@@ -181,12 +178,9 @@ func TestLoad_WithDataPath(t *testing.T) {
 	if cfg.DataPath != "/scratch/runq" {
 		t.Errorf("DataPath = %q, want /scratch/runq", cfg.DataPath)
 	}
-	if cfg.Mode != ModeDaemon {
-		t.Errorf("Mode = %q, want %q", cfg.Mode, ModeDaemon)
-	}
 }
 
-func TestLoad_WithMode(t *testing.T) {
+func TestLoad_StaleModeKeyIgnored(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("RUNQ_DATA_DIR", dir)
 	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("mode: hpc\n"), 0o644); err != nil {
@@ -196,19 +190,21 @@ func TestLoad_WithMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.Mode != ModeHPC {
-		t.Errorf("Mode = %q, want %q", cfg.Mode, ModeHPC)
+	// mode is dead (D9): a leftover key in an old file parses as an
+	// ignored unknown — never an error, never behavior.
+	if got := cfg.ResolveDefaultTarget(); got != "local" {
+		t.Errorf("default target = %q, want local", got)
 	}
 }
 
-func TestLoad_InvalidMode(t *testing.T) {
+func TestLoad_ArbitraryModeValueIgnored(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("RUNQ_DATA_DIR", dir)
 	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("mode: cluster\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Load(); err == nil {
-		t.Fatal("Load() error = nil, want invalid mode error")
+	if _, err := Load(); err != nil {
+		t.Fatalf("stale mode key must be ignored, got error: %v", err)
 	}
 }
 
@@ -220,15 +216,15 @@ func TestSetKeyPreservesHPCSection(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := SetKey("mode", "hpc"); err != nil {
+	if err := SetKey("default_target", "my-lab"); err != nil {
 		t.Fatalf("SetKey: %v", err)
 	}
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.Mode != ModeHPC {
-		t.Errorf("Mode = %q, want %q", cfg.Mode, ModeHPC)
+	if cfg.DefaultTarget != "my-lab" {
+		t.Errorf("DefaultTarget = %q, want my-lab", cfg.DefaultTarget)
 	}
 
 	buf, err := os.ReadFile(filepath.Join(dir, "config.yaml"))

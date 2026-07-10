@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"strings"
 )
 
 // MetricRow maps to one row in the `metrics` table.
@@ -31,40 +32,271 @@ type CheckpointRow struct {
 	TS        int64
 }
 
-// InsertMetricsBatch inserts many MetricRow within one transaction.
-// Uses INSERT OR IGNORE so that re-reaping the same metrics.jsonl (e.g. after
-// daemon restart + reclaim) doesn't fail on PK conflicts.
+// IngestMark is one task's incremental-ingest state (spec §8.1.4).
+// Zero value = never ingested.
+type IngestMark struct {
+	Size   int64 // stat size at last pass
+	Offset int64 // parsed up to here (complete lines only)
+	Final  bool  // terminal pass done: skip this task forever
+}
+
+// GetIngestMark returns the task's mark; zero value when absent.
+func (s *Store) GetIngestMark(ctx context.Context, taskID string) (IngestMark, error) {
+	var m IngestMark
+	var final int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT file_size, parsed_offset, final FROM metrics_ingest WHERE task_id = ?`,
+		taskID).Scan(&m.Size, &m.Offset, &final)
+	if err == sql.ErrNoRows {
+		return IngestMark{}, nil
+	}
+	if err != nil {
+		return IngestMark{}, err
+	}
+	m.Final = final == 1
+	return m, nil
+}
+
+// SetIngestMark upserts the task's mark.
+func (s *Store) SetIngestMark(ctx context.Context, taskID string, m IngestMark) error {
+	final := 0
+	if m.Final {
+		final = 1
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO metrics_ingest (task_id, file_size, parsed_offset, final)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(task_id) DO UPDATE SET
+			file_size = excluded.file_size,
+			parsed_offset = excluded.parsed_offset,
+			final = excluded.final`,
+		taskID, m.Size, m.Offset, final)
+	return err
+}
+
+// DeleteTaskMetrics drops a task's summaries and ingest mark — the rebuild
+// path when metrics.jsonl shrank (retry rerun rewrote it), and the retry
+// unfreeze.
 //
-// Caller-side guarantees:
-//   - All rows must reference an existing task (FK).
-//   - Empty slice is a no-op (returns nil).
-func (s *Store) InsertMetricsBatch(ctx context.Context, rows []MetricRow) error {
+// checkpoints are DELIBERATELY kept: they are a TASK-lifetime event log,
+// not a reduction of the current file. Freeze sizing (MaxCheckpointSize)
+// asks "how big does this task's checkpoints get" — attempt-independent,
+// and a retry often RESUMES from the previous attempt's checkpoint, whose
+// file is still on disk. PK (task_id, step) + newer-ts upsert makes
+// re-reads idempotent, so keeping rows costs nothing.
+func (s *Store) DeleteTaskMetrics(ctx context.Context, taskID string) error {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM metric_summary WHERE task_id = ?`, taskID); err != nil {
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, `DELETE FROM metrics_ingest WHERE task_id = ?`, taskID)
+	return err
+}
+
+// MetricSummaryRow is one (task, key) streaming reduction.
+type MetricSummaryRow struct {
+	TaskID string
+	JobID  string
+	Key    string
+	Min    float64
+	Max    float64
+	Last   float64
+	LastTS int64
+	Count  int64
+}
+
+// MergeMetricSummaries upserts delta reductions into metric_summary.
+// min/max/count merge associatively; last wins by timestamp — so repeated
+// incremental passes compose losslessly.
+func (s *Store) MergeMetricSummaries(ctx context.Context, rows []MetricSummaryRow) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := mergeMetricSummariesTx(ctx, tx, rows); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func mergeMetricSummariesTx(ctx context.Context, tx *sql.Tx, rows []MetricSummaryRow) error {
 	if len(rows) == 0 {
 		return nil
 	}
+	stmt, err := tx.PrepareContext(ctx, `
+		INSERT INTO metric_summary (task_id, job_id, key, min, max, last, last_ts, count)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(task_id, key) DO UPDATE SET
+			min     = MIN(metric_summary.min, excluded.min),
+			max     = MAX(metric_summary.max, excluded.max),
+			last    = CASE WHEN excluded.last_ts >= metric_summary.last_ts
+			               THEN excluded.last ELSE metric_summary.last END,
+			last_ts = MAX(metric_summary.last_ts, excluded.last_ts),
+			count   = metric_summary.count + excluded.count`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for _, r := range rows {
+		if _, err := stmt.ExecContext(ctx, r.TaskID, r.JobID, r.Key, r.Min, r.Max, r.Last, r.LastTS, r.Count); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ApplyIngestDelta commits one incremental-reap pass ATOMICALLY: optional
+// rebuild delete, summary merges, checkpoint inserts, and the ingest mark
+// land in ONE transaction. This is the double-count defense — "counted"
+// and "accounted" must be inseparable: a crash between merging a delta
+// and advancing the mark would replay the delta and inflate count/sum
+// (the exact disease that killed the markless full reap).
+func (s *Store) ApplyIngestDelta(ctx context.Context, taskID string, rebuild bool,
+	summaries []MetricSummaryRow, ckpts []CheckpointRow, mark IngestMark) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	stmt, err := tx.PrepareContext(ctx, `
-		INSERT OR IGNORE INTO metrics
-			(task_id, job_id, key, value, step, ts)
-		VALUES (?, ?, ?, ?, ?, ?)`)
-	if err != nil {
-		return err
-	}
-	defer stmt.Close()
-
-	for _, r := range rows {
-		if _, err := stmt.ExecContext(ctx,
-			r.TaskID, r.JobID, r.Key, r.Value, nullStep(r.Step), r.TS,
-		); err != nil {
+	if rebuild {
+		// Summaries only — checkpoints are a task-lifetime event log (see
+		// DeleteTaskMetrics), and re-reading the rewritten file re-inserts
+		// its events idempotently via PK (task_id, step).
+		if _, err := tx.ExecContext(ctx, `DELETE FROM metric_summary WHERE task_id = ?`, taskID); err != nil {
 			return err
 		}
 	}
+	if err := mergeMetricSummariesTx(ctx, tx, summaries); err != nil {
+		return err
+	}
+	if err := insertCheckpointsTx(ctx, tx, ckpts); err != nil {
+		return err
+	}
+	final := 0
+	if mark.Final {
+		final = 1
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO metrics_ingest (task_id, file_size, parsed_offset, final)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(task_id) DO UPDATE SET
+			file_size = excluded.file_size,
+			parsed_offset = excluded.parsed_offset,
+			final = excluded.final`,
+		taskID, mark.Size, mark.Offset, final); err != nil {
+		return err
+	}
 	return tx.Commit()
+}
+
+// ListMetricSummaries returns a job's summaries, optionally one key only.
+func (s *Store) ListMetricSummaries(ctx context.Context, jobID, key string) ([]MetricSummaryRow, error) {
+	query := `SELECT task_id, job_id, key, min, max, last, last_ts, count FROM metric_summary WHERE job_id = ?`
+	args := []any{jobID}
+	if key != "" {
+		query += ` AND key = ?`
+		args = append(args, key)
+	}
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []MetricSummaryRow
+	for rows.Next() {
+		var r MetricSummaryRow
+		if err := rows.Scan(&r.TaskID, &r.JobID, &r.Key, &r.Min, &r.Max, &r.Last, &r.LastTS, &r.Count); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// TaskCleanStat is the ledger-known size preview for clean's TUI: what
+// deletion would free, WITHOUT touching the filesystem.
+type TaskCleanStat struct {
+	CkptFiles    int
+	CkptBytes    int64
+	MetricsBytes int64
+}
+
+// TaskCleanStats batch-fetches clean previews for the given task IDs
+// (chunked IN queries; checkpoints + ingest marks).
+func (s *Store) TaskCleanStats(ctx context.Context, taskIDs []string) (map[string]TaskCleanStat, error) {
+	out := make(map[string]TaskCleanStat, len(taskIDs))
+	const chunk = 500
+	for start := 0; start < len(taskIDs); start += chunk {
+		ids := taskIDs[start:min(start+chunk, len(taskIDs))]
+		ph := strings.Repeat("?,", len(ids)-1) + "?"
+		args := make([]any, len(ids))
+		for i, id := range ids {
+			args[i] = id
+		}
+
+		rows, err := s.db.QueryContext(ctx,
+			`SELECT task_id, COUNT(*), COALESCE(SUM(size_bytes), 0)
+			 FROM checkpoints WHERE task_id IN (`+ph+`) GROUP BY task_id`, args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var id string
+			var st TaskCleanStat
+			if err := rows.Scan(&id, &st.CkptFiles, &st.CkptBytes); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			out[id] = st
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+
+		mrows, err := s.db.QueryContext(ctx,
+			`SELECT task_id, file_size FROM metrics_ingest WHERE task_id IN (`+ph+`)`, args...)
+		if err != nil {
+			return nil, err
+		}
+		for mrows.Next() {
+			var id string
+			var size int64
+			if err := mrows.Scan(&id, &size); err != nil {
+				mrows.Close()
+				return nil, err
+			}
+			st := out[id]
+			st.MetricsBytes = size
+			out[id] = st
+		}
+		mrows.Close()
+		if err := mrows.Err(); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+// MetricKeys is the key-discovery query (spec §5.4 dual-mode): DISTINCT
+// over summaries — O(tasks × keys) rows, tiny by construction.
+func (s *Store) MetricKeys(ctx context.Context, jobID string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT DISTINCT key FROM metric_summary WHERE job_id = ? ORDER BY key`, jobID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	keys := []string{}
+	for rows.Next() {
+		var k string
+		if err := rows.Scan(&k); err != nil {
+			return nil, err
+		}
+		keys = append(keys, k)
+	}
+	return keys, rows.Err()
 }
 
 // InsertCheckpointsBatch inserts many CheckpointRow within one transaction.
@@ -78,11 +310,32 @@ func (s *Store) InsertCheckpointsBatch(ctx context.Context, rows []CheckpointRow
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := insertCheckpointsTx(ctx, tx, rows); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
 
+// insertCheckpointsTx upserts checkpoint events: PK (task_id, step),
+// NEWER ts wins. A retry rerun re-saving the same step must update
+// size/path/is_best (the old OR IGNORE kept the stale row — conservative
+// for MaxCheckpointSize but wrong for LatestCheckpoint's thaw display);
+// the ts guard keeps out-of-order re-reads from clobbering newer facts,
+// which also preserves re-read idempotence.
+func insertCheckpointsTx(ctx context.Context, tx *sql.Tx, rows []CheckpointRow) error {
+	if len(rows) == 0 {
+		return nil
+	}
 	stmt, err := tx.PrepareContext(ctx, `
-		INSERT OR IGNORE INTO checkpoints
+		INSERT INTO checkpoints
 			(task_id, job_id, path, size_bytes, step, is_best, ts)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(task_id, step) DO UPDATE SET
+			path       = excluded.path,
+			size_bytes = excluded.size_bytes,
+			is_best    = excluded.is_best,
+			ts         = excluded.ts
+		WHERE excluded.ts >= checkpoints.ts`)
 	if err != nil {
 		return err
 	}
@@ -99,46 +352,7 @@ func (s *Store) InsertCheckpointsBatch(ctx context.Context, rows []CheckpointRow
 			return err
 		}
 	}
-	return tx.Commit()
-}
-
-// ListMetrics returns metrics for a task, optionally filtered by key.
-// Used by stage 3's `runq log <task>` and tests.
-func (s *Store) ListMetrics(ctx context.Context, taskID, key string) ([]MetricRow, error) {
-	var (
-		rows *sql.Rows
-		err  error
-	)
-	if key == "" {
-		rows, err = s.db.QueryContext(ctx,
-			`SELECT task_id, job_id, key, value, step, ts
-			 FROM metrics WHERE task_id = ? ORDER BY ts ASC`, taskID)
-	} else {
-		rows, err = s.db.QueryContext(ctx,
-			`SELECT task_id, job_id, key, value, step, ts
-			 FROM metrics WHERE task_id = ? AND key = ? ORDER BY ts ASC`, taskID, key)
-	}
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var out []MetricRow
-	for rows.Next() {
-		var (
-			m    MetricRow
-			step sql.NullInt64
-		)
-		if err := rows.Scan(&m.TaskID, &m.JobID, &m.Key, &m.Value, &step, &m.TS); err != nil {
-			return nil, err
-		}
-		if step.Valid {
-			v := step.Int64
-			m.Step = &v
-		}
-		out = append(out, m)
-	}
-	return out, rows.Err()
+	return nil
 }
 
 // MaxCheckpointSize returns the largest size_bytes recorded for the task in

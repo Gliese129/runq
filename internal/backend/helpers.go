@@ -2,19 +2,25 @@ package backend
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gliese129/runq/internal/config"
 	"github.com/gliese129/runq/internal/job"
+	"github.com/gliese129/runq/internal/logfile"
 	"github.com/gliese129/runq/internal/project"
+	"github.com/gliese129/runq/internal/rfs"
+	"github.com/gliese129/runq/internal/scheduler"
 	"github.com/gliese129/runq/internal/store"
+	"github.com/gliese129/runq/internal/utils"
 	"github.com/gliese129/runq/internal/workspace"
 )
 
@@ -65,6 +71,7 @@ func BuildJobSummary(job store.JobRow, tasks []store.TaskRow) JobSummary {
 		Project:     job.ProjectName,
 		Note:        job.Note,
 		Status:      job.Status,
+		Target:      job.Target,
 		Archived:    job.ArchivedAt != nil,
 		CreatedAt:   job.CreatedAt.Unix(),
 		Tasks:       counts,
@@ -73,7 +80,11 @@ func BuildJobSummary(job store.JobRow, tasks []store.TaskRow) JobSummary {
 	}
 }
 
-func BuildJobDetail(job store.JobRow, tasks []store.TaskRow) JobDetail {
+// BuildJobDetail assembles the detail view. metricKeys comes from the
+// caller's store (SELECT DISTINCT over summaries) — the old file-scanning
+// key discovery is gone: it capped at 5 tasks and silently returned
+// nothing for remote task dirs.
+func BuildJobDetail(job store.JobRow, tasks []store.TaskRow, metricKeys []string) JobDetail {
 	views := make([]TaskView, 0, len(tasks))
 	for _, task := range tasks {
 		views = append(views, BuildTaskView(task))
@@ -81,11 +92,226 @@ func BuildJobDetail(job store.JobRow, tasks []store.TaskRow) JobDetail {
 	return JobDetail{
 		Job:        BuildJobSummary(job, tasks),
 		Tasks:      views,
-		MetricKeys: collectMetricKeys(tasks),
+		MetricKeys: metricKeys,
 		// Raw config (note template, sweep blocks) — powers "re-run as
 		// template" in the GUI without a second endpoint.
 		Config: json.RawMessage(job.ConfigJSON),
 	}
+}
+
+// compareRowsFromDB builds CompareRows from INGESTED metrics — pure SQL,
+// no file IO (spec §8.1.4: the background ingest keeps the DB warm).
+func compareRowsFromDB(ctx context.Context, st *store.Store, jobID, key string, desc bool) ([]CompareRow, error) {
+	scores, err := st.MetricLeaderboard(ctx, jobID, key, desc)
+	if err != nil {
+		return nil, err
+	}
+	rows := make([]CompareRow, 0, len(scores))
+	for i, sc := range scores {
+		rows = append(rows, CompareRow{
+			TaskID:   sc.TaskID,
+			Status:   sc.Status,
+			Params:   sc.Params,
+			Best:     sc.Value,
+			HasValue: sc.HasValue,
+			Rank:     i + 1,
+		})
+	}
+	return rows, nil
+}
+
+// tailMetricWindowBytes bounds the raw tail read for task charts: recent
+// points come straight from metrics.jsonl's tail (raw points are never
+// stored in the DB — see metric_summary / the pyramid index).
+const tailMetricWindowBytes = 256 * 1024
+
+// readTailMetricPoints reads the tail window of metrics.jsonl through the
+// given FS and parses metric events — the chart path for running tasks
+// (and the fallback for finished ones until their pyramid is built).
+// Returns the newest ≤ maxPoints points; afterTS > 0 filters older ones
+// (?after= incremental pull); key != "" keeps only that key.
+func readTailMetricPoints(fsys rfs.FS, taskDir, key string, maxPoints int, afterTS int64) []MetricPoint {
+	if taskDir == "" {
+		return nil
+	}
+	if fsys == nil {
+		fsys = rfs.NewLocalFS()
+	}
+	p := workspace.MetricsPath(taskDir)
+	info, err := fsys.Stat(p)
+	if err != nil {
+		return nil
+	}
+	start := info.Size() - tailMetricWindowBytes
+	if start < 0 {
+		start = 0
+	}
+	f, err := fsys.Open(p)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	if start > 0 {
+		if _, err := f.Seek(start, io.SeekStart); err != nil {
+			return nil
+		}
+	}
+
+	br := bufio.NewReaderSize(f, 64*1024)
+	if start > 0 {
+		_, _ = br.ReadBytes('\n') // mid-line entry: discard the partial first line
+	}
+	var points []MetricPoint
+	for {
+		raw, rerr := br.ReadBytes('\n')
+		if rerr == nil && len(raw) > 1 {
+			var e struct {
+				Type  string  `json:"type"`
+				Key   string  `json:"key"`
+				Value float64 `json:"value"`
+				Step  *int    `json:"step"`
+				TS    int64   `json:"ts"`
+			}
+			if json.Unmarshal(raw, &e) == nil && e.Type == "metric" &&
+				(afterTS == 0 || e.TS > afterTS) && (key == "" || e.Key == key) {
+				points = append(points, MetricPoint{Key: e.Key, Value: e.Value, Step: e.Step, TS: e.TS})
+			}
+		}
+		if rerr != nil {
+			break
+		}
+	}
+	if len(points) > maxPoints {
+		points = points[len(points)-maxPoints:]
+	}
+	return points
+}
+
+// tailMetricBuckets is the buckets-mode FALLBACK (running task / pyramid
+// not built): tail points → 1-point buckets → MergeBucketsToBudget. Same
+// aggregation operator as the pyramid, so the frontend renders both
+// sources identically; RawStart/RawEnd are 0 (the tail path doesn't track
+// raw offsets — zoom-to-raw needs the pyramid).
+func tailMetricBuckets(fsys rfs.FS, taskDir, key string, fromTS, toTS int64, budget int) []workspace.PyramidBucket {
+	points := readTailMetricPoints(fsys, taskDir, key, 1<<20, 0) // window-bounded anyway
+	buckets := make([]workspace.PyramidBucket, 0, len(points))
+	for _, p := range points {
+		if fromTS != 0 && p.TS < fromTS {
+			continue
+		}
+		if toTS != 0 && p.TS > toTS {
+			continue
+		}
+		b := workspace.PyramidBucket{
+			Min: p.Value, Max: p.Value, Sum: p.Value, SumSq: p.Value * p.Value,
+			Count: 1, FirstTS: p.TS, LastTS: p.TS, FirstStep: -1, LastStep: -1,
+		}
+		if p.Step != nil {
+			b.FirstStep, b.LastStep = int64(*p.Step), int64(*p.Step)
+		}
+		buckets = append(buckets, b)
+	}
+	return workspace.MergeBucketsToBudget(buckets, budget)
+}
+
+// jobLogSearchViaExec greps every task log of a job ON THE OWNING SIDE
+// (RQ-44: results travel, files don't — one grep beats N file transfers).
+// Fixed-string search (-F): the query is user text, not a regex — no
+// injection semantics to reason about. Batched to keep command lines
+// bounded on thousand-task sweeps.
+func jobLogSearchViaExec(ctx context.Context, st *store.Store, fsys rfs.FS, jobID, query string) ([]LogMatch, error) {
+	if query == "" {
+		return []LogMatch{}, nil
+	}
+	if fsys == nil {
+		fsys = rfs.NewLocalFS()
+	}
+	rows, err := st.ListTasks(ctx, store.TaskFilter{JobID: jobID})
+	if err != nil {
+		return nil, err
+	}
+
+	const (
+		maxMatches = 500 // mirrors logfile.MaxSearchMatches
+		batchSize  = 100 // paths per grep invocation (command-line budget)
+	)
+	byPath := make(map[string]string, len(rows)) // log path → task id
+	paths := make([]string, 0, len(rows))
+	for _, r := range rows {
+		if r.LogPath != "" {
+			byPath[r.LogPath] = r.ID
+			paths = append(paths, r.LogPath)
+		}
+	}
+
+	out := []LogMatch{}
+	for start := 0; start < len(paths) && len(out) < maxMatches; start += batchSize {
+		batch := paths[start:min(start+batchSize, len(paths))]
+		var sb strings.Builder
+		// -H force path prefix (even single file), -n line numbers,
+		// -F fixed string, -s suppress missing-file noise (pending tasks),
+		// -m per-file cap so one chatty log can't starve the others.
+		sb.WriteString("grep -H -n -s -F -m 50 -- ")
+		sb.WriteString(utils.ShellQuote(query))
+		for _, p := range batch {
+			sb.WriteByte(' ')
+			sb.WriteString(utils.ShellQuote(p))
+		}
+		stdout, _, code, err := fsys.Exec(ctx, "sh", "-c", sb.String())
+		if err != nil {
+			return nil, fmt.Errorf("job log search: %w", err) // transport: no fact learned
+		}
+		if code > 1 && len(stdout) == 0 {
+			return nil, fmt.Errorf("job log search: grep exit %d", code)
+		}
+		// exit 1 = no matches in this batch — a real answer, keep going.
+		for _, line := range strings.Split(string(stdout), "\n") {
+			if line == "" {
+				continue
+			}
+			// "path:lineno:text" — text may contain ':', split max 3.
+			parts := strings.SplitN(line, ":", 3)
+			if len(parts) != 3 {
+				continue
+			}
+			taskID, ok := byPath[parts[0]]
+			if !ok {
+				continue
+			}
+			n, _ := strconv.Atoi(parts[1])
+			out = append(out, LogMatch{TaskID: taskID, Line: n, Text: logfile.StripANSI(parts[2])})
+			if len(out) >= maxMatches {
+				break
+			}
+		}
+	}
+	return out, nil
+}
+
+// listTasksFromStore is the shared ListTasks implementation: every lane and
+// the Multi router sit on the same store (tasks.target column), so the flat
+// table is one SQL query regardless of who serves it.
+func listTasksFromStore(ctx context.Context, st *store.Store, opts TaskListOptions) ([]TaskView, int, error) {
+	filter := store.TaskFilter{
+		JobID:  opts.JobID,
+		Status: opts.Status,
+		Target: opts.Target,
+		Limit:  opts.Limit,
+		Offset: opts.Offset,
+	}
+	rows, err := st.ListTasks(ctx, filter)
+	if err != nil {
+		return nil, 0, err
+	}
+	total, err := st.CountTasks(ctx, filter)
+	if err != nil {
+		return nil, 0, err
+	}
+	views := make([]TaskView, 0, len(rows))
+	for _, r := range rows {
+		views = append(views, BuildTaskView(r))
+	}
+	return views, total, nil
 }
 
 func BuildTaskView(task store.TaskRow) TaskView {
@@ -129,51 +355,13 @@ func BuildTaskView(task store.TaskRow) TaskView {
 	return view
 }
 
-func BuildCompareRows(tasks []store.TaskRow, key string, desc bool) []CompareRow {
-	rows := make([]CompareRow, 0, len(tasks))
-	for _, task := range tasks {
-		best, ok := bestMetric(task.TaskDir, key, desc)
-		if !ok {
-			rows = append(rows, CompareRow{
-				TaskID:   task.ID,
-				Status:   task.Status,
-				Params:   decodeParams(task.ParamsJSON),
-				HasValue: false,
-			})
-			continue
-		}
-		rows = append(rows, CompareRow{
-			TaskID:   task.ID,
-			Status:   task.Status,
-			Params:   decodeParams(task.ParamsJSON),
-			Best:     best,
-			HasValue: true,
-		})
-	}
-	// Sort: tasks with values first (ranked), then tasks without values.
-	sort.SliceStable(rows, func(i, j int) bool {
-		if rows[i].HasValue != rows[j].HasValue {
-			return rows[i].HasValue
-		}
-		if !rows[i].HasValue {
-			return false
-		}
-		if desc {
-			return rows[i].Best > rows[j].Best
-		}
-		return rows[i].Best < rows[j].Best
-	})
-	for i := range rows {
-		if rows[i].HasValue {
-			rows[i].Rank = i + 1
-		}
-	}
-	return rows
-}
-
-// buildDryRunResult expands tasks and adds best-effort preview info.
+// BuildDryRunResult expands tasks and adds best-effort preview info.
 // getProject is the backend-specific project lookup.
-func buildDryRunResult(cfg job.JobConfig, getProject func(string) (*project.Config, error)) (*DryRunResult, error) {
+// BuildDryRunResult compiles the cheap plan view. wsRootFor overrides the
+// workspace-root preview with the OWNING backend's decision (RQ-65) — nil
+// falls back to the local global-config resolution, which is only correct
+// for local targets.
+func BuildDryRunResult(cfg job.JobConfig, getProject func(string) (*project.Config, error), wsRootFor func(*project.Config) string) (*DryRunResult, error) {
 	tasks, err := job.Expand(&cfg)
 	if err != nil {
 		return nil, err
@@ -186,7 +374,9 @@ func buildDryRunResult(cfg job.JobConfig, getProject func(string) (*project.Conf
 					result.SampleCommand = cmd
 				}
 			}
-			if storageCfg, cerr := config.Load(); cerr == nil {
+			if wsRootFor != nil {
+				result.WorkspaceRoot = wsRootFor(proj)
+			} else if storageCfg, cerr := config.Load(); cerr == nil {
 				result.WorkspaceRoot = config.ProspectiveRoot(storageCfg, proj.WorkingDir, proj.ProjectName)
 			}
 		}
@@ -278,72 +468,6 @@ func readStatusArtifacts(path string, out *taskArtifacts) {
 	}
 }
 
-// collectMetricKeys scans the first few tasks with metrics for unique
-// metric key names. Internal keys (prefixed with "_") are excluded.
-func collectMetricKeys(tasks []store.TaskRow) []string {
-	seen := map[string]bool{}
-	scanned := 0
-	for _, task := range tasks {
-		if task.TaskDir == "" || scanned >= 5 {
-			continue
-		}
-		f, err := os.Open(workspace.MetricsPath(task.TaskDir))
-		if err != nil {
-			continue
-		}
-		scanner := bufio.NewScanner(f)
-		scanner.Buffer(make([]byte, 64*1024), 10*1024*1024)
-		for scanner.Scan() {
-			var event struct {
-				Key string `json:"key"`
-			}
-			if json.Unmarshal(scanner.Bytes(), &event) == nil && event.Key != "" {
-				if !strings.HasPrefix(event.Key, "_") {
-					seen[event.Key] = true
-				}
-			}
-		}
-		f.Close()
-		scanned++
-	}
-	keys := make([]string, 0, len(seen))
-	for k := range seen {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
-}
-
-func bestMetric(taskDir, key string, desc bool) (float64, bool) {
-	if taskDir == "" || key == "" {
-		return 0, false
-	}
-	f, err := os.Open(workspace.MetricsPath(taskDir))
-	if err != nil {
-		return 0, false
-	}
-	defer f.Close()
-
-	var best float64
-	has := false
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 64*1024), 10*1024*1024)
-	for scanner.Scan() {
-		var event struct {
-			Key   string  `json:"key"`
-			Value float64 `json:"value"`
-		}
-		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil || event.Key != key {
-			continue
-		}
-		if !has || (desc && event.Value > best) || (!desc && event.Value < best) {
-			best = event.Value
-			has = true
-		}
-	}
-	return best, has
-}
-
 func numericInt(value any) (int, bool) {
 	switch v := value.(type) {
 	case float64:
@@ -376,39 +500,87 @@ func numericFloat(value any) (float64, bool) {
 	}
 }
 
-// readMetricPoints reads metrics.jsonl and returns all metric points (excluding internal keys).
-func readMetricPoints(taskDir string) []MetricPoint {
-	if taskDir == "" {
-		return nil
+// TaskRowToSchedulerTask converts a store.TaskRow to a scheduler.Task.
+// Maps all fields including status, PID, GPUs, and timestamps.
+// JSON fields (params, env) are decoded back to maps.
+func TaskRowToSchedulerTask(row *store.TaskRow) *scheduler.Task {
+	var params map[string]any
+	if row.ParamsJSON != "" {
+		_ = json.Unmarshal([]byte(row.ParamsJSON), &params)
 	}
-	f, err := os.Open(workspace.MetricsPath(taskDir))
-	if err != nil {
-		return nil
+	var env map[string]string
+	if row.EnvJSON != "" {
+		_ = json.Unmarshal([]byte(row.EnvJSON), &env)
 	}
-	defer f.Close()
+	// CheckpointDir is derived from TaskDir rather than stored separately —
+	// keeps the schema simple, and the value never diverges from
+	// RUNQ_CHECKPOINT_DIR (computed the same way in buildTaskEnv).
+	var ckptDir string
+	if row.TaskDir != "" {
+		ckptDir = filepath.Join(row.TaskDir, "checkpoints")
+	}
+	return &scheduler.Task{
+		ID:            row.ID,
+		JobID:         row.JobID,
+		ProjectName:   row.ProjectName,
+		Command:       row.Command,
+		Params:        params,
+		GPUsNeeded:    row.GPUsNeeded,
+		GPUs:          parseGPUIndices(row.GPUs),
+		Status:        mapTaskStatus(row.Status),
+		RetryCount:    row.RetryCount,
+		MaxRetry:      row.MaxRetry,
+		PID:           row.PID,
+		StartTime:     time.Unix(row.StartTime, 0),
+		LogPath:       row.LogPath,
+		WorkingDir:    row.WorkingDir,
+		Env:           env,
+		EnqueuedAt:    row.EnqueuedAt,
+		StartedAt:     row.StartedAt,
+		FinishedAt:    row.FinishedAt,
+		Resumable:     row.Resumable,
+		ExtraArgs:     row.ExtraArgs,
+		Timeout:       row.Timeout,
+		UID:           row.UID,
+		TaskDir:       row.TaskDir,
+		CheckpointDir: ckptDir,
+		ExternalID:    row.ExternalID,
+	}
+}
 
-	var points []MetricPoint
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 64*1024), 10*1024*1024)
-	for scanner.Scan() {
-		var event struct {
-			Key   string  `json:"key"`
-			Value float64 `json:"value"`
-			Step  *int    `json:"step"`
-			TS    int64   `json:"ts"`
-		}
-		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil || event.Key == "" {
-			continue
-		}
-		if strings.HasPrefix(event.Key, "_") {
-			continue
-		}
-		points = append(points, MetricPoint{
-			Key:   event.Key,
-			Value: event.Value,
-			Step:  event.Step,
-			TS:    event.TS,
-		})
+// mapTaskStatus converts a DB status string to scheduler.TaskStatus.
+func mapTaskStatus(s string) scheduler.TaskStatus {
+	switch s {
+	case "running":
+		return scheduler.StatusRunning
+	case "success":
+		return scheduler.StatusSuccess
+	case "failed":
+		return scheduler.StatusFailed
+	case "killed":
+		return scheduler.StatusKilled
+	default:
+		return scheduler.StatusPending
 	}
-	return points
+}
+
+// parseGPUIndices converts a comma-separated GPU string (e.g. "0,1,3") to []int.
+func parseGPUIndices(s string) []int {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	indices := make([]int, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		v, err := strconv.Atoi(p)
+		if err != nil {
+			continue
+		}
+		indices = append(indices, v)
+	}
+	return indices
 }

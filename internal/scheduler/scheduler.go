@@ -21,20 +21,20 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gliese129/runq/internal/executor"
 	"github.com/gliese129/runq/internal/resource"
 	"github.com/gliese129/runq/internal/store"
 	"github.com/shirou/gopsutil/v4/disk"
 )
 
 // Scheduler is the core scheduling loop.
-// It pulls tasks from the queue, allocates GPUs, and dispatches to the executor.
+// It pulls tasks from the queue, allocates resources, and dispatches to the
+// launcher (local process fork or remote submit — see Launcher).
 // All state transitions are persisted to store BEFORE updating the in-memory queue.
 type Scheduler struct {
 	cfg         Config
 	queue       *Queue
 	pool        resource.Allocator
-	exec        *executor.Executor
+	launcher    Launcher
 	store       *store.Store
 	logger      *slog.Logger
 	prioritizer Prioritizer
@@ -49,6 +49,12 @@ type Scheduler struct {
 	// retry vs killed. Prevents user-killed tasks from being auto-retried.
 	killRequested map[string]bool
 	killMu        sync.Mutex
+
+	// finishMu serializes FinishTask on the unsupervised lane, where multiple
+	// sensors (marker scan, probe align, kill paths) can deliver verdicts for
+	// the same task concurrently — and a STALE verdict (read before a retry
+	// requeued the task) must not clobber the new attempt.
+	finishMu sync.Mutex
 
 	// L2-C: optional disk-freeze state machine. nil means freeze disabled.
 	// When set, tick() filters on FrozenJobs/FrozenMounts and runTask calls
@@ -76,7 +82,7 @@ func New(
 	cfg Config,
 	queue *Queue,
 	pool resource.Allocator,
-	exec *executor.Executor,
+	launcher Launcher,
 	st *store.Store,
 	logger *slog.Logger,
 	prioritizer Prioritizer,
@@ -91,7 +97,7 @@ func New(
 		cfg:           cfg,
 		queue:         queue,
 		pool:          pool,
-		exec:          exec,
+		launcher:      launcher,
 		store:         st,
 		logger:        logger,
 		prioritizer:   prioritizer,

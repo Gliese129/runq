@@ -11,8 +11,10 @@ AGENTS.md
 CLAUDE.md
 
 demo/
-docs/
+docs/*
+!docs/*.md
 scripts/
+data/
 
 # Go
 *.exe

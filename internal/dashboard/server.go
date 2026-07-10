@@ -8,8 +8,10 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -18,6 +20,8 @@ import (
 	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/logfile"
 	"github.com/gliese129/runq/internal/project"
+	"github.com/gliese129/runq/internal/version"
+	"github.com/gliese129/runq/internal/workspace"
 )
 
 // backgroundReconciler is the optional capability for HPC backends that can
@@ -29,7 +33,6 @@ type backgroundReconciler interface {
 
 type Server struct {
 	backend      backend.Backend
-	mode         string
 	cfg          *config.GlobalConfig
 	mux          *http.ServeMux
 	static       fs.FS
@@ -37,28 +40,51 @@ type Server struct {
 	staticErr    error
 	utilsLogs    *utilsLogStore
 
-	// Background reconcile (HPC mode only): the ticker runs EnsureAllFresh
+	// Background reconcile (HPC mode only): the ticker runs SchedulerProbe
 	// periodically so the frontend list endpoint is a pure DB read.
 	reconciler backgroundReconciler // nil in daemon mode
 	lastPoll   atomic.Int64         // unix timestamp of last frontend poll
 	stopLoop   context.CancelFunc   // cancels the reconcileLoop goroutine
+
+	version   string    // /health; stamped via internal/version (ldflags)
+	startedAt time.Time // /health uptime_seconds
+
+	// forwardStarter is the client daemon's runtime hook for POST
+	// /targets/{name}/connect (start/replace a remote CLI forward without
+	// a restart). nil on deployments without forwards (runqd) → 501.
+	forwardStarter func(name string) error
+	forwardStopper func(name string) error
+
+	// Per-job forced-refresh floor (D22): memory-only — a restart forgiving
+	// the throttle is harmless.
+	jobRefreshMu sync.Mutex
+	jobRefreshAt map[string]time.Time
 }
 
-func NewServer(be backend.Backend, mode string, cfg *config.GlobalConfig) *Server {
-	return NewServerWithAssets(be, mode, cfg, "")
+// jobRefreshFloor is the per-job forced-probe floor. Shorter than the
+// target-level floor would be pointless (a job refresh IS a probe); 30s
+// keeps the button honest without making it feel broken.
+const jobRefreshFloor = 30 * time.Second
+
+// NewServer builds the v1 server. mode is gone (D5/D9): capabilities are
+// declared per-target, never inferred.
+func NewServer(be backend.Backend, cfg *config.GlobalConfig) *Server {
+	return NewServerWithAssets(be, cfg, "")
 }
 
-func NewServerWithAssets(be backend.Backend, mode string, cfg *config.GlobalConfig, assetsDir string) *Server {
+func NewServerWithAssets(be backend.Backend, cfg *config.GlobalConfig, assetsDir string) *Server {
 	static := ResolveStaticAssets(assetsDir)
 	s := &Server{
 		backend:      be,
-		mode:         mode,
 		cfg:          cfg,
 		mux:          http.NewServeMux(),
 		static:       static.FS,
 		staticSource: static.Source,
 		staticErr:    static.Err,
 		utilsLogs:    newUtilsLogStore(),
+		version:      version.Version,
+		startedAt:    time.Now(),
+		jobRefreshAt: map[string]time.Time{},
 	}
 	s.registerRoutes()
 
@@ -78,7 +104,47 @@ func NewServerWithAssets(be backend.Backend, mode string, cfg *config.GlobalConf
 }
 
 func (s *Server) Handler() http.Handler {
-	return corsMiddleware(s.mux)
+	return recoverMiddleware(corsMiddleware(versionGateMiddleware(s.mux)))
+}
+
+// versionGateMiddleware is the client-version guardrail: a runq client that
+// self-identifies (X-Runq-Version) as older than version.MinClient gets a
+// 426 with upgrade instructions instead of a confusing downstream failure.
+// It fires only when BOTH sides are stamped builds — dev builds and
+// browsers (no header) pass through, and version echo happens on every
+// response so the client can warn about mild skew (see api.warnVersionSkew).
+// Protocol-shape compatibility is owned by /api/v1 path versioning, not here.
+func versionGateMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Runq-Version", version.Version)
+		clientV := r.Header.Get("X-Runq-Version")
+		if clientV != "" && version.MinClient != "" {
+			if cmp, ok := version.Compare(clientV, version.MinClient); ok && cmp < 0 {
+				writeErr(w, http.StatusUpgradeRequired, backend.CodeBadRequest,
+					fmt.Sprintf("runq client %s is older than the daemon's minimum %s (daemon %s) — rerun `runq connect` on your workstation to update the remote CLI, or reinstall runq",
+						clientV, version.MinClient, version.Version))
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// recoverMiddleware turns a handler panic into a logged 500 instead of a
+// dropped connection: without it the CLI sees a bare "EOF" and the panic's
+// stack never reaches anyone. (gin has this built in; this mux needs it.)
+func recoverMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				slog.Error("panic in dashboard handler",
+					"path", r.URL.Path, "panic", rec, "stack", string(debug.Stack()))
+				writeErr(w, http.StatusInternalServerError, backend.CodeInternal,
+					fmt.Sprintf("internal error: %v", rec))
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
 }
 
 // Close stops the background reconcile loop (if running). Safe to call
@@ -102,7 +168,7 @@ const reconcileInterval = 30 * time.Second
 const pollActivityWindow = 60 * time.Second
 
 // reconcileLoop runs in a background goroutine (HPC mode only). It runs
-// EnsureAllFresh (batch probe) on a 30 s cadence — but ONLY when the
+// SchedulerProbe (batch) on a 30 s cadence — but ONLY when the
 // frontend has polled within the last 60 s (nobody watching = no work).
 //
 // ListJobs still does per-job EnsureFresh on every call, but the scheduler
@@ -136,7 +202,7 @@ func (s *Server) reconcileLoop(ctx context.Context) {
 				continue // frontend went idle
 			}
 			if err := s.reconciler.ReconcileAll(ctx); err != nil {
-				slog.Warn("reconcileLoop: EnsureAllFresh failed", "err", err)
+				slog.Warn("reconcileLoop: scheduler probe failed", "err", err)
 			}
 		}
 	}
@@ -163,52 +229,77 @@ func corsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// registerRoutes mounts the v1 protocol surface (spec §5). Single surface
+// for CLI and WebUI: the same mux is served on the unix socket and TCP.
+// Layout follows the spec sections; legacy /api/dashboard/* is gone
+// (spec-first, no back-compat — D1).
 func (s *Server) registerRoutes() {
-	s.mux.HandleFunc("GET /api/dashboard/config", s.handleConfig)
-	s.mux.HandleFunc("GET /api/dashboard/jobs", s.handleListJobs)
-	s.mux.HandleFunc("GET /api/dashboard/jobs/{id}", s.handleGetJob)
-	s.mux.HandleFunc("GET /api/dashboard/jobs/{id}/compare", s.handleCompare)
-	s.mux.HandleFunc("GET /api/dashboard/projects", s.handleListProjects)
-	s.mux.HandleFunc("GET /api/dashboard/projects/match", s.handleMatchProjects)
-	s.mux.HandleFunc("GET /api/dashboard/projects/{name}", s.handleGetProject)
-	s.mux.HandleFunc("POST /api/dashboard/projects", s.handleCreateProject)
-	s.mux.HandleFunc("PUT /api/dashboard/projects/{name}", s.handleUpdateProject)
-	s.mux.HandleFunc("POST /api/dashboard/projects/{name}/rename", s.handleRenameProject)
-	s.mux.HandleFunc("GET /api/dashboard/gpu", s.handleGPU)
-	s.mux.HandleFunc("POST /api/dashboard/jobs", s.handleSubmitJob)
-	s.mux.HandleFunc("POST /api/dashboard/jobs/dry-run", s.handleDryRun)
-	s.mux.HandleFunc("POST /api/dashboard/jobs/preview", s.handlePreviewSubmit)
-	s.mux.HandleFunc("GET /api/dashboard/jobs/archived", s.handleListArchivedJobs)
-	s.mux.HandleFunc("POST /api/dashboard/jobs/{id}/archive", s.handleArchiveJob)
-	s.mux.HandleFunc("POST /api/dashboard/jobs/{id}/unarchive", s.handleUnarchiveJob)
-	s.mux.HandleFunc("POST /api/dashboard/projects/{name}/archive", s.handleArchiveProject)
-	s.mux.HandleFunc("POST /api/dashboard/projects/{name}/unarchive", s.handleUnarchiveProject)
-	s.mux.HandleFunc("POST /api/dashboard/jobs/resolve-note", s.handleResolveNote)
-	s.mux.HandleFunc("GET /api/dashboard/tasks/{id}", s.handleGetTask)
-	s.mux.HandleFunc("GET /api/dashboard/tasks/{id}/log", s.handleTaskLog)
-	s.mux.HandleFunc("GET /api/dashboard/tasks/{id}/log/stream", s.handleTaskLogStream)
-	s.mux.HandleFunc("GET /api/dashboard/tasks/{id}/metrics", s.handleTaskMetrics)
-	s.mux.HandleFunc("GET /api/dashboard/jobs/{id}/activity", s.handleJobActivity)
-	s.mux.HandleFunc("GET /api/dashboard/jobs/{id}/log/search", s.handleJobLogSearch)
-	s.mux.HandleFunc("POST /api/dashboard/tasks/{id}/kill", s.handleKillTask)
-	s.mux.HandleFunc("POST /api/dashboard/tasks/{id}/retry", s.handleRetryTask)
-	s.mux.HandleFunc("POST /api/dashboard/utils/log", s.handleUtilsLogUpload)
-	s.mux.HandleFunc("GET /api/dashboard/utils/log/{id}", s.handleUtilsLogRead)
-	s.mux.HandleFunc("GET /api/dashboard/utils/log/{id}/search", s.handleUtilsLogSearch)
-	s.mux.HandleFunc("DELETE /api/dashboard/utils/log/{id}", s.handleUtilsLogDelete)
-	s.mux.HandleFunc("POST /api/dashboard/jobs/{id}/kill", s.handleKillJob)
-	s.mux.HandleFunc("POST /api/dashboard/jobs/{id}/refresh", s.handleRefreshJob)
-	s.mux.HandleFunc("POST /api/dashboard/jobs/{id}/pause", s.handlePauseJob)
-	s.mux.HandleFunc("POST /api/dashboard/jobs/{id}/resume", s.handleResumeJob)
-	s.mux.HandleFunc("GET /api/dashboard/hpc-config", s.handleGetHPCConfig)
-	s.mux.HandleFunc("GET /api/dashboard/hpc-config/presets", s.handleHPCPresets)
-	s.mux.HandleFunc("PUT /api/dashboard/hpc-config", s.handlePutHPCConfig)
-	s.mux.HandleFunc("POST /api/dashboard/hpc-config/check", s.handleCheckHPCConfig)
-	s.mux.HandleFunc("PUT /api/dashboard/global-config", s.handlePutGlobalConfig)
-	s.mux.HandleFunc("GET /api/dashboard/fs/list", s.handleFSList)
-	s.mux.HandleFunc("GET /api/dashboard/fs/read", s.handleFSRead)
-	s.mux.HandleFunc("POST /api/dashboard/fs/parse-script", s.handleParseScript)
-	s.mux.HandleFunc("GET /api/dashboard/conda/envs", s.handleCondaEnvs)
+	// ── §5.1 System ──────────────────────────────────────────────────
+	s.mux.HandleFunc("GET /api/v1/health", s.handleHealth)
+	s.mux.HandleFunc("GET /api/v1/config", s.handleConfig)
+	s.mux.HandleFunc("PUT /api/v1/config", s.handlePutGlobalConfig)
+	s.mux.HandleFunc("POST /api/v1/clean", s.handleClean)
+
+	// ── §5.2 Targets（含 target 级资源）────────────────────────────────
+	// "presets" is a reserved name (never a valid target); register the
+	// literal route before the {name} wildcards.
+	s.mux.HandleFunc("GET /api/v1/targets", s.handleListTargets)
+	s.mux.HandleFunc("GET /api/v1/targets/presets", s.handleTargetPresets)
+	s.mux.HandleFunc("PUT /api/v1/targets/{name}", s.handlePutTarget)
+	s.mux.HandleFunc("DELETE /api/v1/targets/{name}", s.handleDeleteTarget)
+	s.mux.HandleFunc("POST /api/v1/targets/{name}/check", s.handleCheckTarget)
+	s.mux.HandleFunc("POST /api/v1/targets/{name}/connect", s.handleConnectTarget)
+	s.mux.HandleFunc("POST /api/v1/targets/{name}/disconnect", s.handleDisconnectTarget)
+	s.mux.HandleFunc("POST /api/v1/targets/{name}/refresh", s.handleRefreshTarget)
+	s.mux.HandleFunc("GET /api/v1/targets/{name}/gpus", s.handleTargetGPUs)
+	s.mux.HandleFunc("GET /api/v1/targets/{name}/fs/list", s.handleFSList)
+	s.mux.HandleFunc("GET /api/v1/targets/{name}/fs/read", s.handleFSRead)
+	s.mux.HandleFunc("POST /api/v1/targets/{name}/fs/parse-script", s.handleParseScript)
+	s.mux.HandleFunc("GET /api/v1/targets/{name}/python-envs", s.handlePythonEnvs)
+
+	// ── §5.3 Projects ────────────────────────────────────────────────
+	s.mux.HandleFunc("GET /api/v1/projects", s.handleListProjects) // ?dir=&archived= 吸收旧 /projects/match
+	s.mux.HandleFunc("POST /api/v1/projects", s.handleCreateProject)
+	s.mux.HandleFunc("GET /api/v1/projects/{name}", s.handleGetProject)
+	s.mux.HandleFunc("PUT /api/v1/projects/{name}", s.handleUpdateProject)
+	s.mux.HandleFunc("POST /api/v1/projects/{name}/rename", s.handleRenameProject)
+	s.mux.HandleFunc("POST /api/v1/projects/{name}/archive", s.handleArchiveProject)
+	s.mux.HandleFunc("POST /api/v1/projects/{name}/unarchive", s.handleUnarchiveProject)
+
+	// ── §5.4 Jobs（提交族 = plan → preview → submit，选项进 body）──────
+	s.mux.HandleFunc("POST /api/v1/jobs/plan", s.handlePlanJob) // 合并 dry-run + resolve-note
+	s.mux.HandleFunc("POST /api/v1/jobs/preview", s.handlePreviewSubmit)
+	s.mux.HandleFunc("POST /api/v1/jobs", s.handleSubmitJob)
+	s.mux.HandleFunc("GET /api/v1/jobs", s.handleListJobs) // ?project=&archived=&status=&target=&limit=&offset=
+	s.mux.HandleFunc("GET /api/v1/jobs/{id}", s.handleGetJob)
+	s.mux.HandleFunc("GET /api/v1/jobs/{id}/metrics", s.handleJobMetrics) // 双模式：无 key → {keys}，有 key → {rows}
+	s.mux.HandleFunc("GET /api/v1/jobs/{id}/activity", s.handleJobActivity)
+	s.mux.HandleFunc("GET /api/v1/jobs/{id}/log/search", s.handleJobLogSearch)
+	s.mux.HandleFunc("GET /api/v1/jobs/{id}/events", s.handleJobEvents) // SSE §6.4（capability: event_stream）
+	s.mux.HandleFunc("POST /api/v1/jobs/{id}/kill", s.handleKillJob)
+	s.mux.HandleFunc("POST /api/v1/jobs/{id}/pause", s.handlePauseJob)
+	s.mux.HandleFunc("POST /api/v1/jobs/{id}/resume", s.handleResumeJob)
+	s.mux.HandleFunc("POST /api/v1/jobs/{id}/archive", s.handleArchiveJob)
+	s.mux.HandleFunc("POST /api/v1/jobs/{id}/unarchive", s.handleUnarchiveJob)
+	s.mux.HandleFunc("POST /api/v1/jobs/{id}/refresh", s.handleRefreshJob)
+
+	// ── §5.5 Tasks ───────────────────────────────────────────────────
+	s.mux.HandleFunc("GET /api/v1/tasks", s.handleListTasks) // ?job=&status=&target=&limit=&offset=
+	s.mux.HandleFunc("GET /api/v1/tasks/{id}", s.handleGetTask)
+	s.mux.HandleFunc("GET /api/v1/tasks/{id}/log", s.handleTaskLog)
+	s.mux.HandleFunc("GET /api/v1/tasks/{id}/log/stream", s.handleTaskLogStream)
+	s.mux.HandleFunc("GET /api/v1/tasks/{id}/metrics", s.handleTaskMetrics)
+	s.mux.HandleFunc("POST /api/v1/tasks/{id}/kill", s.handleKillTask)
+	s.mux.HandleFunc("POST /api/v1/tasks/{id}/retry", s.handleRetryTask)
+
+	// ── §5.6 Log sessions（原 /utils/log）──────────────────────────────
+	s.mux.HandleFunc("POST /api/v1/log-sessions", s.handleUtilsLogUpload)
+	s.mux.HandleFunc("GET /api/v1/log-sessions/{id}", s.handleUtilsLogRead)
+	s.mux.HandleFunc("GET /api/v1/log-sessions/{id}/search", s.handleUtilsLogSearch)
+	s.mux.HandleFunc("DELETE /api/v1/log-sessions/{id}", s.handleUtilsLogDelete)
+
+	// (thaw is deliberately absent: freeze/thaw is a runqd-machine concern
+	// and stays on the runqd executor lane, spec §9.)
 	s.mux.HandleFunc("GET /api/{path...}", s.handleAPINotFound)
 	s.mux.HandleFunc("POST /api/{path...}", s.handleAPINotFound)
 	s.mux.HandleFunc("PUT /api/{path...}", s.handleAPINotFound)
@@ -216,49 +307,172 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /", s.handleSPA)
 }
 
+// handleConfig — GET /config, the v1 bootstrap summary (spec §4): paths,
+// default_target, per-target type/scheduler/capabilities. Identity comes
+// from config.yaml (ResolveTargets), capability bits from each backend's
+// self-description (philosophy #2: declared facts, not inferences) — mode
+// is gone from the wire (D5/D9).
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
-	// Capabilities come from the backend's self-description — the server
-	// does not infer them from mode (design philosophy #2).
-	writeJSON(w, http.StatusOK, backend.ConfigResponse{
-		Mode:         s.mode,
-		DataPath:     s.cfg.DataPath,
-		ConfigPath:   config.ConfigPath(),
-		Capabilities: s.backend.Capabilities(),
+	resp := backend.ConfigResponse{
+		DataPath:      s.cfg.DataPath,
+		ConfigPath:    config.ConfigPath(),
+		DefaultTarget: s.cfg.ResolveDefaultTarget(),
+		Targets:       []backend.TargetSummary{},
+	}
+	caps := map[string]backend.Capabilities{}
+	if mt, ok := s.backend.(interface {
+		PerTargetCapabilities() map[string]backend.Capabilities
+		DefaultTargetName() string
+	}); ok {
+		caps = mt.PerTargetCapabilities()
+		resp.DefaultTarget = mt.DefaultTargetName()
+	}
+	for _, t := range s.cfg.ResolveTargets() {
+		ts := backend.TargetSummary{
+			Name:      t.Name,
+			Type:      t.Type(),
+			Scheduler: t.Scheduler,
+		}
+		if c, ok := caps[t.Name]; ok {
+			ts.Capabilities = c
+		} else {
+			ts.Capabilities = s.backend.Capabilities()
+		}
+		resp.Targets = append(resp.Targets, ts)
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleClean routes a clean request through the Backend (MultiBackend fans
+// out per-target orphan detection before the shared PerformClean).
+func (s *Server) handleClean(w http.ResponseWriter, r *http.Request) {
+	var opts backend.CleanOptions
+	if err := json.NewDecoder(r.Body).Decode(&opts); err != nil {
+		writeErr(w, http.StatusBadRequest, backend.CodeBadRequest, "invalid clean options: "+err.Error())
+		return
+	}
+	// At least one selector must be present (mirrors the legacy endpoint).
+	if !opts.Orphan && !opts.Archived && opts.JobID == "" && opts.TaskID == "" &&
+		len(opts.TaskIDs) == 0 && opts.OlderThan == nil {
+		writeErr(w, http.StatusBadRequest, backend.CodeBadRequest, "at least one selector required (older_than, orphan, archived, job_id, task_id, task_ids)")
+		return
+	}
+	result, err := s.backend.Clean(r.Context(), opts)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+// handleRefreshJob — POST /jobs/{id}/refresh. Returns the D22 receipt so
+// the caller knows whether it actually refreshed. Per-job floor: a second
+// forced probe for the SAME job within the window gets an honest
+// {refreshed:false, reason:"min_interval"} receipt instead of a qstat.
+func (s *Server) handleRefreshJob(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	s.jobRefreshMu.Lock()
+	if last, ok := s.jobRefreshAt[id]; ok {
+		if since := time.Since(last); since < jobRefreshFloor {
+			s.jobRefreshMu.Unlock()
+			writeJSON(w, http.StatusOK, backend.RefreshReceipt{
+				RefreshedAt:       last.Unix(),
+				Refreshed:         false,
+				Reason:            "min_interval",
+				RetryAfterSeconds: int64((jobRefreshFloor - since).Seconds()) + 1,
+			})
+			return
+		}
+	}
+	s.jobRefreshAt[id] = time.Now()
+	s.jobRefreshMu.Unlock()
+
+	if err := s.backend.RefreshJob(r.Context(), id); err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, backend.RefreshReceipt{
+		RefreshedAt: time.Now().Unix(), // this probe JUST ran: now is the truth
+		Refreshed:   true,
 	})
 }
 
-func (s *Server) handleRefreshJob(w http.ResponseWriter, r *http.Request) {
-	if err := s.backend.RefreshJob(r.Context(), r.PathValue("id")); err != nil {
+// handleHealth — GET /health (spec §5.1, D6): PASSIVE endpoint. Target
+// reachability comes from each lane's most recent transport outcome
+// (marker scan / probe / user op) — never an active probe.
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	targets := []backend.TargetHealth{}
+	if ph, ok := s.backend.(interface{ PerTargetHealth() []backend.TargetHealth }); ok {
+		targets = ph.PerTargetHealth()
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"version":        s.version,
+		"uptime_seconds": int64(time.Since(s.startedAt).Seconds()),
+		"targets":        targets,
+	})
+}
+
+// handleListTasks — GET /tasks?job=&status=&target=&limit=&offset= (spec
+// §5.5, D7): the flat task table. Pagination is SQL-level (D20).
+func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	opts := backend.TaskListOptions{
+		JobID:  q.Get("job"),
+		Status: q.Get("status"),
+		Target: q.Get("target"),
+		Limit:  200,
+	}
+	if n, err := strconv.Atoi(q.Get("limit")); err == nil && n > 0 {
+		opts.Limit = n
+	}
+	if n, err := strconv.Atoi(q.Get("offset")); err == nil && n > 0 {
+		opts.Offset = n
+	}
+	items, total, err := s.backend.ListTasks(r.Context(), opts)
+	if err != nil {
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, backend.ActionResponse{OK: true})
+	env := envelope(items)
+	env.Total = &total
+	stampFreshness(r.Context(), s.backend, opts.Target, &env.RefreshedAt, &env.Stale)
+	writeJSON(w, http.StatusOK, env)
 }
 
+// handleJobEvents — GET /jobs/{id}/events (spec §6.4, D14): SSE state
+// stream, capability event_stream. Push targets emit live; poll targets
+// emit on cache refresh. Lands with the cache layer + #49.
+func (s *Server) handleJobEvents(w http.ResponseWriter, r *http.Request) {
+	notImplemented(w, "job event stream") // TODO(#49): SSE `state` events
+}
+
+// handleListProjects — GET /projects?dir=&archived= (spec §5.3, D3).
+// ?dir= absorbs the retired /projects/match; projects are local config,
+// so the envelope carries no freshness fields.
 func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
-	projects, err := s.backend.ListProjects(r.Context())
+	var projects []backend.ProjectSummary
+	var err error
+	if dir := r.URL.Query().Get("dir"); dir != "" {
+		projects, err = s.backend.MatchProjects(r.Context(), dir)
+	} else {
+		projects, err = s.backend.ListProjects(r.Context())
+	}
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, projects)
-}
-
-func (s *Server) handleMatchProjects(w http.ResponseWriter, r *http.Request) {
-	dir := r.URL.Query().Get("dir")
-	if dir == "" {
-		writeErrorStatus(w, http.StatusBadRequest, fmt.Errorf("dir query parameter is required"))
-		return
+	if v := r.URL.Query().Get("archived"); v != "" {
+		want := v == "true" || v == "1"
+		kept := projects[:0]
+		for _, p := range projects {
+			if p.Archived == want {
+				kept = append(kept, p)
+			}
+		}
+		projects = kept
 	}
-	projects, err := s.backend.MatchProjects(r.Context(), dir)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	if projects == nil {
-		projects = []backend.ProjectSummary{}
-	}
-	writeJSON(w, http.StatusOK, projects)
+	writeJSON(w, http.StatusOK, envelope(projects))
 }
 
 func (s *Server) handleGetProject(w http.ResponseWriter, r *http.Request) {
@@ -343,17 +557,135 @@ func (s *Server) handleRenameProject(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// targetScopedLister is MultiBackend's per-target list capability — the CLI's
+// --target / RUNQ_TARGET scoping arrives here as a query parameter.
+type targetScopedLister interface {
+	ListJobsForTarget(ctx context.Context, target, projectScope string) ([]backend.JobSummary, error)
+	ListArchivedJobsForTarget(ctx context.Context, target string) ([]backend.JobSummary, error)
+}
+
+// handleListJobs — GET /jobs?project=&archived=&status=&target=&limit=&offset=
+// (spec §5.4, D3/D20). ?archived=true absorbs the retired /jobs/archived.
+// status/pagination are handler-level filters for now; they move into SQL
+// once the list queries grow LIMIT/OFFSET (D20 落地在 store 层时).
 func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	// Mark that the frontend is actively polling — the background
 	// reconcileLoop checks this to skip work when nobody is watching.
 	s.lastPoll.Store(time.Now().Unix())
 
-	jobs, err := s.backend.ListJobs(r.Context(), r.URL.Query().Get("project"))
+	q := r.URL.Query()
+	archived := q.Get("archived") == "true" || q.Get("archived") == "1"
+	target := q.Get("target")
+
+	var jobs []backend.JobSummary
+	var err error
+	switch {
+	case target != "" && archived:
+		tl, ok := s.backend.(targetScopedLister)
+		if !ok {
+			writeErr(w, http.StatusBadRequest, backend.CodeBadRequest, "target scoping not supported by this backend")
+			return
+		}
+		jobs, err = tl.ListArchivedJobsForTarget(r.Context(), target)
+	case target != "":
+		tl, ok := s.backend.(targetScopedLister)
+		if !ok {
+			writeErr(w, http.StatusBadRequest, backend.CodeBadRequest, "target scoping not supported by this backend")
+			return
+		}
+		jobs, err = tl.ListJobsForTarget(r.Context(), target, q.Get("project"))
+	case archived:
+		jobs, err = s.backend.ListArchivedJobs(r.Context())
+	default:
+		jobs, err = s.backend.ListJobs(r.Context(), q.Get("project"))
+	}
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, jobs)
+
+	if status := q.Get("status"); status != "" {
+		kept := jobs[:0]
+		for _, j := range jobs {
+			if j.Status == status {
+				kept = append(kept, j)
+			}
+		}
+		jobs = kept
+	}
+
+	total := len(jobs)
+	jobs = paginate(jobs, q.Get("limit"), q.Get("offset"))
+
+	// Per-job freshness (spec §6.1: jobs in one response may belong to
+	// DIFFERENT targets, so each row carries its own lane's timestamp).
+	// One SyncInfo per distinct target, not per job.
+	if sy, ok := s.backend.(interface {
+		SyncInfo(context.Context, string) (int64, bool, bool)
+	}); ok {
+		type fresh struct {
+			at    int64
+			known bool
+		}
+		byTarget := map[string]fresh{}
+		for i := range jobs {
+			t := jobs[i].Target
+			f, seen := byTarget[t]
+			if !seen {
+				at, _, known := sy.SyncInfo(r.Context(), t)
+				f = fresh{at: at, known: known}
+				byTarget[t] = f
+			}
+			if f.known && f.at > 0 {
+				at := f.at
+				jobs[i].RefreshedAt = &at
+			}
+		}
+	}
+
+	env := envelope(jobs)
+	env.Total = &total
+	stampFreshness(r.Context(), s.backend, target, &env.RefreshedAt, &env.Stale)
+	writeJSON(w, http.StatusOK, env)
+}
+
+// stampFreshness fills envelope refreshed_at/stale from the backend's L4
+// sync ledger (real persisted timestamps — never response time). Backends
+// without the concept leave the fields omitted, which the spec allows.
+// Reading SyncInfo doubles as the SWR trigger: soft-stale data nudges the
+// lane's sensor in the background; this request never waits.
+func stampFreshness(ctx context.Context, be backend.Backend, target string, refreshedAt **int64, stale **bool) {
+	sy, ok := be.(interface {
+		SyncInfo(context.Context, string) (int64, bool, bool)
+	})
+	if !ok {
+		return
+	}
+	at, st, known := sy.SyncInfo(ctx, target)
+	if !known {
+		return
+	}
+	*refreshedAt = &at
+	*stale = &st
+}
+
+// paginate applies limit/offset query semantics (default limit 200).
+func paginate[T any](items []T, limitStr, offsetStr string) []T {
+	limit, offset := 200, 0
+	if n, err := strconv.Atoi(limitStr); err == nil && n > 0 {
+		limit = n
+	}
+	if n, err := strconv.Atoi(offsetStr); err == nil && n > 0 {
+		offset = n
+	}
+	if offset >= len(items) {
+		return []T{}
+	}
+	items = items[offset:]
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	return items
 }
 
 func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
@@ -365,10 +697,22 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, detail)
 }
 
-func (s *Server) handleCompare(w http.ResponseWriter, r *http.Request) {
+// handleJobMetrics — GET /jobs/{id}/metrics, dual-mode (spec §5.4, D13):
+// without ?key= → {keys: [...]} (key discovery); with ?key=&order=&limit=
+// → {rows: MetricRankRow[]}. Both shapes are objects so the frontend can
+// discriminate by field.
+func (s *Server) handleJobMetrics(w http.ResponseWriter, r *http.Request) {
 	key := r.URL.Query().Get("key")
 	if key == "" {
-		writeErrorStatus(w, http.StatusBadRequest, fmt.Errorf("key is required"))
+		keys, err := s.backend.MetricKeys(r.Context(), r.PathValue("id"))
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		if keys == nil {
+			keys = []string{}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"keys": keys})
 		return
 	}
 	desc := strings.EqualFold(r.URL.Query().Get("order"), "desc")
@@ -377,33 +721,63 @@ func (s *Server) handleCompare(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, rows)
+	if rows == nil {
+		rows = []backend.CompareRow{}
+	}
+	rows = paginate(rows, r.URL.Query().Get("limit"), "")
+	writeJSON(w, http.StatusOK, map[string]any{"rows": rows})
 }
 
-func (s *Server) handleGPU(w http.ResponseWriter, r *http.Request) {
+// handleTargetGPUs — GET /targets/{name}/gpus (spec §5.2, D11). The
+// aggregated GPUStatus is filtered down to the addressed target.
+// refreshed_at/stale become real once the light cache lands (L4); until
+// then the response claims "fresh now", which is true for push targets
+// and a TODO-honest lie for poll ones.
+func (s *Server) handleTargetGPUs(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
 	gpus, err := s.backend.GPUStatus(r.Context())
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, gpus)
+	kept := make([]backend.GPUSlot, 0, len(gpus))
+	for _, g := range gpus {
+		if g.Target == name {
+			kept = append(kept, g)
+		}
+	}
+	env := envelope(kept)
+	// GPU status is a live exec (or the lane's ≤30s view cache) — "now"
+	// is honest within that TTL; no sync_state row needed.
+	now := time.Now().Unix()
+	stale := false
+	env.RefreshedAt, env.Stale = &now, &stale
+	writeJSON(w, http.StatusOK, env)
+}
+
+// submitBody is the v1 submit-family request body (spec §5.4, D12):
+// options live in the body, never in query parameters.
+type submitBody struct {
+	Config        job.JobConfig `json:"config"`
+	Target        string        `json:"target"`         // 缺省 = default_target
+	SkipPreflight bool          `json:"skip_preflight"` //nolint:tagliatelle
 }
 
 func (s *Server) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
-	var cfg job.JobConfig
-	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
-		writeErrorStatus(w, http.StatusBadRequest, err)
+	var body submitBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, backend.CodeBadRequest, err.Error())
 		return
 	}
-	cfg.Project = strings.TrimSpace(cfg.Project)
-	if cfg.Project == "" {
-		writeErrorStatus(w, http.StatusBadRequest, fmt.Errorf("project is required"))
+	body.Config.Project = strings.TrimSpace(body.Config.Project)
+	if body.Config.Project == "" {
+		writeErr(w, http.StatusBadRequest, backend.CodeBadRequest, "config.project is required")
 		return
 	}
-	opts := backend.SubmitOptions{
-		SkipPreflight: r.URL.Query().Get("no_preflight") == "1",
-	}
-	jobID, total, err := s.backend.SubmitJob(r.Context(), cfg, opts)
+	jobID, total, err := s.backend.SubmitJob(r.Context(), body.Config, backend.SubmitOptions{
+		SkipPreflight: body.SkipPreflight,
+		Target:        body.Target,
+	})
 	if err != nil {
 		writeError(w, err)
 		return
@@ -414,13 +788,16 @@ func (s *Server) handleSubmitJob(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) handleDryRun(w http.ResponseWriter, r *http.Request) {
-	var cfg job.JobConfig
-	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
-		writeErrorStatus(w, http.StatusBadRequest, err)
+// handlePlanJob — POST /jobs/plan (spec §5.4, D12): merges the retired
+// dry-run + resolve-note into one cheap, purely local expansion so the
+// submit wizard makes a single call.
+func (s *Server) handlePlanJob(w http.ResponseWriter, r *http.Request) {
+	var body submitBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, backend.CodeBadRequest, err.Error())
 		return
 	}
-	result, err := s.backend.DryRun(r.Context(), cfg)
+	result, err := s.backend.DryRun(r.Context(), body.Config)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -429,19 +806,16 @@ func (s *Server) handleDryRun(w http.ResponseWriter, r *http.Request) {
 	if tasks == nil {
 		tasks = []job.TaskParams{}
 	}
-	writeJSON(w, http.StatusOK, tasks)
-}
-
-func (s *Server) handleListArchivedJobs(w http.ResponseWriter, r *http.Request) {
-	jobs, err := s.backend.ListArchivedJobs(r.Context())
+	note, err := s.backend.ResolveNote(r.Context(), body.Config)
 	if err != nil {
-		writeError(w, err)
-		return
+		// note 解析失败不应阻塞 plan：降级为原样返回
+		note = body.Config.Note
 	}
-	if jobs == nil {
-		jobs = []backend.JobSummary{}
-	}
-	writeJSON(w, http.StatusOK, jobs)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"tasks":         tasks,
+		"note_resolved": note,
+		"warnings":      []string{}, // TODO(L3): preflight-adjacent warnings
+	})
 }
 
 func (s *Server) handleArchiveJob(w http.ResponseWriter, r *http.Request) {
@@ -477,15 +851,28 @@ func (s *Server) handleUnarchiveProject(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) handlePreviewSubmit(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Config        job.JobConfig `json:"config"`
-		SkipPreflight bool          `json:"skip_preflight"`
-	}
+	var body submitBody
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeErrorStatus(w, http.StatusBadRequest, err)
+		writeErr(w, http.StatusBadRequest, backend.CodeBadRequest, err.Error())
 		return
 	}
-	text, err := s.backend.PreviewSubmit(r.Context(), body.Config, body.SkipPreflight)
+	// body.target routes the preview to that target's backend (full run.sh
+	// + submit command rendering); default target otherwise. (D11: target
+	// 一律显式进 body，?target= 变体已退役。)
+	var text string
+	var err error
+	if body.Target != "" {
+		pt, ok := s.backend.(interface {
+			PreviewSubmitForTarget(ctx context.Context, target string, cfg job.JobConfig, skipPreflight bool) (string, error)
+		})
+		if !ok {
+			writeErr(w, http.StatusBadRequest, backend.CodeBadRequest, "target scoping not supported by this backend")
+			return
+		}
+		text, err = pt.PreviewSubmitForTarget(r.Context(), body.Target, body.Config, body.SkipPreflight)
+	} else {
+		text, err = s.backend.PreviewSubmit(r.Context(), body.Config, body.SkipPreflight)
+	}
 	if err != nil {
 		writeError(w, err)
 		return
@@ -496,7 +883,7 @@ func (s *Server) handlePreviewSubmit(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGetTask(w http.ResponseWriter, r *http.Request) {
 	view, err := s.backend.GetTask(r.Context(), r.PathValue("id"))
 	if err != nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		writeError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, view)
@@ -504,29 +891,14 @@ func (s *Server) handleGetTask(w http.ResponseWriter, r *http.Request) {
 
 // handleTaskLog reads a page of log lines starting at a byte offset.
 // Query params:
-//   - offset: byte offset into the raw log file (default 0)
+//   - offset: byte offset into the raw log file; ABSENT = tail view
+//     (TaskLogTail — the first-paint entry point)
 //   - lines:  number of lines to return (default 200, max 5000)
 //
-// Returns a logfile.Page JSON. The frontend uses start_offset / end_offset
-// for forward/backward paging and total_bytes for progress indication.
+// Returns a logfile.Page JSON (offset / next_offset / size / truncated).
+// All path/FS resolution lives in the owning lane behind the Backend
+// interface — this handler never touches the filesystem.
 func (s *Server) handleTaskLog(w http.ResponseWriter, r *http.Request) {
-	view, err := s.backend.GetTask(r.Context(), r.PathValue("id"))
-	if err != nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
-		return
-	}
-	logPath := view.LogPath
-	if logPath == "" {
-		writeJSON(w, http.StatusOK, &logfile.Page{Lines: []string{}})
-		return
-	}
-
-	offset := int64(0)
-	if v := r.URL.Query().Get("offset"); v != "" {
-		if n, e := strconv.ParseInt(v, 10, 64); e == nil && n >= 0 {
-			offset = n
-		}
-	}
 	lines := logfile.DefaultPageLines
 	if v := r.URL.Query().Get("lines"); v != "" {
 		if n, e := strconv.Atoi(v); e == nil && n > 0 && n <= logfile.MaxPageLines {
@@ -534,16 +906,20 @@ func (s *Server) handleTaskLog(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	lr, err := logfile.Open(logPath)
-	if err != nil {
-		writeJSON(w, http.StatusOK, &logfile.Page{Lines: []string{}})
-		return
+	var page *backend.LogPage
+	var err error
+	if v := r.URL.Query().Get("offset"); v != "" {
+		offset, e := strconv.ParseInt(v, 10, 64)
+		if e != nil || offset < 0 {
+			writeErr(w, http.StatusBadRequest, backend.CodeBadRequest, "invalid offset")
+			return
+		}
+		page, err = s.backend.TaskLogRead(r.Context(), r.PathValue("id"), offset, lines)
+	} else {
+		page, err = s.backend.TaskLogTail(r.Context(), r.PathValue("id"), lines)
 	}
-	defer lr.Close()
-
-	page, err := lr.ReadLines(offset, lines)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		writeError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, page)
@@ -554,25 +930,13 @@ func (s *Server) handleTaskLog(w http.ResponseWriter, r *http.Request) {
 //   - offset: byte offset to start streaming from (default 0)
 //
 // Sends "lines" events containing logfile.Page JSON as new content appears.
+// The handler is a bare pull loop over LogFollower — poll cadence,
+// rotation handling and pending-file waiting all live in the follower.
 // Stops when the client disconnects (EventSource.close / page navigation).
 func (s *Server) handleTaskLogStream(w http.ResponseWriter, r *http.Request) {
-	view, err := s.backend.GetTask(r.Context(), r.PathValue("id"))
-	if err != nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
-		return
-	}
-	logPath := view.LogPath
-	if logPath == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no log file"})
-		return
-	}
-
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		writeErr(w, http.StatusInternalServerError, backend.CodeInternal, "streaming not supported")
 		return
 	}
 
@@ -583,79 +947,81 @@ func (s *Server) handleTaskLogStream(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	lr, err := logfile.Open(logPath)
+	f, err := s.backend.TaskLogFollow(r.Context(), r.PathValue("id"), offset)
 	if err != nil {
-		http.Error(w, "cannot open log file", http.StatusInternalServerError)
+		writeError(w, err)
 		return
 	}
-	defer lr.Close()
+	defer f.Close()
 
-	ticker := time.NewTicker(1 * time.Second)
-	defer ticker.Stop()
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
 
 	for {
-		select {
-		case <-r.Context().Done():
-			return
-		case <-ticker.C:
-			if err := lr.Refresh(); err != nil {
-				continue
-			}
-			if lr.Size() <= offset {
-				continue
-			}
-			page, err := lr.ReadLines(offset, logfile.DefaultPageLines)
-			if err != nil || len(page.Lines) == 0 {
-				continue
-			}
-			data, _ := json.Marshal(page)
-			fmt.Fprintf(w, "event: lines\ndata: %s\n\n", data)
-			flusher.Flush()
-			offset = page.EndOffset
+		page, err := f.Next(r.Context())
+		if err != nil {
+			return // ctx cancelled (client gone) or follower failed: end stream
 		}
+		data, _ := json.Marshal(page)
+		fmt.Fprintf(w, "event: lines\ndata: %s\n\n", data)
+		flusher.Flush()
 	}
 }
 
+// handleTaskMetrics — GET /tasks/{id}/metrics, dual-mode (spec §5.5/§6.4):
+// without ?key= → {points, refreshed_at} (all-key tail points; ?after=
+// incremental); with ?key=&buckets=&from=&to= → {buckets, source}
+// (terminal → pyramid, otherwise tail aggregation).
 func (s *Server) handleTaskMetrics(w http.ResponseWriter, r *http.Request) {
-	points, err := s.backend.TaskMetrics(r.Context(), r.PathValue("id"))
+	q := r.URL.Query()
+	if key := q.Get("key"); key != "" {
+		parse := func(name string) int64 {
+			n, _ := strconv.ParseInt(q.Get(name), 10, 64)
+			return n
+		}
+		maxBuckets := 2000
+		if n, e := strconv.Atoi(q.Get("buckets")); e == nil && n > 0 {
+			maxBuckets = n
+		}
+		buckets, source, err := s.backend.TaskMetricBuckets(
+			r.Context(), r.PathValue("id"), key, parse("from"), parse("to"), maxBuckets)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		if buckets == nil {
+			buckets = []workspace.PyramidBucket{}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"buckets": buckets, "source": source})
+		return
+	}
+
+	after := int64(0)
+	if v := q.Get("after"); v != "" {
+		if n, e := strconv.ParseInt(v, 10, 64); e == nil && n > 0 {
+			after = n
+		}
+	}
+	points, err := s.backend.TaskMetrics(r.Context(), r.PathValue("id"), after)
 	if err != nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		writeError(w, err)
 		return
 	}
 	if points == nil {
 		points = []backend.MetricPoint{}
 	}
-	writeJSON(w, http.StatusOK, points)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"points":       points,
+		"refreshed_at": time.Now().Unix(), // live tail-window read: now IS the read time
+	})
 }
 
 // handleJobActivity returns activity.tsv data for all tasks in a job.
 // The conversion from bytes to lines is deferred to the logfile package
 // once it's implemented (Step 4).
 func (s *Server) handleJobActivity(w http.ResponseWriter, r *http.Request) {
-	detail, err := s.backend.GetJob(r.Context(), r.PathValue("id"))
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	type activityPoint struct {
-		TS    int64 `json:"ts"`
-		Bytes int64 `json:"bytes"`
-		Lines int64 `json:"lines"`
-	}
-	type taskActivity struct {
-		TaskID string          `json:"task_id"`
-		Status string          `json:"status"`
-		Points []activityPoint `json:"points"`
-	}
-	tasks := make([]taskActivity, 0, len(detail.Tasks))
-	for _, t := range detail.Tasks {
-		ta := taskActivity{TaskID: t.ID, Status: t.Status, Points: []activityPoint{}}
-		// TODO(p6-step4): read activity.tsv from task dir + lazy bytes→lines
-		tasks = append(tasks, ta)
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"tasks": tasks,
-	})
+	notImplemented(w, "job activity")
 }
 
 // handleJobLogSearch searches across all task logs in a job.
@@ -663,14 +1029,54 @@ func (s *Server) handleJobActivity(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleJobLogSearch(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query().Get("q")
 	if q == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "q parameter required"})
+		writeErr(w, http.StatusBadRequest, backend.CodeBadRequest, "q parameter required")
 		return
 	}
-	// TODO(p6-step5): iterate task log files using logfile.Reader.Search
+
+	// NOTE: limit/offset paginate the RESPONSE, not the grep — the lane
+	// greps up to its 500-match cap regardless, so paging here saves wire
+	// bytes only. Pushing offset into the grep would need per-batch
+	// cursors; not worth it while the cap bounds total work.
+	matches, err := s.backend.JobLogSearch(r.Context(), r.PathValue("id"), q)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	total := len(matches)
+	limit := 100
+	if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n > 0 {
+		limit = n
+	}
+	offset := 0
+	if n, err := strconv.Atoi(r.URL.Query().Get("offset")); err == nil && n > 0 {
+		offset = n
+	}
+	if offset > total {
+		offset = total
+	}
+	end := min(offset+limit, total)
+	truncated := end < total
+	nextOffset := 0
+	if truncated {
+		nextOffset = end
+	}
+	// Wire shape (spec §5.4): {task_id, line_no, text}. Deliberately NO
+	// byte offset — the grep source has none, and a permanent zero would
+	// bait the frontend into building jump-to-offset on it; jumps go
+	// through the log paging / pyramid raw ranges instead.
+	type searchMatch struct {
+		TaskID string `json:"task_id"`
+		LineNo int    `json:"line_no"`
+		Text   string `json:"text"`
+	}
+	out := make([]searchMatch, 0, end-offset)
+	for _, m := range matches[offset:end] {
+		out = append(out, searchMatch{TaskID: m.TaskID, LineNo: m.Line, Text: m.Text})
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"matches":     []any{},
-		"next_offset": 0,
-		"truncated":   false,
+		"matches":     out,
+		"next_offset": nextOffset,
+		"truncated":   truncated,
 	})
 }
 
@@ -765,26 +1171,67 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// writeError classifies an error into the v1 (status, code) pair (spec §2).
+// Handlers that already know the code should call writeErr directly.
 func writeError(w http.ResponseWriter, err error) {
-	status := http.StatusInternalServerError
+	status, code := http.StatusInternalServerError, backend.CodeInternal
 	msg := strings.ToLower(err.Error())
-	if errors.Is(err, backend.ErrNotSupported) {
-		status = http.StatusBadRequest
-	} else if backend.IsNotFound(err) {
-		status = http.StatusNotFound
-	} else if strings.Contains(msg, "already exists") {
-		status = http.StatusConflict
-	} else if strings.Contains(msg, "required") || strings.Contains(msg, "invalid") {
-		status = http.StatusBadRequest
+	switch {
+	case errors.Is(err, backend.ErrNotSupported):
+		status, code = http.StatusConflict, backend.CodeNotSupported
+	case backend.IsNotFound(err):
+		status, code = http.StatusNotFound, backend.CodeNotFound
+	case strings.Contains(msg, "already exists"):
+		status, code = http.StatusConflict, backend.CodeInvalidState
+	case strings.Contains(msg, "required") || strings.Contains(msg, "invalid"):
+		status, code = http.StatusBadRequest, backend.CodeBadRequest
 	}
-	writeErrorStatus(w, status, err)
+	writeErr(w, status, code, err.Error())
 }
 
+// writeErr emits the v1 error envelope: error for humans, code for
+// programs (stable enum — clients branch only on code).
+func writeErr(w http.ResponseWriter, status int, code, msg string) {
+	writeJSON(w, status, backend.ErrorResponse{Error: msg, Code: code})
+}
+
+// writeErrorStatus is a transitional shim for status-only call sites: the
+// code is derived from the status. New code should call writeErr directly.
 func writeErrorStatus(w http.ResponseWriter, status int, err error) {
-	writeJSON(w, status, backend.ErrorResponse{
-		Error: err.Error(),
-		Code:  status,
-	})
+	code := backend.CodeInternal
+	switch status {
+	case http.StatusBadRequest:
+		code = backend.CodeBadRequest
+	case http.StatusNotFound:
+		code = backend.CodeNotFound
+	case http.StatusConflict:
+		code = backend.CodeInvalidState
+	}
+	writeErr(w, status, code, err.Error())
+}
+
+// notImplemented is the spec-first stub response: the endpoint is defined
+// in the protocol spec but its layer below is not built yet (501).
+func notImplemented(w http.ResponseWriter, what string) {
+	writeErr(w, http.StatusNotImplemented, backend.CodeNotImplemented, what+": not implemented yet")
+}
+
+// listEnvelope is the v1 list response (spec §2/D20): never bare arrays.
+// Freshness fields are pointers so plain local resources (projects) omit
+// them entirely.
+type listEnvelope[T any] struct {
+	Items       []T    `json:"items"`
+	Total       *int   `json:"total,omitempty"`
+	RefreshedAt *int64 `json:"refreshed_at,omitempty"`
+	Stale       *bool  `json:"stale,omitempty"`
+}
+
+// envelope wraps items, materializing nil slices to [] (JSON []).
+func envelope[T any](items []T) listEnvelope[T] {
+	if items == nil {
+		items = []T{}
+	}
+	return listEnvelope[T]{Items: items}
 }
 
 func ParsePort(port string) (int, error) {
