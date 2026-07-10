@@ -6,7 +6,6 @@ import (
 	"path"
 	"strings"
 
-	"github.com/gliese129/runq/internal/config"
 	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/project"
 	"github.com/gliese129/runq/internal/submitplan"
@@ -18,19 +17,11 @@ import (
 // side effects: nothing written, nothing persisted, nothing queued.
 // The dry-run contract: preview is truth, disk stays untouched (C5/U1).
 func (b *Backend) Preview(ctx context.Context, jobCfg job.JobConfig, proj *project.Config, skipPreflight bool) (string, error) {
-	disableLocal := b.Cfg.PreflightLocal != nil && !*b.Cfg.PreflightLocal
-	plan, err := submitplan.Build(ctx, jobCfg, proj, submitplan.Deps{
-		JobID: utils.GenerateJobID(),
-		IDGen: utils.GenerateTaskID,
-		Paths: submitplan.Paths{
-			WorkspaceRoot: "<workspace>", // placeholder roots: nothing is written
-			LogRoot:       "<workspace>",
-		},
-		SkipPreflight:         skipPreflight,
-		PreflightDisableLocal: disableLocal,
-		PreflightScope:        "on this login node",
-		SchedulerParams:       config.HPCTemplateParamRefs(b.Cfg.SubmitTemplate),
-	})
+	deps := b.planDeps(skipPreflight)
+	deps.JobID = utils.GenerateJobID()
+	// Placeholder roots: nothing is written (the dry-run contract).
+	deps.Paths = submitplan.Paths{WorkspaceRoot: "<workspace>", LogRoot: "<workspace>"}
+	plan, err := submitplan.Build(ctx, jobCfg, proj, deps)
 	if err != nil {
 		return "", err
 	}

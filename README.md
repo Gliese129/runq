@@ -1,6 +1,6 @@
 # runq
 
-**If you are an AI agent, please read [AI_README.md](./AI_README.md)**
+**If you are an AI agent, please read [SKILLS.md](./SKILLS.md)**
 
 A lightweight GPU job scheduler for research labs.
 

@@ -136,6 +136,25 @@ func resolveNote(ctx context.Context, st *store.Store, cfg job.JobConfig) (strin
 // to be queued; the actual submission happens per task in Launcher.Launch
 // (scheduler lane) or inline in Submit (legacy lane).
 //
+// planDeps assembles the submitplan.Deps fields that Prepare and Preview
+// MUST agree on (RQ-65 retest #1: preview forgot PreflightFS and checked
+// TSUBAME paths on the Mac). Callers add only their true differences:
+// JobID and Paths (real root vs placeholder).
+//
+// Checks run against the TARGET: paths/script via its FS, probes on its
+// login node. The scope label is the honest caveat that the login-node
+// env may still differ from compute nodes.
+func (b *Backend) planDeps(skipPreflight bool) submitplan.Deps {
+	return submitplan.Deps{
+		IDGen:                 utils.GenerateTaskID,
+		SkipPreflight:         skipPreflight,
+		PreflightDisableLocal: b.Cfg.PreflightLocal != nil && !*b.Cfg.PreflightLocal,
+		PreflightScope:        fmt.Sprintf("on %s login node", b.Cfg.Name),
+		PreflightFS:           b.FS,
+		SchedulerParams:       config.HPCTemplateParamRefs(b.Cfg.SubmitTemplate),
+	}
+}
+
 // WorkspaceRoot is THE single decision point for where this target puts
 // job workspaces (RQ-65): a configured target workspace WINS — it is a
 // path on the TARGET's filesystem, composed as POSIX and materialized via
@@ -193,23 +212,10 @@ func (b *Backend) Prepare(ctx context.Context, jobCfg job.JobConfig, proj *proje
 	// experiment log; the DB stores full paths (never re-derived from id).
 	jobRoot := path.Join(wsRoot, workspace.JobDirName(planCfg.Note, jobID))
 
-	disableLocal := b.Cfg.PreflightLocal != nil && !*b.Cfg.PreflightLocal
-	plan, err := submitplan.Build(ctx, planCfg, proj, submitplan.Deps{
-		JobID: jobID,
-		IDGen: utils.GenerateTaskID,
-		Paths: submitplan.Paths{
-			WorkspaceRoot: jobRoot,
-			LogRoot:       jobRoot,
-		},
-		SkipPreflight:         opts.SkipPreflight,
-		PreflightDisableLocal: disableLocal,
-		// Checks run against the TARGET: paths/script via its FS, probes on
-		// its login node. The scope label is the honest caveat that the
-		// login-node env may still differ from compute nodes.
-		PreflightScope:  fmt.Sprintf("on %s login node", b.Cfg.Name),
-		PreflightFS:     b.FS,
-		SchedulerParams: config.HPCTemplateParamRefs(b.Cfg.SubmitTemplate),
-	})
+	deps := b.planDeps(opts.SkipPreflight)
+	deps.JobID = jobID
+	deps.Paths = submitplan.Paths{WorkspaceRoot: jobRoot, LogRoot: jobRoot}
+	plan, err := submitplan.Build(ctx, planCfg, proj, deps)
 	if err != nil {
 		return "", nil, err
 	}

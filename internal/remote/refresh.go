@@ -186,6 +186,18 @@ func awaitingRelaunch(tk store.TaskRow) bool {
 // terminal corrections (inferred→wrapper) — stays a direct store update,
 // because the scheduler only manages in-flight tasks.
 func (b *Backend) persistDecision(ctx context.Context, tk store.TaskRow, d Decision, fields map[string]any) error {
+	// INVARIANT (RQ-65 #5), enforced at THE funnel — every hard-final
+	// write from every entry point (reconcile, batch, marker scan, kill)
+	// passes through here, and a hard-final is the LAST write a task ever
+	// sees: whatever it leaves behind is frozen forever. Frozen fields
+	// must hold TIMELESS values, not snapshots — even a freshly probed
+	// "running"/"COMPLETING" is a truth with seconds to live. So the
+	// override is unconditional: "gone" (the scheduler no longer knows
+	// this job) is the only native_state that stays true.
+	if isTerminal(d.Status) && (d.Source == SourceWrapper || d.Source == SourceRunq) {
+		fields["native_state"] = "gone"
+		fields["queue"] = ""
+	}
 	if b.Finisher != nil && isTerminal(d.Status) && !isTerminal(tk.Status) {
 		b.Finisher.FinishTask(rowToTask(tk), scheduler.TaskStatus(d.Status), fields)
 		return nil
@@ -332,17 +344,6 @@ func (b *Backend) reconcileWith(ctx context.Context, jobID string, probe bool, p
 			fields["finished_at"] = nil
 		}
 
-		// Hard-final adoption is the LAST write this task will ever see
-		// (wrapper/runq terminals skip all future probes) — a stale
-		// native_state "running" would be frozen forever (RQ-65 #5).
-		// "gone" is the honest scheduler answer: it no longer knows this job.
-		if isTerminal(d.Status) && (d.Source == SourceWrapper || d.Source == SourceRunq) {
-			if !probe || pr.NativeState == "" {
-				fields["native_state"] = "gone"
-			}
-			fields["queue"] = ""
-		}
-
 		if err := b.persistDecision(ctx, tk, d, fields); err != nil {
 			return fmt.Errorf("update task %s: %w", tk.ID, err)
 		}
@@ -437,15 +438,6 @@ func (b *Backend) reconcileWithBatch(ctx context.Context, jobID string, signals 
 			}
 		case !isTerminal(d.Status) && isTerminal(tk.Status):
 			fields["finished_at"] = nil
-		}
-
-		// Hard-final adoption freezes fields forever — leave an honest
-		// native_state behind (RQ-65 #5; see reconcileWith).
-		if isTerminal(d.Status) && (d.Source == SourceWrapper || d.Source == SourceRunq) {
-			if pr.NativeState == "" {
-				fields["native_state"] = "gone"
-			}
-			fields["queue"] = ""
 		}
 
 		if err := b.persistDecision(ctx, tk, d, fields); err != nil {
