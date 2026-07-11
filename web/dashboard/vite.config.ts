@@ -1,14 +1,12 @@
 import { fileURLToPath, URL } from "node:url";
 import vue from "@vitejs/plugin-vue";
 import vuetify from "vite-plugin-vuetify";
-import tailwindcss from "@tailwindcss/vite";
 import { defineConfig } from "vite";
 
 export default defineConfig({
   plugins: [
     vue(),
     vuetify({ autoImport: true }),
-    tailwindcss(),
   ],
   resolve: {
     alias: {

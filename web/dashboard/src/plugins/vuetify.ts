@@ -1,6 +1,18 @@
 import 'vuetify/styles'
-import '@mdi/font/css/materialdesignicons.css'
-import { createVuetify } from 'vuetify'
+import { h } from 'vue'
+import { createVuetify, type IconSet, type IconProps } from 'vuetify'
+import { aliases, mdi } from 'vuetify/iconsets/mdi-svg'
+import { MDI_PATHS } from './mdiPaths'
+
+// ── Icons: SVG paths, resolved by name ──
+// @mdi/font shipped all 7000+ glyphs (~400KB woff2 + ~90KB gzip CSS) for
+// the ~90 we use. Templates keep writing plain `mdi-*` strings; this set
+// resolves them through the generated MDI_PATHS map (yarn gen:icons).
+// Unknown names render empty — the generator fails CI-side first.
+const mdiSvgByName: IconSet = {
+  component: (props: IconProps) =>
+    h(mdi.component, { ...props, icon: MDI_PATHS[props.icon as string] ?? '' }),
+}
 
 // ──────────────────────────────────────────────
 // Theme A (Flat Professional) + B (Terminal Data)
@@ -49,6 +61,11 @@ const dark = {
 }
 
 export default createVuetify({
+  icons: {
+    defaultSet: 'mdi',
+    aliases, // vuetify-internal $close/$menu/... → svg paths
+    sets: { mdi: mdiSvgByName },
+  },
   theme: {
     defaultTheme: localStorage.getItem('runq-theme') || 'light',
     themes: { light, dark },

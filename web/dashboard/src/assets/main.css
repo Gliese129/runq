@@ -1,9 +1,17 @@
-@import "tailwindcss";
-
 /* ═══════════════════════════════════════════
    runq Design System
    Style A (Flat Professional) + B (Terminal Data)
+
+   Utility classes come from Vuetify (d-flex, ga-2, text-caption, ...).
+   Tailwind was removed on purpose — it only ever supplied .font-mono,
+   while its mb-* / px-* duplicates of Vuetify's spacing scale created
+   ambiguity about which framework a class resolved to. Do not re-add.
    ═══════════════════════════════════════════ */
+
+/* ── .font-mono (ex-Tailwind, the one utility we actually used) ── */
+.font-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
 
 /* ── Global card radius: 6px (between Vuetify sm=4 and default=8) ── */
 .v-card {

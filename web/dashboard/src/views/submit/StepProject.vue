@@ -799,7 +799,7 @@ async function onScriptPicked(entry: FSEntry) {
   const parts = dir.split(/[\\/]+/).filter(Boolean)
   if (!form.name) form.name = parts[parts.length - 1] || 'my-project'
   form.workDir = dir
-  const isShell = /\.sh$/.test(entry.name)
+  const isShell = entry.name.endsWith('.sh')
   form.cmd = isShell ? `bash ${entry.name} {{args}}` : `python ${entry.name} {{args}}`
 
   try {

@@ -73,5 +73,13 @@ jobs:
           yarn install --frozen-lockfile
           yarn build
 
+      - name: Lint dashboard
+        working-directory: web/dashboard
+        run: yarn lint
+
+      - name: Test dashboard
+        working-directory: web/dashboard
+        run: yarn test
+
       - name: Build Go binary with embedded dashboard
         run: go build -tags dashboard ./cmd/runq
