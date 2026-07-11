@@ -168,6 +168,7 @@ const linkSets = ref<LinkSet[]>([])
 const dryRunResult = ref<Record<string, any>[]>([])
 const dryRunLoading = ref(false)
 const dryRunError = ref('')
+const noteResolved = ref('')
 const submitting = ref(false)
 const preflightEnabled = ref(true)
 
@@ -204,6 +205,7 @@ provide(SUBMIT_STATE_KEY, reactive({
   dryRunLoading,
   dryRunError,
   dryRunHeaders,
+  noteResolved,
   submitting,
   preflightEnabled,
   prefs,
@@ -268,15 +270,18 @@ async function goNext() {
       snack.error(validation.message)
       return
     }
-    // Run dry-run before entering review
+    // Plan (merged dry-run + resolve-note) before entering review
     prefs.lastProject.value = projectName.value
     dryRunLoading.value = true
     dryRunError.value = ''
     step.value = 2
     try {
-      dryRunResult.value = await jobsApi.dryRun(buildJobConfig())
+      const plan = await jobsApi.plan(buildJobConfig())
+      dryRunResult.value = plan.tasks
+      noteResolved.value = plan.note_resolved
     } catch (e: any) {
       dryRunResult.value = []
+      noteResolved.value = ''
       dryRunError.value = e?.message || t('submit.dryrun_failed')
     } finally {
       dryRunLoading.value = false

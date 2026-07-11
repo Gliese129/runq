@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import {
-  compile, decompile, taskCount, validateTable, rowEffect, inferType,
+  compile, decompile, taskCount, validateTable, rowEffect, inferType, newLinkSetId,
   type ParamRow, type LinkSet,
 } from './paramTable'
 
@@ -169,5 +169,15 @@ describe('decompile (re-run job as template)', () => {
     expect(inferType([0.1, 1])).toBe('float')
     expect(inferType([true])).toBe('bool')
     expect(inferType(['a', 1])).toBe('str')
+  })
+
+  // Regression: decompile and manual Link each ran a local `ls${n}` counter
+  // from 0 — importing a template then linking manually produced two sets
+  // with the same id, and unlink-by-id deleted both.
+  it('generates globally unique link-set ids across creation paths', () => {
+    const a = decompile({ sweep: [{ method: 'list', parameters: { x: [1, 2], y: [3, 4] } as any }] })
+    const b = decompile({ sweep: [{ method: 'list', parameters: { p: [1, 2], q: [3, 4] } as any }] })
+    const ids = [...a.linkSets, ...b.linkSets].map(s => s.id).concat(newLinkSetId())
+    expect(new Set(ids).size).toBe(ids.length)
   })
 })

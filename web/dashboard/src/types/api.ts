@@ -1,4 +1,13 @@
-// Mirrors Go view types in internal/dashboard/types.go
+// Mirrors Go view types in internal/backend/types.go (spec-first /api/v1).
+
+/** Standard list wrapper for all v1 collection endpoints. */
+export interface ListEnvelope<T> {
+  items: T[]
+  total?: number
+  /** poll-model freshness metadata — surface staleness in the UI */
+  refreshed_at?: number
+  stale?: boolean
+}
 
 export interface TaskCountGroup {
   total: number
@@ -14,6 +23,8 @@ export interface JobSummary {
   project: string
   note: string
   status: string
+  /** compute target this job runs on (multi-target model) */
+  target: string
   created_at: number
   tasks: TaskCountGroup
   eta_seconds?: number
@@ -51,6 +62,22 @@ export interface TaskView {
   native_state?: string
   /** Scheduler queue/partition name (e.g. "gpu-a100", "cpu-batch"). */
   queue?: string
+  /** filesystem path to the task's log file — populated by GetTask only */
+  log_path?: string
+}
+
+/** One metric sample (mirrors backend.MetricPoint). */
+export interface MetricPoint {
+  key: string
+  value: number
+  step?: number
+  ts: number
+}
+
+/** GET /tasks/{id}/metrics without ?key= — live tail-window read. */
+export interface TaskMetricsResponse {
+  points: MetricPoint[]
+  refreshed_at: number
 }
 
 /** Mirrors logfile.Page — byte-offset based log page. */
@@ -98,6 +125,8 @@ export interface GPUSlot {
   util_percent: number
   task_id?: string
   job_id?: string
+  /** compute target these GPUs belong to (stamped during aggregation) */
+  target?: string
 }
 
 /**
@@ -123,11 +152,56 @@ export interface Capabilities {
   log_search: boolean
 }
 
+/** One target's bootstrap entry: identity + capability bits (spec §4). */
+export interface TargetSummary {
+  name: string
+  type: 'local' | 'remote'
+  /** slurm | pbs | ... | runq | "" (empty = direct execution) */
+  scheduler: string
+  capabilities: Capabilities
+}
+
+/**
+ * GET /config — v1 bootstrap summary. `mode` is gone from the wire;
+ * capabilities are declared per target.
+ */
 export interface ConfigResponse {
-  mode: string
   data_path: string
   config_path: string
-  capabilities: Capabilities
+  default_target: string
+  targets: TargetSummary[]
+}
+
+/** POST /targets|jobs/{id}/refresh — D22: caller always learns the outcome. */
+export interface RefreshReceipt {
+  /** unix; 0 = never synced. Persisted photo timestamp, not response time. */
+  refreshed_at: number
+  refreshed: boolean
+  /** min_interval | timeout | <sync error> */
+  reason?: string
+  retry_after_seconds?: number
+}
+
+/** One row of GET /health targets[] — passive reachability. */
+export interface TargetHealth {
+  name: string
+  reachable: boolean
+  last_error?: string
+  /** unix; 0 = no contact yet */
+  last_checked: number
+}
+
+export interface HealthResponse {
+  version: string
+  uptime_seconds: number
+  targets: TargetHealth[]
+}
+
+/** POST /jobs/plan — merged dry-run + resolve-note (single wizard call). */
+export interface JobPlanResponse {
+  tasks: Record<string, any>[]
+  note_resolved: string
+  warnings: string[]
 }
 
 export interface ActionResponse {
@@ -288,11 +362,12 @@ export interface JobActivityResponse {
   job_end?: number
 }
 
+/** Wire shape (spec §5.4): deliberately no byte offset — jumps go through
+ *  log paging / pyramid raw ranges, not grep results. */
 export interface SearchMatch {
   task_id: string
   line_no: number
-  offset: number
-  line: string
+  text: string
 }
 
 export interface JobLogSearchResponse {

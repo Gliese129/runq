@@ -409,19 +409,35 @@ const isCreating = computed(() => mode.value === 'create')
 // Path A is read-only by default; this expands the edit form.
 const editingProject = ref(false)
 
-// ── Dirty tracking ──
+// ── Dirty tracking (snapshot compare) ──
 // goNext saves the project ONLY when something was actually edited (or in
 // create mode). Selecting a project and clicking Next is side-effect free.
-let applying = false
-watch(
-  () => [form_(), state.newProject.params],
-  () => { if (!applying) state.newProject.dirty = true },
-  { deep: true },
-)
+//
+// Snapshot-based on purpose: the previous `applying` boolean raced with
+// the deep watcher — watch callbacks are pre-flush (async), so by the time
+// they ran the whole synchronous apply had finished and the flag was
+// already false → every programmatic apply was misdetected as a user edit
+// and goNext silently rewrote project.yaml. Comparing against a baseline
+// taken AFTER each apply is immune to callback timing (and as a bonus,
+// edit-then-undo returns to clean).
 function form_() {
   const { name, workDir, cmd, setupCmd, envText, jobName, gpus, maxRetry, envType, envPath, envName } = state.newProject
   return { name, workDir, cmd, setupCmd, envText, jobName, gpus, maxRetry, envType, envPath, envName }
 }
+function snapshot(): string {
+  return JSON.stringify([form_(), state.newProject.params])
+}
+let appliedSnapshot = snapshot()
+/** Re-baseline after a programmatic apply: current state == persisted state. */
+function markClean() {
+  appliedSnapshot = snapshot()
+  state.newProject.dirty = false
+}
+watch(
+  () => [form_(), state.newProject.params],
+  () => { state.newProject.dirty = snapshot() !== appliedSnapshot },
+  { deep: true },
+)
 
 function enterEditMode() {
   editingProject.value = true
@@ -458,9 +474,12 @@ async function doRename() {
     const proj = state.matchedProjects.find(p => p.name === state.projectName)
     if (proj) proj.name = newName
     state.projectName = newName
-    applying = true
+    // Rename is already persisted server-side. If nothing else was edited,
+    // re-baseline (stay clean); if other edits are pending, dirty stays
+    // true and the new name rides along with the eventual save.
+    const otherEditsPending = snapshot() !== appliedSnapshot
     form.name = newName
-    applying = false
+    if (!otherEditsPending) markClean()
     prefs.lastProject.value = newName
     renameDialog.value = false
   } catch (e: any) {
@@ -508,7 +527,6 @@ async function selectProject(name: string) {
 }
 
 function applyProjectConfig(cfg: ProjectConfig, resetGroups = true) {
-  applying = true
   form.name = cfg.project_name
   form.workDir = cfg.working_dir
   form.cmd = cfg.command_template
@@ -528,8 +546,7 @@ function applyProjectConfig(cfg: ProjectConfig, resetGroups = true) {
   if (!rawParams.some(p => p.include !== undefined)) {
     autoIncludeCommonParams()
   }
-  state.newProject.dirty = false
-  applying = false
+  markClean()
   if (resetGroups) { state.rows = []; state.linkSets = [] }
 }
 
@@ -539,10 +556,8 @@ async function refreshParamsFromProject(cfg: ProjectConfig) {
   scriptPath.value = path
   try {
     const result = await filesApi.parseScript(path, { silent: true })
-    applying = true
     mergeParsedParams(result.args || [])
-    state.newProject.dirty = false
-    applying = false
+    markClean()
   } catch {
     // Keep persisted project.yaml params when script parsing is unavailable.
   }
@@ -631,7 +646,6 @@ function enterCreateMode() {
 }
 
 function resetProjectForm() {
-  applying = true
   form.name = ''
   form.workDir = ''
   form.cmd = ''
@@ -645,8 +659,7 @@ function resetProjectForm() {
   form.envName = ''
   form.error = ''
   form.params = []
-  state.newProject.dirty = false
-  applying = false
+  markClean()
   scriptPath.value = ''
   scriptPicked.value = false
   detectedSummary.value = ''

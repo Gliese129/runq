@@ -13,18 +13,19 @@ import en from '@/i18n/en.json'
 // immediate watcher touching a ref still in its temporal dead zone) —
 // exactly the class of bug vue-tsc cannot see and a mount catches.
 vi.mock('@/apis/client', () => {
-  const respond = (path: string) => {
-    if (path.includes('/jobs/archived')) return []
-    if (path.includes('/jobs')) return []
+  // v1: collection endpoints go through api.getList (envelope unwrapped)
+  const respondList = (path: string) => {
     if (path.includes('/projects')) return [{ name: 'p1', work_dir: '/x', job_count: 0, archived: true }]
-    return {}
+    return []
   }
   return {
     api: {
-      get: vi.fn(async (p: string) => respond(p)),
-      post: vi.fn(async (p: string) => respond(p)),
-      put: vi.fn(async (p: string) => respond(p)),
-      delete: vi.fn(async (p: string) => respond(p)),
+      get: vi.fn(async () => ({})),
+      post: vi.fn(async () => ({})),
+      put: vi.fn(async () => ({})),
+      del: vi.fn(async () => ({})),
+      getList: vi.fn(async (p: string) => respondList(p)),
+      getEnvelope: vi.fn(async (p: string) => ({ items: respondList(p) })),
     },
   }
 })

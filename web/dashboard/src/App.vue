@@ -22,10 +22,14 @@
       <v-btn variant="text" size="small" icon="mdi-close" @click="snack.dismiss()" />
     </template>
   </v-snackbar>
+
+  <!-- Global confirm dialog (useConfirm) -->
+  <ConfirmDialog />
 </template>
 
 <script setup lang="ts">
 import { useSnackbar } from '@/composables/useSnackbar'
+import ConfirmDialog from '@/components/ConfirmDialog.vue'
 
 const snack = useSnackbar()
 </script>

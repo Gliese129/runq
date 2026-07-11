@@ -233,5 +233,10 @@
   "log.load_earlier": "前を読み込む",
   "log.processors": "プロセッサ",
   "activity.title": "アクティビティ",
-  "activity.no_data": "アクティビティデータなし"
+  "activity.no_data": "アクティビティデータなし",
+  "confirm.kill_job_title": "ジョブを停止しますか?",
+  "confirm.kill_job_body": "{n} 件の実行中/待機中タスクが停止されます。この操作は取り消せません。",
+  "confirm.kill_task_title": "タスクを停止しますか?",
+  "confirm.kill_task_body": "タスク {id} が停止されます。この操作は取り消せません。",
+  "settings.default_target": "デフォルトターゲット"
 }

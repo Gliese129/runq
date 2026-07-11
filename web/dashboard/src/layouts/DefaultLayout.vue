@@ -16,7 +16,7 @@
         </router-link>
         <v-spacer />
         <v-chip v-if="!collapsed && config.loaded" size="x-small" variant="tonal" color="primary" label>
-          {{ config.mode }}
+          {{ config.targetLabel }}
         </v-chip>
       </div>
 

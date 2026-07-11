@@ -233,5 +233,10 @@
   "log.load_earlier": "加载更早内容",
   "log.processors": "处理器",
   "activity.title": "活跃度",
-  "activity.no_data": "暂无活跃度数据"
+  "activity.no_data": "暂无活跃度数据",
+  "confirm.kill_job_title": "终止此 Job?",
+  "confirm.kill_job_body": "将终止 {n} 个 running/pending 任务,此操作不可撤销。",
+  "confirm.kill_task_title": "终止此任务?",
+  "confirm.kill_task_body": "任务 {id} 将被终止,此操作不可撤销。",
+  "settings.default_target": "默认 Target"
 }

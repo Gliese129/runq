@@ -12,8 +12,8 @@
       <v-card class="pa-4 mb-4 text-left">
         <div class="d-flex flex-column ga-2">
           <div class="d-flex align-center justify-space-between">
-            <span class="text-on-surface-variant">{{ t('settings.mode') }}</span>
-            <v-chip size="small" variant="tonal" color="primary">{{ config.mode }}</v-chip>
+            <span class="text-on-surface-variant">{{ t('settings.default_target') }}</span>
+            <v-chip size="small" variant="tonal" color="primary">{{ config.targetLabel }}</v-chip>
           </div>
           <div class="d-flex align-center justify-space-between">
             <span class="text-on-surface-variant">Version</span>

@@ -7,6 +7,9 @@
       :can-pause="config.caps.pause_resume"
       :is-poll="config.isPoll"
       :refreshing="refreshing"
+      :pausing="pausing"
+      :killing="killing"
+      :archiving="archiving"
       @pause="togglePause"
       @resume="togglePause"
       @kill="killJob"
@@ -69,6 +72,7 @@ import { useConfigStore } from '@/stores/config'
 import { usePreferences } from '@/composables/usePreferences'
 import { usePolling } from '@/composables/usePolling'
 import { useSnackbar } from '@/composables/useSnackbar'
+import { useConfirm } from '@/composables/useConfirm'
 import JobHeader from './JobHeader.vue'
 import TaskTable from './TaskTable.vue'
 import StatusDot from '@/components/StatusDot.vue'
@@ -81,6 +85,7 @@ const prefs = usePreferences()
 const snack = useSnackbar()
 const jobsStore = useJobsStore()
 const { t } = useI18n()
+const { confirm: confirmDialog } = useConfirm()
 
 const statusFilter = ref(prefs.lastStatusFilter.value)
 
@@ -147,20 +152,27 @@ watch(statusFilter, (v) => { prefs.lastStatusFilter.value = v })
 
 function refresh(silent = false) { store.fetchDetail(props.jobId, silent) }
 
+const archiving = ref(false)
 async function archiveJob() {
+  if (archiving.value) return
+  archiving.value = true
   try {
     await jobsStore.archiveJob(props.jobId) // store action refreshes lists
     snack.success(t('archive.job_done'))
     refresh(true)
-  } catch (e: any) { snack.error(e?.message || 'Archive failed') }
+  } catch (e: any) { snack.error(e?.message || t('common.error')) }
+  finally { archiving.value = false }
 }
 
 async function unarchiveJob() {
+  if (archiving.value) return
+  archiving.value = true
   try {
     await jobsStore.unarchiveJob(props.jobId)
     snack.success(t('archive.job_back'))
     refresh(true)
-  } catch (e: any) { snack.error(e?.message || 'Unarchive failed') }
+  } catch (e: any) { snack.error(e?.message || t('common.error')) }
+  finally { archiving.value = false }
 }
 
 // Manual reconcile (poll-model backends): forces the backend to re-read
@@ -175,24 +187,53 @@ function onRefresh() {
     .finally(() => { refreshing.value = false })
 }
 
+const pausing = ref(false)
 function togglePause() {
-  if (!store.detail) return
+  if (!store.detail || pausing.value) return
+  pausing.value = true
   const p = store.detail.job.status === 'paused'
     ? store.resumeJob(props.jobId)
     : store.pauseJob(props.jobId)
-  p.then(() => { snack.success('Done'); refresh() })
+  p.then(() => { snack.success(t('common.done')); refresh() })
+    .catch((e: any) => snack.error(e?.message || t('common.error')))
+    .finally(() => { pausing.value = false })
 }
 
-function killJob() {
-  store.killJob(props.jobId).then(() => { snack.success('Job killed'); refresh() })
+const killing = ref(false)
+async function killJob() {
+  if (!store.detail || killing.value) return
+  const counts = store.detail.job.tasks
+  const ok = await confirmDialog({
+    title: t('confirm.kill_job_title'),
+    body: t('confirm.kill_job_body', { n: counts.running + counts.pending }),
+    confirmText: t('job.kill'),
+    danger: true,
+  })
+  if (!ok) return
+  killing.value = true
+  store.killJob(props.jobId)
+    .then(() => { snack.success(t('job.killed')); refresh() })
+    .catch((e: any) => snack.error(e?.message || t('common.error')))
+    .finally(() => { killing.value = false })
 }
 
-function onKillTask(id: string) {
-  store.killTask(id).then(() => refresh())
+async function onKillTask(id: string) {
+  const ok = await confirmDialog({
+    title: t('confirm.kill_task_title'),
+    body: t('confirm.kill_task_body', { id: id.slice(0, 8) }),
+    confirmText: t('job.kill'),
+    danger: true,
+  })
+  if (!ok) return
+  store.killTask(id)
+    .then(() => refresh())
+    .catch((e: any) => snack.error(e?.message || t('common.error')))
 }
 
 function onRetryTask(id: string) {
-  store.retryTask(id).then(() => refresh())
+  store.retryTask(id)
+    .then(() => refresh())
+    .catch((e: any) => snack.error(e?.message || t('common.error')))
 }
 
 function onClickTask(id: string) {

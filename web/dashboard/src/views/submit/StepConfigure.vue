@@ -230,7 +230,7 @@ import { usePreferences } from '@/composables/usePreferences'
 import { SUBMIT_STATE_KEY } from '@/types/submit'
 import { inject } from 'vue'
 import {
-  activeValues, linkColor, rowEffect, validateTable, taskCount,
+  activeValues, linkColor, rowEffect, validateTable, taskCount, newLinkSetId,
   type LinkSet, type ParamRow,
 } from './paramTable'
 import { sweepSummary, buildJobConfig } from './submitFlow'
@@ -244,7 +244,6 @@ const selected = reactive(new Set<string>())
 const newParamName = ref('')
 const customNames = reactive(new Set<string>())
 const hintDismissed = ref(false)
-let setCounter = 0
 
 function placeholderText(ph: string): string {
   return `{{${ph}}}`
@@ -335,7 +334,7 @@ function linkSelected() {
   const touched = new Set([...selected].map(n => setIdOf(n)).filter(Boolean))
   state.linkSets = state.linkSets.filter(s => !touched.has(s.id))
   const members = state.rows.filter(r => selected.has(r.name)).map(r => r.name)
-  state.linkSets.push({ id: `ls${setCounter++}`, members })
+  state.linkSets.push({ id: newLinkSetId(), members })
   if (alignedSetId.value && touched.has(alignedSetId.value)) alignedSetId.value = null
   selected.clear()
 }
@@ -530,9 +529,10 @@ watch(
     if (!state.note.includes('{{')) { resolvedNote.value = ''; return }
     noteTimer = setTimeout(async () => {
       try {
+        // v1: resolve-note is merged into /jobs/plan (cheap local expansion)
         const cfg = buildJobConfig(state.projectName, state.note, state.rows, state.linkSets)
-        const res = await jobsApi.resolveNote(cfg)
-        resolvedNote.value = res.resolved
+        const res = await jobsApi.plan(cfg)
+        resolvedNote.value = res.note_resolved
       } catch { resolvedNote.value = '' }
     }, 500)
   },

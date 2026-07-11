@@ -63,6 +63,8 @@ export interface SubmitState {
   dryRunLoading: boolean
   dryRunError: string
   dryRunHeaders: { title: string; key: string }[]
+  /** backend-resolved note from POST /jobs/plan ({{version}} scanned) */
+  noteResolved: string
   submitting: boolean
   preflightEnabled: boolean
   prefs: any

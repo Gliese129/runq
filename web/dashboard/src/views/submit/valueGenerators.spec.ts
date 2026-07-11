@@ -15,6 +15,15 @@ describe('linearSpace', () => {
   it('caps at MAX_GENERATED', () => {
     expect(linearSpace(0, 1e6, 1, true).length).toBe(MAX_GENERATED)
   })
+  // Regression: `v += step` accumulated float error and the absolute 1e-9
+  // epsilon dropped endpoints — 0.1×3 = 0.30000000000000004 > 0.3 + 1e-9.
+  it('keeps the endpoint despite float accumulation', () => {
+    expect(linearSpace(0, 0.3, 0.1, false)).toEqual(['0', '0.1', '0.2', '0.3'])
+    expect(linearSpace(0, 0.7, 0.1, false)).toContain('0.7')
+  })
+  it('keeps the endpoint at large magnitudes (relative epsilon)', () => {
+    expect(linearSpace(0, 3e10, 1e10, false)).toEqual(['0', '10000000000', '20000000000', '30000000000'])
+  })
 })
 
 describe('logSpace', () => {

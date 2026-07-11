@@ -67,11 +67,11 @@ type DashboardConfig struct {
 //   - scheduler set  → SSHBackend   (cluster job submission via SSH)
 //   - ssh present    → SSHFS        (remote filesystem); absent → LocalFS
 type TargetConfig struct {
-	Name      string           `yaml:"name"`
-	GPUs      []int            `yaml:"gpus,omitempty"`
-	Scheduler string           `yaml:"scheduler,omitempty"` // e.g. "slurm", "pbs"
-	Workspace string           `yaml:"workspace,omitempty"` // HPC workspace root on the target
-	SSH       *SSHTargetConfig `yaml:"ssh,omitempty"`
+	Name      string           `yaml:"name" json:"name"`
+	GPUs      []int            `yaml:"gpus,omitempty" json:"gpus,omitempty"`
+	Scheduler string           `yaml:"scheduler,omitempty" json:"scheduler,omitempty"` // e.g. "slurm", "pbs"
+	Workspace string           `yaml:"workspace,omitempty" json:"workspace,omitempty"` // HPC workspace root on the target
+	SSH       *SSHTargetConfig `yaml:"ssh,omitempty" json:"ssh,omitempty"`
 
 	// MaxInflight caps how many of this target's tasks may be in flight on
 	// the external scheduler at once (submitted and not yet terminal); tasks
@@ -141,11 +141,11 @@ type TargetConfig struct {
 
 // SSHTargetConfig holds SSH connection parameters for a remote target.
 type SSHTargetConfig struct {
-	Host      string `yaml:"host"`
-	User      string `yaml:"user"`
-	Key       string `yaml:"key,omitempty"`        // path to private key; empty → agent
-	Port      int    `yaml:"port,omitempty"`       // default 22
-	ProxyJump string `yaml:"proxy_jump,omitempty"` // SSH ProxyJump host
+	Host      string `yaml:"host" json:"host"`
+	User      string `yaml:"user" json:"user"`
+	Key       string `yaml:"key,omitempty" json:"key,omitempty"`               // path to private key; empty → agent
+	Port      int    `yaml:"port,omitempty" json:"port,omitempty"`             // default 22
+	ProxyJump string `yaml:"proxy_jump,omitempty" json:"proxy_jump,omitempty"` // SSH ProxyJump host
 }
 
 // Target type constants.

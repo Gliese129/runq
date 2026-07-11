@@ -45,3 +45,4 @@ logs/
 # local progress tracking
 progress/
 .cache
+/docs/design_philosophy.md

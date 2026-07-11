@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import { configApi } from '@/apis/config'
-import type { Capabilities } from '@/types/api'
+import type { Capabilities, TargetSummary } from '@/types/api'
 
 const NO_CAPS: Capabilities = {
   gpu_map: false,
@@ -15,12 +15,35 @@ const NO_CAPS: Capabilities = {
   log_search: false,
 }
 
+/**
+ * v1 bootstrap: multi-target model. `mode` is gone from the wire —
+ * capabilities are declared per target. Until the multi-target shell
+ * lands, currentTarget follows default_target (single-target UX).
+ */
 export const useConfigStore = defineStore('config', () => {
-  const mode = ref('')
   const dataPath = ref('')
   const configPath = ref('')
-  const caps = ref<Capabilities>({ ...NO_CAPS })
+  const defaultTarget = ref('')
+  const targets = ref<TargetSummary[]>([])
   const loaded = ref(false)
+
+  // The target the UI is operating on. Alignment phase: = default_target.
+  // The app-shell issue upgrades this to a user-switchable context.
+  const currentTarget = computed(() => defaultTarget.value || targets.value[0]?.name || 'local')
+
+  const currentTargetSummary = computed(() =>
+    targets.value.find(t => t.name === currentTarget.value))
+
+  /** Capabilities of the CURRENT target — existing caps-gating reads this. */
+  const caps = computed<Capabilities>(() =>
+    currentTargetSummary.value?.capabilities ?? { ...NO_CAPS })
+
+  /** Human-readable descriptor shown where `mode` used to be. */
+  const targetLabel = computed(() => {
+    const t = currentTargetSummary.value
+    if (!t) return ''
+    return t.scheduler ? `${t.name} (${t.scheduler})` : t.name
+  })
 
   // Convenience getters for the two non-boolean dimensions.
   const isPoll = computed(() => caps.value.state_model === 'poll')
@@ -28,12 +51,16 @@ export const useConfigStore = defineStore('config', () => {
 
   async function fetchConfig() {
     const res = await configApi.get()
-    mode.value = res.mode
     dataPath.value = res.data_path
     configPath.value = res.config_path
-    caps.value = res.capabilities ?? { ...NO_CAPS }
+    defaultTarget.value = res.default_target
+    targets.value = res.targets ?? []
     loaded.value = true
   }
 
-  return { mode, dataPath, configPath, caps, isPoll, killAsync, loaded, fetchConfig }
+  return {
+    dataPath, configPath, defaultTarget, targets, loaded,
+    currentTarget, currentTargetSummary, caps, targetLabel, isPoll, killAsync,
+    fetchConfig,
+  }
 })

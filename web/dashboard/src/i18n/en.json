@@ -233,5 +233,10 @@
   "nav.utils": "Utils",
   "nav.log_viewer": "Log Viewer",
   "activity.title": "Activity",
-  "activity.no_data": "No activity data"
+  "activity.no_data": "No activity data",
+  "confirm.kill_job_title": "Kill job?",
+  "confirm.kill_job_body": "This will terminate {n} running/pending task(s). This cannot be undone.",
+  "confirm.kill_task_title": "Kill task?",
+  "confirm.kill_task_body": "Task {id} will be terminated. This cannot be undone.",
+  "settings.default_target": "Default target"
 }

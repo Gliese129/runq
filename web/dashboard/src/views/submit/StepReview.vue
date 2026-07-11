@@ -133,7 +133,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, inject, onMounted, ref } from 'vue'
+import { computed, inject, onActivated, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { SUBMIT_STATE_KEY } from '@/types/submit'
 import { sweptParamNames as computeSwept, fixedParamPreview, buildJobConfig } from './submitFlow'
@@ -150,9 +150,14 @@ const previewOpen = ref(true)
 const previewText = ref('')
 const previewLoading = ref(false)
 const previewError = ref('')
-onMounted(async () => {
+// onActivated (not onMounted): this component lives inside <KeepAlive>,
+// so it must re-fetch every time the user re-enters review — a cached
+// preview of edited params would violate preview-is-backend-truth (U1).
+// onActivated also fires on the first mount.
+onActivated(async () => {
   if (!config.caps.submit_preview) return
   previewLoading.value = true
+  previewError.value = ''
   try {
     const cfg = buildJobConfig(state.projectName, state.note, state.rows, state.linkSets)
     if (state.jobName.trim()) cfg.name = state.jobName.trim()
@@ -165,15 +170,10 @@ onMounted(async () => {
 })
 
 // Final job name as it WILL be submitted ({{version}} already scanned) —
-// resolved by the backend, never simulated here (U1).
-const resolvedNote = ref('')
-onMounted(async () => {
-  if (!state.note.includes('{{')) { resolvedNote.value = state.note; return }
-  try {
-    const cfg = buildJobConfig(state.projectName, state.note, state.rows, state.linkSets)
-    resolvedNote.value = (await jobsApi.resolveNote(cfg)).resolved
-  } catch { resolvedNote.value = '' }
-})
+// resolved by the backend via POST /jobs/plan (runs on every entry into
+// review), never simulated here (U1).
+const resolvedNote = computed(() =>
+  state.note.includes('{{') ? state.noteResolved : state.note)
 
 // Effective scheduler job name TEMPLATE (override > project > default).
 // The rendered per-task value is backend truth — visible in the Rendered

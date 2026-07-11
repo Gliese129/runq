@@ -25,15 +25,20 @@
         </v-btn>
         <v-btn v-if="canPause && isActive" size="x-small" variant="tonal"
           :color="detail.job.status === 'paused' ? 'success' : 'warning'"
+          :loading="pausing" :disabled="pausing"
           @click="emitPauseResume"
         >
           <v-icon start size="14">{{ detail.job.status === 'paused' ? 'mdi-play' : 'mdi-pause' }}</v-icon>
           {{ detail.job.status === 'paused' ? 'Resume' : 'Pause' }}
         </v-btn>
-        <v-btn v-if="isActive" size="x-small" variant="tonal" color="error" @click="$emit('kill')">
+        <v-btn v-if="isActive" size="x-small" variant="tonal" color="error"
+          :loading="killing" :disabled="killing"
+          @click="$emit('kill')"
+        >
           <v-icon start size="14">mdi-stop</v-icon> Kill
         </v-btn>
         <v-btn v-if="!isActive" size="x-small" variant="text"
+          :loading="archiving" :disabled="archiving"
           :title="detail.job.archived ? undefined : 'Hide from default lists — data and workspace untouched, reversible'"
           @click="toggleArchive"
         >
@@ -93,6 +98,10 @@ const props = defineProps<{
   /** poll state model: render freshness + manual refresh */
   isPoll?: boolean
   refreshing?: boolean
+  /** in-flight guards for async actions (loading + double-click protection) */
+  pausing?: boolean
+  killing?: boolean
+  archiving?: boolean
 }>()
 
 const emit = defineEmits<{

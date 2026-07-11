@@ -8,10 +8,12 @@
           <TaskStatusBadge :status="displayStatus" />
         </div>
         <div class="d-flex ga-1">
-          <v-btn v-if="displayStatus === 'running'" size="x-small" variant="tonal" color="error" @click="killTask">
+          <v-btn v-if="displayStatus === 'running'" size="x-small" variant="tonal" color="error"
+            :loading="killing" :disabled="killing" @click="killTask">
             <v-icon start size="14">mdi-stop</v-icon> Kill
           </v-btn>
-          <v-btn v-if="config.caps.retry && (task.status === 'failed' || task.status === 'killed')" size="x-small" variant="tonal" color="primary" @click="retryTask">
+          <v-btn v-if="config.caps.retry && (task.status === 'failed' || task.status === 'killed')" size="x-small" variant="tonal" color="primary"
+            :loading="retrying" :disabled="retrying" @click="retryTask">
             <v-icon start size="14">mdi-refresh</v-icon> Retry
           </v-btn>
         </div>
@@ -303,9 +305,11 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { tasksApi } from '@/apis/tasks'
 import { jobsApi } from '@/apis/jobs'
 import { useSnackbar } from '@/composables/useSnackbar'
+import { useConfirm } from '@/composables/useConfirm'
 import { useConfigStore } from '@/stores/config'
 import { useLogViewerStore } from '@/stores/logViewer'
 import MetricsChart from '@/components/MetricsChart.vue'
@@ -320,6 +324,8 @@ const props = defineProps<{ project: string; jobId: string; taskId: string }>()
 const snack = useSnackbar()
 const config = useConfigStore()
 const logStore = useLogViewerStore()
+const { t } = useI18n()
+const { confirm: confirmDialog } = useConfirm()
 
 const task = ref<TaskView | null>(null)
 
@@ -478,7 +484,17 @@ watch(isActive, (active, prev) => {
 })
 
 // ── Actions ──
+const killing = ref(false)
 async function killTask() {
+  if (killing.value) return
+  const ok = await confirmDialog({
+    title: t('confirm.kill_task_title'),
+    body: t('confirm.kill_task_body', { id: props.taskId.slice(0, 8) }),
+    confirmText: t('job.kill'),
+    danger: true,
+  })
+  if (!ok) return
+  killing.value = true
   try {
     await tasksApi.kill(props.taskId)
     if (config.killAsync) {
@@ -489,14 +505,19 @@ async function killTask() {
     }
     fetchTask()
   } catch (e: any) { snack.error(e?.message || 'Kill failed') }
+  finally { killing.value = false }
 }
 
+const retrying = ref(false)
 async function retryTask() {
+  if (retrying.value) return
+  retrying.value = true
   try {
     await tasksApi.retry(props.taskId)
     snack.success('Task retried')
     fetchTask()
   } catch (e: any) { snack.error(e?.message || 'Retry failed') }
+  finally { retrying.value = false }
 }
 
 function formatDuration(sec: number): string {

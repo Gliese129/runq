@@ -1,5 +1,8 @@
 import { api, type RequestOptions } from './client'
-import type { CompareRow, JobActivityResponse, JobConfigPayload, JobDetail, JobLogSearchResponse, JobSubmitResponse, JobSummary, MessageResponse } from '@/types/api'
+import type {
+  CompareRow, JobActivityResponse, JobConfigPayload, JobDetail, JobLogSearchResponse,
+  JobPlanResponse, JobSubmitResponse, JobSummary, MessageResponse, RefreshReceipt,
+} from '@/types/api'
 
 export interface SubmitJobOptions extends RequestOptions {
   preflightEnabled?: boolean
@@ -7,49 +10,54 @@ export interface SubmitJobOptions extends RequestOptions {
   target?: string
 }
 
-export function submitJobPath(preflightEnabled = true, forceSkipPreflight: unknown = false, target?: string): string {
-  const params = new URLSearchParams()
-  const skipPreflight = forceSkipPreflight === true || !preflightEnabled
-  if (skipPreflight) params.set('no_preflight', '1')
-  if (target) params.set('target', target)
-  const qs = params.toString()
-  return qs ? `/jobs?${qs}` : '/jobs'
+/** v1 submit-family body (spec §5.4, D12): options in the body, never in query. */
+function submitBody(cfg: JobConfigPayload, skipPreflight = false, target = '') {
+  return { config: cfg, target, skip_preflight: skipPreflight }
 }
 
 export const jobsApi = {
-  list: (opts?: RequestOptions) => api.get<JobSummary[]>('/jobs', opts),
+  list: (opts?: RequestOptions) => api.getList<JobSummary>('/jobs', opts),
 
   /** Project-scoped list — unlike the global list, it skips the archived-
    *  project cascade, so an archived project's page still shows its jobs. */
   listByProject: (project: string, opts?: RequestOptions) =>
-    api.get<JobSummary[]>(`/jobs?project=${encodeURIComponent(project)}`, opts),
+    api.getList<JobSummary>(`/jobs?project=${encodeURIComponent(project)}`, opts),
+
+  listArchived: () => api.getList<JobSummary>('/jobs?archived=true'),
 
   get: (jobId: string, opts?: RequestOptions) =>
     api.get<JobDetail>(`/jobs/${encodeURIComponent(jobId)}`, opts),
 
-  compare: (jobId: string, key: string, desc: boolean) => {
-    const params = new URLSearchParams({
-      key,
-      order: desc ? 'desc' : 'asc',
-    })
-    return api.get<CompareRow[]>(`/jobs/${encodeURIComponent(jobId)}/compare?${params}`)
+  /** GET /jobs/{id}/metrics with ?key= — ranked rows for the compare table. */
+  compare: async (jobId: string, key: string, desc: boolean) => {
+    const params = new URLSearchParams({ key, order: desc ? 'desc' : 'asc' })
+    const res = await api.get<{ rows: CompareRow[] }>(
+      `/jobs/${encodeURIComponent(jobId)}/metrics?${params}`)
+    return res.rows ?? []
   },
 
-  dryRun: (cfg: JobConfigPayload) =>
-    api.post<Record<string, any>[]>('/jobs/dry-run', cfg),
+  /** GET /jobs/{id}/metrics without ?key= — metric key discovery. */
+  metricKeys: async (jobId: string) => {
+    const res = await api.get<{ keys: string[] }>(`/jobs/${encodeURIComponent(jobId)}/metrics`)
+    return res.keys ?? []
+  },
+
+  /** POST /jobs/plan — merged dry-run + resolve-note, one wizard call. */
+  plan: (cfg: JobConfigPayload, target = '') =>
+    api.post<JobPlanResponse>('/jobs/plan', submitBody(cfg, false, target), { silent: true }),
 
   /** GUI face of `--dry-run`: rendered run.sh + submit command, zero side effects. */
-  previewSubmit: (cfg: JobConfigPayload, skipPreflight: boolean) =>
-    api.post<{ preview: string }>('/jobs/preview', { config: cfg, skip_preflight: skipPreflight }, { silent: true }),
+  previewSubmit: (cfg: JobConfigPayload, skipPreflight: boolean, target = '') =>
+    api.post<{ preview: string }>('/jobs/preview', submitBody(cfg, skipPreflight, target), { silent: true }),
 
-  submit: (cfg: JobConfigPayload, opts: SubmitJobOptions = {}) =>
-    api.post<JobSubmitResponse>(
-      submitJobPath(opts.preflightEnabled, opts.forceSkipPreflight, opts.target),
-      cfg,
+  submit: (cfg: JobConfigPayload, opts: SubmitJobOptions = {}) => {
+    const skip = opts.forceSkipPreflight === true || opts.preflightEnabled === false
+    return api.post<JobSubmitResponse>(
+      '/jobs',
+      submitBody(cfg, skip, opts.target ?? ''),
       { silent: opts.silent, timeoutMs: opts.timeoutMs },
-    ),
-
-  listArchived: () => api.get<JobSummary[]>('/jobs/archived'),
+    )
+  },
 
   archive: (jobId: string) =>
     api.post<MessageResponse>(`/jobs/${encodeURIComponent(jobId)}/archive`, {}),
@@ -66,15 +74,12 @@ export const jobsApi = {
   resume: (jobId: string) =>
     api.post(`/jobs/${encodeURIComponent(jobId)}/resume`),
 
-  /** Force a reconcile from external sources (poll-model backends only). */
+  /** Force a reconcile from external sources (poll-model backends only).
+   *  D22: the receipt always says whether the refresh actually happened. */
   refresh: (jobId: string) =>
-    api.post(`/jobs/${encodeURIComponent(jobId)}/refresh`),
+    api.post<RefreshReceipt>(`/jobs/${encodeURIComponent(jobId)}/refresh`),
 
-  /** Preview note resolution ({{version}} scan etc.) — submit's code path. */
-  resolveNote: (cfg: JobConfigPayload) =>
-    api.post<{ resolved: string }>('/jobs/resolve-note', cfg, { silent: true }),
-
-  /** P6: fetch activity.tsv data for all tasks in a job. */
+  /** P6: fetch activity.tsv data for all tasks in a job (501 until implemented). */
   activity: (jobId: string) =>
     api.get<JobActivityResponse>(`/jobs/${encodeURIComponent(jobId)}/activity`),
 
