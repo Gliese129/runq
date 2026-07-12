@@ -536,7 +536,9 @@ function applyProjectConfig(cfg: ProjectConfig, resetGroups = true) {
   form.setupCmd = cfg.setup_command || ''
   form.envText = Object.entries(cfg.environment || {}).map(([k, v]) => `${k}=${v}`).join('\n')
   form.jobName = cfg.job_name || ''
-  form.gpus = cfg.defaults?.gpus_per_task || 1
+  // ?? not ||: gpus_per_task 0 (CPU-only task) is a legal stored value and
+  // must round-trip — || coerced it to 1 and the save overwrote the base.
+  form.gpus = cfg.defaults?.gpus_per_task ?? 1
   form.maxRetry = cfg.defaults?.max_retry ?? 0
   form.envType = cfg.python_env?.type || ''
   form.envPath = cfg.python_env?.path || ''

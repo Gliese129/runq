@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -36,6 +37,10 @@ var sbatchCmd = &cobra.Command{
 		id, err := p.Sbatch(cmd.Context(), backend.TaskSpec{
 			RunSH: args[0], GPUs: gpus, Name: name,
 			TaskDir: taskDir, LogPath: logPath, Project: projectLabel,
+			// RQ-69: the client injects its per-attempt cancel handle via
+			// env; adopting it as this server's task id makes external_id
+			// deterministic (known before the submit response arrives).
+			Handle: os.Getenv("RUNQ_SUBMIT_HANDLE"),
 		})
 		if err != nil {
 			return err

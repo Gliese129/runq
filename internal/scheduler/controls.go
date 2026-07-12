@@ -71,6 +71,28 @@ func (s *Scheduler) consumeKillRequest(taskID string) bool {
 	return false
 }
 
+// killPending reports whether a kill flag is set WITHOUT consuming it.
+// Use when the settle decision depends on a fallible action (late remote
+// cancel): consume only after the action succeeded, otherwise the intent
+// must survive for the next lifecycle event.
+func (s *Scheduler) killPending(taskID string) bool {
+	s.killMu.Lock()
+	defer s.killMu.Unlock()
+	return s.killRequested[taskID]
+}
+
+// ClearKillRequest drops a pending kill flag without acting on it. Manual
+// retry MUST call this: a stale flag from an earlier refused kill would
+// otherwise assassinate the fresh attempt at its first lifecycle event
+// (the flag survives refusals by design — see RQ-69 ownership protocol).
+// completeTask also clears it on every terminal transition, so a flag can
+// never outlive the attempt it was aimed at.
+func (s *Scheduler) ClearKillRequest(taskID string) {
+	s.killMu.Lock()
+	defer s.killMu.Unlock()
+	delete(s.killRequested, taskID)
+}
+
 // ── Job aggregate status ──────────────────────────────────────────────────
 
 // RefreshJobStatus checks all tasks of a job and updates the job status in DB.

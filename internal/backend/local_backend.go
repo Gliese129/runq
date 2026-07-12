@@ -87,6 +87,12 @@ type TaskSpec struct {
 	Name    string `json:"name,omitempty"`
 	TaskDir string `json:"task_dir"`
 	LogPath string `json:"log_path,omitempty"`
+	// Handle is the caller-chosen task id (RQ-69: the client's
+	// "{task_id}-a{attempt}" cancel handle). When set it becomes THIS
+	// server's task id, so the client can cancel/probe deterministically
+	// without ever depending on the submit response. Re-submitting an
+	// existing handle is an idempotent claim, not a duplicate.
+	Handle string `json:"handle,omitempty"`
 	// Project is the CLIENT's project name, carried through the protocol as
 	// a plain label (like a Slurm job name): it makes squeue/logs greppable
 	// but requires NO registration here — this ledger is a scheduler's,
@@ -109,6 +115,18 @@ func (b *LocalBackend) Enqueue(ctx context.Context, spec TaskSpec) (string, erro
 	now := time.Now()
 	jobID := utils.GenerateJobID()
 	taskID := utils.GenerateTaskID()
+	if spec.Handle != "" {
+		if !validHandle(spec.Handle) {
+			return "", fmt.Errorf("invalid handle %q: only [A-Za-z0-9._-] allowed", spec.Handle)
+		}
+		// Idempotent claim: the handle already existing means an earlier
+		// submit succeeded but its response was lost — adopt it instead of
+		// enqueueing a duplicate (clients resubmit with the same handle).
+		if existing, gerr := b.store.GetTask(ctx, spec.Handle); gerr == nil && existing != nil {
+			return spec.Handle, nil
+		}
+		taskID = spec.Handle
+	}
 	logPath := spec.LogPath
 	if logPath == "" {
 		logPath = filepath.Join(spec.TaskDir, taskID+".log")
@@ -134,6 +152,23 @@ func (b *LocalBackend) Enqueue(ctx context.Context, spec TaskSpec) (string, erro
 	}
 	b.queue.Push(TaskRowToSchedulerTask(&row))
 	return taskID, nil
+}
+
+// validHandle restricts caller-chosen task ids to filename/shell-safe
+// characters — the id lands in file paths (log name) and command lines.
+func validHandle(h string) bool {
+	if len(h) == 0 || len(h) > 128 {
+		return false
+	}
+	for _, c := range h {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9',
+			c == '-', c == '_', c == '.':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // DetectOrphansNow marks/clears orphan state for this local target's
@@ -440,6 +475,11 @@ func (b *LocalBackend) RetryTask(ctx context.Context, taskID string) error {
 
 	row, _ = b.store.GetTask(ctx, taskID)
 	task := TaskRowToSchedulerTask(row)
+	if b.scheduler != nil {
+		// Fresh attempt by explicit user intent — a stale kill flag must
+		// not assassinate it at its first lifecycle event (RQ-69).
+		b.scheduler.ClearKillRequest(taskID)
+	}
 	if !b.queue.RetryExisting(task) {
 		b.queue.Push(task)
 	}

@@ -22,10 +22,22 @@ function* walk(dir) {
   }
 }
 
+// Names that match the mdi-* shape but are NOT icons (import specifiers,
+// iconset ids). Scanning is line-based so module paths can be skipped
+// outright instead of poisoning the map.
+const NOT_ICONS = new Set(['mdi-svg'])
+
 const used = new Set()
 for (const file of walk(srcDir)) {
-  for (const m of readFileSync(file, 'utf8').matchAll(/\bmdi-[a-z0-9]+(?:-[a-z0-9]+)*\b/g)) {
-    used.add(m[0])
+  for (const line of readFileSync(file, 'utf8').split('\n')) {
+    // Skip MODULE-IMPORT lines — `vuetify/iconsets/mdi-svg` is a module
+    // path, not an icon usage. Match the `from '...'` / side-effect-import
+    // shapes only: a bare `import:` object key must NOT be skipped (that
+    // false positive once dropped mdi-package-variant-remove).
+    if (/\bfrom\s+['"][^'"]+['"]/.test(line) || /^\s*import\s+['"]/.test(line)) continue
+    for (const m of line.matchAll(/\bmdi-[a-z0-9]+(?:-[a-z0-9]+)*\b/g)) {
+      if (!NOT_ICONS.has(m[0])) used.add(m[0])
+    }
   }
 }
 
