@@ -238,5 +238,7 @@
   "confirm.kill_job_body": "This will terminate {n} running/pending task(s). This cannot be undone.",
   "confirm.kill_task_title": "Kill task?",
   "confirm.kill_task_body": "Task {id} will be terminated. This cannot be undone.",
-  "settings.default_target": "Default target"
+  "settings.default_target": "Default target",
+  "log.stream_lost": "Live log stream disconnected",
+  "task.not_found": "Task not found — it may have been cleaned"
 }

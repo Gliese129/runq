@@ -81,5 +81,11 @@ jobs:
         working-directory: web/dashboard
         run: yarn test
 
+      - name: Verify generated icon map is in sync
+        working-directory: web/dashboard
+        run: |
+          yarn gen:icons
+          git diff --exit-code src/plugins/mdiPaths.ts
+
       - name: Build Go binary with embedded dashboard
         run: go build -tags dashboard ./cmd/runq

@@ -132,19 +132,8 @@ code {
   font-size: 0.85em;
 }
 
-/* ═══════ Route transitions ═══════ */
-.fade-slide-enter-active,
-.fade-slide-leave-active {
-  transition: opacity 0.2s ease, transform 0.2s ease;
-}
-.fade-slide-enter-from {
-  opacity: 0;
-  transform: translateY(8px);
-}
-.fade-slide-leave-to {
-  opacity: 0;
-  transform: translateY(-4px);
-}
+/* Route transitions removed on purpose (RQ-49): mode="out-in" could
+   stall the swap and keep the OLD page under the NEW URL for seconds. */
 
 /* ═══════ Utility ═══════ */
 .cursor-pointer { cursor: pointer; }

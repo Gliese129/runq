@@ -13,7 +13,8 @@ CLAUDE.md
 demo/
 docs/*
 !docs/*.md
-scripts/
+# Root-only match: web/dashboard/scripts/ (gen-mdi-paths.mjs etc.) must be tracked
+/scripts/
 data/
 
 # Go

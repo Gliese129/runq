@@ -51,7 +51,7 @@ func newClientDaemon(dataDir string, paths utils.DataDirPaths, logger *slog.Logg
 	for _, tc := range storageCfg.ResolveTargets() {
 		var be *backend.SSHBackend
 		var berr error
-		if tc.Type() == config.TargetTypeHPC {
+		if tc.Type() == config.TargetTypeRemote {
 			be, berr = backend.NewSSHBackend(backend.SSHBackendConfig{
 				Target: tc, Store: st, GlobalCfg: storageCfg, Logger: logger,
 			})

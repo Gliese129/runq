@@ -148,16 +148,18 @@ type SSHTargetConfig struct {
 	ProxyJump string `yaml:"proxy_jump,omitempty" json:"proxy_jump,omitempty"` // SSH ProxyJump host
 }
 
-// Target type constants.
+// Target type constants — the WIRE vocabulary (spec §4: local | remote).
+// "remote" covers every scheduler/ssh target; runqd-vs-slurm is a dialect
+// detail (TargetSummary.Scheduler), never a type.
 const (
-	TargetTypeLocal = "local"
-	TargetTypeHPC   = "hpc"
+	TargetTypeLocal  = "local"
+	TargetTypeRemote = "remote"
 )
 
 // Type returns the inferred backend type for this target.
 func (t *TargetConfig) Type() string {
 	if t.Scheduler != "" {
-		return TargetTypeHPC
+		return TargetTypeRemote
 	}
 	return TargetTypeLocal
 }

@@ -238,5 +238,7 @@
   "confirm.kill_job_body": "将终止 {n} 个 running/pending 任务,此操作不可撤销。",
   "confirm.kill_task_title": "终止此任务?",
   "confirm.kill_task_body": "任务 {id} 将被终止,此操作不可撤销。",
-  "settings.default_target": "默认 Target"
+  "settings.default_target": "默认 Target",
+  "log.stream_lost": "实时日志流已断开",
+  "task.not_found": "任务不存在,可能已被清理"
 }

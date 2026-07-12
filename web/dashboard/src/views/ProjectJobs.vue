@@ -99,7 +99,7 @@
     </v-card>
 
     <!-- Empty state -->
-    <v-card v-else-if="!jobs.loading" class="pa-8 text-center">
+    <v-card v-else-if="!loading" class="pa-8 text-center">
       <v-icon size="36" color="primary" class="mb-3" style="opacity: 0.4">mdi-briefcase-outline</v-icon>
       <div class="text-h6 mb-1">{{ t('project.no_jobs') }}</div>
       <div class="text-body-2 text-on-surface-variant mb-4">{{ t('project.no_jobs_hint') }}</div>
@@ -135,38 +135,39 @@
 import { ref, computed, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
-import { useJobsStore } from '@/stores/jobs'
 import { useProjectStore } from '@/stores/projects'
 import { useSnackbar } from '@/composables/useSnackbar'
+import { useJobsListQuery, useArchivedJobsQuery, useProjectJobsQuery, useJobActions } from '@/queries/useJobQueries'
 import StatusDot from '@/components/StatusDot.vue'
 import type { JobSummary } from '@/types/api'
 
 const props = defineProps<{ project: string }>()
 const { t } = useI18n()
-const jobs = useJobsStore()
 const projectStore = useProjectStore()
 const router = useRouter()
 const snack = useSnackbar()
 
-// ── Archive — ALL state derives from the pinia stores (single source).
-// No local copies: route-param switches and post-mutation refreshes can't
-// go stale, because there is nothing here to go stale.
+// ── Server state: query cache is the single source. Keys derive from
+// props.project, so route-param switches re-point automatically — no
+// manual refetch choreography, nothing here to go stale.
+const listQuery = useJobsListQuery()
+const archivedQuery = useArchivedJobsQuery()
+const scopedQuery = useProjectJobsQuery(() => props.project)
+const jobActions = useJobActions()
+
 const archivedOpen = ref(false)
 const projectArchived = computed(() =>
   !!projectStore.list.find(p => p.name === props.project)?.archived)
 const archivedJobs = computed(() =>
-  jobs.archived.filter(j => j.project === props.project))
+  (archivedQuery.data.value ?? []).filter(j => j.project === props.project))
 // Inside an archived project the global list is empty BY DESIGN (cascade);
 // the scoped query skips it.
-const scopedJobs = computed(() => jobs.scoped[props.project] ?? [])
+const scopedJobs = computed(() => scopedQuery.data.value ?? [])
+const loading = computed(() => listQuery.isLoading.value)
 
-// Vue Router REUSES this component when only :project changes — refetch;
-// the computeds above re-point automatically. immediate covers mount.
 watch(() => props.project, () => {
   archivedOpen.value = false
-  projectStore.fetch()
-  jobs.fetchArchived()
-  jobs.fetchScoped(props.project)
+  projectStore.fetch() // project archive flags live in the pinia store
 }, { immediate: true })
 
 async function toggleProjectArchive() {
@@ -178,14 +179,14 @@ async function toggleProjectArchive() {
       await projectStore.archive(props.project)
       snack.success(t('archive.project_done'))
     }
+    await Promise.all([archivedQuery.refetch(), scopedQuery.refetch(), listQuery.refetch()])
   } catch (e: any) { snack.error(e?.message || 'Archive failed') }
 }
 
 async function unarchiveJob(id: string) {
   try {
-    await jobs.unarchiveJob(id)
+    await jobActions.unarchive.mutateAsync({ id, project: props.project })
     snack.success(t('archive.job_back'))
-    jobs.fetchScoped(props.project)
   } catch (e: any) { snack.error(e?.message || 'Unarchive failed') }
 }
 
@@ -205,7 +206,9 @@ const statusFilters: { value: string; label: string; dot: string; kind: 'task' |
 ]
 
 const projectJobs = computed(() =>
-  projectArchived.value ? scopedJobs.value : (jobs.jobsByProject.get(props.project) ?? []))
+  projectArchived.value
+    ? scopedJobs.value
+    : (listQuery.data.value ?? []).filter(j => j.project === props.project))
 
 const displayedJobs = computed(() => {
   let list = [...projectJobs.value]

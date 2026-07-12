@@ -166,22 +166,25 @@
       </v-breadcrumbs>
       <v-spacer />
       <v-chip
-        v-if="config.caps.gpu_map && gpu.totalCount > 0"
+        v-if="config.caps.gpu_map && gpuTotal > 0"
         size="small" variant="tonal"
-        :color="gpu.freeCount > 0 ? 'success' : 'warning'"
+        :color="gpuFree > 0 ? 'success' : 'warning'"
         class="mr-2"
       >
         <v-icon start size="14">mdi-memory</v-icon>
-        {{ gpu.freeCount }}/{{ gpu.totalCount }}
+        {{ gpuFree }}/{{ gpuTotal }}
       </v-chip>
     </v-app-bar>
 
     <v-main>
       <v-container fluid class="pa-4 pa-md-6" style="max-width: 1200px">
+        <!-- No route transition ON PURPOSE: mode="out-in" delayed the new
+             view until the old one's leave finished, and a poll-driven
+             re-render inside that window could stall afterLeave — the old
+             page (even the wrong component type) stayed on screen for
+             seconds under the new URL (Codex finding, RQ-49). -->
         <router-view v-slot="{ Component, route: r }">
-          <transition name="fade-slide" mode="out-in">
-            <component :is="Component" :key="r.path" />
-          </transition>
+          <component :is="Component" :key="r.path" />
         </router-view>
       </v-container>
     </v-main>
@@ -193,12 +196,13 @@ import { ref, computed, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute } from 'vue-router'
 import { useTheme, useDisplay } from 'vuetify'
+import { useQueryClient } from '@tanstack/vue-query'
 import { useConfigStore } from '@/stores/config'
-import { useGPUStore } from '@/stores/gpu'
 import { useSettingsStore } from '@/stores/settings'
 import { useProjectStore } from '@/stores/projects'
-import { useJobsStore } from '@/stores/jobs'
 import { useConnection } from '@/composables/useConnection'
+import { useGpuQuery } from '@/queries/useGpuQuery'
+import { qk } from '@/queries/keys'
 import RunqLogo from '@/components/RunqLogo.vue'
 
 const { t } = useI18n()
@@ -206,11 +210,12 @@ const route = useRoute()
 const theme = useTheme()
 const { mobile } = useDisplay()
 const config = useConfigStore()
-const gpu = useGPUStore()
 const settings = useSettingsStore()
 const projects = useProjectStore()
-const jobs = useJobsStore()
 const conn = useConnection()
+const qc = useQueryClient()
+// gpu chip in the app bar — caps-gated inside the query (enabled)
+const { freeCount: gpuFree, totalCount: gpuTotal } = useGpuQuery()
 
 const drawerOpen = ref(true)
 const collapsed = ref(localStorage.getItem('runq-sidebar-collapsed') === 'true')
@@ -262,14 +267,14 @@ function projectColor(name: string): string {
 
 function refreshShellData() {
   projects.fetch()
-  jobs.fetchJobs()
+  // invalidating ['jobs'] refreshes every list variant wherever mounted
+  qc.invalidateQueries({ queryKey: qk.jobs })
 }
 
 onMounted(async () => {
   try {
     if (!config.loaded) await config.fetchConfig()
-    if (config.caps.gpu_map) gpu.fetchGPU()
-    refreshShellData()
+    projects.fetch()
   } catch {}
 })
 </script>

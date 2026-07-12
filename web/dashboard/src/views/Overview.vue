@@ -38,10 +38,10 @@
     </v-row>
 
     <!-- GPU bars (always visible in daemon mode) -->
-    <v-card v-if="config.caps.gpu_map && gpu.gpus.length > 0" class="mb-4 pa-3">
+    <v-card v-if="config.caps.gpu_map && gpus.length > 0" class="mb-4 pa-3">
       <div class="text-caption text-on-surface-variant mb-2">GPU</div>
       <div class="d-flex flex-column ga-1">
-        <GPUBar v-for="g in gpu.gpus" :key="g.index" :slot="g" />
+        <GPUBar v-for="g in gpus" :key="g.index" :slot="g" />
       </div>
     </v-card>
 
@@ -126,7 +126,7 @@
     </div>
 
     <!-- Empty state -->
-    <v-card v-if="jobs.projects.length === 0 && !jobs.loading && !activeFilter" class="pa-8 text-center">
+    <v-card v-if="jobList.length === 0 && !jobsLoading && !activeFilter" class="pa-8 text-center">
       <v-icon size="40" color="primary" class="mb-3" style="opacity: 0.4">mdi-rocket-launch-outline</v-icon>
       <div class="text-h6 mb-1">{{ t('overview.no_projects') }}</div>
       <div class="text-body-2 text-on-surface-variant mb-4">{{ t('overview.no_projects_hint') }}</div>
@@ -168,27 +168,34 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
-import { useJobsStore } from '@/stores/jobs'
 import { useProjectStore } from '@/stores/projects'
-import { useGPUStore } from '@/stores/gpu'
 import { useConfigStore } from '@/stores/config'
-import { usePolling } from '@/composables/usePolling'
 import { useConnection } from '@/composables/useConnection'
+import { useJobsListQuery } from '@/queries/useJobQueries'
+import { useGpuQuery } from '@/queries/useGpuQuery'
 import GPUBar from '@/components/GPUBar.vue'
 import StatusDot from '@/components/StatusDot.vue'
 import { useSnackbar } from '@/composables/useSnackbar'
 
 const { t } = useI18n()
 const router = useRouter()
-const jobs = useJobsStore()
 const projectStore = useProjectStore()
-const gpu = useGPUStore()
 const config = useConfigStore()
 const conn = useConnection()
 const snack = useSnackbar()
+
+// ── Server state: polling/dedupe/freshness live in the query layer. ──
+const jobsQuery = useJobsListQuery()
+const jobList = computed(() => jobsQuery.data.value ?? [])
+const jobsLoading = computed(() => jobsQuery.isLoading.value)
+const gpuQuery = useGpuQuery()
+const gpus = computed(() => gpuQuery.data.value ?? [])
+
+// Project list is low-churn: load on mount, mutations refresh it themselves.
+onMounted(() => { projectStore.fetch() })
 
 // ── Archived projects (recovery entry) — derived from the store ──
 const archivedOpen = ref(false)
@@ -202,20 +209,27 @@ async function unarchiveProject(name: string) {
 }
 const activeFilter = ref('')
 
+const totals = computed(() => {
+  const acc = { running: 0, pending: 0, failed: 0, completed: 0 }
+  for (const j of jobList.value) {
+    acc.running += j.tasks.running
+    acc.pending += j.tasks.pending
+    acc.failed += j.tasks.failed
+    acc.completed += j.tasks.completed
+  }
+  return acc
+})
+
 const metrics = computed(() => [
-  { key: 'running', label: t('overview.running'), value: jobs.totalRunning, status: 'running' },
-  { key: 'pending', label: t('overview.pending'), value: jobs.totalPending, status: 'pending' },
-  { key: 'failed', label: t('overview.failed'), value: jobs.totalFailed, status: 'failed' },
-  { key: 'done', label: t('overview.completed'), value: totalCompleted.value, status: 'success' },
+  { key: 'running', label: t('overview.running'), value: totals.value.running, status: 'running' },
+  { key: 'pending', label: t('overview.pending'), value: totals.value.pending, status: 'pending' },
+  { key: 'failed', label: t('overview.failed'), value: totals.value.failed, status: 'failed' },
+  { key: 'done', label: t('overview.completed'), value: totals.value.completed, status: 'success' },
 ])
 
-const totalCompleted = computed(() =>
-  jobs.jobs.reduce((sum, job) => sum + job.tasks.completed, 0)
-)
-
 function retryConnection() {
-  jobs.fetchJobs()
-  if (config.caps.gpu_map) gpu.fetchGPU()
+  jobsQuery.refetch()
+  gpuQuery.refetch()
 }
 
 function openJob(project: string, id: string) {
@@ -224,7 +238,7 @@ function openJob(project: string, id: string) {
 
 const filteredJobs = computed(() => {
   if (!activeFilter.value) return []
-  return jobs.jobs.filter(j => {
+  return jobList.value.filter(j => {
     if (activeFilter.value === 'running') return j.tasks.running > 0
     if (activeFilter.value === 'pending') return j.tasks.pending > 0
     if (activeFilter.value === 'failed') return j.tasks.failed > 0
@@ -234,7 +248,7 @@ const filteredJobs = computed(() => {
 })
 
 const recentJobs = computed(() =>
-  [...jobs.jobs].sort((a, b) => b.created_at - a.created_at).slice(0, 10)
+  [...jobList.value].sort((a, b) => b.created_at - a.created_at).slice(0, 10)
 )
 
 function toggleFilter(status: string) {
@@ -249,11 +263,6 @@ function relativeTime(ts: number): string {
   return `${Math.floor(diff / 86400)}d ago`
 }
 
-usePolling((silent: boolean) => {
-  jobs.fetchJobs(silent)
-  projectStore.fetch()
-  if (config.caps.gpu_map) gpu.fetchGPU(silent)
-}, 5000)
 </script>
 
 <style scoped>

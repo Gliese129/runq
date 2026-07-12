@@ -275,8 +275,8 @@ async function fetchPage(offset: number, lines: number, replace: boolean) {
     } else {
       logLines.value.push(...page.lines)
     }
-    endOffset.value = page.end_offset
-    totalBytes.value = page.total_bytes
+    endOffset.value = page.next_offset
+    totalBytes.value = page.size
   } catch { /* ignore */ }
 }
 

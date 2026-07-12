@@ -33,7 +33,12 @@ vi.mock('@/apis/client', () => {
 vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
 vi.stubGlobal('visualViewport', undefined)
 
+import { VueQueryPlugin, QueryClient } from '@tanstack/vue-query'
 import ProjectJobs from './ProjectJobs.vue'
+
+function makeQueryClient() {
+  return new QueryClient({ defaultOptions: { queries: { retry: false } } })
+}
 
 function makeRouter() {
   return createRouter({
@@ -57,6 +62,7 @@ describe('ProjectJobs smoke', () => {
           createPinia(),
           createI18n({ legacy: false, locale: 'en', messages: { en } as any }),
           makeRouter(),
+          [VueQueryPlugin, { queryClient: makeQueryClient() }],
         ],
       },
     })

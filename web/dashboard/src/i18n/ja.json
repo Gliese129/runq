@@ -238,5 +238,7 @@
   "confirm.kill_job_body": "{n} 件の実行中/待機中タスクが停止されます。この操作は取り消せません。",
   "confirm.kill_task_title": "タスクを停止しますか?",
   "confirm.kill_task_body": "タスク {id} が停止されます。この操作は取り消せません。",
-  "settings.default_target": "デフォルトターゲット"
+  "settings.default_target": "デフォルトターゲット",
+  "log.stream_lost": "ライブログの接続が切断されました",
+  "task.not_found": "タスクが見つかりません。削除された可能性があります"
 }

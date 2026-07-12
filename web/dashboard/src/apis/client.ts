@@ -31,6 +31,8 @@ export class ApiError extends Error {
 export interface RequestOptions {
   silent?: boolean
   timeoutMs?: number
+  /** abort in-flight request (TanStack Query passes this per queryFn) */
+  signal?: AbortSignal
 }
 
 async function request<T>(method: string, path: string, body?: unknown, opts?: RequestOptions): Promise<T> {
@@ -40,6 +42,7 @@ async function request<T>(method: string, path: string, body?: unknown, opts?: R
       url: path,
       data: body,
       timeout: opts?.timeoutMs,
+      signal: opts?.signal,
     })
     onApiSuccess()
     return res.data

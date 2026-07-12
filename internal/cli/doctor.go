@@ -175,7 +175,7 @@ func doctorTargets(d *doctorChecks, cfg *config.GlobalConfig, dataDir string, da
 		if t.Name == defaultTarget {
 			label = "[default] " + label
 		}
-		if t.Type() == config.TargetTypeHPC {
+		if t.Type() == config.TargetTypeRemote {
 			kind := "remote"
 			if t.Scheduler != "" {
 				kind += "/" + t.Scheduler
@@ -187,7 +187,7 @@ func doctorTargets(d *doctorChecks, cfg *config.GlobalConfig, dataDir string, da
 
 		var status string
 		var ok bool
-		if t.Type() != config.TargetTypeHPC {
+		if t.Type() != config.TargetTypeRemote {
 			// Local runqd: socket dial is local IPC.
 			if checkSocketAlive(utils.RunqdPathsFromDataDir(dataDir).SocketPath) {
 				status, ok = "connected", true
@@ -281,7 +281,7 @@ func fetchTargetHealth(daemonUp bool) map[string]targetHealthLine {
 func hasExecutorRole(cfg *config.GlobalConfig) bool {
 	if cfg != nil {
 		for _, t := range cfg.ResolveTargets() {
-			if t.Type() != config.TargetTypeHPC {
+			if t.Type() != config.TargetTypeRemote {
 				return true
 			}
 		}
@@ -297,7 +297,7 @@ func doctorExecutor(d *doctorChecks, cfg *config.GlobalConfig) {
 	gpusConfigured := false
 	if cfg != nil {
 		for _, t := range cfg.ResolveTargets() {
-			if t.Type() != config.TargetTypeHPC && len(t.GPUs) > 0 {
+			if t.Type() != config.TargetTypeRemote && len(t.GPUs) > 0 {
 				gpusConfigured = true
 				break
 			}
@@ -372,7 +372,7 @@ func doctorConnection(cfg *config.GlobalConfig, health map[string]targetHealthLi
 	}
 	var remotes []config.TargetConfig
 	for _, t := range cfg.ResolveTargets() {
-		if t.Type() == config.TargetTypeHPC && t.SSH != nil {
+		if t.Type() == config.TargetTypeRemote && t.SSH != nil {
 			remotes = append(remotes, t)
 		}
 	}

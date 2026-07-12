@@ -182,8 +182,14 @@ async function loadDir(path: string) {
   currentDir.value = path
   pathInput.value = path ? path + '/' : ''
   try {
-    entries.value = await filesApi.list(path)
-  } catch { entries.value = [] }
+    const res = await filesApi.list(path)
+    // Stale-response guard: rapid navigation can land an older dir's
+    // listing after a newer one — drop it if we already moved on.
+    if (currentDir.value !== path) return
+    entries.value = res
+  } catch {
+    if (currentDir.value === path) entries.value = []
+  }
 }
 
 function navigateUp() {

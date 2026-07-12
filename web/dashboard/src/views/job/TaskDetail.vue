@@ -298,6 +298,16 @@
     </v-expansion-panels>
   </div>
 
+  <!-- 404: stale link / cleaned task — a spinner forever was the old bug -->
+  <v-card v-else-if="notFound" class="pa-8 text-center">
+    <v-icon size="40" color="on-surface-variant" class="mb-3" style="opacity: 0.5">mdi-file-question-outline</v-icon>
+    <div class="text-h6 mb-1">{{ t('task.not_found') }}</div>
+    <v-btn class="mt-3" variant="tonal" color="primary"
+      :to="{ name: 'job-detail', params: { project: props.project, jobId: props.jobId } }">
+      {{ t('common.back') }}
+    </v-btn>
+  </v-card>
+
   <div v-else class="d-flex justify-center pa-12">
     <v-progress-circular indeterminate color="primary" />
   </div>
@@ -308,8 +318,11 @@ import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { tasksApi } from '@/apis/tasks'
 import { jobsApi } from '@/apis/jobs'
+import { ApiError } from '@/apis/client'
 import { useSnackbar } from '@/composables/useSnackbar'
 import { useConfirm } from '@/composables/useConfirm'
+import { useCancelling } from '@/composables/useCancelling'
+import { useTaskQuery, useTaskMetricsQuery, useTaskActions } from '@/queries/useTaskQueries'
 import { useConfigStore } from '@/stores/config'
 import { useLogViewerStore } from '@/stores/logViewer'
 import MetricsChart from '@/components/MetricsChart.vue'
@@ -327,16 +340,24 @@ const logStore = useLogViewerStore()
 const { t } = useI18n()
 const { confirm: confirmDialog } = useConfirm()
 
-const task = ref<TaskView | null>(null)
+// ── Server state: query cache owns task + metrics (polls while active,
+// stops on terminal states, pauses in background tabs). ──
+const taskQuery = useTaskQuery(() => props.taskId)
+const task = computed(() => taskQuery.data.value ?? null)
+const isActive = computed(() => !!task.value && ['running', 'pending'].includes(task.value.status))
+// client.ts mutes 404 snackbars by design — the page must render the
+// absence itself instead of spinning forever.
+const notFound = computed(() =>
+  taskQuery.error.value instanceof ApiError && taskQuery.error.value.status === 404)
 
-// Kill in flight
-const cancelPending = ref(false)
-const displayStatus = computed(() =>
-  cancelPending.value && task.value?.status === 'running' ? 'cancelling' : task.value?.status ?? '',
-)
-watch(() => task.value?.status, (s) => {
-  if (s && s !== 'running') cancelPending.value = false
-})
+const metricsQuery = useTaskMetricsQuery(() => props.taskId, isActive)
+const metricPoints = computed(() => metricsQuery.data.value ?? [])
+
+// Kill in flight — shared overlay, same state the job page renders.
+const { cancelling, prune, displayStatus: overlayStatus } = useCancelling()
+const displayStatus = computed(() => (task.value ? overlayStatus(task.value) : ''))
+watch(task, (v) => { if (v) prune([v]) })
+void cancelling
 
 // ── Log state (byte-offset based) ──
 const logLines = ref<string[]>([])
@@ -347,7 +368,6 @@ const loadingMore = ref(false)
 const following = ref(false)
 const logContainer = ref<HTMLElement>()
 
-const metricPoints = ref<any[]>([])
 const openPanels = ref(['params', 'metrics', 'log'])
 
 // W&B link: fetch base_url from job detail to avoid hardcoding wandb.ai.
@@ -373,19 +393,6 @@ const {
   toggleSearch, closeSearch, searchNext, searchPrev, isSearchHit,
 } = useLogSurface(logLines, logContainer)
 
-// ── Fetch task info ──
-async function fetchTask() {
-  try {
-    task.value = await tasksApi.get(props.taskId)
-  } catch { /* ignore */ }
-}
-
-async function fetchMetrics() {
-  try {
-    metricPoints.value = await tasksApi.metrics(props.taskId)
-  } catch { metricPoints.value = [] }
-}
-
 // ── Fetch log (GET — initial load + manual paging) ──
 async function fetchLog(offset = 0, lines = 500) {
   logLoading.value = true
@@ -402,8 +409,8 @@ function applyPage(page: LogPage, replace: boolean) {
   } else {
     logLines.value.push(...page.lines)
   }
-  endOffset.value = page.end_offset
-  totalBytes.value = page.total_bytes
+  endOffset.value = page.next_offset
+  totalBytes.value = page.size
 }
 
 async function loadMore() {
@@ -426,8 +433,8 @@ function startFollow() {
     try {
       const page: LogPage = JSON.parse(e.data)
       logLines.value.push(...page.lines)
-      endOffset.value = page.end_offset
-      totalBytes.value = page.total_bytes
+      endOffset.value = page.next_offset
+      totalBytes.value = page.size
       nextTick(() => {
         const el = logContainer.value
         if (el) el.scrollTop = el.scrollHeight
@@ -435,7 +442,14 @@ function startFollow() {
     } catch { /* ignore parse errors */ }
   })
   eventSource.onerror = () => {
-    // SSE auto-reconnects; nothing to do unless we want to surface it.
+    // EventSource only auto-reconnects on network-level errors. When the
+    // SERVER closes the stream (task ended, daemon restart, proxy cut)
+    // readyState goes CLOSED and no reconnect happens — surface it
+    // instead of leaving the Follow toggle silently lying.
+    if (eventSource?.readyState === EventSource.CLOSED) {
+      following.value = false
+      snack.warn(t('log.stream_lost'))
+    }
   }
 }
 
@@ -458,33 +472,36 @@ watch(following, (on) => {
   }
 })
 
-// ── Polling for task status + metrics ──
-const isActive = computed(() => task.value && ['running', 'pending'].includes(task.value.status))
-let pollTimer: ReturnType<typeof setInterval> | null = null
-
-function startPolling() {
-  stopPolling()
-  pollTimer = setInterval(async () => {
-    await Promise.all([fetchTask(), fetchMetrics()])
-  }, 3000)
-}
-
-function stopPolling() {
-  if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
-}
-
-watch(isActive, (active, prev) => {
+// Status/metrics polling is owned by the queries above; this watch only
+// drives the log-follow toggle across the active/terminal transition.
+watch(isActive, async (active, prev) => {
   if (active) {
-    startPolling()
     if (!prev) following.value = true
   } else {
-    stopPolling()
-    following.value = false
+    following.value = false // closes SSE via the following watcher
+    if (prev) {
+      // Final metrics refetch: polling stops on terminal states, but the
+      // last batch (often THE final score) lands right at the flip.
+      metricsQuery.refetch()
+      // The stream may die before the final buffered lines flush — fetch
+      // the tail once so the exit message is never missing.
+      try {
+        const tailFrom = endOffset.value
+        const page = await tasksApi.log(props.taskId, { offset: tailFrom, lines: 500 })
+        // Generation guard: if SSE advanced the offset while this request
+        // was in flight, the same lines already rendered — drop the page.
+        if (endOffset.value !== tailFrom) return
+        applyPage(page, false)
+      } catch { /* best effort */ }
+    }
   }
 })
 
-// ── Actions ──
-const killing = ref(false)
+// ── Actions: mutations invalidate task + parent job + lists. ──
+const taskActions = useTaskActions(() => props.jobId)
+const killing = computed(() => taskActions.kill.isPending.value)
+const retrying = computed(() => taskActions.retry.isPending.value)
+
 async function killTask() {
   if (killing.value) return
   const ok = await confirmDialog({
@@ -494,30 +511,19 @@ async function killTask() {
     danger: true,
   })
   if (!ok) return
-  killing.value = true
   try {
-    await tasksApi.kill(props.taskId)
-    if (config.killAsync) {
-      cancelPending.value = true
-      snack.info('Cancel requested')
-    } else {
-      snack.success('Task killed')
-    }
-    fetchTask()
+    await taskActions.kill.mutateAsync(props.taskId)
+    if (config.killAsync) snack.info('Cancel requested')
+    else snack.success('Task killed')
   } catch (e: any) { snack.error(e?.message || 'Kill failed') }
-  finally { killing.value = false }
 }
 
-const retrying = ref(false)
 async function retryTask() {
   if (retrying.value) return
-  retrying.value = true
   try {
-    await tasksApi.retry(props.taskId)
+    await taskActions.retry.mutateAsync(props.taskId)
     snack.success('Task retried')
-    fetchTask()
   } catch (e: any) { snack.error(e?.message || 'Retry failed') }
-  finally { retrying.value = false }
 }
 
 function formatDuration(sec: number): string {
@@ -536,12 +542,10 @@ function formatBytes(b: number): string {
 
 onMounted(async () => {
   fetchWandbInfo() // fire-and-forget — best effort, doesn't block render
-  await fetchTask()
-  await Promise.all([fetchLog(), fetchMetrics()])
-  if (isActive.value) {
-    startPolling()
-    following.value = true
-  }
+  await fetchLog()
+  // Query cache may already have the task (navigated from the job page);
+  // the immediate isActive value seeds follow, the watch handles flips.
+  if (isActive.value) following.value = true
   nextTick(() => {
     const el = logContainer.value
     if (el) el.scrollTop = el.scrollHeight
@@ -549,7 +553,6 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
-  stopPolling()
   stopFollow()
 })
 </script>

@@ -111,6 +111,8 @@ import { projectsApi } from '@/apis/projects'
 import { filesApi } from '@/apis/files'
 import { useSnackbar } from '@/composables/useSnackbar'
 import { usePreferences } from '@/composables/usePreferences'
+import { queryClient } from '@/queries/client'
+import { qk } from '@/queries/keys'
 import type { ProjectSummary } from '@/types/api'
 
 import PreflightError from '@/components/PreflightError.vue'
@@ -158,6 +160,7 @@ const newProject = reactive({
   error: '',
   params: [] as import('@/types/submit').ProjectParam[],
   dirty: false,
+  source: undefined as import('@/types/api').ProjectConfig | undefined,
 })
 const note = ref('')
 const jobName = ref('') // per-submit override; '' = project default
@@ -214,7 +217,8 @@ provide(SUBMIT_STATE_KEY, reactive({
 // ── Actions ──
 
 function buildProjectPayload() {
-  return createProjectPayload(newProject)
+  // Pass the fetched config as merge base — unedited fields survive.
+  return createProjectPayload(newProject, newProject.source)
 }
 
 async function saveProject(): Promise<boolean> {
@@ -427,9 +431,15 @@ async function submit(forceSkipPreflight = false) {
       preflightEnabled: preflightEnabled.value,
       forceSkipPreflight,
       timeoutMs: 50000,
+      // errors render in-page (submitError below) — a global snackbar on
+      // top of that was double reporting
+      silent: true,
     })
     snack.success(t('submit.success'))
     prefs.submitDraft.value = null // submitted — the draft has served its purpose
+    // The new job must appear in every list immediately (prefix match
+    // covers global + archived + project-scoped variants).
+    queryClient.invalidateQueries({ queryKey: qk.jobs })
     router.push({ name: 'job-detail', params: { project: projectName.value, jobId: res.job_id } })
   } catch (e: any) {
     submitError.value = e?.message || 'Submit failed'

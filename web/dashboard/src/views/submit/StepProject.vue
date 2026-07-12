@@ -527,6 +527,9 @@ async function selectProject(name: string) {
 }
 
 function applyProjectConfig(cfg: ProjectConfig, resetGroups = true) {
+  // Keep the raw config: saves read-modify-write over it so fields the
+  // form doesn't edit (target/env_file/timeout/resume/wandb) are kept.
+  state.newProject.source = cfg
   form.name = cfg.project_name
   form.workDir = cfg.working_dir
   form.cmd = cfg.command_template
@@ -646,6 +649,7 @@ function enterCreateMode() {
 }
 
 function resetProjectForm() {
+  state.newProject.source = undefined
   form.name = ''
   form.workDir = ''
   form.cmd = ''
