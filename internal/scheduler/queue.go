@@ -28,7 +28,7 @@ type Task struct {
 	GPUs        []int // assigned GPU indices (filled after scheduling)
 	Status      TaskStatus
 	RetryCount  int
-	MaxRetry    int // 0 = unlimited
+	MaxRetry    int // -1 = unlimited, 0 = no retries (zero value is safe)
 	PID         int
 	StartTime   time.Time // absolute process start time (for reclaim)
 	LogPath     string

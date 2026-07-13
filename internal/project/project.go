@@ -126,11 +126,34 @@ type WandbConfig struct {
 	Mode    string   `yaml:"mode,omitempty" json:"mode,omitempty"` // "online" / "offline" / "disabled"
 }
 
+// UnlimitedRetries is the ONLY negative max_retry the contract admits.
+// Intake boundaries (project save, submit planning) reject anything below
+// it; the RUNTIME retry check stays tolerant (`< 0` = unlimited) so rows
+// persisted before this rule existed cannot brick the scheduler.
+const UnlimitedRetries = -1
+
+// ValidateRetryBounds enforces the max_retry contract at intake.
+func ValidateRetryBounds(maxRetry int) error {
+	if maxRetry < UnlimitedRetries {
+		return fmt.Errorf("max_retry %d out of range: use -1 (unlimited) or >= 0", maxRetry)
+	}
+	return nil
+}
+
 // Defaults are project-level defaults that can be overridden per-job.
+//
+// The int fields carry MEANINGFUL zeros (gpus_per_task 0 = CPU-only,
+// max_retry 0 = no retries), and the scheduler already treats an unset
+// field as 0 — so the JSON tags must NOT use omitempty: it silently
+// dropped a legal explicit 0 from the wire and the dashboard rendered its
+// form default (1 GPU) instead, then wrote that back (RQ-69 review).
+// YAML keeps omitempty for hand-written project.yaml friendliness; an
+// omitted key decodes to the same 0 the scheduler uses, so the file and
+// wire semantics agree.
 type Defaults struct {
-	GPUsPerTask int    `yaml:"gpus_per_task,omitempty" json:"gpus_per_task,omitempty"`
-	MaxRetry    int    `yaml:"max_retry,omitempty" json:"max_retry,omitempty"` // 0 means unlimited
-	Timeout     string `yaml:"timeout,omitempty" json:"timeout,omitempty"`     // human duration, e.g. "3h", "1d"
+	GPUsPerTask int    `yaml:"gpus_per_task,omitempty" json:"gpus_per_task"`
+	MaxRetry    int    `yaml:"max_retry,omitempty" json:"max_retry"`       // -1 = unlimited, 0 = no retries
+	Timeout     string `yaml:"timeout,omitempty" json:"timeout,omitempty"` // human duration, e.g. "3h", "1d"
 }
 
 // PythonEnvConfig specifies which Python environment to activate before running tasks.

@@ -39,6 +39,6 @@ sweep:
 # Optional: override project defaults for this job
 # overrides:
 #   gpus_per_task: 4
-#   max_retry: 0
+#   max_retry: 5       # -1 = unlimited, 0 = no retries
 #   env:
 #     WANDB_RUN_GROUP: sweep-v2

@@ -69,7 +69,7 @@ func seedRunningTask(t *testing.T, s *Scheduler, q *Queue, id string) *Task {
 	task := &Task{
 		ID: id, JobID: "j-" + id, ProjectName: "test",
 		Command: "true", GPUsNeeded: 1,
-		MaxRetry: 0, // unlimited retry — the RQ-69 loop precondition
+		MaxRetry: -1, // unlimited retry — the RQ-69 loop precondition
 	}
 	seedJob(t, s.store, task.JobID, "test", 1)
 	seedTask(t, s.store, task)

@@ -405,13 +405,18 @@ func (s *Scheduler) MonitorReattached(task *Task, ch <-chan executor.ReattachRes
 }
 
 // handleFailure decides whether to retry or permanently fail a task.
-// MaxRetry == 0 means unlimited retries. extra fields (may be nil) are
-// persisted only with the permanent-failure transition; a requeue resets
-// state instead.
+// MaxRetry < 0 means unlimited retries; 0 means none. extra fields (may
+// be nil) are persisted only with the permanent-failure transition; a
+// requeue resets state instead.
 func (s *Scheduler) handleFailure(task *Task, extra map[string]any) {
 	// No kill handling here: the failed×kill decision is made ONCE in
 	// finishTaskInner's funnel checkpoint before this is even reached.
-	canRetry := task.MaxRetry == 0 || task.RetryCount < task.MaxRetry
+	//
+	// Retry budget semantics (changed with RQ-69): -1 = unlimited
+	// (explicit opt-in), 0 = no retries. The zero value is now the SAFE
+	// behavior — under the old "0 = unlimited" rule, a project that simply
+	// omitted max_retry defaulted into an infinite resubmit loop.
+	canRetry := task.MaxRetry < 0 || task.RetryCount < task.MaxRetry
 	if canRetry {
 		nextRetry := task.RetryCount + 1
 		dbCtx, cancel := context.WithTimeout(s.ctx, 5*time.Second)

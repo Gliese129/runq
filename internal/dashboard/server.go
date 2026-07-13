@@ -500,6 +500,10 @@ func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 		writeErrorStatus(w, http.StatusBadRequest, fmt.Errorf("project_name is required"))
 		return
 	}
+	if err := project.ValidateRetryBounds(cfg.Defaults.MaxRetry); err != nil {
+		writeErrorStatus(w, http.StatusBadRequest, err)
+		return
+	}
 	if err := s.backend.CreateProject(r.Context(), cfg); err != nil {
 		writeError(w, err)
 		return
@@ -521,6 +525,10 @@ func (s *Server) handleUpdateProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg.ProjectName = name
+	if err := project.ValidateRetryBounds(cfg.Defaults.MaxRetry); err != nil {
+		writeErrorStatus(w, http.StatusBadRequest, err)
+		return
+	}
 	if err := s.backend.UpdateProject(r.Context(), cfg); err != nil {
 		writeError(w, err)
 		return

@@ -31,7 +31,8 @@
         </v-col>
         <v-col cols="6" sm="3">
           <div class="text-caption text-on-surface-variant">Retries</div>
-          <div class="text-body-2 font-weight-medium">{{ task.retry_count || 0 }} / {{ task.max_retry || '∞' }}</div>
+          <!-- -1 = unlimited (explicit opt-in); 0 legitimately means "no retries" -->
+          <div class="text-body-2 font-weight-medium">{{ task.retry_count || 0 }} / {{ task.max_retry < 0 ? '∞' : task.max_retry }}</div>
         </v-col>
         <v-col cols="6" sm="3">
           <div class="text-caption text-on-surface-variant">GPUs</div>

@@ -75,7 +75,7 @@
           <span class="text-subtitle-1 font-weight-medium">{{ form.name }}</span>
           <v-chip size="x-small" variant="tonal">{{ envSummary }}</v-chip>
           <v-chip size="x-small" variant="tonal">{{ form.gpus }} GPU{{ form.gpus === 1 ? '' : 's' }}</v-chip>
-          <v-chip size="x-small" variant="tonal">retry {{ form.maxRetry }}</v-chip>
+          <v-chip size="x-small" variant="tonal">retry {{ form.maxRetry < 0 ? '∞' : form.maxRetry }}</v-chip>
         </div>
 
         <table class="summary-table">
@@ -267,7 +267,7 @@
           <v-col cols="6">
             <v-number-input
               v-model="form.maxRetry" :label="t('submit.max_retry')"
-              variant="outlined" density="compact" :min="0" hide-details
+              variant="outlined" density="compact" :min="-1" hide-details
               control-variant="stacked"
             />
           </v-col>
