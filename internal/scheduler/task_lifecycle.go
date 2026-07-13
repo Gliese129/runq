@@ -117,6 +117,7 @@ func (s *Scheduler) runTask(task *Task) {
 //     status.json. Never retry (double submission).
 //   - REJECTED (scheduler said no, exit != 0): deterministic — permanent
 //     failure with the scheduler's own words in the error.
+//
 // launchAsync submits an unsupervised task and settles the outcome against
 // the kill flag. The kill × launch-outcome semantics (RQ-69) are:
 //
@@ -238,7 +239,7 @@ func (s *Scheduler) FinishTask(task *Task, status TaskStatus, extra map[string]a
 
 // FinishTaskNoRetry records a permanent failure that must NOT enter the
 // retry policy — deterministic scheduler rejections (submission ran, exit
-// non-zero): retrying replays the same answer and, with max_retry=0
+// non-zero): retrying replays the same answer and, with max_retry=-1
 // (unlimited), becomes a log storm.
 func (s *Scheduler) FinishTaskNoRetry(task *Task, extra map[string]any) {
 	s.finishTaskInner(task, StatusFailed, extra, false)

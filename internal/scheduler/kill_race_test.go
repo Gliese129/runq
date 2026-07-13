@@ -12,7 +12,7 @@ import (
 // between retry attempts (pending, external_id cleared) or while the
 // remote submit is in flight (running, external_id not yet backfilled).
 // Before the ownership-flag protocol this was an unkillable resubmit loop
-// under max_retry=0 (unlimited).
+// under unlimited retry (max_retry -1; 0 was "unlimited" at the time).
 
 // fakeRemoteLauncher is an unsupervised (remote-lane-shaped) launcher.
 type fakeRemoteLauncher struct {
