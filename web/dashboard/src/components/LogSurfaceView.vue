@@ -11,7 +11,7 @@
           density="compact"
           variant="plain"
           hide-details
-          placeholder="Search..."
+          :placeholder="t('log.search')"
           class="log-search-input"
           @keydown.enter.exact="searchNext"
           @keydown.enter.shift="searchPrev"
@@ -80,7 +80,7 @@
               :color="item.variant === 'traceback' ? 'error' : undefined"
               class="ml-auto flex-shrink-0"
             >
-              {{ item.lineCount }} lines<template v-if="item.repeats"> ×{{ item.repeats }}</template>
+              {{ t('log.n_lines', { n: item.lineCount }) }}<template v-if="item.repeats"> ×{{ item.repeats }}</template>
             </v-chip>
           </div>
           <!-- Expanded block header (drain diff view / interleaved motif) -->
@@ -94,7 +94,7 @@
             <span class="drain-fold-chevron">&#9660;</span>
             <span class="drain-fold-summary text-truncate">{{ item.label }}</span>
             <v-chip size="x-small" variant="tonal" class="ml-auto flex-shrink-0">
-              {{ item.lineCount }} lines<template v-if="item.repeats"> ×{{ item.repeats }}</template>
+              {{ t('log.n_lines', { n: item.lineCount }) }}<template v-if="item.repeats"> ×{{ item.repeats }}</template>
             </v-chip>
           </div>
           <!-- Expanded block line (left/right borders continue the panel) -->
@@ -132,7 +132,7 @@
             @click="toggleFold(item.foldKey)"
           >
             <span class="drain-fold-chevron">&#9650;</span>
-            <span>Collapse</span>
+            <span>{{ t('common.collapse') }}</span>
           </div>
           <!-- Normal line -->
           <div
@@ -149,14 +149,14 @@
                 v-if="item.line.tqdmFolded > 0"
                 size="x-small" variant="tonal" color="secondary" class="mr-1 log-tqdm-badge"
               >
-                {{ item.line.tqdmFolded }} folded
+                {{ t('log.n_folded', { n: item.line.tqdmFolded }) }}
               </v-chip>
               <!-- Long line: truncated by default -->
               <template v-if="isLong(item.line) && !isExpanded(item.line)">
                 {{ truncateText(item.line.text) }}<span
                   class="log-expand-btn"
                   @click="toggleExpand(item.line)"
-                >… +{{ (item.line.text.length - LONG_LINE_THRESHOLD).toLocaleString() }} chars</span>
+                >… {{ t('log.expand_chars', { n: (item.line.text.length - LONG_LINE_THRESHOLD).toLocaleString() }) }}</span>
               </template>
               <template v-else>
                 <template v-for="(seg, si) in getSegments(item.line)" :key="si">
@@ -167,7 +167,7 @@
                   v-if="isLong(item.line)"
                   class="log-collapse-btn"
                   @click="toggleExpand(item.line)"
-                >collapse</span>
+                >{{ t('common.collapse').toLocaleLowerCase() }}</span>
               </template>
             </span>
           </div>
@@ -274,8 +274,10 @@ onBeforeUnmount(() => {
 .log-scroll {
   overflow-y: auto;
 }
+/* Muted-but-readable: slate-400 keeps ≥4.5:1 on the #0F172A terminal
+   background (slate-500 was ~3.7:1 — below WCAG AA). */
 .log-empty {
-  color: #64748B;
+  color: #94A3B8;
 }
 
 /* ── Virtual rows (tanstack standard mode) ── */
@@ -304,7 +306,7 @@ onBeforeUnmount(() => {
   width: 48px;
   text-align: right;
   padding-right: 12px;
-  color: #64748B;
+  color: #94A3B8;
   user-select: none;
   flex-shrink: 0;
 }
@@ -312,7 +314,7 @@ onBeforeUnmount(() => {
   width: 8ch;
   min-width: 8ch;
   padding-right: 8px;
-  color: #64748B;
+  color: #94A3B8;
   font-size: 0.9em;
   user-select: none;
   flex-shrink: 0;
@@ -395,7 +397,9 @@ onBeforeUnmount(() => {
   background: rgba(var(--v-theme-primary), 0.06);
 }
 .drain-col { display: inline-block; padding-right: 1ch; }
-.drain-static { color: #475569; }
+/* Static tokens stay visually secondary via weight, but the color itself
+   clears 4.5:1 on the terminal background (was #475569 ≈ 2.4:1). */
+.drain-static { color: #94A3B8; }
 .drain-var { color: #e2e8f0; font-weight: 500; }
 
 /* ── Inline highlights ── */

@@ -26,14 +26,17 @@
             @select="onJobYamlSelected"
           />
           <v-chip v-if="step >= 2 && displayTaskCount > 0" variant="tonal" color="primary">
-            {{ displayTaskCount }} {{ displayTaskCount === 1 ? 'task' : 'tasks' }}
+            {{ t('submit.task_count', { n: displayTaskCount }, displayTaskCount) }}
           </v-chip>
         </div>
       </div>
 
-      <div class="d-flex ga-2 mb-5">
+      <div class="d-flex ga-2 mb-5" role="list">
         <div v-for="(_, i) in steps" :key="i"
           class="flex-grow-1 rounded-pill"
+          role="listitem"
+          :aria-current="step === i ? 'step' : undefined"
+          :aria-label="t(stepLabelKeys[i])"
           :style="{
             height: '4px',
             background: step > i
@@ -78,7 +81,7 @@
         @click="submit()"
       >
         <v-icon start>mdi-rocket-launch-outline</v-icon>
-        {{ t('submit.submit') }} ({{ dryRunResult.length }} tasks)
+        {{ t('submit.submit') }} ({{ t('submit.task_count', { n: dryRunResult.length }, dryRunResult.length) }})
       </v-btn>
     </div>
 
@@ -140,6 +143,8 @@ const snack = useSnackbar()
 const prefs = usePreferences()
 
 const steps = ['project', 'configure', 'review']
+// Step indicator labels (a11y): announced with aria-current="step".
+const stepLabelKeys = ['submit.project', 'submit.configure', 'submit.review']
 const step = ref(0)
 
 const projectName = ref(prefs.lastProject.value || '')
@@ -230,7 +235,7 @@ async function saveProject(): Promise<boolean> {
     const selectedName = projectName.value.trim()
     const selectedExists = selectedName && matchedProjects.value.some(p => p.name === selectedName)
     if (selectedExists && targetName !== selectedName) {
-      newProject.error = 'Use Rename before continuing'
+      newProject.error = t('submit.use_rename')
       return false
     }
     const isNew = !matchedProjects.value.some(p => p.name === targetName)
@@ -241,7 +246,7 @@ async function saveProject(): Promise<boolean> {
         work_dir: newProject.workDir,
         job_count: 0,
       })
-      snack.success(`Project "${targetName}" registered`)
+      snack.success(t('submit.project_registered', { name: targetName }))
     } else {
       await projectsApi.update(targetName, payload)
     }
@@ -249,7 +254,7 @@ async function saveProject(): Promise<boolean> {
     prefs.lastProject.value = projectName.value
     return true
   } catch (e: any) {
-    newProject.error = e?.message || 'Failed to save project'
+    newProject.error = e?.message || t('common.error')
     return false
   } finally {
     newProject.creating = false
@@ -326,7 +331,7 @@ onMounted(async () => {
     linkSets.value = ls
     step.value = 1
   } catch (e: any) {
-    snack.error(e?.message || 'Failed to load source job')
+    snack.error(e?.message || t('submit.load_job_failed'))
   }
 })
 
@@ -442,7 +447,7 @@ async function submit(forceSkipPreflight = false) {
     queryClient.invalidateQueries({ queryKey: qk.jobs })
     router.push({ name: 'job-detail', params: { project: projectName.value, jobId: res.job_id } })
   } catch (e: any) {
-    submitError.value = e?.message || 'Submit failed'
+    submitError.value = e?.message || t('common.error')
   } finally {
     submitting.value = false
   }

@@ -5,7 +5,7 @@
       <div class="text-h5 font-weight-bold">{{ project }}</div>
       <div class="d-flex ga-2">
         <v-btn variant="text" size="small"
-          :title="projectArchived ? undefined : 'Hide this project and its jobs from default lists — reversible'"
+          :title="projectArchived ? undefined : t('archive.project_tooltip')"
           @click="toggleProjectArchive"
         >
           <v-icon start size="16">{{ projectArchived ? 'mdi-archive-arrow-up-outline' : 'mdi-archive-arrow-down-outline' }}</v-icon>
@@ -19,9 +19,13 @@
 
     <!-- Filters -->
     <div class="d-flex align-center ga-2 mb-3 flex-wrap">
+      <!-- role=button + aria-pressed: VChip is a focusable span and already
+           handles Enter/Space itself; SR users just need the toggle semantics. -->
       <v-chip
         v-for="s in statusFilters"
         :key="s.value"
+        role="button"
+        :aria-pressed="statusFilter === s.value"
         :variant="statusFilter === s.value ? 'flat' : 'outlined'"
         :color="statusFilter === s.value ? 'primary' : undefined"
         size="small"
@@ -33,7 +37,7 @@
       <v-spacer />
       <v-text-field
         v-model="searchQuery"
-        placeholder="Search by note..."
+        :placeholder="t('project.search_note')"
         prepend-inner-icon="mdi-magnify"
         density="compact"
         variant="outlined"
@@ -51,18 +55,28 @@
           <thead>
             <tr>
               <th style="width: 24px"></th>
-              <th class="cursor-pointer" @click="toggleSort('id')">
-                ID {{ sortIcon('id') }}
+              <!-- th keeps its columnheader role (aria-sort lives there);
+                   the inner <button> supplies keyboard access and focus. -->
+              <th :aria-sort="ariaSort('id')">
+                <button type="button" class="th-sort-btn" @click="toggleSort('id')">
+                  ID {{ sortIcon('id') }}
+                </button>
               </th>
-              <th class="cursor-pointer" @click="toggleSort('note')">
-                Note {{ sortIcon('note') }}
+              <th :aria-sort="ariaSort('note')">
+                <button type="button" class="th-sort-btn" @click="toggleSort('note')">
+                  {{ t('table.note') }} {{ sortIcon('note') }}
+                </button>
               </th>
-              <th class="cursor-pointer" @click="toggleSort('tasks')">
-                Tasks {{ sortIcon('tasks') }}
+              <th :aria-sort="ariaSort('tasks')">
+                <button type="button" class="th-sort-btn" @click="toggleSort('tasks')">
+                  {{ t('table.tasks') }} {{ sortIcon('tasks') }}
+                </button>
               </th>
-              <th>ETA</th>
-              <th class="cursor-pointer" @click="toggleSort('created_at')">
-                Created {{ sortIcon('created_at') }}
+              <th>{{ t('job.eta') }}</th>
+              <th :aria-sort="ariaSort('created_at')">
+                <button type="button" class="th-sort-btn" @click="toggleSort('created_at')">
+                  {{ t('table.created') }} {{ sortIcon('created_at') }}
+                </button>
               </th>
             </tr>
           </thead>
@@ -78,16 +92,14 @@
               @keydown.enter="router.push({ name: 'job-detail', params: { project, jobId: j.id } })"
               @keydown.space.prevent="router.push({ name: 'job-detail', params: { project, jobId: j.id } })"
             >
-              <td><StatusDot :status="j.status" kind="job" /></td>
+              <td><StatusDot :status="j.status" kind="job" :size="14" /></td>
               <td><code>{{ j.id.slice(0, 8) }}</code></td>
               <td class="text-on-surface-variant">{{ j.note || '—' }}</td>
               <td>
                 <div class="d-flex align-center ga-2">
-                  <v-progress-linear
-                    :model-value="j.tasks.total > 0 ? (j.tasks.completed / j.tasks.total) * 100 : 0"
-                    color="success" height="3" rounded style="width: 40px"
-                  />
+                  <SegmentedProgress :counts="j.tasks" :height="3" style="width: 40px" />
                   {{ j.tasks.completed }}/{{ j.tasks.total }}
+                  <span v-if="j.tasks.failed > 0" class="text-error">· {{ t('job.n_failed', { n: j.tasks.failed }) }}</span>
                 </div>
               </td>
               <td class="text-on-surface-variant">{{ j.eta_seconds ? formatDuration(j.eta_seconds) : '—' }}</td>
@@ -108,7 +120,13 @@
 
     <!-- Archived jobs of this project (collapsed by default) -->
     <v-card v-if="archivedJobs.length > 0" class="mt-3">
-      <div class="d-flex align-center ga-2 px-4 py-3 cursor-pointer text-on-surface-variant" @click="archivedOpen = !archivedOpen">
+      <div
+        class="d-flex align-center ga-2 px-4 py-3 cursor-pointer text-on-surface-variant"
+        role="button" tabindex="0" :aria-expanded="archivedOpen"
+        @click="archivedOpen = !archivedOpen"
+        @keydown.enter="archivedOpen = !archivedOpen"
+        @keydown.space.prevent="archivedOpen = !archivedOpen"
+      >
         <v-icon size="16">mdi-archive-outline</v-icon>
         <span class="text-subtitle-2">{{ t('archive.section', { n: archivedJobs.length }) }}</span>
         <v-spacer />
@@ -117,8 +135,12 @@
       <div v-if="archivedOpen" class="px-2 pb-2">
         <div
           v-for="j in archivedJobs" :key="j.id"
-          class="d-flex align-center ga-2 px-2 py-1 rounded recent-row cursor-pointer"
+          class="d-flex align-center ga-2 px-2 py-1 rounded recent-row cursor-pointer row-focus"
+          role="link" tabindex="0"
+          :aria-label="t('a11y.open_job', { id: j.id.slice(0, 10) })"
           @click="router.push({ name: 'job-detail', params: { project: j.project, jobId: j.id } })"
+          @keydown.enter="router.push({ name: 'job-detail', params: { project: j.project, jobId: j.id } })"
+          @keydown.space.prevent="router.push({ name: 'job-detail', params: { project: j.project, jobId: j.id } })"
         >
           <code class="text-body-2">{{ j.id.slice(0, 10) }}</code>
           <span class="text-caption text-on-surface-variant text-truncate flex-grow-1">{{ j.note || '—' }}</span>
@@ -139,7 +161,9 @@ import { useProjectStore } from '@/stores/projects'
 import { useSnackbar } from '@/composables/useSnackbar'
 import { useJobsListQuery, useArchivedJobsQuery, useProjectJobsQuery, useJobActions } from '@/queries/useJobQueries'
 import StatusDot from '@/components/StatusDot.vue'
+import SegmentedProgress from '@/components/SegmentedProgress.vue'
 import type { JobSummary } from '@/types/api'
+import { relativeTime, formatDuration } from '@/utils/relativeTime'
 
 const props = defineProps<{ project: string }>()
 const { t } = useI18n()
@@ -180,14 +204,14 @@ async function toggleProjectArchive() {
       snack.success(t('archive.project_done'))
     }
     await Promise.all([archivedQuery.refetch(), scopedQuery.refetch(), listQuery.refetch()])
-  } catch (e: any) { snack.error(e?.message || 'Archive failed') }
+  } catch (e: any) { snack.error(e?.message || t('common.error')) }
 }
 
 async function unarchiveJob(id: string) {
   try {
     await jobActions.unarchive.mutateAsync({ id, project: props.project })
     snack.success(t('archive.job_back'))
-  } catch (e: any) { snack.error(e?.message || 'Unarchive failed') }
+  } catch (e: any) { snack.error(e?.message || t('common.error')) }
 }
 
 const statusFilter = ref('')
@@ -195,15 +219,32 @@ const searchQuery = ref('')
 const sortKey = ref('created_at')
 const sortDesc = ref(true)
 
-// dot/kind reference statusGrammar — 'done' is a job-level status, the
-// rest filter on task counts, hence task-level statuses.
-const statusFilters: { value: string; label: string; dot: string; kind: 'task' | 'job' }[] = [
-  { value: '', label: 'All', dot: '', kind: 'task' },
-  { value: 'running', label: 'Running', dot: 'running', kind: 'task' },
-  { value: 'done', label: 'Done', dot: 'done', kind: 'job' },
-  { value: 'failed', label: 'Failed', dot: 'failed', kind: 'task' },
-  { value: 'pending', label: 'Pending', dot: 'pending', kind: 'task' },
-]
+// Count-carrying filter chips: "x/n done · y/n failed · z/n running".
+// The chip reports MATCH COUNTS instead of pretending to be a job-status
+// taxonomy — so partial/killed jobs need no chip color of their own: the
+// backend folds killed into tasks.failed, hence every not-fully-successful
+// terminal job lands under "failed" naturally. "done" stays strict (job
+// fully succeeded). Overlap across chips (a live job can match running AND
+// failed) is inherent to contains-semantics and intended.
+function matchesFilter(j: JobSummary, f: string): boolean {
+  if (f === 'running') return j.tasks.running > 0
+  if (f === 'pending') return j.tasks.pending > 0
+  if (f === 'failed') return j.tasks.failed > 0
+  if (f === 'done') return j.status === 'done'
+  return true
+}
+
+const statusFilters = computed<{ value: string; label: string; dot: string; kind: 'task' | 'job' }[]>(() => {
+  const n = projectJobs.value.length
+  const count = (f: string) => projectJobs.value.filter(j => matchesFilter(j, f)).length
+  return [
+    { value: '', label: t('common.all'), dot: '', kind: 'task' },
+    { value: 'done', label: t('filter.count', { x: count('done'), n, s: t('status.job.done') }), dot: 'done', kind: 'job' },
+    { value: 'failed', label: t('filter.count', { x: count('failed'), n, s: t('status.task.failed') }), dot: 'failed', kind: 'task' },
+    { value: 'running', label: t('filter.count', { x: count('running'), n, s: t('status.task.running') }), dot: 'running', kind: 'task' },
+    { value: 'pending', label: t('filter.count', { x: count('pending'), n, s: t('status.task.pending') }), dot: 'pending', kind: 'task' },
+  ]
+})
 
 const projectJobs = computed(() =>
   projectArchived.value
@@ -214,13 +255,8 @@ const displayedJobs = computed(() => {
   let list = [...projectJobs.value]
 
   if (statusFilter.value) {
-    list = list.filter(j => {
-      if (statusFilter.value === 'running') return j.tasks.running > 0
-      if (statusFilter.value === 'pending') return j.tasks.pending > 0
-      if (statusFilter.value === 'failed') return j.tasks.failed > 0
-      if (statusFilter.value === 'done') return j.status === 'done'
-      return true
-    })
+    // Same predicate the chip counted with — the number IS the promise.
+    list = list.filter(j => matchesFilter(j, statusFilter.value))
   }
 
   if (searchQuery.value) {
@@ -250,17 +286,9 @@ function sortIcon(key: string): string {
   return sortDesc.value ? '↓' : '↑'
 }
 
-function relativeTime(ts: number): string {
-  const diff = Date.now() / 1000 - ts
-  if (diff < 60) return 'just now'
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`
-  return `${Math.floor(diff / 86400)}d ago`
-}
-
-function formatDuration(sec: number): string {
-  if (sec < 60) return `${sec}s`
-  if (sec < 3600) return `${Math.floor(sec / 60)}m`
-  return `${Math.floor(sec / 3600)}h ${Math.floor((sec % 3600) / 60)}m`
+/** aria-sort value for a sortable header (a11y). */
+function ariaSort(key: string): 'ascending' | 'descending' | 'none' {
+  if (sortKey.value !== key) return 'none'
+  return sortDesc.value ? 'descending' : 'ascending'
 }
 </script>

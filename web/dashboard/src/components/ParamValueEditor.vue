@@ -5,7 +5,7 @@
     size="small" variant="outlined"
     class="opacity-70 cursor-pointer"
     style="font-family: monospace"
-    title="default — click to edit"
+    :title="t('submit.default_click_edit')"
     @click="expand"
   >
     {{ defaultValue }}
@@ -46,12 +46,12 @@
         v-for="sug in availableSuggestions" :key="sug"
         size="x-small" variant="outlined" class="cursor-pointer opacity-70"
         style="font-family: monospace"
-        :title="type !== 'str' ? sug : 'click to append (repeatable)'"
+        :title="type !== 'str' ? sug : t('submit.click_append')"
         @click="$emit('update:modelValue', [...modelValue, sug])"
       >+ {{ type !== 'str' ? (sug.split('/').pop() || sug) : sug }}</v-chip>
     </div>
     <div v-if="type !== 'str' && invalidPaths.length > 0" class="text-caption text-warning mt-1">
-      {{ invalidPaths.length }} value(s) don't look like paths
+      {{ t('submit.invalid_paths', { n: invalidPaths.length }) }}
     </div>
   </div>
 
@@ -88,8 +88,11 @@
 
 <script setup lang="ts">
 import { computed, nextTick, ref } from 'vue'
+import { useI18n } from 'vue-i18n'
 import ChipInput from './ChipInput.vue'
 import ValueGenerator from './ValueGenerator.vue'
+
+const { t } = useI18n()
 
 const props = withDefaults(defineProps<{
   modelValue: string[]
@@ -102,7 +105,7 @@ const props = withDefaults(defineProps<{
    *  false: "fixed at default" and "zipped" are contradictory states. */
   collapsible?: boolean
 }>(), {
-  placeholder: 'Type value + Enter',
+  placeholder: '',
   color: 'primary',
   defaultValue: '',
   suggestions: () => [],
@@ -128,7 +131,9 @@ const collapsed = computed(() =>
 )
 
 const effectivePlaceholder = computed(() =>
-  props.defaultValue ? `default ${props.defaultValue} — type to override/sweep` : props.placeholder,
+  props.defaultValue
+    ? t('submit.default_override_hint', { v: props.defaultValue })
+    : (props.placeholder || t('submit.type_value_enter')),
 )
 
 function expand() {
@@ -165,8 +170,8 @@ const availableSuggestions = computed(() => props.suggestions)
 // ── Path validation for file/folder ──
 const invalidPaths = computed(() =>
   props.modelValue.filter(v => {
-    const t = v.trim()
-    return t.length > 0 && !t.includes('/') && !t.includes('\\')
+    const s = v.trim()
+    return s.length > 0 && !s.includes('/') && !s.includes('\\')
   })
 )
 

@@ -2,7 +2,7 @@
   <div class="log-side-panel">
     <!-- Processor toggles — compact btn row -->
     <div class="panel-section">
-      <div class="panel-header">Processors</div>
+      <div class="panel-header">{{ t('log.processors') }}</div>
       <div class="btn-wrap">
         <v-btn
           v-for="p in processors" :key="p.key"
@@ -18,8 +18,9 @@
     <!-- Pre-Drain rules — compact -->
     <div class="panel-section">
       <div class="d-flex align-center justify-space-between">
-        <div class="panel-header mb-0">Rules</div>
-        <v-btn size="x-small" variant="text" icon="mdi-plus" density="compact" @click="openAdd" />
+        <div class="panel-header mb-0">{{ t('log.rules') }}</div>
+        <v-btn size="x-small" variant="text" icon="mdi-plus" density="compact"
+          :aria-label="t('log.add_rule')" :title="t('log.add_rule')" @click="openAdd" />
       </div>
       <div class="btn-wrap" v-if="rules.length > 0">
         <v-btn
@@ -34,33 +35,34 @@
           {{ rule.name }}
           <v-tooltip activator="parent" location="top">
             /{{ rule.pattern }}/ → {{ rule.replacement }}
-            <br>Right-click to edit
+            <br>{{ t('log.rule_edit_hint') }}
           </v-tooltip>
         </v-btn>
       </div>
-      <div v-else class="text-caption text-disabled pa-1">No rules</div>
+      <div v-else class="text-caption text-disabled pa-1">{{ t('log.no_rules') }}</div>
     </div>
 
     <!-- Rule edit dialog -->
     <v-dialog v-model="dialog" max-width="480">
       <v-card>
         <v-card-title class="text-subtitle-1">
-          {{ editIdx < 0 ? 'Add Rule' : 'Edit Rule' }}
+          {{ editIdx < 0 ? t('log.add_rule') : t('log.edit_rule') }}
           <v-btn v-if="editIdx >= 0" size="x-small" variant="text" icon="mdi-delete-outline"
-            color="error" class="ml-2" @click="removeAndClose" />
+            color="error" class="ml-2" :aria-label="t('common.delete')" :title="t('common.delete')"
+            @click="removeAndClose" />
         </v-card-title>
         <v-card-text class="pb-0">
-          <v-text-field v-model="editForm.name" label="Name" variant="outlined" density="compact" class="mb-2" />
-          <v-text-field v-model="editForm.pattern" label="Regex pattern" variant="outlined" density="compact"
+          <v-text-field v-model="editForm.name" :label="t('table.name')" variant="outlined" density="compact" class="mb-2" />
+          <v-text-field v-model="editForm.pattern" :label="t('log.rule_pattern')" variant="outlined" density="compact"
             class="mb-2 mono-input" :error-messages="patternError" />
-          <v-text-field v-model="editForm.replacement" label="Replacement" variant="outlined" density="compact"
-            class="mono-input" hint="Supports $1, $2, etc." persistent-hint />
+          <v-text-field v-model="editForm.replacement" :label="t('log.rule_replacement')" variant="outlined" density="compact"
+            class="mono-input" :hint="t('log.rule_replacement_hint')" persistent-hint />
         </v-card-text>
         <v-card-actions>
           <v-spacer />
-          <v-btn variant="text" @click="dialog = false">Cancel</v-btn>
+          <v-btn variant="text" @click="dialog = false">{{ t('common.cancel') }}</v-btn>
           <v-btn variant="tonal" color="primary" :disabled="!editForm.name || !editForm.pattern || !!patternError" @click="saveRule">
-            {{ editIdx < 0 ? 'Add' : 'Save' }}
+            {{ editIdx < 0 ? t('common.add') : t('common.save') }}
           </v-btn>
         </v-card-actions>
       </v-card>
@@ -68,7 +70,7 @@
 
     <!-- Motif groups — compact list -->
     <div v-if="motifGroups.length > 0" class="panel-section">
-      <div class="panel-header">Groups ({{ motifGroups.length }})</div>
+      <div class="panel-header">{{ t('log.groups', { n: motifGroups.length }) }}</div>
       <div
         v-for="g in motifGroups" :key="g.id"
         class="group-row"
@@ -78,6 +80,8 @@
           size="x-small" variant="text" density="compact"
           :icon="isHidden(g) ? 'mdi-eye-off-outline' : 'mdi-eye-outline'"
           :color="isHidden(g) ? 'default' : 'primary'"
+          :aria-label="isHidden(g) ? t('log.show_group') : t('log.hide_group')"
+          :title="isHidden(g) ? t('log.show_group') : t('log.hide_group')"
           @click="$emit('toggle-cluster', g.id)"
         />
         <span class="group-label text-caption" @click="$emit('scroll-to-group', g.id)" :title="g.label">
@@ -95,7 +99,10 @@
 
 <script setup lang="ts">
 import { ref, computed } from 'vue'
+import { useI18n } from 'vue-i18n'
 import type { ProcessorToggles, MotifGroup, PreDrainRule } from '@/utils/logProcessors'
+
+const { t } = useI18n()
 
 const props = defineProps<{
   toggles: ProcessorToggles
@@ -114,13 +121,15 @@ const emit = defineEmits<{
   'remove-rule': [index: number]
 }>()
 
-const processors = [
-  { key: 'crFolder',       label: '\\r' },
-  { key: 'tracebackFold',  label: 'TB' },
-  { key: 'levelColoring',  label: 'Level' },
-  { key: 'metricHighlight', label: 'Metric' },
-  { key: 'rankColoring',   label: 'Rank' },
-]
+// Toggle labels: "\r" and "TB" are technical markers and stay as-is; the
+// word labels go through i18n. Computed so a locale switch updates live.
+const processors = computed(() => [
+  { key: 'crFolder',        label: '\\r' },
+  { key: 'tracebackFold',   label: 'TB' },
+  { key: 'levelColoring',   label: t('log.proc_level') },
+  { key: 'metricHighlight', label: t('log.proc_metric') },
+  { key: 'rankColoring',    label: t('log.proc_rank') },
+])
 
 function isHidden(g: MotifGroup): boolean {
   return props.hiddenGroupIds.has(g.id)
@@ -137,7 +146,7 @@ const patternError = computed(() => {
     new RegExp(editForm.value.pattern)
     return ''
   } catch (e: any) {
-    return e.message || 'Invalid regex'
+    return e.message || t('common.error')
   }
 })
 
@@ -179,6 +188,17 @@ function removeAndClose() {
   padding: 8px;
   overflow-y: auto;
   max-height: 600px;
+}
+/* Narrow screens: the 220px column starves the log — go full width and
+   wrap below it (parent containers use flex-wrap). */
+@media (max-width: 959px) {
+  .log-side-panel {
+    width: 100%;
+    min-width: 100%;
+    border-left: none;
+    border-top: 1px solid rgb(var(--v-theme-outline-variant));
+    max-height: 260px;
+  }
 }
 .panel-section + .panel-section {
   margin-top: 10px;

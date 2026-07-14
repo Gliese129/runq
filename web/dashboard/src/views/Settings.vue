@@ -112,7 +112,7 @@
           </span>
           <v-icon size="14" color="on-surface-variant" class="flex-shrink-0">mdi-pencil-outline</v-icon>
         </div>
-        <v-btn icon size="x-small" variant="text" @click="hpcParser.splice(i, 1)">
+        <v-btn icon size="x-small" variant="text" :aria-label="t('common.delete')" :title="t('common.delete')" @click="hpcParser.splice(i, 1)">
           <v-icon size="14">mdi-close</v-icon>
         </v-btn>
       </div>
@@ -274,7 +274,7 @@ async function saveGlobal() {
     await config.fetchConfig()
     syncGlobal()
   } catch (e: any) {
-    snack.error(e?.message || 'Save failed')
+    snack.error(e?.message || t('common.error'))
   } finally {
     savingGlobal.value = false
   }
@@ -395,7 +395,7 @@ async function checkHPC() {
     const res = await configApi.checkTarget(selectedTarget.value, collectTarget())
     hpcResults.value = res.results
   } catch (e: any) {
-    snack.error(e?.message || 'Check failed')
+    snack.error(e?.message || t('common.error'))
   }
 }
 
@@ -408,7 +408,7 @@ async function saveHPC() {
     await checkHPC()
     snack.success(t('settings.hpc_saved'))
   } catch (e: any) {
-    snack.error(e?.message || 'Save failed')
+    snack.error(e?.message || t('common.error'))
   } finally {
     savingHPC.value = false
   }
@@ -477,7 +477,7 @@ async function testWebhook() {
     await settings.testWebhook()
     snack.success(t('settings.webhook_test_ok'))
   } catch (e: any) {
-    snack.error(e?.message || 'Webhook test failed')
+    snack.error(e?.message || t('common.error'))
   } finally {
     testing.value = false
   }

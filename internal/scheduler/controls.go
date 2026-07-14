@@ -39,6 +39,17 @@ func (s *Scheduler) IsJobPaused(jobID string) bool {
 	return s.isJobPaused(jobID)
 }
 
+// ClearPause drops the pause flag WITHOUT resume semantics (no scheduling
+// rejoin implied, no "resumed" log). Kill is the other human intent that
+// overrides pause: a killed job must be free to reach its terminal aggregate
+// instead of parking at "paused" forever. Call before the final
+// RefreshJobStatus of a kill path.
+func (s *Scheduler) ClearPause(jobID string) {
+	s.pauseMu.Lock()
+	defer s.pauseMu.Unlock()
+	delete(s.pausedJobs, jobID)
+}
+
 // ── Kill request tracking ─────────────────────────────────────────────────
 
 // RequestKill marks a task as user-killed. Call before Launcher.Kill()
@@ -100,7 +111,8 @@ func (s *Scheduler) ClearKillRequest(taskID string) {
 //
 // Rules:
 //   - any task running → job = "running"
-//   - all tasks terminal (success/failed/killed) → job = "done"
+//   - all tasks terminal (success/failed/killed) → terminal split via
+//     store.TerminalJobStatus: done / killed / failed / partial
 //   - otherwise (some pending, none running) → keep current status
 func (s *Scheduler) RefreshJobStatus(jobID string) {
 	tasks, err := s.store.ListTasks(s.ctx, store.TaskFilter{JobID: jobID})
@@ -109,34 +121,40 @@ func (s *Scheduler) RefreshJobStatus(jobID string) {
 		return
 	}
 
-	counts := map[string]int{"running": 0, "pending": 0, "done": 0}
+	var running, pending, success, failed, killed int
 	for _, t := range tasks {
 		switch t.Status {
 		case "running":
-			counts["running"]++
+			running++
 		case "pending":
-			counts["pending"]++
-		case "success", "failed", "killed":
-			counts["done"]++
+			pending++
+		case "success":
+			success++
+		case "failed":
+			failed++
+		case "killed":
+			killed++
 		}
 	}
 
-	isStarted := (counts["running"] + counts["done"]) > 0
-	isEnded := (counts["pending"] + counts["running"]) == 0
+	isStarted := (running + success + failed + killed) > 0
+	isEnded := (pending + running) == 0
 
-	// Preserve the "paused" control state. Lifecycle aggregation derives status
-	// purely from task states and must not overwrite a user-initiated pause;
-	// otherwise a running task completing flips the job to "running"/"pending"
-	// and the later ResumeJob rejects ("not paused"). A paused job with work
-	// still left stays paused so ResumeJob can find it; once every task is
-	// terminal, "done" wins (resume is meaningless).
-	if !isEnded && s.isJobPaused(jobID) {
+	// Preserve the "paused" control state — UNCONDITIONALLY. Pause is a human
+	// intent (same grammar as the kill flag, RQ-69): it outlives mechanical
+	// task terminality and is released only by another human action. Even when
+	// every task has settled, the job stays "paused" until the user resumes
+	// (ResumeJob clears the set and re-runs this aggregation, which then lands
+	// the terminal split) or kills (killJob clears the pause via ClearPause).
+	// Rewriting paused → done here would silently discard the control state a
+	// user is still holding.
+	if s.isJobPaused(jobID) {
 		return
 	}
 
 	var newStatus string
 	if isEnded {
-		newStatus = "done"
+		newStatus = store.TerminalJobStatus(success, failed, killed)
 	} else if isStarted {
 		newStatus = "running"
 	} else {

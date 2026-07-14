@@ -8,7 +8,7 @@
 -->
 <template>
   <div class="mb-3">
-    <div class="text-caption text-on-surface-variant mb-1">{{ label }}</div>
+    <div class="text-caption text-on-surface-variant mb-1">{{ labelText }}</div>
     <div
       v-for="(row, i) in rows"
       :key="i"
@@ -34,7 +34,8 @@
       <v-btn
         icon size="x-small" variant="text"
         :style="{ visibility: isBlankRow(row) ? 'hidden' : 'visible' }"
-        :title="'remove ' + (row.key || 'row')"
+        :aria-label="t('common.remove_item', { name: row.key || '' })"
+        :title="t('common.remove_item', { name: row.key || '' })"
         @click="removeRow(i)"
       >
         <v-icon size="14" color="on-surface-variant">mdi-close</v-icon>
@@ -45,7 +46,8 @@
 </template>
 
 <script setup lang="ts">
-import { reactive, watch } from 'vue'
+import { computed, reactive, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 
 interface EnvRow { key: string; value: string }
 
@@ -57,11 +59,14 @@ const props = withDefaults(defineProps<{
   keyPlaceholder?: string
   valuePlaceholder?: string
 }>(), {
-  label: 'Environment (optional)',
+  label: '',
   hint: '',
   keyPlaceholder: 'TSUBAME_GROUP',
   valuePlaceholder: 'tga-xxx',
 })
+
+const { t } = useI18n()
+const labelText = computed(() => props.label || t('submit.environment'))
 
 const emit = defineEmits<{ 'update:modelValue': [string] }>()
 

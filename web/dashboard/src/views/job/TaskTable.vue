@@ -2,7 +2,7 @@
   <v-card class="pa-0">
     <!-- Column visibility + sort controls -->
     <div class="d-flex align-center ga-2 pa-3 flex-wrap" style="border-bottom: 0.5px solid rgb(var(--v-theme-outline-variant))">
-      <div class="text-caption text-on-surface-variant">Columns:</div>
+      <div class="text-caption text-on-surface-variant">{{ t('table.columns') }}:</div>
       <v-chip
         v-for="col in availableParamCols" :key="col"
         size="x-small"
@@ -27,26 +27,43 @@
         <thead>
           <tr>
             <th style="width:24px"></th>
-            <th class="cursor-pointer" @click="setSort('id')">
-              ID {{ sortIndicator('id') }}
+            <!-- Sortable headers: th keeps columnheader semantics (+ aria-sort);
+                 the inner <button> gives keyboard access — dynamic param/metric
+                 columns included. Same pattern as ProjectJobs. -->
+            <th :aria-sort="ariaSort('id')">
+              <button type="button" class="th-sort-btn" @click="setSort('id')">
+                ID {{ sortIndicator('id') }}
+              </button>
             </th>
-            <th v-if="hasHPC" class="cursor-pointer" @click="setSort('ext_id')">
-              EXT_ID {{ sortIndicator('ext_id') }}
+            <th v-if="hasHPC" :aria-sort="ariaSort('ext_id')">
+              <button type="button" class="th-sort-btn" @click="setSort('ext_id')">
+                EXT_ID {{ sortIndicator('ext_id') }}
+              </button>
             </th>
-            <th
-              v-for="col in shownCols" :key="col"
-              class="cursor-pointer"
-              @click="setSort(col)"
-            >
-              {{ col }} {{ sortIndicator(col) }}
+            <th v-for="col in shownCols" :key="col" :aria-sort="ariaSort(col)">
+              <button type="button" class="th-sort-btn" @click="setSort(col)">
+                {{ col }} {{ sortIndicator(col) }}
+              </button>
             </th>
-            <th class="cursor-pointer" @click="setSort('step')">Step {{ sortIndicator('step') }}</th>
-            <th class="cursor-pointer" @click="setSort('elapsed')">Elapsed {{ sortIndicator('elapsed') }}</th>
-            <th v-if="hasHPC" class="cursor-pointer" @click="setSort('native_state')">
-              SCHED_STATE {{ sortIndicator('native_state') }}
+            <th :aria-sort="ariaSort('step')">
+              <button type="button" class="th-sort-btn" @click="setSort('step')">
+                {{ t('job.step') }} {{ sortIndicator('step') }}
+              </button>
             </th>
-            <th v-if="hasHPC" class="cursor-pointer" @click="setSort('queue')">
-              QUEUE {{ sortIndicator('queue') }}
+            <th :aria-sort="ariaSort('elapsed')">
+              <button type="button" class="th-sort-btn" @click="setSort('elapsed')">
+                {{ t('job.elapsed') }} {{ sortIndicator('elapsed') }}
+              </button>
+            </th>
+            <th v-if="hasHPC" :aria-sort="ariaSort('native_state')">
+              <button type="button" class="th-sort-btn" @click="setSort('native_state')">
+                SCHED_STATE {{ sortIndicator('native_state') }}
+              </button>
+            </th>
+            <th v-if="hasHPC" :aria-sort="ariaSort('queue')">
+              <button type="button" class="th-sort-btn" @click="setSort('queue')">
+                QUEUE {{ sortIndicator('queue') }}
+              </button>
             </th>
             <th v-if="hasWandb" style="width:36px"></th>
             <th style="width:70px"></th>
@@ -64,8 +81,7 @@
             @keydown.space.prevent="$emit('click-task', task.id)"
           >
             <td>
-              <StatusDot :status="task.status" />
-
+              <StatusDot :status="task.status" :size="14" />
             </td>
             <td><code>{{ task.id.slice(0, 8) }}</code></td>
             <td v-if="hasHPC" class="text-on-surface-variant"><code>{{ task.external_id || '—' }}</code></td>
@@ -99,7 +115,7 @@
       </table>
     </div>
     <div v-if="tasks.length === 0" class="text-center text-on-surface-variant pa-6">
-      No tasks match the filter
+      {{ t('task.no_match') }}
     </div>
   </v-card>
 </template>
@@ -110,6 +126,7 @@ import { useI18n } from 'vue-i18n'
 import type { TaskView, WandbInfo } from '@/types/api'
 import { usePreferences } from '@/composables/usePreferences'
 import StatusDot from '@/components/StatusDot.vue'
+import { formatDuration } from '@/utils/relativeTime'
 
 const { t } = useI18n()
 const prefs = usePreferences()
@@ -187,6 +204,12 @@ function sortIndicator(key: string): string {
   return sortDesc.value ? '↓' : '↑'
 }
 
+/** aria-sort value for a sortable header (a11y). */
+function ariaSort(key: string): 'ascending' | 'descending' | 'none' {
+  if (sortKey.value !== key) return 'none'
+  return sortDesc.value ? 'descending' : 'ascending'
+}
+
 const sortedTasks = computed(() => {
   if (!sortKey.value) return props.tasks
   const key = sortKey.value
@@ -220,12 +243,6 @@ function wandbRunURL(runId: string): string {
   return `https://wandb.ai/runs/${runId}`
 }
 
-function formatDuration(sec: number): string {
-  const s = Math.round(sec)
-  if (s < 60) return `${s}s`
-  if (s < 3600) return `${Math.floor(s / 60)}m ${s % 60}s`
-  return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`
-}
 </script>
 
 <style scoped>

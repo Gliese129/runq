@@ -13,7 +13,9 @@ export interface TaskCountGroup {
   total: number
   pending: number
   running: number
+  /** success tasks (the backend counts "success" as completed) */
   completed: number
+  /** failed + killed tasks (the backend folds killed in here) */
   failed: number
 }
 
@@ -22,6 +24,11 @@ export interface JobSummary {
   id: string
   project: string
   note: string
+  /**
+   * pending | running | paused while live; done | failed | partial | killed
+   * once terminal (mirrors store.TerminalJobStatus — see statusGrammar for
+   * the visual mapping)
+   */
   status: string
   /** compute target this job runs on (multi-target model) */
   target: string

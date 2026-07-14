@@ -86,7 +86,7 @@ func (b *Backend) SchedulerProbe(ctx context.Context, floor time.Duration) error
 	var active []entry
 	anyNeedsProbe := false
 	for _, j := range jobs {
-		if j.Status == "done" {
+		if store.IsTerminalJobStatus(j.Status) {
 			continue
 		}
 		probe := ttl == 0 || !b.probeIsFresh(j.ID, ttl)

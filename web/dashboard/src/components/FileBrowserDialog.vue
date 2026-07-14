@@ -10,9 +10,17 @@
             :disabled="!currentDir"
             @click="emitSelect(currentDir)"
           >
-            <v-icon size="14" start>mdi-check</v-icon> Use this folder
+            <v-icon size="14" start>mdi-check</v-icon> {{ t('browse.use_folder') }}
           </v-btn>
-          <v-btn icon size="small" variant="text" @click="open = false">
+          <v-btn
+            icon size="x-small" variant="text"
+            :color="showHidden ? 'primary' : undefined"
+            :aria-label="t('submit.show_hidden')" :title="t('submit.show_hidden')"
+            @click="showHidden = !showHidden"
+          >
+            <v-icon size="16">{{ showHidden ? 'mdi-eye' : 'mdi-eye-off-outline' }}</v-icon>
+          </v-btn>
+          <v-btn icon size="small" variant="text" :aria-label="t('common.close')" @click="open = false">
             <v-icon>mdi-close</v-icon>
           </v-btn>
         </div>
@@ -23,7 +31,7 @@
         <v-col cols="4" class="pr-3" style="max-height: 460px; overflow-y: auto">
           <div v-if="prefs.preferredWorkspaces.value.length > 0" class="mb-3">
             <div class="text-caption text-on-surface-variant mb-1 d-flex align-center ga-1">
-              <v-icon size="11">mdi-star</v-icon> Favorites
+              <v-icon size="11">mdi-star</v-icon> {{ t('browse.favorites') }}
             </div>
             <div
               v-for="ws in prefs.preferredWorkspaces.value" :key="ws"
@@ -40,7 +48,7 @@
 
           <div v-if="mode === 'script' && prefs.recentScripts.value.length > 0">
             <div class="text-caption text-on-surface-variant mb-1 d-flex align-center ga-1">
-              <v-icon size="11">mdi-clock-outline</v-icon> Recent
+              <v-icon size="11">mdi-clock-outline</v-icon> {{ t('browse.recent') }}
             </div>
             <div
               v-for="s in prefs.recentScripts.value" :key="s.path"
@@ -58,7 +66,7 @@
           <div v-if="prefs.preferredWorkspaces.value.length === 0 && !(mode === 'script' && prefs.recentScripts.value.length > 0)"
             class="text-caption text-on-surface-variant pa-2"
           >
-            No favorites yet
+            {{ t('browse.no_favorites') }}
           </div>
         </v-col>
 
@@ -66,7 +74,7 @@
         <v-col cols="8">
           <v-text-field
             v-model="pathInput"
-            placeholder="Paste path or browse..."
+            :placeholder="t('browse.path_placeholder')"
             prepend-inner-icon="mdi-link-variant"
             density="compact" variant="outlined" hide-details clearable
             class="mb-2" style="font-family: monospace; font-size: 12px"
@@ -75,16 +83,25 @@
 
           <!-- Breadcrumb -->
           <div class="d-flex align-center flex-wrap ga-1 text-caption text-on-surface-variant mb-2">
-            <span class="cursor-pointer breadcrumb-seg" @click="loadDir('')">~</span>
+            <span
+              class="cursor-pointer breadcrumb-seg" role="button" tabindex="0"
+              @click="loadDir('')"
+              @keydown.enter="loadDir('')" @keydown.space.prevent="loadDir('')"
+            >~</span>
             <template v-for="(seg, i) in segments" :key="i">
               <v-icon size="10">mdi-chevron-right</v-icon>
               <span
                 class="cursor-pointer breadcrumb-seg"
                 :class="{ 'font-weight-medium': i === segments.length - 1 }"
+                role="button" tabindex="0"
                 @click="loadDir('/' + segments.slice(0, i + 1).join('/'))"
+                @keydown.enter="loadDir('/' + segments.slice(0, i + 1).join('/'))"
+                @keydown.space.prevent="loadDir('/' + segments.slice(0, i + 1).join('/'))"
               >{{ seg }}</span>
             </template>
-            <v-btn v-if="currentDir" icon size="x-small" variant="text" :color="isPinned ? 'primary' : undefined" @click="togglePin" class="ml-1">
+            <v-btn v-if="currentDir" icon size="x-small" variant="text" :color="isPinned ? 'primary' : undefined"
+              :aria-label="t('submit.pin_workspace')" :title="t('submit.pin_workspace')"
+              @click="togglePin" class="ml-1">
               <v-icon size="14">{{ isPinned ? 'mdi-star' : 'mdi-star-outline' }}</v-icon>
             </v-btn>
           </div>
@@ -115,6 +132,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { filesApi } from '@/apis/files'
 import { usePreferences } from '@/composables/usePreferences'
 import type { FSEntry } from '@/types/api'
@@ -137,6 +155,7 @@ const emit = defineEmits<{
   'select': [path: string]
 }>()
 
+const { t } = useI18n()
 const prefs = usePreferences()
 
 const open = computed({
@@ -154,16 +173,21 @@ const isPinned = computed(() => currentDir.value !== '' && prefs.preferredWorksp
 
 const title = computed(() => {
   switch (props.mode) {
-    case 'script': return 'Select Script'
-    case 'directory': return 'Select Working Directory'
-    case 'file': return 'Select File'
-    case 'folder': return 'Select Folder'
+    case 'script': return t('browse.select_script')
+    case 'directory': return t('browse.select_directory')
+    case 'file': return t('browse.select_file')
+    case 'folder': return t('browse.select_folder')
   }
 })
 
+/** Dotfiles are noise for the common case — hidden unless toggled on.
+ *  The toggle persists via usePreferences, so a reopened dialog (or a
+ *  fresh component instance) keeps the user's choice. */
+const showHidden = prefs.showHiddenFiles
+
 const filteredEntries = computed(() =>
   entries.value.filter(e => {
-    if (e.name.startsWith('.')) return false
+    if (!showHidden.value && e.name.startsWith('.')) return false
     if (props.mode === 'directory' || props.mode === 'folder') return e.is_dir
     if (e.is_dir) return true
     if (props.fileFilter) {
@@ -240,4 +264,9 @@ function emitSelect(path: string) {
 .quick-item:hover { background: rgb(var(--v-theme-surface-variant)); }
 .breadcrumb-seg { text-decoration: underline dotted; text-underline-offset: 2px; }
 .breadcrumb-seg:hover { color: rgb(var(--v-theme-primary)); }
+.breadcrumb-seg:focus-visible {
+  outline: 2px solid rgb(var(--v-theme-primary));
+  outline-offset: 2px;
+  border-radius: 2px;
+}
 </style>

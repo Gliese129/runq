@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     description  TEXT,
     note         TEXT,                -- user-supplied experiment note (--note flag or job.yaml note: field)
     config_json  TEXT NOT NULL,       -- serialized job.JobConfig as JSON
-    status       TEXT NOT NULL DEFAULT 'pending',  -- pending/running/paused/done
+    status       TEXT NOT NULL DEFAULT 'pending',  -- pending/running/paused | done/failed/partial/killed (terminal)
     total_tasks  INTEGER NOT NULL DEFAULT 0,
     target       TEXT NOT NULL DEFAULT 'local',    -- compute target name (Phase 1: MultiBackend routing)
     created_at   INTEGER,             -- Unix timestamp

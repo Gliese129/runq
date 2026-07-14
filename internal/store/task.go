@@ -587,11 +587,11 @@ func (s *Store) ListFinishedTasks(ctx context.Context) ([]TaskRow, error) {
 	return result, rows.Err()
 }
 
-// DeleteOrphanJobs removes jobs in "done" status that have no remaining tasks.
+// DeleteOrphanJobs removes terminal-status jobs that have no remaining tasks.
 func (s *Store) DeleteOrphanJobs(ctx context.Context) (int64, error) {
 	result, err := s.db.ExecContext(ctx,
-		`DELETE FROM jobs WHERE status = 'done'
-		 AND id NOT IN (SELECT DISTINCT job_id FROM tasks)`)
+		fmt.Sprintf(`DELETE FROM jobs WHERE status IN %s
+		 AND id NOT IN (SELECT DISTINCT job_id FROM tasks)`, TerminalJobStatusesSQL()))
 	if err != nil {
 		return 0, err
 	}

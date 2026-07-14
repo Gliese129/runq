@@ -15,7 +15,7 @@ type JobRow struct {
 	Description string
 	Note        string
 	ConfigJSON  string // serialized job.JobConfig (kept for UI to display original sweep config)
-	Status      string // pending / running / paused / done
+	Status      string // pending / running / paused | done / failed / partial / killed (terminal)
 	TotalTasks  int
 	// Target is the compute target this job was submitted to (e.g. "local",
 	// "tsubame"). Phase 1: MultiBackend routing key.
@@ -87,12 +87,12 @@ func (s *Store) InsertJobWithTasks(ctx context.Context, job *JobRow, tasks []Tas
 }
 
 // UpdateJobStatus updates a job's status.
-// Automatically sets finished_at when transitioning to "done".
+// Automatically sets finished_at when transitioning to any terminal status.
 func (s *Store) UpdateJobStatus(ctx context.Context, jobID string, status string) error {
 	var query string
 	var args []any
 
-	if status == "done" {
+	if IsTerminalJobStatus(status) {
 		query = "UPDATE jobs SET status = ?, finished_at = ? WHERE id = ?"
 		args = []any{status, time.Now().Unix(), jobID}
 	} else {
@@ -194,6 +194,10 @@ const allJobColumns = `id, project_name, description, note, config_json, status,
 func scanJob(scanner interface{ Scan(dest ...any) error }) (*JobRow, error) {
 	var j JobRow
 	var (
+		// description and note are nullable TEXT in the schema; production
+		// writers always bind a value, but legacy / hand-written rows can be
+		// NULL — scan through NullString like every other nullable column.
+		description sql.NullString
 		note        sql.NullString
 		target      sql.NullString
 		createdAt   int64
@@ -203,13 +207,14 @@ func scanJob(scanner interface{ Scan(dest ...any) error }) (*JobRow, error) {
 	)
 
 	err := scanner.Scan(
-		&j.ID, &j.ProjectName, &j.Description, &note, &j.ConfigJSON,
+		&j.ID, &j.ProjectName, &description, &note, &j.ConfigJSON,
 		&j.Status, &j.TotalTasks, &target, &createdAt, &finishedAt, &refreshedAt, &archivedAt,
 	)
 	if err != nil {
 		return nil, err
 	}
 
+	j.Description = description.String
 	j.Note = note.String
 	j.Target = target.String
 	if j.Target == "" {
@@ -248,14 +253,66 @@ func IsActiveStatus(s string) bool {
 	return false
 }
 
-// activeStatusesSQL renders ActiveStatuses as a SQL IN(...) literal — the
+// ActiveStatusesSQL renders ActiveStatuses as a SQL IN(...) literal — the
 // values are compile-time constants, never user input.
 func ActiveStatusesSQL() string {
-	quoted := make([]string, len(ActiveStatuses))
-	for i, s := range ActiveStatuses {
+	return statusInSQL(ActiveStatuses)
+}
+
+// TerminalJobStatuses is THE set of job statuses meaning "no live work
+// remains" — the complement of ActiveStatuses. The terminal outcome is
+// split (RQ status-semantics extension):
+//
+//	done    — every task succeeded
+//	killed  — zero successes and every task was user-killed (a human
+//	          decision, distinct from failure)
+//	failed  — zero successes otherwise (incl. failed+killed mixes)
+//	partial — some succeeded, some didn't
+//
+// Every SQL guard that used to check status = 'done' must use this set.
+var TerminalJobStatuses = []string{"done", "failed", "partial", "killed"}
+
+// IsTerminalJobStatus reports whether s is one of TerminalJobStatuses.
+func IsTerminalJobStatus(s string) bool {
+	for _, t := range TerminalJobStatuses {
+		if s == t {
+			return true
+		}
+	}
+	return false
+}
+
+// TerminalJobStatusesSQL renders TerminalJobStatuses as a SQL IN(...)
+// literal — compile-time constants, never user input.
+func TerminalJobStatusesSQL() string {
+	return statusInSQL(TerminalJobStatuses)
+}
+
+// statusInSQL quotes a compile-time status list as a SQL "(...)" literal.
+func statusInSQL(statuses []string) string {
+	quoted := make([]string, len(statuses))
+	for i, s := range statuses {
 		quoted[i] = "'" + s + "'"
 	}
 	return "(" + strings.Join(quoted, ",") + ")"
+}
+
+// TerminalJobStatus derives the terminal job status from task outcome
+// counts. Callers must have established that every task is terminal
+// (success+failed+killed == total). The zero-task edge resolves to "done"
+// (vacuously complete — mirrors the old aggregator's behavior).
+func TerminalJobStatus(success, failed, killed int) string {
+	total := success + failed + killed
+	switch {
+	case success == total:
+		return "done"
+	case success == 0 && killed == total:
+		return "killed"
+	case success == 0:
+		return "failed"
+	default:
+		return "partial"
+	}
 }
 
 // ── Archive ──

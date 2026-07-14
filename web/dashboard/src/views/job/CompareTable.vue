@@ -5,8 +5,8 @@
         <thead>
           <tr>
             <th style="width:50px">#</th>
-            <th>Task</th>
-            <th>Params</th>
+            <th>{{ t('table.task') }}</th>
+            <th>{{ t('job.params') }}</th>
             <th>{{ metricKey }}</th>
           </tr>
         </thead>
@@ -29,13 +29,16 @@
       </table>
     </div>
     <div v-if="rows.length === 0" class="text-center text-on-surface-variant pa-6">
-      No comparison data
+      {{ t('job.no_compare') }}
     </div>
   </v-card>
 </template>
 
 <script setup lang="ts">
+import { useI18n } from 'vue-i18n'
 import type { CompareRow } from '@/types/api'
+
+const { t } = useI18n()
 
 defineProps<{
   rows: CompareRow[]

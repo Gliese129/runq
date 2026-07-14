@@ -69,8 +69,10 @@ func TestKillJobRefreshesAggregateStatusForPendingTasks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get job: %v", err)
 	}
-	if j.Status != "done" {
-		t.Fatalf("expected job status done, got %q", j.Status)
+	// All tasks were user-killed with zero successes → the terminal split
+	// reports "killed", not "done".
+	if j.Status != "killed" {
+		t.Fatalf("expected job status killed, got %q", j.Status)
 	}
 	if j.FinishedAt == nil {
 		t.Fatalf("expected finished_at to be set")

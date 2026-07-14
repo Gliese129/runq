@@ -521,8 +521,8 @@ func (b *LocalBackend) PauseJob(ctx context.Context, jobID string) error {
 	if j == nil {
 		return fmt.Errorf("job %q not found", jobID)
 	}
-	if j.Status == "done" {
-		return fmt.Errorf("job %q is already done", jobID)
+	if store.IsTerminalJobStatus(j.Status) {
+		return fmt.Errorf("job %q is already %s", jobID, j.Status)
 	}
 	b.scheduler.PauseJob(jobID)
 	return b.store.UpdateJobStatus(ctx, jobID, "paused")
@@ -816,6 +816,13 @@ func (b *LocalBackend) killJob(ctx context.Context, jobID string) (int, error) {
 			killed++
 		}
 	}
+	// Kill overrides pause (human intent supersedes human intent, latest
+	// wins): drop the flag so the aggregate below can land the terminal
+	// status instead of parking at "paused" forever. nil-guarded like every
+	// scheduler touchpoint here — test harnesses run without a scheduler.
+	if b.scheduler != nil {
+		b.scheduler.ClearPause(jobID)
+	}
 	if err := b.refreshJobStatus(ctx, jobID); err != nil {
 		return killed, err
 	}
@@ -828,28 +835,35 @@ func (b *LocalBackend) refreshJobStatus(ctx context.Context, jobID string) error
 		return err
 	}
 
-	counts := map[string]int{"running": 0, "pending": 0, "done": 0}
+	var running, pending, success, failed, killed int
 	for _, t := range tasks {
 		switch t.Status {
 		case "running":
-			counts["running"]++
+			running++
 		case "pending":
-			counts["pending"]++
-		case "success", "failed", "killed":
-			counts["done"]++
+			pending++
+		case "success":
+			success++
+		case "failed":
+			failed++
+		case "killed":
+			killed++
 		}
 	}
 
-	isStarted := (counts["running"] + counts["done"]) > 0
-	isEnded := (counts["pending"] + counts["running"]) == 0
+	isStarted := (running + success + failed + killed) > 0
+	isEnded := (pending + running) == 0
 
-	if !isEnded && b.scheduler != nil && b.scheduler.IsJobPaused(jobID) {
+	// Unconditional pause guard — mirrors scheduler.RefreshJobStatus: paused
+	// is a human control state that outlives task terminality; resume/kill
+	// are the only releases (both clear the set before re-aggregating).
+	if b.scheduler != nil && b.scheduler.IsJobPaused(jobID) {
 		return nil
 	}
 
 	var newStatus string
 	if isEnded {
-		newStatus = "done"
+		newStatus = store.TerminalJobStatus(success, failed, killed)
 	} else if isStarted {
 		newStatus = "running"
 	} else {

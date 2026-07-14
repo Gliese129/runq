@@ -10,11 +10,11 @@
         <div class="d-flex ga-1">
           <v-btn v-if="displayStatus === 'running'" size="x-small" variant="tonal" color="error"
             :loading="killing" :disabled="killing" @click="killTask">
-            <v-icon start size="14">mdi-stop</v-icon> Kill
+            <v-icon start size="14">mdi-stop</v-icon> {{ t('job.kill') }}
           </v-btn>
           <v-btn v-if="config.caps.retry && (task.status === 'failed' || task.status === 'killed')" size="x-small" variant="tonal" color="primary"
             :loading="retrying" :disabled="retrying" @click="retryTask">
-            <v-icon start size="14">mdi-refresh</v-icon> Retry
+            <v-icon start size="14">mdi-refresh</v-icon> {{ t('job.retry') }}
           </v-btn>
         </div>
       </div>
@@ -22,35 +22,35 @@
       <!-- Stats -->
       <v-row dense>
         <v-col cols="6" sm="3">
-          <div class="text-caption text-on-surface-variant">Elapsed</div>
+          <div class="text-caption text-on-surface-variant">{{ t('job.elapsed') }}</div>
           <div class="text-body-2 font-weight-medium">{{ task.elapsed_seconds ? formatDuration(task.elapsed_seconds) : '—' }}</div>
         </v-col>
         <v-col cols="6" sm="3">
-          <div class="text-caption text-on-surface-variant">Step</div>
+          <div class="text-caption text-on-surface-variant">{{ t('job.step') }}</div>
           <div class="text-body-2 font-weight-medium">{{ task.current_step ?? '—' }}</div>
         </v-col>
         <v-col cols="6" sm="3">
-          <div class="text-caption text-on-surface-variant">Retries</div>
+          <div class="text-caption text-on-surface-variant">{{ t('task.retries') }}</div>
           <!-- -1 = unlimited (explicit opt-in); 0 legitimately means "no retries" -->
           <div class="text-body-2 font-weight-medium">{{ task.retry_count || 0 }} / {{ task.max_retry < 0 ? '∞' : task.max_retry }}</div>
         </v-col>
         <v-col cols="6" sm="3">
-          <div class="text-caption text-on-surface-variant">GPUs</div>
+          <div class="text-caption text-on-surface-variant">{{ t('task.gpus') }}</div>
           <div class="text-body-2 font-weight-medium">{{ task.gpus || '—' }}</div>
         </v-col>
       </v-row>
       <!-- HPC-specific stats (poll-model only) -->
       <v-row v-if="task.external_id" dense class="mt-1">
         <v-col cols="6" sm="3">
-          <div class="text-caption text-on-surface-variant">External ID</div>
+          <div class="text-caption text-on-surface-variant">{{ t('task.external_id') }}</div>
           <div class="text-body-2 font-weight-medium"><code>{{ task.external_id }}</code></div>
         </v-col>
         <v-col cols="6" sm="3">
-          <div class="text-caption text-on-surface-variant">Scheduler State</div>
+          <div class="text-caption text-on-surface-variant">{{ t('task.scheduler_state') }}</div>
           <div class="text-body-2 font-weight-medium">{{ task.native_state || '—' }}</div>
         </v-col>
         <v-col cols="6" sm="3">
-          <div class="text-caption text-on-surface-variant">Queue</div>
+          <div class="text-caption text-on-surface-variant">{{ t('task.queue') }}</div>
           <div class="text-body-2 font-weight-medium">{{ task.queue || '—' }}</div>
         </v-col>
       </v-row>
@@ -60,13 +60,13 @@
     <v-expansion-panels v-model="openPanels" multiple>
       <v-expansion-panel value="params">
         <v-expansion-panel-title>
-          <span class="text-subtitle-2">Parameters</span>
+          <span class="text-subtitle-2">{{ t('submit.parameters') }}</span>
           <v-chip size="x-small" variant="tonal" class="ml-2">{{ Object.keys(task.params || {}).length }}</v-chip>
         </v-expansion-panel-title>
         <v-expansion-panel-text>
           <div class="overflow-x-auto">
             <table class="data-mono" style="width: 100%">
-              <thead><tr><th>Name</th><th>Value</th></tr></thead>
+              <thead><tr><th>{{ t('table.name') }}</th><th>{{ t('table.value') }}</th></tr></thead>
               <tbody>
                 <tr v-for="(val, key) in task.params" :key="key">
                   <td class="font-weight-medium">{{ key }}</td>
@@ -81,7 +81,7 @@
       <v-expansion-panel v-if="task.status !== 'pending'" value="metrics">
         <v-expansion-panel-title>
           <span class="text-subtitle-2 d-flex align-center ga-1">
-            <v-icon size="16">mdi-chart-line</v-icon> Metrics
+            <v-icon size="16">mdi-chart-line</v-icon> {{ t('task.metrics') }}
           </span>
           <v-spacer />
           <v-btn
@@ -100,7 +100,7 @@
 
       <v-expansion-panel value="log" class="log-panel">
         <v-expansion-panel-title>
-          <span class="text-subtitle-2">Log</span>
+          <span class="text-subtitle-2">{{ t('log.title') }}</span>
           <v-chip v-if="totalBytes > 0" size="x-small" variant="tonal" class="ml-2">{{ formatBytes(totalBytes) }}</v-chip>
           <v-spacer />
           <div class="d-flex align-center ga-1 mr-2" @click.stop>
@@ -114,13 +114,13 @@
               v-if="!following && endOffset < totalBytes"
               size="x-small" variant="text" :loading="loadingMore" @click="loadMore"
             >
-              Load more
+              {{ t('log.load_more') }}
             </v-btn>
             <v-switch
               v-model="following"
               density="compact" hide-details inline
               :color="streamState === 'reconnecting' ? 'warning' : 'primary'"
-              :label="streamState === 'reconnecting' ? t('log.reconnecting') : 'Follow'"
+              :label="streamState === 'reconnecting' ? t('log.reconnecting') : t('log.follow')"
             />
           </div>
         </v-expansion-panel-title>
@@ -134,14 +134,14 @@
               {{ t('log.reload_start') }}
             </v-btn>
           </div>
-          <div class="d-flex">
+          <div class="d-flex flex-wrap">
             <!-- Log content (virtualized shared surface, incl. search bar) -->
             <LogSurfaceView
               :surface="surface"
               :items="renderItems"
               :log-loading="logLoading"
               :line-number-base="lineNumberBase"
-              :empty-text="task.status === 'pending' ? 'Waiting to start...' : 'No log output yet'"
+              :empty-text="task.status === 'pending' ? t('task.waiting_start') : t('log.no_output')"
             />
             <!-- Side panel -->
             <LogSidePanel
@@ -198,6 +198,7 @@ import type { LogPage } from '@/types/api'
 import { trimLogBuffer } from '@/utils/log/buffer'
 import { applyPage as applyCursorPage } from '@/utils/log/cursor'
 import { useLogSurface } from '@/composables/useLogSurface'
+import { formatDuration } from '@/utils/relativeTime'
 
 const props = defineProps<{ project: string; jobId: string; taskId: string }>()
 const snack = useSnackbar()
@@ -604,24 +605,17 @@ async function killTask() {
   if (!ok) return
   try {
     await taskActions.kill.mutateAsync(props.taskId)
-    if (config.killAsync) snack.info('Cancel requested')
-    else snack.success('Task killed')
-  } catch (e: any) { snack.error(e?.message || 'Kill failed') }
+    if (config.killAsync) snack.info(t('task.cancel_requested'))
+    else snack.success(t('task.killed_ok'))
+  } catch (e: any) { snack.error(e?.message || t('common.error')) }
 }
 
 async function retryTask() {
   if (retrying.value) return
   try {
     await taskActions.retry.mutateAsync(props.taskId)
-    snack.success('Task retried')
-  } catch (e: any) { snack.error(e?.message || 'Retry failed') }
-}
-
-function formatDuration(sec: number): string {
-  const s = Math.round(sec)
-  if (s < 60) return `${s}s`
-  if (s < 3600) return `${Math.floor(s / 60)}m ${s % 60}s`
-  return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`
+    snack.success(t('task.retried'))
+  } catch (e: any) { snack.error(e?.message || t('common.error')) }
 }
 
 function formatBytes(b: number): string {

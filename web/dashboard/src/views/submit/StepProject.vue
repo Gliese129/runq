@@ -34,8 +34,8 @@
             </template>
             <v-list-item-title class="text-body-2 font-weight-medium">{{ p.name }}</v-list-item-title>
             <v-list-item-subtitle class="text-caption">
-              {{ p.job_count }} {{ p.job_count === 1 ? 'job' : 'jobs' }}
-              <span v-if="p.name === prefs.lastProject.value" class="text-primary"> · recent</span>
+              {{ t('project.job_count', { n: p.job_count }, p.job_count) }}
+              <span v-if="p.name === prefs.lastProject.value" class="text-primary"> · {{ t('submit.recent_tag') }}</span>
             </v-list-item-subtitle>
           </v-list-item>
 
@@ -202,7 +202,7 @@
                 >{{ seg }}</span>
               </template>
             </div>
-            <v-btn icon size="x-small" variant="text" @click="editWorkDir">
+            <v-btn icon size="x-small" variant="text" :aria-label="t('common.edit')" :title="t('common.edit')" @click="editWorkDir">
               <v-icon size="14" color="on-surface-variant">mdi-pencil-outline</v-icon>
             </v-btn>
           </div>
@@ -220,7 +220,7 @@
           <v-icon size="14" color="on-surface-variant" class="flex-shrink-0">mdi-pencil-outline</v-icon>
         </div>
         <div class="text-caption text-on-surface-variant mb-3">
-          <span v-text="argsPlaceholder" /> will be replaced with parameters
+          <span v-text="argsPlaceholder" /> {{ t('submit.args_replaced') }}
         </div>
         <ShellTemplateEditor
           v-model="cmdEditorOpen"
@@ -259,7 +259,7 @@
               v-model="form.gpus" :label="t('submit.gpus_per_task')"
               variant="outlined" density="compact" :min="0"
               control-variant="stacked"
-              :hint="config.isPoll ? 'HPC: only used as {{gpus}} in submit_template — set 0 for whole-node queues' : ''"
+              :hint="config.isPoll ? t('submit.gpus_hpc_hint') : ''"
               :persistent-hint="config.isPoll"
               :hide-details="!config.isPoll"
             />
@@ -316,7 +316,7 @@
               />
 
               <div v-else class="text-caption text-on-surface-variant pa-2">
-                Uses system Python
+                {{ t('submit.system_python') }}
               </div>
             </v-col>
           </v-row>
@@ -327,11 +327,11 @@
           <div class="d-flex align-center justify-space-between mb-2">
             <div class="text-caption text-on-surface-variant d-flex align-center ga-1">
               <v-icon size="12">mdi-variable</v-icon>
-              Parameters
+              {{ t('submit.parameters') }}
               <v-chip size="x-small" variant="tonal">{{ includedParams.length }} / {{ form.params.length }}</v-chip>
             </div>
             <v-btn size="x-small" variant="tonal" color="primary" @click="showParamEditor = true">
-              <v-icon start size="12">mdi-pencil-outline</v-icon> Edit parameters
+              <v-icon start size="12">mdi-pencil-outline</v-icon> {{ t('submit.edit_params') }}
             </v-btn>
           </div>
           <div class="d-flex align-center flex-wrap ga-1">
@@ -341,7 +341,7 @@
               @click="showParamEditor = true"
             >{{ p.name }}<span v-if="p.default" class="text-on-surface-variant">&nbsp;= {{ p.default }}</span></v-chip>
             <span v-if="form.params.length === 0" class="text-caption text-on-surface-variant">
-              No parameters — select a script or add them in the editor
+              {{ t('submit.no_params_hint') }}
             </span>
           </div>
         </div>
@@ -483,7 +483,7 @@ async function doRename() {
     prefs.lastProject.value = newName
     renameDialog.value = false
   } catch (e: any) {
-    form.error = e?.message || 'Rename failed'
+    form.error = e?.message || t('common.error')
   } finally {
     renaming.value = false
   }
@@ -501,7 +501,7 @@ const cmdPlaceholders = computed(() => [
 const defaultCmdTemplate = 'python train.py {{args}}'
 const argsPlaceholder = '{{args}}'
 const jobNamePlaceholderLiteral = 'rq-{{task_id}}'
-const jobNameHint = 'Scheduler job name ({{name}} in submit_template) - params + {{project}} {{job_id}} {{task_id}}. Sanitized automatically (never starts with a digit). Each submit can override it.'
+const jobNameHint = computed(() => t('submit.job_name_tmpl_hint'))
 const displayCmdTemplate = computed(() => form.cmd || defaultCmdTemplate)
 
 function onParamsEdited(params: import('@/types/submit').ProjectParam[]) {

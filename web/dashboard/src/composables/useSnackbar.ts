@@ -1,10 +1,13 @@
 import { ref } from 'vue'
+import i18n from '@/plugins/i18n'
 
 export interface SnackMessage {
   text: string
   color?: string
   action?: string
   onAction?: () => void
+  /** v-snackbar timeout in ms; -1 = stays until dismissed. */
+  timeout?: number
 }
 
 const queue = ref<SnackMessage[]>([])
@@ -49,11 +52,20 @@ export function useSnackbar() {
     current,
     visible,
     dismiss,
-    success: (text: string) => show({ text, color: 'success' }),
+    // Timeouts scale with severity: success is glanceable (3.5s), errors
+    // need reading time (8s), and an error with a Retry action must not
+    // vanish before the user can act on it (-1 = manual dismiss).
+    success: (text: string) => show({ text, color: 'success', timeout: 3500 }),
     error: (text: string, onRetry?: () => void) =>
-      show({ text, color: 'error', action: onRetry ? 'Retry' : undefined, onAction: onRetry }),
+      show({
+        text,
+        color: 'error',
+        action: onRetry ? i18n.global.t('common.retry') : undefined,
+        onAction: onRetry,
+        timeout: onRetry ? -1 : 8000,
+      }),
     info: (text: string, action?: string, onAction?: () => void) =>
-      show({ text, color: 'info', action, onAction }),
-    warn: (text: string) => show({ text, color: 'warning' }),
+      show({ text, color: 'info', action, onAction, timeout: action ? -1 : 5000 }),
+    warn: (text: string) => show({ text, color: 'warning', timeout: 6000 }),
   }
 }

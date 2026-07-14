@@ -68,12 +68,12 @@
 
       <div class="pa-2 flex-grow-1 overflow-y-auto">
         <div v-if="!collapsed" class="text-caption text-on-surface-variant px-2 mb-1 d-flex align-center justify-space-between">
-          Projects
-          <v-btn icon size="x-small" variant="text" @click="refreshShellData">
+          {{ t('overview.projects') }}
+          <v-btn icon size="x-small" variant="text" :aria-label="t('common.refresh')" :title="t('common.refresh')" @click="refreshShellData">
             <v-icon size="12">mdi-refresh</v-icon>
           </v-btn>
         </div>
-        <v-tooltip v-else text="Projects" location="end">
+        <v-tooltip v-else :text="t('overview.projects')" location="end">
           <template #activator="{ props: tp }">
             <div v-bind="tp" class="text-center mb-1">
               <v-icon size="16" color="on-surface-variant">mdi-folder-multiple-outline</v-icon>
@@ -103,7 +103,7 @@
         </v-list-item>
 
         <div v-if="projects.visible.length === 0 && !projects.loading && !collapsed" class="text-caption text-on-surface-variant text-center pa-3">
-          No projects yet
+          {{ t('overview.no_projects') }}
         </div>
       </div>
 
@@ -128,10 +128,10 @@
             class="nav-btn mb-1"
             :class="collapsed ? 'justify-center' : 'justify-start px-3'"
             :prepend-icon="settings.theme === 'dark' ? 'mdi-white-balance-sunny' : 'mdi-moon-waning-crescent'"
-            :aria-label="settings.theme === 'dark' ? 'Light mode' : 'Dark mode'"
+            :aria-label="settings.theme === 'dark' ? t('layout.light_mode') : t('layout.dark_mode')"
             @click="toggleTheme"
           >
-            <span v-if="!collapsed" class="text-body-2">{{ settings.theme === 'dark' ? 'Light mode' : 'Dark mode' }}</span>
+            <span v-if="!collapsed" class="text-body-2">{{ settings.theme === 'dark' ? t('layout.light_mode') : t('layout.dark_mode') }}</span>
           </v-btn>
           <v-btn
             v-if="!mobile"
@@ -142,10 +142,10 @@
             class="nav-btn mb-1"
             :class="collapsed ? 'justify-center' : 'justify-start px-3'"
             :prepend-icon="collapsed ? 'mdi-chevron-right' : 'mdi-chevron-left'"
-            :aria-label="collapsed ? 'Expand sidebar' : 'Collapse sidebar'"
+            :aria-label="collapsed ? t('layout.expand_sidebar') : t('layout.collapse_sidebar')"
             @click="toggleCollapse"
           >
-            <span v-if="!collapsed" class="text-body-2">Collapse</span>
+            <span v-if="!collapsed" class="text-body-2">{{ t('common.collapse') }}</span>
           </v-btn>
           <div class="d-flex align-center ga-2 px-3 py-1">
             <div class="status-dot" :class="conn.connected.value ? 'status-dot--completed' : 'status-dot--failed'" />
@@ -158,7 +158,7 @@
     </v-navigation-drawer>
 
     <v-app-bar elevation="0" color="transparent" density="compact" style="border-bottom: 0.5px solid rgb(var(--v-theme-outline-variant))">
-      <v-btn v-if="mobile" icon size="small" variant="text" @click="drawerOpen = !drawerOpen">
+      <v-btn v-if="mobile" icon size="small" variant="text" :aria-label="t('a11y.open_menu')" @click="drawerOpen = !drawerOpen">
         <v-icon>mdi-menu</v-icon>
       </v-btn>
       <v-breadcrumbs v-if="breadcrumbs.length > 0" :items="breadcrumbs" density="compact" class="text-body-2 pa-0 ml-2">
@@ -192,7 +192,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute } from 'vue-router'
 import { useTheme, useDisplay } from 'vuetify'
@@ -217,8 +217,14 @@ const qc = useQueryClient()
 // gpu chip in the app bar — caps-gated inside the query (enabled)
 const { freeCount: gpuFree, totalCount: gpuTotal } = useGpuQuery()
 
-const drawerOpen = ref(true)
+const drawerOpen = ref(!mobile.value)
 const collapsed = ref(localStorage.getItem('runq-sidebar-collapsed') === 'true')
+
+// Temporary drawers must not cover the dashboard on first load or after an
+// iPad orientation change. Permanent desktop navigation remains open.
+watch(mobile, (isMobile) => {
+  drawerOpen.value = !isMobile
+})
 
 function toggleCollapse() {
   collapsed.value = !collapsed.value

@@ -1,17 +1,17 @@
 <template>
   <div>
     <div class="d-flex align-center justify-space-between mb-4">
-      <h2 class="text-h6">Log Viewer</h2>
+      <h2 class="text-h6">{{ t('nav.log_viewer') }}</h2>
       <div class="d-flex ga-2">
         <v-btn size="small" variant="tonal" prepend-icon="mdi-content-paste" @click="pasteFromClipboard">
-          Paste
+          {{ t('log.viewer_paste') }}
         </v-btn>
         <v-btn size="small" variant="tonal" prepend-icon="mdi-file-upload-outline" @click="fileInput?.click()">
-          Open file
+          {{ t('log.viewer_open_file') }}
         </v-btn>
         <input ref="fileInput" type="file" accept=".log,.txt,.out,*" style="display:none" @change="onFileSelect" />
         <v-btn v-if="sessionId" size="small" variant="text" color="error" prepend-icon="mdi-close" @click="clear">
-          Clear
+          {{ t('common.clear') }}
         </v-btn>
       </div>
     </div>
@@ -20,7 +20,7 @@
     <v-card v-if="!sessionId" class="pa-0" variant="outlined">
       <v-textarea
         v-model="inputText"
-        placeholder="Paste log content here, or use the buttons above to paste / open a file..."
+        :placeholder="t('log.viewer_placeholder')"
         variant="plain"
         rows="12"
         auto-grow
@@ -30,7 +30,7 @@
       <v-card-actions class="pa-3 pt-0">
         <v-spacer />
         <v-btn :disabled="!inputText.trim()" :loading="uploading" color="primary" variant="tonal" @click="loadInput">
-          Process
+          {{ t('log.viewer_process') }}
         </v-btn>
       </v-card-actions>
     </v-card>
@@ -38,17 +38,17 @@
     <!-- Processed log view -->
     <v-card v-else variant="outlined" class="log-viewer-card">
       <div class="d-flex align-center pa-3 pb-0 ga-2">
-        <v-chip size="x-small" variant="tonal">{{ logLines.length }} lines</v-chip>
+        <v-chip size="x-small" variant="tonal">{{ t('log.n_lines', { n: logLines.length }) }}</v-chip>
         <v-chip size="x-small" variant="tonal">{{ formatBytes(totalBytes) }}</v-chip>
         <v-btn
           v-if="endOffset < totalBytes"
           size="x-small" variant="text" :loading="loadingMore" @click="loadMore"
         >
-          Load more
+          {{ t('log.load_more') }}
         </v-btn>
         <v-spacer />
       </div>
-      <div class="d-flex">
+      <div class="d-flex flex-wrap">
         <!-- Log content (virtualized shared surface, incl. search bar) -->
         <!-- Uploaded sessions always page from byte 0, so the buffer base
              line number is 0 and absolute numbering stays valid. -->
@@ -57,7 +57,7 @@
           :items="renderItems"
           :log-loading="uploading"
           :line-number-base="0"
-          empty-text="No log output"
+          :empty-text="t('log.no_output')"
           max-height="70vh"
         />
         <!-- Side panel -->
@@ -81,12 +81,14 @@
 
 <script setup lang="ts">
 import { ref, nextTick, onMounted, onUnmounted } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { useLogViewerStore } from '@/stores/logViewer'
 import { utilsApi } from '@/apis/utils'
 import LogSidePanel from '@/components/LogSidePanel.vue'
 import LogSurfaceView from '@/components/LogSurfaceView.vue'
 import { useLogSurface } from '@/composables/useLogSurface'
 
+const { t } = useI18n()
 const logStore = useLogViewerStore()
 
 const inputText = ref('')

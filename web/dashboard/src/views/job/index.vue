@@ -21,9 +21,13 @@
 
     <!-- Filter bar -->
     <div class="d-flex align-center ga-2 mb-3 flex-wrap">
+      <!-- role=button + aria-pressed: VChip is a focusable span and already
+           handles Enter/Space itself; SR users just need the toggle semantics. -->
       <v-chip
         v-for="s in statusOptions"
         :key="s.value"
+        role="button"
+        :aria-pressed="statusFilter === s.value"
         :variant="statusFilter === s.value ? 'flat' : 'outlined'"
         :color="statusFilter === s.value ? 'primary' : undefined"
         size="small"
@@ -101,15 +105,16 @@ watch(() => detail.value?.tasks, (tasks) => { if (tasks) prune(tasks) })
 const statusFilter = ref(prefs.lastStatusFilter.value)
 
 // Task-level filter — the "done" option matches success tasks, so it uses
-// the task success dot from statusGrammar.
-const statusOptions = [
-  { value: '', label: 'All', dot: '' },
-  { value: 'running', label: 'Running', dot: 'running' },
-  { value: 'done', label: 'Done', dot: 'success' },
-  { value: 'failed', label: 'Failed', dot: 'failed' },
-  { value: 'killed', label: 'Killed', dot: 'killed' },
-  { value: 'pending', label: 'Pending', dot: 'pending' },
-]
+// the task success dot from statusGrammar. Computed so labels follow
+// live locale switches.
+const statusOptions = computed(() => [
+  { value: '', label: t('common.all'), dot: '' },
+  { value: 'running', label: t('status.task.running'), dot: 'running' },
+  { value: 'done', label: t('common.done'), dot: 'success' },
+  { value: 'failed', label: t('status.task.failed'), dot: 'failed' },
+  { value: 'killed', label: t('status.task.killed'), dot: 'killed' },
+  { value: 'pending', label: t('status.task.pending'), dot: 'pending' },
+])
 
 const isActiveJob = computed(() => {
   const s = detail.value?.job.status

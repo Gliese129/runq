@@ -137,20 +137,22 @@ func PerformClean(ctx context.Context, st *store.Store, fsFor func(target string
 		deleted = append(deleted, dbDeleted{u.task, preview[i].Action})
 	}
 
-	// Delete orphan jobs (done jobs with no remaining tasks) within the same tx.
-	// The status='done' guard mirrors store.DeleteOrphanJobs — never remove
-	// pending/running/paused jobs that just haven't spawned tasks yet.
-	// When a target filter is active, only delete orphan jobs matching that
-	// target so `clean --target X` can't accidentally remove another target's
-	// empty done jobs.
+	// Delete orphan jobs (terminal jobs with no remaining tasks) within the
+	// same tx. The terminal-status guard mirrors store.DeleteOrphanJobs —
+	// never remove pending/running/paused jobs that just haven't spawned
+	// tasks yet. When a target filter is active, only delete orphan jobs
+	// matching that target so `clean --target X` can't accidentally remove
+	// another target's empty terminal jobs.
 	var res sql.Result
 	if opts.Target != "" {
 		res, _ = tx.ExecContext(ctx,
-			"DELETE FROM jobs WHERE status = 'done' AND target = ? AND id NOT IN (SELECT DISTINCT job_id FROM tasks)",
+			fmt.Sprintf("DELETE FROM jobs WHERE status IN %s AND target = ? AND id NOT IN (SELECT DISTINCT job_id FROM tasks)",
+				store.TerminalJobStatusesSQL()),
 			opts.Target)
 	} else {
 		res, _ = tx.ExecContext(ctx,
-			"DELETE FROM jobs WHERE status = 'done' AND id NOT IN (SELECT DISTINCT job_id FROM tasks)")
+			fmt.Sprintf("DELETE FROM jobs WHERE status IN %s AND id NOT IN (SELECT DISTINCT job_id FROM tasks)",
+				store.TerminalJobStatusesSQL()))
 	}
 	deletedJobs := int64(0)
 	if res != nil {

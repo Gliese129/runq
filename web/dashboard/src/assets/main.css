@@ -73,6 +73,47 @@
   background: rgb(var(--v-theme-surface-variant), 0.4);
 }
 
+/* Sortable column headers: the th keeps its columnheader role (aria-sort
+   lives there); the inner <button> supplies keyboard access + focus. */
+.th-sort-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+  text-transform: inherit;
+  letter-spacing: inherit;
+  white-space: nowrap;
+}
+.th-sort-btn:focus-visible {
+  outline: 2px solid rgb(var(--v-theme-primary));
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+/* Sortability affordance: INACTIVE sortable columns show a persistent faint
+   ↕ (aria-sort="none" is the anchor — active columns render their own ↑/↓
+   via sortIcon). Persistent, not hover-only: touch and keyboard users get
+   the same discoverability. Pseudo-element = decorative only; the real
+   semantics stay on aria-sort. */
+th[aria-sort='none'] .th-sort-btn::after {
+  content: '↕';
+  margin-left: 4px;
+  opacity: 0.35;
+}
+th[aria-sort='none'] .th-sort-btn:hover::after,
+th[aria-sort='none'] .th-sort-btn:focus-visible::after {
+  opacity: 0.8;
+}
+
+/* Keyboard focus ring for clickable non-table rows/cards (role=link or
+   role=button on a div) — mirrors the table-row rule above. */
+.row-focus:focus-visible {
+  outline: 2px solid rgb(var(--v-theme-primary));
+  outline-offset: -2px;
+}
+
 /* Status dots — colors come EXCLUSIVELY from statusGrammar.ts via
    <StatusDot>. Do not add per-status color rules here (philosophy U3). */
 .status-dot {
@@ -100,10 +141,21 @@
   animation: icon-spin 1.6s linear infinite;
 }
 
+/* Respect the OS "reduce motion" preference: stop decorative animation
+   (status pulse, spinners' decorative variant, skeleton shimmer) and cut
+   UI transitions to imperceptible. Durations stay >0 so transitionend /
+   animationend listeners (Vuetify overlays) still fire. */
 @media (prefers-reduced-motion: reduce) {
   .status-dot--pulse,
-  .icon-spin {
-    animation: none;
+  .icon-spin,
+  .skeleton,
+  .v-skeleton-loader__bone::after {
+    animation: none !important;
+  }
+  .v-btn, .v-chip, .v-card, .v-list-item,
+  .quick-item, .row-line, .row-check, .row-delete,
+  .script-drop, .tmpl-display, .log-search-bar {
+    transition-duration: 0.01ms !important;
   }
 }
 
@@ -124,7 +176,8 @@
 .terminal-block .t-red    { color: #F87171; }
 .terminal-block .t-yellow { color: #FBBF24; }
 .terminal-block .t-blue   { color: #60A5FA; }
-.terminal-block .t-dim    { color: #64748B; }
+/* Slate-400, not 500: #64748B on #0F172A was ~3.7:1 — below WCAG AA. */
+.terminal-block .t-dim    { color: #94A3B8; }
 
 /* ═══════ Monospace for values/paths/IDs globally ═══════ */
 code {

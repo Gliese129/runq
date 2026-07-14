@@ -18,9 +18,11 @@ import type { GPUSlot } from '@/types/api'
 
 const props = defineProps<{ slot: GPUSlot }>()
 
+// Neutral-to-warning scale: normal utilization stays a calm grey-blue —
+// a busy lab GPU is not an alarm. Only near-saturation (>80%) escalates,
+// so a full cluster no longer renders as a wall of red/amber.
 const barColor = computed(() => {
-  if (props.slot.util_percent > 80) return 'error'
-  if (props.slot.util_percent > 40) return 'warning'
-  return 'success'
+  if (props.slot.util_percent > 80) return 'warning'
+  return 'blue-grey'
 })
 </script>

@@ -495,7 +495,7 @@ func (b *SSHBackend) ListJobs(ctx context.Context, projectScope string) ([]JobSu
 		return nil, err
 	}
 	for _, j := range jobs {
-		if j.Status != "done" {
+		if !store.IsTerminalJobStatus(j.Status) {
 			_ = b.backend.EnsureFresh(ctx, j.ID, DefaultReadTTL)
 		}
 	}
