@@ -87,6 +87,25 @@ export class IncrementalLogPipeline {
     if (Date.now() - this.motifsAt >= MOTIF_THROTTLE_MS) this.recomputeMotifs()
   }
 
+  /** Replace the LAST raw line's text in place (continues-fragment merge:
+   *  the server delivered the rest of a line we only had a prefix of).
+   *
+   *  The tail raw line is BY CONSTRUCTION inside the pending window: new
+   *  lines only enter through push/reset into pendingRaw, and
+   *  finalizeIfLarge moves only the head — it always keeps at least the
+   *  last PENDING_WINDOW entries pending. So replacing pendingRaw's last
+   *  element and re-processing the pending tail is exact. */
+  replaceTailLine(text: string): void {
+    if (this.pendingRaw.length === 0) {
+      this.push([text])
+      return
+    }
+    this.pendingRaw[this.pendingRaw.length - 1] = text
+    this.reprocessPending()
+    this.motifsDirty = true
+    if (Date.now() - this.motifsAt >= MOTIF_THROTTLE_MS) this.recomputeMotifs()
+  }
+
   /** Recompute motif groups over the whole window (throttled by push). */
   recomputeMotifs(): void {
     this.motifs = detectMotifs(this.lines(), this.drain)

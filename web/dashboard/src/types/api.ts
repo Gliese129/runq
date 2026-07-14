@@ -117,6 +117,14 @@ export interface LogPage {
   size: number
   truncated?: boolean
   total_lines: number // -1 when unknown
+  /** 0-based absolute line number of the page's first line; -1/absent = unknown */
+  start_line?: number
+  /** last entry is a fragment of a line longer than max_bytes (chain continues) */
+  partial?: boolean
+  /** first entry continues the previous page's unterminated last line */
+  continues?: boolean
+  /** requested offset was beyond the file size (rotation); page restarts at 0 */
+  rotated?: boolean
 }
 
 export interface WandbInfo {

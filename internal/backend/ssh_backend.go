@@ -907,6 +907,28 @@ func (b *SSHBackend) TaskLogTail(ctx context.Context, taskID string, maxLines in
 	return r.TailLines(maxLines) // LogPage = logfile.Page: no mapping
 }
 
+// TaskLogPage — dashboard log contract v2: byte-budget page (positional /
+// tail / rotation / optional line count) through the owning target's FS.
+func (b *SSHBackend) TaskLogPage(ctx context.Context, taskID string, req logfile.PageRequest) (*LogPage, error) {
+	b.touchActivity()
+	task, err := b.store.GetTask(ctx, taskID)
+	if err != nil {
+		return nil, fmt.Errorf("task log page: %w", err)
+	}
+	if task == nil {
+		return nil, fmt.Errorf("task %q: %w", taskID, ErrNotFound)
+	}
+	r, err := logfile.Open(task.LogPath, b.backend.FS)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return &LogPage{Lines: []string{}, TotalLines: -1, StartLine: -1}, nil // pending
+		}
+		return nil, err
+	}
+	defer r.Close()
+	return r.ReadPage(req)
+}
+
 // TaskLogFollow — pure assembly: resolve the task, hand path+FS+offset to
 // logfile.Follow. *logfile.Follower satisfies LogFollower natively (LogPage
 // = logfile.Page), so there is no adapter and deliberately NO goroutine:

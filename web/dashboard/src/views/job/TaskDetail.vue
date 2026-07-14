@@ -105,6 +105,12 @@
           <v-spacer />
           <div class="d-flex align-center ga-1 mr-2" @click.stop>
             <v-btn
+              v-if="canLoadEarlier"
+              size="x-small" variant="text" :loading="loadingEarlier" @click="loadEarlier"
+            >
+              {{ t('log.load_earlier') }}
+            </v-btn>
+            <v-btn
               v-if="!following && endOffset < totalBytes"
               size="x-small" variant="text" :loading="loadingMore" @click="loadMore"
             >
@@ -112,8 +118,9 @@
             </v-btn>
             <v-switch
               v-model="following"
-              density="compact" hide-details color="primary" inline
-              label="Follow"
+              density="compact" hide-details inline
+              :color="streamState === 'reconnecting' ? 'warning' : 'primary'"
+              :label="streamState === 'reconnecting' ? t('log.reconnecting') : 'Follow'"
             />
           </div>
         </v-expansion-panel-title>
@@ -133,6 +140,7 @@
               :surface="surface"
               :items="renderItems"
               :log-loading="logLoading"
+              :line-number-base="lineNumberBase"
               :empty-text="task.status === 'pending' ? 'Waiting to start...' : 'No log output yet'"
             />
             <!-- Side panel -->
@@ -173,7 +181,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { tasksApi } from '@/apis/tasks'
+import { tasksApi, DEFAULT_LOG_MAX_BYTES } from '@/apis/tasks'
 import { jobsApi } from '@/apis/jobs'
 import { ApiError } from '@/apis/client'
 import { useSnackbar } from '@/composables/useSnackbar'
@@ -188,6 +196,7 @@ import LogSidePanel from '@/components/LogSidePanel.vue'
 import LogSurfaceView from '@/components/LogSurfaceView.vue'
 import type { LogPage } from '@/types/api'
 import { trimLogBuffer } from '@/utils/log/buffer'
+import { applyPage as applyCursorPage } from '@/utils/log/cursor'
 import { useLogSurface } from '@/composables/useLogSurface'
 
 const props = defineProps<{ project: string; jobId: string; taskId: string }>()
@@ -216,12 +225,23 @@ const displayStatus = computed(() => (task.value ? overlayStatus(task.value) : '
 watch(task, (v) => { if (v) prune([v]) })
 void cancelling
 
-// ── Log state (byte-offset based) ──
+// ── Log state (byte-offset based, log stream contract v2) ──
 const logLines = ref<string[]>([])
 /** Lines released from memory by the follow-mode ring buffer. */
 const trimmedLines = ref(0)
+/** Byte offset of logLines[0] — the backward-paging anchor. */
+const firstOffset = ref(0)
 const endOffset = ref(0)
 const totalBytes = ref(0)
+/** The buffer's last line is an unterminated fragment (page.partial). */
+const tailPartial = ref(false)
+/** Absolute 0-based line number of logLines[0]; -1 = unknown. */
+const startLine = ref(-1)
+
+// Absolute line numbers only in the archive view with a known base and an
+// untrimmed buffer; the live view hides the column (contract v2).
+const lineNumberBase = computed(() =>
+  !isActive.value && startLine.value >= 0 && trimmedLines.value === 0 ? startLine.value : -1)
 
 // ── Log stream lifecycle ──
 // One explicit state instead of independent booleans whose combinations
@@ -234,17 +254,21 @@ const totalBytes = ref(0)
 //
 // The only legal entry into `following` is FROM `ready` — encoded in the
 // `following` setter, so no call site can start SSE before offsets exist.
-type LogStreamState = 'loading' | 'ready' | 'following'
+// `reconnecting` is follow INTENT with the stream down — tail -f
+// semantics: the intent never expires, retries back off forever (1s→10s)
+// until the stream returns, the user toggles off, or the task ends.
+type LogStreamState = 'loading' | 'ready' | 'following' | 'reconnecting'
 const streamState = ref<LogStreamState>('loading')
 
-/** v-switch model: a view over streamState with transition legality. */
+/** v-switch model: a view over streamState with transition legality.
+ *  The switch stays ON through `reconnecting` — that IS still following. */
 const following = computed({
-  get: () => streamState.value === 'following',
+  get: () => streamState.value === 'following' || streamState.value === 'reconnecting',
   set: (on: boolean) => {
     if (on) {
       if (streamState.value === 'ready') streamState.value = 'following'
       // from `loading`: ignored — illegal transition, not a race to patch
-    } else if (streamState.value === 'following') {
+    } else if (streamState.value === 'following' || streamState.value === 'reconnecting') {
       streamState.value = 'ready'
     }
   },
@@ -275,45 +299,140 @@ function wandbRunURL(runId: string): string {
 const surface = useLogSurface(logLines, logContainer)
 const {
   pipelineResult, effectiveHidden, renderItems,
-  toggleGroup, scrollToGroup, scrollToBottom,
+  toggleGroup, scrollToGroup, scrollToBottom, replaceTailLine,
 } = surface
 
-// ── Fetch log (GET — initial load + manual paging) ──
-async function fetchLog(offset = 0, lines = 500) {
-  logLoading.value = true
-  try {
-    const page = await tasksApi.log(props.taskId, { offset, lines })
-    applyPage(page, offset === 0)
-  } catch { /* ignore */ }
-  finally { logLoading.value = false }
+// ── Apply pages through the pure cursor state machine (utils/log/cursor).
+// Returns false when the cursor invariant was violated — the caller must
+// resync instead of applying the page. ──
+function acceptPage(page: LogPage): boolean {
+  const action = applyCursorPage(
+    { endOffset: endOffset.value, tailPartial: tailPartial.value }, page)
+  switch (action.kind) {
+    case 'ignore':
+      return true
+    case 'reset':
+      // Rotation: clear buffer + trim counter; the new array reference
+      // makes the incremental pipeline rebuild from scratch.
+      trimmedLines.value = 0
+      logLines.value = action.lines.slice()
+      firstOffset.value = 0
+      endOffset.value = action.nextOffset
+      totalBytes.value = action.size
+      tailPartial.value = action.tailPartial
+      startLine.value = -1
+      return true
+    case 'append': {
+      const lines = action.lines
+      if (action.mergeFirst && logLines.value.length > 0 && lines.length > 0) {
+        // continues chain: glue the first fragment onto our tail line.
+        // The watch in useLogSurface can't see a same-length mutation, so
+        // the engine is notified explicitly via replaceTailLine.
+        const last = logLines.value.length - 1
+        const merged = logLines.value[last] + lines[0]
+        logLines.value[last] = merged
+        replaceTailLine(merged)
+        if (lines.length > 1) logLines.value.push(...lines.slice(1))
+      } else {
+        logLines.value.push(...lines)
+      }
+      endOffset.value = action.nextOffset
+      totalBytes.value = action.size
+      tailPartial.value = action.tailPartial
+      return true
+    }
+    case 'resync':
+      return false
+  }
 }
 
-function applyPage(page: LogPage, replace: boolean) {
-  if (replace) {
-    logLines.value = page.lines
-  } else {
-    logLines.value.push(...page.lines)
-  }
+/** Seed/replace the whole buffer from one tail-opened page. */
+function seedFromTail(page: LogPage, active: boolean) {
+  trimmedLines.value = 0
+  logLines.value = (page.lines ?? []).slice()
+  firstOffset.value = page.offset
   endOffset.value = page.next_offset
   totalBytes.value = page.size
+  tailPartial.value = !!page.partial
+  startLine.value = !active && page.start_line != null && page.start_line >= 0
+    ? page.start_line : -1
+}
+
+// ── Open / reload: live AND archive both open from the tail; only the
+// archive first page asks for line counts (count_lines=1). ──
+async function reloadTail() {
+  const active = isActive.value
+  const page = await tasksApi.log(props.taskId, {
+    tail: true, maxBytes: DEFAULT_LOG_MAX_BYTES, countLines: !active,
+  })
+  seedFromTail(page, active)
+  nextTick(() => scrollToBottom())
 }
 
 /** Re-read the log from byte 0 (recovers ring-buffer-trimmed history). */
 async function reloadFromStart() {
   streamState.value = 'loading' // closes SSE; re-entry only via ready
   trimmedLines.value = 0
-  await fetchLog(0, 500)
+  logLoading.value = true
+  try {
+    const page = await tasksApi.log(props.taskId, { offset: 0, maxBytes: DEFAULT_LOG_MAX_BYTES })
+    logLines.value = (page.lines ?? []).slice()
+    firstOffset.value = 0
+    endOffset.value = page.next_offset
+    totalBytes.value = page.size
+    tailPartial.value = !!page.partial
+    startLine.value = 0 // buffer head IS the file head
+  } catch { /* ignore */ }
+  finally { logLoading.value = false }
   streamState.value = 'ready'
 }
 
+// ── Forward paging (archive, buffer not yet at EOF) ──
 async function loadMore() {
   if (endOffset.value >= totalBytes.value) return
   loadingMore.value = true
   try {
-    const page = await tasksApi.log(props.taskId, { offset: endOffset.value, lines: 200 })
-    applyPage(page, false)
+    const page = await tasksApi.log(props.taskId, {
+      offset: endOffset.value, maxBytes: DEFAULT_LOG_MAX_BYTES,
+    })
+    if (!acceptPage(page)) void resync()
   } catch { /* ignore */ }
   finally { loadingMore.value = false }
+}
+
+// ── Backward paging (archive "Load earlier") ──
+// Requests [max(0, firstOffset − budget), firstOffset). firstOffset is a
+// line boundary after tail-open, so the page's next_offset lands exactly
+// on it; when the window START falls mid-line the first entry is a
+// continuation fragment shown as its (head-truncated) line — the 1 entry
+// = 1 line accounting still holds, so start_line just decrements by the
+// prepended count. No auto-trim on backward paging (contract v2).
+const loadingEarlier = ref(false)
+const canLoadEarlier = computed(() =>
+  !isActive.value && !following.value && firstOffset.value > 0 && trimmedLines.value === 0)
+
+async function loadEarlier() {
+  if (loadingEarlier.value || firstOffset.value <= 0) return
+  loadingEarlier.value = true
+  try {
+    const target = firstOffset.value
+    const start = Math.max(0, target - DEFAULT_LOG_MAX_BYTES)
+    const page = await tasksApi.log(props.taskId, { offset: start, maxBytes: target - start })
+    if (firstOffset.value !== target) return // raced with rotation/reload: drop
+    const lines = page.lines ?? []
+    if (lines.length === 0) return
+    // Prepend: the new array reference makes the pipeline reset (accepted).
+    logLines.value = [...lines, ...logLines.value]
+    firstOffset.value = page.offset
+    if (startLine.value >= 0) {
+      // page.partial here means a mega-line fragment that never reached a
+      // newline — it belongs to the SAME line as our previous head, so the
+      // per-entry accounting breaks: fall back to "base unknown".
+      const base = startLine.value - lines.length
+      startLine.value = page.partial || base < 0 ? -1 : base
+    }
+  } catch { /* ignore */ }
+  finally { loadingEarlier.value = false }
 }
 
 // ── SSE follow mode ──
@@ -321,32 +440,97 @@ let eventSource: EventSource | null = null
 
 function startFollow() {
   stopFollow()
-  eventSource = tasksApi.logStream(props.taskId, endOffset.value)
+  eventSource = tasksApi.logStream(props.taskId, endOffset.value, DEFAULT_LOG_MAX_BYTES)
   eventSource.addEventListener('lines', (e: MessageEvent) => {
     try {
       const page: LogPage = JSON.parse(e.data)
-      // Cursor guard: only accept the page that continues our buffer —
-      // drops duplicates from any GET/SSE race instead of appending them.
-      if (page.offset !== endOffset.value) return
-      logLines.value.push(...page.lines)
+      // Cursor state machine: rotated → reset, continues → fragment merge,
+      // duplicates → dropped. A violated offset assertion does NOT drop
+      // the page silently anymore — it converts into a resync, which also
+      // re-opens the stream from the repaired cursor (the current stream's
+      // server-side cursor is out of sync with ours by definition here).
+      if (!acceptPage(page)) {
+        void resync(true)
+        return
+      }
       // Follow mode = pinned to tail: safe to release the oldest lines
       // (server file keeps everything; a banner explains the gap).
       trimmedLines.value += trimLogBuffer(logLines.value)
-      endOffset.value = page.next_offset
-      totalBytes.value = page.size
       nextTick(() => scrollToBottom())
     } catch { /* ignore parse errors */ }
   })
+  eventSource.onopen = () => {
+    // Stream (re)established: reconnecting → following, backoff resets.
+    reconnectDelay = 1_000
+    if (streamState.value === 'reconnecting') streamState.value = 'following'
+  }
   eventSource.onerror = () => {
-    // EventSource only auto-reconnects on network-level errors. When the
-    // SERVER closes the stream (task ended, daemon restart, proxy cut)
-    // readyState goes CLOSED and no reconnect happens — surface it
-    // instead of leaving the Follow toggle silently lying.
-    if (eventSource?.readyState === EventSource.CLOSED) {
-      following.value = false
-      snack.warn(t('log.stream_lost'))
+    // ONE recovery path owns every failure mode. Native auto-reconnect is
+    // deliberately killed here (close()): it lingers in CONNECTING with
+    // the ORIGINAL URL and — as observed on a real daemon restart — can
+    // spin there forever without recovering (RQ-54). We reconnect
+    // ourselves from the LATEST endOffset instead; onopen flips back to
+    // `following`. tail -f semantics: the intent never expires.
+    stopFollow()
+    if (streamState.value === 'following') {
+      streamState.value = 'reconnecting' // state watcher schedules the loop
+    } else if (streamState.value === 'reconnecting') {
+      scheduleReconnect() // a retry attempt failed — schedule the next one
     }
   }
+}
+
+// ── Infinite reconnect loop (event-driven): each attempt aligns the
+// buffer with one GET, then reopens the stream; a failed attempt fires
+// onerror again, which schedules the next one with doubled backoff. ──
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+let reconnectDelay = 1_000
+function scheduleReconnect() {
+  if (reconnectTimer) return
+  reconnectTimer = setTimeout(async () => {
+    reconnectTimer = null
+    if (streamState.value !== 'reconnecting') return
+    reconnectDelay = Math.min(reconnectDelay * 2, 10_000)
+    try {
+      const from = endOffset.value
+      const page = await tasksApi.log(props.taskId, { offset: from, maxBytes: DEFAULT_LOG_MAX_BYTES })
+      if (endOffset.value === from) acceptPage(page)
+    } catch { /* backend still down — the reopened stream will error again */ }
+    if (streamState.value === 'reconnecting') startFollow() // onopen flips back
+  }, reconnectDelay)
+}
+
+// ── Resync: the single recovery path (contract v2). One GET from our
+// endOffset pulls the buffer level; if that GET fails (or its page still
+// violates the cursor), reload the whole tail; only THAT failing surfaces
+// the degraded snackbar. ──
+let resyncing = false
+async function resync(restartStream = false) {
+  if (resyncing) return
+  resyncing = true
+  try {
+    const from = endOffset.value
+    let ok = false
+    try {
+      const page = await tasksApi.log(props.taskId, {
+        offset: from, maxBytes: DEFAULT_LOG_MAX_BYTES,
+      })
+      // If something already advanced the cursor meanwhile, that path
+      // owns the buffer now — this resync is settled.
+      ok = endOffset.value !== from || acceptPage(page)
+    } catch { ok = false }
+    if (!ok) {
+      try { await reloadTail() } catch {
+        // Backend unreachable. If we were following, the intent survives:
+        // hand recovery to the infinite reconnect loop instead of giving
+        // up (tail -f semantics). Outside follow, surface it once.
+        if (streamState.value === 'following') streamState.value = 'reconnecting'
+        else if (streamState.value !== 'reconnecting') snack.warn(t('log.stream_lost'))
+        return
+      }
+    }
+    if (restartStream && streamState.value === 'following') startFollow()
+  } finally { resyncing = false }
 }
 
 function stopFollow() {
@@ -357,12 +541,20 @@ function stopFollow() {
 }
 
 // Side effects live on the STATE transition, not on scattered call sites.
-watch(streamState, (state) => {
+watch(streamState, (state, prev) => {
   if (state === 'following') {
-    startFollow()
-    nextTick(() => scrollToBottom())
+    // Coming back from `reconnecting`, the retry loop already opened the
+    // stream (onopen brought us here) — restarting would kill it.
+    if (prev !== 'reconnecting') {
+      startFollow()
+      nextTick(() => scrollToBottom())
+    }
+  } else if (state === 'reconnecting') {
+    scheduleReconnect()
   } else {
     stopFollow()
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
+    reconnectDelay = 1_000
   }
 })
 
@@ -381,14 +573,16 @@ watch(isActive, async (active, prev) => {
       // last batch (often THE final score) lands right at the flip.
       metricsQuery.refetch()
       // The stream may die before the final buffered lines flush — fetch
-      // the tail once so the exit message is never missing.
+      // once from our cursor so the exit message is never missing.
       try {
         const tailFrom = endOffset.value
-        const page = await tasksApi.log(props.taskId, { offset: tailFrom, lines: 500 })
+        const page = await tasksApi.log(props.taskId, {
+          offset: tailFrom, maxBytes: DEFAULT_LOG_MAX_BYTES,
+        })
         // Generation guard: if SSE advanced the offset while this request
         // was in flight, the same lines already rendered — drop the page.
         if (endOffset.value !== tailFrom) return
-        applyPage(page, false)
+        if (!acceptPage(page)) void resync()
       } catch { /* best effort */ }
     }
   }
@@ -437,9 +631,27 @@ function formatBytes(b: number): string {
   return `${(b / (1024 * 1024 * 1024)).toFixed(1)} GB`
 }
 
+/** The first log fetch needs to know live vs archive (count_lines only on
+ *  archive) — wait for the task row; the query cache may already have it. */
+function waitForTask(): Promise<void> {
+  if (task.value || notFound.value) return Promise.resolve()
+  return new Promise((resolve) => {
+    const stop = watch([task, notFound], ([tv, nf]) => {
+      if (tv || nf) {
+        stop()
+        resolve()
+      }
+    })
+  })
+}
+
 onMounted(async () => {
   fetchWandbInfo() // fire-and-forget — best effort, doesn't block render
-  await fetchLog()
+  await waitForTask()
+  if (notFound.value) return
+  logLoading.value = true
+  try { await reloadTail() } catch { /* ignore */ }
+  finally { logLoading.value = false }
   streamState.value = 'ready' // GET settled: offsets are now trustworthy
   // Query cache may already have the task (navigated from the job page);
   // the immediate isActive value seeds follow, the watch handles flips.
@@ -449,6 +661,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   stopFollow()
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
 })
 </script>
 

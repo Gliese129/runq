@@ -247,5 +247,6 @@
   "log.stream_lost": "Live log stream disconnected",
   "task.not_found": "Task not found — it may have been cleaned",
   "log.trimmed": "Oldest {n} lines released from memory — the full log remains on the server",
-  "log.reload_start": "Reload from start"
+  "log.reload_start": "Reload from start",
+  "log.reconnecting": "Reconnecting…"
 }

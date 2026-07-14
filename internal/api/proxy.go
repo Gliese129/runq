@@ -12,6 +12,7 @@ import (
 
 	"github.com/gliese129/runq/internal/backend"
 	"github.com/gliese129/runq/internal/job"
+	"github.com/gliese129/runq/internal/logfile"
 	"github.com/gliese129/runq/internal/project"
 	"github.com/gliese129/runq/internal/workspace"
 )
@@ -421,6 +422,25 @@ func (p *Proxy) TaskLogRead(ctx context.Context, taskID string, offset int64, ma
 // TaskLogTail — same endpoint WITHOUT offset (handler: absent = tail).
 func (p *Proxy) TaskLogTail(ctx context.Context, taskID string, maxLines int) (*backend.LogPage, error) {
 	q := url.Values{"lines": {strconv.Itoa(maxLines)}}
+	var page backend.LogPage
+	if err := p.do(ctx, "GET", "/api/v1/tasks/"+url.PathEscape(taskID)+"/log?"+q.Encode(), nil, &page); err != nil {
+		return nil, err
+	}
+	return &page, nil
+}
+
+// TaskLogPage — GET /tasks/{id}/log with the v2 byte-budget params
+// (max_bytes priority over lines; tail=1; count_lines=1).
+func (p *Proxy) TaskLogPage(ctx context.Context, taskID string, req logfile.PageRequest) (*backend.LogPage, error) {
+	q := url.Values{"max_bytes": {strconv.FormatInt(req.MaxBytes, 10)}}
+	if req.Tail {
+		q.Set("tail", "1")
+	} else {
+		q.Set("offset", strconv.FormatInt(req.Offset, 10))
+	}
+	if req.CountLines {
+		q.Set("count_lines", "1")
+	}
 	var page backend.LogPage
 	if err := p.do(ctx, "GET", "/api/v1/tasks/"+url.PathEscape(taskID)+"/log?"+q.Encode(), nil, &page); err != nil {
 		return nil, err

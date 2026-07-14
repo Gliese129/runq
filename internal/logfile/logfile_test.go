@@ -135,10 +135,12 @@ func TestReadLines_FromStart(t *testing.T) {
 	}
 }
 
-func TestReadLines_SnapToLineBoundary(t *testing.T) {
+func TestReadLines_MidLineOffsetDoesNotRewind(t *testing.T) {
 	// "line0\nline1\nline2\n"
 	//  01234 5 67890 1 ...
-	// offset=3 is inside "line0" → backward snap to start of current line (offset 0)
+	// Log contract v2: offsets are used AS-IS — a mid-line offset starts in
+	// place (offsets returned by this package are always line boundaries,
+	// so this only happens on deliberate mid-line reads).
 	content := "line0\nline1\nline2\n"
 	r := mustOpen(t, writeTemp(t, content))
 	page, err := r.ReadLines(3, 10)
@@ -146,13 +148,13 @@ func TestReadLines_SnapToLineBoundary(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(page.Lines) < 1 {
-		t.Fatal("expected at least 1 line after snap")
+		t.Fatal("expected at least 1 line")
 	}
-	if page.Lines[0] != "line0" {
-		t.Fatalf("expected first line 'line0' after backward snap, got %q", page.Lines[0])
+	if page.Lines[0] != "e0" {
+		t.Fatalf("expected first line 'e0' (remainder, no rewind), got %q", page.Lines[0])
 	}
-	if page.Offset != 0 {
-		t.Fatalf("expected StartOffset=0 (start of line0), got %d", page.Offset)
+	if page.Offset != 3 {
+		t.Fatalf("expected StartOffset=3 (no rewind), got %d", page.Offset)
 	}
 }
 

@@ -247,5 +247,6 @@
   "log.stream_lost": "实时日志流已断开",
   "task.not_found": "任务不存在,可能已被清理",
   "log.trimmed": "最早的 {n} 行已从内存释放,完整日志仍在服务端",
-  "log.reload_start": "从头重新加载"
+  "log.reload_start": "从头重新加载",
+  "log.reconnecting": "重连中…"
 }

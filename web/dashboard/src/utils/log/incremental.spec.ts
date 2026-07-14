@@ -103,4 +103,44 @@ describe('IncrementalLogPipeline ≡ processLog', () => {
     inc.push([])
     expect(inc.result().lines.map(l => l.text)).toEqual(['only line'])
   })
+
+  // ── replaceTailLine (log contract v2: continues-fragment merge) ──
+
+  it('replaceTailLine ≡ pushing the full line in one shot', () => {
+    const raw = makeLog(1200)
+    const full = raw.concat(['2026-07-13 10:01:00 INFO final step loss=0.123'])
+    const oneShot = processLog(full, TOGGLES, DEFAULT_PRE_DRAIN_RULES)
+
+    // Stream everything, but deliver the last line as fragment + merge —
+    // exactly what a continues page does to the buffer.
+    const inc = new IncrementalLogPipeline(TOGGLES, DEFAULT_PRE_DRAIN_RULES)
+    inc.push(raw)
+    inc.push(['2026-07-13 10:01:00 INFO fin'])
+    inc.replaceTailLine('2026-07-13 10:01:00 INFO final step loss=0.123')
+    inc.recomputeMotifs()
+
+    expect(normalize(inc.result())).toEqual(normalize(oneShot))
+    for (const l of inc.result().lines) {
+      if (l.clusterId >= 0) expect(inc.result().drain.count(l.clusterId)).toBeGreaterThan(0)
+    }
+  })
+
+  it('replaceTailLine chains (multi-fragment mega line) stay equivalent', () => {
+    const oneShot = processLog(['start', 'ABCDEF'], TOGGLES, DEFAULT_PRE_DRAIN_RULES)
+
+    const inc = new IncrementalLogPipeline(TOGGLES, DEFAULT_PRE_DRAIN_RULES)
+    inc.push(['start'])
+    inc.push(['AB'])
+    inc.replaceTailLine('ABCD')
+    inc.replaceTailLine('ABCDEF')
+    inc.recomputeMotifs()
+
+    expect(normalize(inc.result())).toEqual(normalize(oneShot))
+  })
+
+  it('replaceTailLine on an empty pipeline degrades to push', () => {
+    const inc = new IncrementalLogPipeline(TOGGLES, DEFAULT_PRE_DRAIN_RULES)
+    inc.replaceTailLine('lonely')
+    expect(inc.result().lines.map(l => l.text)).toEqual(['lonely'])
+  })
 })

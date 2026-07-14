@@ -89,6 +89,17 @@ export function useLogSurface(
     { deep: true },
   )
 
+  /** Notify the engine that the LAST line's text changed IN PLACE
+   *  (continues-fragment merge, log contract v2). The [ref, length] watch
+   *  above cannot detect a same-length content change, so the caller
+   *  mutates logLines[last] AND calls this; fedRef/fedCount stay valid
+   *  because the array reference and length are unchanged. */
+  function replaceTailLine(text: string) {
+    engine.replaceTailLine(text)
+    pipelineVersion.value++
+    scheduleMotifRefresh()
+  }
+
   // Motifs are throttled inside the engine; make sure the LAST batch's
   // groups still surface once the quiet period ends.
   let motifTimer: ReturnType<typeof setTimeout> | null = null
@@ -304,6 +315,7 @@ export function useLogSurface(
     // pipeline
     pipelineResult, foldState, effectiveHidden, renderItems,
     toggleFold, toggleGroup, scrollToGroup, lineClasses, getSegments, resetPipeline,
+    replaceTailLine,
     // scrolling (LogSurfaceView injects scrollToIndexRef and binds logContainer)
     logContainer, scrollToIndexRef, scrollToBottom,
     // search

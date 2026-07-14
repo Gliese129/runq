@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/gliese129/runq/internal/job"
+	"github.com/gliese129/runq/internal/logfile"
 	"github.com/gliese129/runq/internal/project"
 	"github.com/gliese129/runq/internal/workspace"
 )
@@ -88,6 +89,12 @@ type Backend interface {
 	// the first paint everything is positional TaskLogRead.
 	// Pending task (no log yet) → empty page, Size 0, NO error.
 	TaskLogTail(ctx context.Context, taskID string, maxLines int) (*LogPage, error)
+
+	// TaskLogPage is the dashboard log contract v2 read: ONE byte-budget
+	// request folding positional read, tail-open, rotation detection and
+	// optional line counting — see logfile.PageRequest / Reader.ReadPage.
+	// Pending task (no log yet) → empty page, Size 0, NO error.
+	TaskLogPage(ctx context.Context, taskID string, req logfile.PageRequest) (*LogPage, error)
 
 	// TaskLogFollow follows the log from offset as the file grows,
 	// delivering it as a LogPage ITERATOR — not a raw byte stream. Raw

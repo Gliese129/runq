@@ -50,10 +50,13 @@
       </div>
       <div class="d-flex">
         <!-- Log content (virtualized shared surface, incl. search bar) -->
+        <!-- Uploaded sessions always page from byte 0, so the buffer base
+             line number is 0 and absolute numbering stays valid. -->
         <LogSurfaceView
           :surface="surface"
           :items="renderItems"
           :log-loading="uploading"
+          :line-number-base="0"
           empty-text="No log output"
           max-height="70vh"
         />

@@ -247,5 +247,6 @@
   "log.stream_lost": "ライブログの接続が切断されました",
   "task.not_found": "タスクが見つかりません。削除された可能性があります",
   "log.trimmed": "古い {n} 行をメモリから解放しました。完全なログはサーバーに残っています",
-  "log.reload_start": "最初から再読み込み"
+  "log.reload_start": "最初から再読み込み",
+  "log.reconnecting": "再接続中…"
 }

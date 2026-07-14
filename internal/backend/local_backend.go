@@ -244,6 +244,25 @@ func (b *LocalBackend) TaskLogTail(ctx context.Context, taskID string, maxLines 
 	return r.TailLines(maxLines)
 }
 
+func (b *LocalBackend) TaskLogPage(ctx context.Context, taskID string, req logfile.PageRequest) (*LogPage, error) {
+	task, err := b.store.GetTask(ctx, taskID)
+	if err != nil {
+		return nil, err
+	}
+	if task == nil {
+		return nil, fmt.Errorf("task %q: %w", taskID, ErrNotFound)
+	}
+	r, err := logfile.Open(task.LogPath, nil)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return &LogPage{Lines: []string{}, TotalLines: -1, StartLine: -1}, nil // pending
+		}
+		return nil, err
+	}
+	defer r.Close()
+	return r.ReadPage(req)
+}
+
 func (b *LocalBackend) TaskLogFollow(ctx context.Context, taskID string, offset int64) (LogFollower, error) {
 	task, err := b.store.GetTask(ctx, taskID)
 	if err != nil {

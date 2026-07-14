@@ -105,7 +105,7 @@
           >
             <span v-if="item.line.timestamp" class="log-timestamp">{{ formatTimestamp(item.line.timestamp) }}</span>
             <span v-else class="log-timestamp"></span>
-            <span class="log-lineno">{{ item.line.lineIdx + 1 }}</span>
+            <span v-if="lineNumberBase >= 0" class="log-lineno">{{ lineNumberBase + item.line.lineIdx + 1 }}</span>
             <span class="log-line-content">
               <!-- Drain diff view: dim static tokens, highlight variables -->
               <template v-if="item.tokens && item.varMask && item.colWidths">
@@ -142,7 +142,7 @@
           >
             <span v-if="item.line.timestamp" class="log-timestamp">{{ formatTimestamp(item.line.timestamp) }}</span>
             <span v-else class="log-timestamp"></span>
-            <span class="log-lineno">{{ item.line.lineIdx + 1 }}</span>
+            <span v-if="lineNumberBase >= 0" class="log-lineno">{{ lineNumberBase + item.line.lineIdx + 1 }}</span>
             <span class="log-line-content">
               <!-- tqdm fold badge -->
               <v-chip
@@ -200,10 +200,15 @@ const props = withDefaults(defineProps<{
   logLoading?: boolean
   emptyText?: string
   maxHeight?: string
+  /** Absolute line number of the buffer's first line (0-based). Rendered
+   *  numbers are lineNumberBase + lineIdx + 1; -1 hides the column
+   *  entirely (live view / unknown base — log contract v2). */
+  lineNumberBase?: number
 }>(), {
   logLoading: false,
   emptyText: '',
   maxHeight: '600px',
+  lineNumberBase: -1,
 })
 
 const { t } = useI18n()
