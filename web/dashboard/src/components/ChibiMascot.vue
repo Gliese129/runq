@@ -5,22 +5,22 @@
     Pose descriptions for image generation:
 
     mood="happy" variant="default"
-      → Q版小人，开心表情，双手叉腰，自信站姿
+      → Chibi character, smiling confidently with hands on hips
 
     mood="happy" variant="sparkle"
-      → Q版小人，开心表情，周围有星星闪烁，一只手举起打招呼
+      → Chibi character, smiling and waving with stars sparkling around them
 
     mood="thinking" variant="sparkle"
-      → Q版小人，歪头思考，手指托下巴，头顶有问号和星星
+      → Chibi character, head tilted in thought, finger on chin, with a question mark and stars overhead
 
     mood="thinking" variant="default"
-      → Q版小人，歪头思考，手指托下巴，一脸疑惑
+      → Chibi character, head tilted in thought, finger on chin, looking puzzled
 
     mood="sad" variant="default"
-      → Q版小人，难过表情，低头垂手，头顶有乌云
+      → Chibi character, looking sad with head and hands lowered, under a dark cloud
 
     mood="happy" variant="gpu"
-      → Q版小人，开心表情，双手举着一块GPU显卡，显卡发光
+      → Chibi character, smiling while holding a glowing GPU with both hands
   -->
   <div
     v-if="settings.animeMode"

@@ -143,7 +143,7 @@ const props = withDefaults(defineProps<{
 defineEmits<{ 'kill-task': [id: string]; 'retry-task': [id: string]; 'click-task': [id: string] }>()
 
 const hasWandb = computed(() => !!props.wandb)
-const hasHPC = computed(() => props.tasks.some(t => !!t.external_id))
+const hasHPC = computed(() => props.tasks.some(task => !!task.external_id))
 
 // ── Column visibility (persisted per job) ──
 const visibleCols = ref(new Set<string>())
@@ -151,8 +151,8 @@ const visibleCols = ref(new Set<string>())
 const availableParamCols = computed(() => {
   if (props.tasks.length === 0) return []
   const all = new Set<string>()
-  for (const t of props.tasks) {
-    for (const k of Object.keys(t.params || {})) all.add(k)
+  for (const task of props.tasks) {
+    for (const k of Object.keys(task.params || {})) all.add(k)
   }
   const swept = props.sweptParams || []
   return [...swept, ...[...all].filter(k => !swept.includes(k))]

@@ -143,10 +143,10 @@ const editForm = ref({ name: '', pattern: '', replacement: '' })
 const patternError = computed(() => {
   if (!editForm.value.pattern) return ''
   try {
-    new RegExp(editForm.value.pattern)
+    RegExp(editForm.value.pattern)
     return ''
-  } catch (e: any) {
-    return e.message || t('common.error')
+  } catch (error: unknown) {
+    return error instanceof Error ? error.message : t('common.error')
   }
 })
 

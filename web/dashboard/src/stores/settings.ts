@@ -18,6 +18,10 @@ function readStoredWebhook(): WebhookConfig {
   }
 }
 
+async function testWebhook() {
+  throw new Error('Webhook test is not supported by the dashboard backend yet')
+}
+
 export const useSettingsStore = defineStore('settings', () => {
   const webhook = ref<WebhookConfig>(readStoredWebhook())
   const theme = ref(localStorage.getItem('runq-theme') || 'light')
@@ -31,10 +35,6 @@ export const useSettingsStore = defineStore('settings', () => {
   async function saveWebhook(url: string, events: string[]) {
     webhook.value = { url, events }
     localStorage.setItem(WEBHOOK_STORAGE_KEY, JSON.stringify(webhook.value))
-  }
-
-  async function testWebhook() {
-    throw new Error('Webhook test is not supported by the dashboard backend yet')
   }
 
   function setTheme(t: string) {

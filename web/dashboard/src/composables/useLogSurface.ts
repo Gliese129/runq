@@ -14,6 +14,14 @@ import { IncrementalLogPipeline, MOTIF_THROTTLE_MS } from '@/utils/log/increment
 const SEARCH_MATCH_CAP = 5000
 const SEARCH_DEBOUNCE_MS = 250
 
+function isLong(line: DisplayLine): boolean {
+  return line.text.length > LONG_LINE_THRESHOLD
+}
+
+function truncateText(text: string): string {
+  return text.slice(0, LONG_LINE_THRESHOLD)
+}
+
 /**
  * Shared log surface: the parse pipeline, unified fold state, motif-group
  * toggling, per-line render helpers, and in-pane search/scroll. Both the task
@@ -35,10 +43,6 @@ export function useLogSurface(
   const foldOverrides = ref(new Map<string, boolean>())
   const expandedLines = ref(new Set<number>())
 
-  function isLong(line: DisplayLine): boolean {
-    return line.text.length > LONG_LINE_THRESHOLD
-  }
-
   function isExpanded(line: DisplayLine): boolean {
     return expandedLines.value.has(line.lineIdx)
   }
@@ -46,10 +50,6 @@ export function useLogSurface(
   function toggleExpand(line: DisplayLine) {
     if (expandedLines.value.has(line.lineIdx)) expandedLines.value.delete(line.lineIdx)
     else expandedLines.value.add(line.lineIdx)
-  }
-
-  function truncateText(text: string): string {
-    return text.slice(0, LONG_LINE_THRESHOLD)
   }
 
   // ── Incremental pipeline ──
@@ -150,14 +150,14 @@ export function useLogSurface(
 
   /** Batch-toggle all instances of a group (from side panel) */
   function toggleGroup(groupId: number) {
-    const g = pipelineResult.value.motifGroups.find(g => g.id === groupId)
-    if (!g) return
-    const allCollapsed = g.instances.every((_, idx) =>
-      foldState.value.get(`m:${g.id}:${idx}`) ?? false,
+    const group = pipelineResult.value.motifGroups.find(candidate => candidate.id === groupId)
+    if (!group) return
+    const allCollapsed = group.instances.every((_, idx) =>
+      foldState.value.get(`m:${group.id}:${idx}`) ?? false,
     )
     const newVal = !allCollapsed
-    for (let idx = 0; idx < g.instances.length; idx++) {
-      foldOverrides.value.set(`m:${g.id}:${idx}`, newVal)
+    for (let idx = 0; idx < group.instances.length; idx++) {
+      foldOverrides.value.set(`m:${group.id}:${idx}`, newVal)
     }
   }
 

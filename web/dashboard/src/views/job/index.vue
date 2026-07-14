@@ -127,12 +127,12 @@ const sweptParams = computed(() => {
   const tasks = detail.value.tasks
   const first = tasks[0].params || {}
   const varying = new Set<string>()
-  for (const t of tasks.slice(1)) {
-    for (const [k, v] of Object.entries(t.params || {})) {
+  for (const task of tasks.slice(1)) {
+    for (const [k, v] of Object.entries(task.params || {})) {
       if (first[k] !== v) varying.add(k)
     }
     for (const k of Object.keys(first)) {
-      if (!(k in (t.params || {}))) varying.add(k)
+      if (!(k in (task.params || {}))) varying.add(k)
     }
   }
   return [...varying]
@@ -153,13 +153,13 @@ const filteredTasks = computed(() => {
   if (!detail.value) return []
   let tasks = detail.value.tasks
   if (statusFilter.value === 'done') {
-    tasks = tasks.filter(t => t.status === 'success')
+    tasks = tasks.filter(task => task.status === 'success')
   } else if (statusFilter.value) {
-    tasks = tasks.filter(t => t.status === statusFilter.value)
+    tasks = tasks.filter(task => task.status === statusFilter.value)
   }
   // Overlay the frontend-local cancelling state (kill_async backends).
   if (cancelling.value.size === 0) return tasks
-  return tasks.map(t => ({ ...t, status: displayStatus(t) }))
+  return tasks.map(task => ({ ...task, status: displayStatus(task) }))
 })
 
 watch(statusFilter, (v) => { prefs.lastStatusFilter.value = v })

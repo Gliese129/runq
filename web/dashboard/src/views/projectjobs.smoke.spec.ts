@@ -9,15 +9,16 @@ import { createI18n } from 'vue-i18n'
 import { createRouter, createMemoryHistory } from 'vue-router'
 import en from '@/i18n/en.json'
 
+function respondList(path: string) {
+  if (path.includes('/projects')) return [{ name: 'p1', work_dir: '/x', job_count: 0, archived: true }]
+  return []
+}
+
 // Mount smoke guard. This page once threw a ReferenceError at setup (an
 // immediate watcher touching a ref still in its temporal dead zone) —
 // exactly the class of bug vue-tsc cannot see and a mount catches.
 vi.mock('@/apis/client', () => {
   // v1: collection endpoints go through api.getList (envelope unwrapped)
-  const respondList = (path: string) => {
-    if (path.includes('/projects')) return [{ name: 'p1', work_dir: '/x', job_count: 0, archived: true }]
-    return []
-  }
   return {
     api: {
       get: vi.fn(async () => ({})),

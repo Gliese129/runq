@@ -30,13 +30,15 @@ import { TQDM_RE, TB_FILE, TB_START, TABLE_LINE_RE } from './lex'
 const PENDING_WINDOW = 250
 export const MOTIF_THROTTLE_MS = 2000
 
+function isPlainLine(line: string): boolean {
+  return !line.includes('\r') && line.trim() !== '' && !TQDM_RE.test(line) &&
+    !TB_START.test(line) && !TB_FILE.test(line) && !TABLE_LINE_RE.test(line)
+}
+
 /** A raw line at which it is safe to cut segments: neither it nor its
  *  neighbour can participate in a fold or multi-line structure. */
 function safeCut(prev: string | undefined, line: string): boolean {
-  const plain = (s: string) =>
-    !s.includes('\r') && s.trim() !== '' && !TQDM_RE.test(s) &&
-    !TB_START.test(s) && !TB_FILE.test(s) && !TABLE_LINE_RE.test(s)
-  return plain(line) && (prev === undefined || plain(prev))
+  return isPlainLine(line) && (prev === undefined || isPlainLine(prev))
 }
 
 export class IncrementalLogPipeline {

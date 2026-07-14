@@ -420,12 +420,12 @@ const editingProject = ref(false)
 // and goNext silently rewrote project.yaml. Comparing against a baseline
 // taken AFTER each apply is immune to callback timing (and as a bonus,
 // edit-then-undo returns to clean).
-function form_() {
+function formSnapshot() {
   const { name, workDir, cmd, setupCmd, envText, jobName, gpus, maxRetry, envType, envPath, envName } = state.newProject
   return { name, workDir, cmd, setupCmd, envText, jobName, gpus, maxRetry, envType, envPath, envName }
 }
 function snapshot(): string {
-  return JSON.stringify([form_(), state.newProject.params])
+  return JSON.stringify([formSnapshot(), state.newProject.params])
 }
 let appliedSnapshot = snapshot()
 /** Re-baseline after a programmatic apply: current state == persisted state. */
@@ -434,7 +434,7 @@ function markClean() {
   state.newProject.dirty = false
 }
 watch(
-  () => [form_(), state.newProject.params],
+  () => [formSnapshot(), state.newProject.params],
   () => { state.newProject.dirty = snapshot() !== appliedSnapshot },
   { deep: true },
 )
@@ -544,7 +544,7 @@ function applyProjectConfig(cfg: ProjectConfig, resetGroups = true) {
   form.envPath = cfg.python_env?.path || ''
   form.envName = cfg.python_env?.name || ''
   form.error = ''
-  const rawParams = ((cfg as any).params || []) as any[]
+  const rawParams = cfg.params || []
   form.params = rawParams.map(p => normalizeParam(p))
   // First-time heuristic ONLY: once any include flag has been persisted,
   // the user's curation is the truth — never clobber it.
@@ -727,8 +727,8 @@ function autoIncludeCommonParams() {
   }
 }
 
-function normalizeType(t: string): string {
-  const lower = (t || '').toLowerCase()
+function normalizeType(rawType: string): string {
+  const lower = (rawType || '').toLowerCase()
   if (lower === 'str' || lower === 'string') return 'str'
   if (lower === 'int' || lower === 'integer') return 'int'
   if (lower === 'float' || lower === 'number') return 'float'
@@ -744,10 +744,10 @@ function normalizeType(t: string): string {
 /** Build a ProjectParam from a parsed arg or persisted def, moving default
  *  into values for str/file/folder. Persisted `include` is the user's
  *  curation and survives; absent include = never curated. */
-function normalizeParam(a: { name: string; type: string; default?: string; choices?: string[]; min?: number; max?: number; include?: boolean }): import('@/types/submit').ProjectParam {
+function normalizeParam(a: NonNullable<ProjectConfig['params']>[number]): import('@/types/submit').ProjectParam {
   const type = normalizeType(a.type)
   const def = a.default || ''
-  const values = Array.isArray((a as any).choices) ? (a as any).choices.map(String) : []
+  const values = Array.isArray(a.choices) ? a.choices.map(String) : []
   if (['str', 'file', 'folder'].includes(type) && def && !values.includes(def)) {
     values.unshift(def)
   }
@@ -755,8 +755,8 @@ function normalizeParam(a: { name: string; type: string; default?: string; choic
     name: a.name, type, default: def, include: a.include ?? true,
     values: values.length > 0 ? values : undefined,
     min: a.min, max: a.max,
-    strict: (a as any).strict || undefined,
-    scope: (a as any).scope || undefined,
+    strict: a.strict || undefined,
+    scope: a.scope || undefined,
   }
 }
 

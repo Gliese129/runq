@@ -253,7 +253,7 @@ watch(
   () => {
     const byName = new Map(state.rows.map(r => [r.name, r]))
     const next: ParamRow[] = []
-    for (const p of state.newProject.params.filter(p => p.include)) {
+    for (const p of state.newProject.params.filter(projectParam => projectParam.include)) {
       const existing = byName.get(p.name)
       if (existing) {
         existing.type = p.type || existing.type
@@ -396,8 +396,8 @@ function rowByName(name: string): ParamRow | undefined {
 }
 
 function suggestionsFor(name: string): string[] {
-  const p = (state.newProject.params || []).find(p => p.name === name)
-  return (p as any)?.values || []
+  const projectParam = (state.newProject.params || []).find(candidate => candidate.name === name)
+  return projectParam?.values || []
 }
 
 // Project params hidden by curation (include=false) — surfaced as

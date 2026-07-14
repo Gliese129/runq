@@ -135,7 +135,7 @@ const failedCount = computed(() => counts.value.failed)
 // Per-task detail for the hint list still needs the task array; include killed
 // so the listed tasks match the (failed-incl-killed) count above.
 const failedTasks = computed(() =>
-  props.detail.tasks.filter(t => t.status === 'failed' || t.status === 'killed'),
+  props.detail.tasks.filter(task => task.status === 'failed' || task.status === 'killed'),
 )
 // Stat colors come from statusGrammar (U3) — no hard-coded text-* classes.
 const stats = computed(() => [
