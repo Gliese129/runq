@@ -118,167 +118,23 @@
           </div>
         </v-expansion-panel-title>
         <v-expansion-panel-text>
-          <!-- Search bar -->
-          <div class="d-flex align-center mb-1 ga-2" v-if="logLines.length > 0">
-            <v-spacer />
-            <div class="log-search-bar d-flex align-center" :class="{ 'log-search-bar--active': searchOpen }">
-              <v-text-field
-                v-if="searchOpen"
-                ref="searchInput"
-                v-model="searchQuery"
-                density="compact"
-                variant="plain"
-                hide-details
-                placeholder="Search..."
-                class="log-search-input"
-                @keydown.enter.exact="searchNext"
-                @keydown.enter.shift="searchPrev"
-                @keydown.escape="closeSearch"
-              />
-              <span v-if="searchOpen && searchQuery" class="text-caption text-no-wrap mx-1">
-                {{ searchMatches.length > 0 ? `${searchIdx + 1}/${searchMatches.length}` : '0' }}
-              </span>
-              <v-btn v-if="searchOpen && searchMatches.length > 0" size="x-small" variant="text" icon="mdi-chevron-up" density="compact" @click="searchPrev" />
-              <v-btn v-if="searchOpen && searchMatches.length > 0" size="x-small" variant="text" icon="mdi-chevron-down" density="compact" @click="searchNext" />
-              <v-btn size="x-small" variant="text" :icon="searchOpen ? 'mdi-close' : 'mdi-magnify'" density="compact" @click="toggleSearch" />
-            </div>
+          <!-- Ring-buffer notice: memory released, server file complete.
+               "Reload from start" is the interim recovery path until the
+               open-at-tail / scroll-up backfill work (RQ-22) lands. -->
+          <div v-if="trimmedLines > 0" class="d-flex align-center text-caption text-on-surface-variant px-2 pb-1">
+            <v-icon size="12" class="mr-1">mdi-history</v-icon>{{ t('log.trimmed', { n: trimmedLines }) }}
+            <v-btn size="x-small" variant="text" color="primary" class="ml-2" @click="reloadFromStart">
+              {{ t('log.reload_start') }}
+            </v-btn>
           </div>
           <div class="d-flex">
-            <!-- Log content -->
-            <div ref="logContainer" class="terminal-block" style="max-height: 600px; overflow-y: auto; flex: 1; min-width: 0">
-              <div v-if="logLines.length === 0 && !logLoading" class="text-center pa-4" style="color: #64748B">
-                {{ task.status === 'pending' ? 'Waiting to start...' : 'No log output yet' }}
-              </div>
-              <template v-for="(item, i) in renderItems" :key="i">
-                <!-- Table block → v-table -->
-                <div v-if="item.type === 'table-block'" class="log-table-wrap" :class="{ 'search-hit': isSearchHit(i) }">
-                  <v-table density="compact" class="log-table">
-                    <thead>
-                      <tr>
-                        <th v-for="(h, hi) in (item as TableBlockItem).headers" :key="hi">{{ h }}</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      <tr v-for="(row, ri) in (item as TableBlockItem).rows" :key="ri">
-                        <td v-for="(cell, ci) in row" :key="ci">{{ cell }}</td>
-                      </tr>
-                    </tbody>
-                  </v-table>
-                </div>
-                <!-- Unified fold summary (collapsed drain / motif / traceback) -->
-                <div v-else-if="item.type === 'fold-summary'"
-                     class="drain-fold-header"
-                     :class="{ 'fold-traceback': (item as FoldSummaryItem).variant === 'traceback', 'search-hit': isSearchHit(i) }"
-                     :data-fold-key="(item as FoldSummaryItem).foldKey"
-                     @click="toggleFold((item as FoldSummaryItem).foldKey)">
-                  <span class="drain-fold-chevron">&#9654;</span>
-                  <span class="drain-fold-summary text-truncate">{{ (item as FoldSummaryItem).label }}</span>
-                  <v-chip size="x-small" variant="tonal"
-                    :color="(item as FoldSummaryItem).variant === 'traceback' ? 'error' : undefined"
-                    class="ml-auto flex-shrink-0"
-                  >
-                    {{ (item as FoldSummaryItem).lineCount }} lines<template v-if="(item as FoldSummaryItem).repeats"> ×{{ (item as FoldSummaryItem).repeats }}</template>
-                  </v-chip>
-                </div>
-                <!-- Drain block (expanded, diff-view aligned) -->
-                <div v-else-if="item.type === 'drain-block'" class="drain-panel" :class="{ 'search-hit': isSearchHit(i) }" :data-fold-key="(item as DrainBlockItem).foldKey">
-                  <div class="drain-fold-header drain-fold-header--open" @click="toggleFold((item as DrainBlockItem).foldKey)">
-                    <span class="drain-fold-chevron">&#9660;</span>
-                    <span class="drain-fold-summary text-truncate">{{ (item as DrainBlockItem).template }}</span>
-                    <v-chip size="x-small" variant="tonal" class="ml-auto flex-shrink-0">{{ (item as DrainBlockItem).lines.length }} lines</v-chip>
-                  </div>
-                  <div class="drain-block-body">
-                    <div
-                      v-for="(line, li) in (item as DrainBlockItem).lines" :key="li"
-                      class="log-line"
-                      :class="lineClasses(line)"
-                    >
-                      <span v-if="line.timestamp" class="log-timestamp">{{ formatTimestamp(line.timestamp) }}</span>
-                      <span v-else class="log-timestamp"></span>
-                      <span class="log-lineno">{{ line.lineIdx + 1 }}</span>
-                      <span class="log-line-content">
-                        <span
-                          v-for="(tok, ci) in (item as DrainBlockItem).tokens[li]" :key="ci"
-                          class="drain-col"
-                          :class="{ 'drain-static': !(item as DrainBlockItem).varMask[ci], 'drain-var': (item as DrainBlockItem).varMask[ci] }"
-                          :style="{ minWidth: (item as DrainBlockItem).colWidths[ci] + 'ch' }"
-                        >{{ tok }}</span>
-                      </span>
-                    </div>
-                  </div>
-                  <div class="drain-fold-footer" @click="toggleFold((item as DrainBlockItem).foldKey)">
-                    <span class="drain-fold-chevron">&#9650;</span>
-                    <span>Collapse</span>
-                  </div>
-                </div>
-                <!-- Group block (expanded interleaved motif) -->
-                <div v-else-if="item.type === 'group-block'" class="drain-panel" :class="{ 'search-hit': isSearchHit(i) }" :data-fold-key="(item as GroupBlockItem).foldKey">
-                  <div class="drain-fold-header drain-fold-header--open" @click="toggleFold((item as GroupBlockItem).foldKey)">
-                    <span class="drain-fold-chevron">&#9660;</span>
-                    <span class="drain-fold-summary text-truncate">{{ (item as GroupBlockItem).label }}</span>
-                    <v-chip size="x-small" variant="tonal" class="ml-auto flex-shrink-0">{{ (item as GroupBlockItem).lineCount }} lines ×{{ (item as GroupBlockItem).repeats }}</v-chip>
-                  </div>
-                  <div class="drain-block-body">
-                    <div
-                      v-for="line in (item as GroupBlockItem).lines" :key="line.lineIdx"
-                      class="log-line"
-                      :class="lineClasses(line)"
-                    >
-                      <span v-if="line.timestamp" class="log-timestamp">{{ formatTimestamp(line.timestamp) }}</span>
-                      <span v-else class="log-timestamp"></span>
-                      <span class="log-lineno">{{ line.lineIdx + 1 }}</span>
-                      <span class="log-line-content">
-                        <template v-for="(seg, si) in getSegments(line)" :key="si">
-                          <span v-if="seg.cls" :class="seg.cls" :style="seg.style">{{ seg.text }}</span>
-                          <template v-else>{{ seg.text }}</template>
-                        </template>
-                      </span>
-                    </div>
-                  </div>
-                  <div class="drain-fold-footer" @click="toggleFold((item as GroupBlockItem).foldKey)">
-                    <span class="drain-fold-chevron">&#9650;</span>
-                    <span>Collapse</span>
-                  </div>
-                </div>
-                <!-- Normal line -->
-                <div
-                  v-else
-                  class="log-line"
-                  :class="{ ...lineClasses((item as any).line), 'search-hit': isSearchHit(i) }"
-                >
-                  <span v-if="(item as any).line.timestamp" class="log-timestamp">{{ formatTimestamp((item as any).line.timestamp) }}</span>
-                  <span v-else class="log-timestamp"></span>
-                  <span class="log-lineno">{{ (item as any).line.lineIdx + 1 }}</span>
-                  <span class="log-line-content">
-                    <!-- tqdm fold badge -->
-                    <v-chip
-                      v-if="(item as any).line.tqdmFolded > 0"
-                      size="x-small" variant="tonal" color="secondary" class="mr-1 log-tqdm-badge"
-                    >
-                      {{ (item as any).line.tqdmFolded }} folded
-                    </v-chip>
-                    <!-- Long line: truncated by default -->
-                    <template v-if="isLong((item as any).line) && !isExpanded((item as any).line)">
-                      {{ truncateText((item as any).line.text) }}<span
-                        class="log-expand-btn"
-                        @click="toggleExpand((item as any).line)"
-                      >… +{{ ((item as any).line.text.length - LONG_LINE_THRESHOLD).toLocaleString() }} chars</span>
-                    </template>
-                    <template v-else>
-                      <template v-for="(seg, si) in getSegments((item as any).line)" :key="si">
-                        <span v-if="seg.cls" :class="seg.cls" :style="seg.style">{{ seg.text }}</span>
-                        <template v-else>{{ seg.text }}</template>
-                      </template>
-                      <span
-                        v-if="isLong((item as any).line)"
-                        class="log-collapse-btn"
-                        @click="toggleExpand((item as any).line)"
-                      >collapse</span>
-                    </template>
-                  </span>
-                </div>
-              </template>
-            </div>
+            <!-- Log content (virtualized shared surface, incl. search bar) -->
+            <LogSurfaceView
+              :surface="surface"
+              :items="renderItems"
+              :log-loading="logLoading"
+              :empty-text="task.status === 'pending' ? 'Waiting to start...' : 'No log output yet'"
+            />
             <!-- Side panel -->
             <LogSidePanel
               :toggles="logStore.processors"
@@ -329,9 +185,9 @@ import { useLogViewerStore } from '@/stores/logViewer'
 import MetricsChart from '@/components/MetricsChart.vue'
 import TaskStatusBadge from '@/components/TaskStatusBadge.vue'
 import LogSidePanel from '@/components/LogSidePanel.vue'
-import type { LogPage, TaskView } from '@/types/api'
-import type { DisplayLine, RenderItem, DrainBlockItem, GroupBlockItem, FoldSummaryItem, TableBlockItem } from '@/utils/logProcessors'
-import { formatTimestamp, LONG_LINE_THRESHOLD } from '@/utils/logProcessors'
+import LogSurfaceView from '@/components/LogSurfaceView.vue'
+import type { LogPage } from '@/types/api'
+import { trimLogBuffer } from '@/utils/log/buffer'
 import { useLogSurface } from '@/composables/useLogSurface'
 
 const props = defineProps<{ project: string; jobId: string; taskId: string }>()
@@ -362,11 +218,39 @@ void cancelling
 
 // ── Log state (byte-offset based) ──
 const logLines = ref<string[]>([])
+/** Lines released from memory by the follow-mode ring buffer. */
+const trimmedLines = ref(0)
 const endOffset = ref(0)
 const totalBytes = ref(0)
+
+// ── Log stream lifecycle ──
+// One explicit state instead of independent booleans whose combinations
+// were never defined (the GET×SSE offset race, RQ-54, lived exactly in an
+// undefined combination):
+//
+//   loading ──GET settled──▶ ready ◀──toggle/terminal/stream-lost── following
+//      ▲                                │
+//      └────────── reload ◀─────────────┘
+//
+// The only legal entry into `following` is FROM `ready` — encoded in the
+// `following` setter, so no call site can start SSE before offsets exist.
+type LogStreamState = 'loading' | 'ready' | 'following'
+const streamState = ref<LogStreamState>('loading')
+
+/** v-switch model: a view over streamState with transition legality. */
+const following = computed({
+  get: () => streamState.value === 'following',
+  set: (on: boolean) => {
+    if (on) {
+      if (streamState.value === 'ready') streamState.value = 'following'
+      // from `loading`: ignored — illegal transition, not a race to patch
+    } else if (streamState.value === 'following') {
+      streamState.value = 'ready'
+    }
+  },
+})
 const logLoading = ref(false)
 const loadingMore = ref(false)
-const following = ref(false)
 const logContainer = ref<HTMLElement>()
 
 const openPanels = ref(['params', 'metrics', 'log'])
@@ -385,14 +269,14 @@ function wandbRunURL(runId: string): string {
   return `${wandbBaseUrl.value}/runs/${runId}`
 }
 
-// ── Shared log surface (pipeline, fold state, search) — see useLogSurface ──
+// ── Shared log surface (pipeline, fold state, search) — see useLogSurface.
+// The whole object goes to LogSurfaceView; only the pieces the side panel
+// and follow mode need are destructured here. ──
+const surface = useLogSurface(logLines, logContainer)
 const {
-  isLong, isExpanded, toggleExpand, truncateText,
-  pipelineResult, foldState, effectiveHidden, renderItems,
-  toggleFold, toggleGroup, scrollToGroup, lineClasses, getSegments,
-  searchOpen, searchQuery, searchInput, searchIdx, searchMatches,
-  toggleSearch, closeSearch, searchNext, searchPrev, isSearchHit,
-} = useLogSurface(logLines, logContainer)
+  pipelineResult, effectiveHidden, renderItems,
+  toggleGroup, scrollToGroup, scrollToBottom,
+} = surface
 
 // ── Fetch log (GET — initial load + manual paging) ──
 async function fetchLog(offset = 0, lines = 500) {
@@ -414,6 +298,14 @@ function applyPage(page: LogPage, replace: boolean) {
   totalBytes.value = page.size
 }
 
+/** Re-read the log from byte 0 (recovers ring-buffer-trimmed history). */
+async function reloadFromStart() {
+  streamState.value = 'loading' // closes SSE; re-entry only via ready
+  trimmedLines.value = 0
+  await fetchLog(0, 500)
+  streamState.value = 'ready'
+}
+
 async function loadMore() {
   if (endOffset.value >= totalBytes.value) return
   loadingMore.value = true
@@ -433,13 +325,16 @@ function startFollow() {
   eventSource.addEventListener('lines', (e: MessageEvent) => {
     try {
       const page: LogPage = JSON.parse(e.data)
+      // Cursor guard: only accept the page that continues our buffer —
+      // drops duplicates from any GET/SSE race instead of appending them.
+      if (page.offset !== endOffset.value) return
       logLines.value.push(...page.lines)
+      // Follow mode = pinned to tail: safe to release the oldest lines
+      // (server file keeps everything; a banner explains the gap).
+      trimmedLines.value += trimLogBuffer(logLines.value)
       endOffset.value = page.next_offset
       totalBytes.value = page.size
-      nextTick(() => {
-        const el = logContainer.value
-        if (el) el.scrollTop = el.scrollHeight
-      })
+      nextTick(() => scrollToBottom())
     } catch { /* ignore parse errors */ }
   })
   eventSource.onerror = () => {
@@ -461,13 +356,11 @@ function stopFollow() {
   }
 }
 
-watch(following, (on) => {
-  if (on) {
+// Side effects live on the STATE transition, not on scattered call sites.
+watch(streamState, (state) => {
+  if (state === 'following') {
     startFollow()
-    nextTick(() => {
-      const el = logContainer.value
-      if (el) el.scrollTop = el.scrollHeight
-    })
+    nextTick(() => scrollToBottom())
   } else {
     stopFollow()
   }
@@ -477,6 +370,9 @@ watch(following, (on) => {
 // drives the log-follow toggle across the active/terminal transition.
 watch(isActive, async (active, prev) => {
   if (active) {
+    // Legal only from `ready` — the setter enforces it, so a task query
+    // that resolves before the initial GET simply no-ops here and
+    // onMounted seeds follow after loading.
     if (!prev) following.value = true
   } else {
     following.value = false // closes SSE via the following watcher
@@ -544,13 +440,11 @@ function formatBytes(b: number): string {
 onMounted(async () => {
   fetchWandbInfo() // fire-and-forget — best effort, doesn't block render
   await fetchLog()
+  streamState.value = 'ready' // GET settled: offsets are now trustworthy
   // Query cache may already have the task (navigated from the job page);
   // the immediate isActive value seeds follow, the watch handles flips.
   if (isActive.value) following.value = true
-  nextTick(() => {
-    const el = logContainer.value
-    if (el) el.scrollTop = el.scrollHeight
-  })
+  nextTick(() => scrollToBottom())
 })
 
 onUnmounted(() => {
@@ -559,209 +453,9 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-/* Log wants a full-bleed terminal block — strip the panel-text padding. */
+/* Log wants a full-bleed terminal block — strip the panel-text padding.
+   The log surface itself (lines, folds, search) lives in LogSurfaceView. */
 .log-panel :deep(.v-expansion-panel-text__wrapper) {
   padding: 0;
-}
-
-/* ── Line layout ── */
-.log-line {
-  display: flex;
-  white-space: pre-wrap;
-  overflow-wrap: break-word;
-  padding: 0 16px 0 0;
-  line-height: 1.5;
-}
-.log-lineno {
-  display: inline-block;
-  min-width: 48px;
-  width: 48px;
-  text-align: right;
-  padding-right: 12px;
-  color: #64748B;
-  user-select: none;
-  flex-shrink: 0;
-}
-.log-timestamp {
-  width: 8ch;
-  min-width: 8ch;
-  padding-right: 8px;
-  color: #64748B;
-  font-size: 0.9em;
-  user-select: none;
-  flex-shrink: 0;
-  white-space: nowrap;
-}
-.log-line-content {
-  flex: 1;
-  min-width: 0;
-}
-
-/* ── Level coloring ── */
-.log-error {
-  color: rgb(var(--v-theme-error));
-  background: rgba(var(--v-theme-error), 0.06);
-}
-.log-warning {
-  color: rgb(var(--v-theme-warning));
-}
-.log-info {
-  opacity: 0.75;
-}
-.log-debug {
-  opacity: 0.5;
-}
-
-/* ── Traceback ── */
-.log-user-code {
-  font-weight: 600;
-  background: rgba(var(--v-theme-error), 0.1);
-}
-.fold-traceback {
-  border-left: 3px solid rgb(var(--v-theme-error));
-  color: rgb(var(--v-theme-error));
-}
-
-/* ── Drain / Motif fold ── */
-.drain-fold-header {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 16px;
-  cursor: pointer;
-  border: 1px solid rgb(var(--v-theme-outline-variant));
-  border-radius: 4px;
-  margin: 2px 0;
-  font-size: 0.82em;
-  color: rgb(var(--v-theme-on-surface-variant));
-  user-select: none;
-  font-family: 'JetBrains Mono', 'Fira Code', monospace;
-}
-.drain-fold-header:hover {
-  background: rgba(var(--v-theme-primary), 0.06);
-}
-.drain-fold-header--open {
-  border-bottom-left-radius: 0;
-  border-bottom-right-radius: 0;
-  margin-bottom: 0;
-  border-bottom-color: transparent;
-}
-.drain-fold-chevron {
-  font-size: 0.65em;
-  flex-shrink: 0;
-  width: 1em;
-  text-align: center;
-}
-.drain-fold-summary {
-  flex: 1;
-  min-width: 0;
-}
-.drain-panel {
-  margin: 2px 0;
-}
-
-/* ── Inline highlights ── */
-.log-metric {
-  background: rgba(var(--v-theme-success), 0.15);
-  border-radius: 2px;
-  padding: 0 2px;
-}
-.log-rank {
-  font-weight: 600;
-}
-
-/* ── tqdm badge ── */
-.log-tqdm-badge {
-  vertical-align: text-bottom;
-}
-
-/* ── Drain block (column-aligned) ── */
-.drain-block-body {
-  border-left: 1px solid rgb(var(--v-theme-outline-variant));
-  border-right: 1px solid rgb(var(--v-theme-outline-variant));
-  max-height: 50vh;
-  overflow-y: auto;
-}
-.drain-fold-footer {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 16px;
-  cursor: pointer;
-  font-size: 0.82em;
-  color: rgb(var(--v-theme-on-surface-variant));
-  user-select: none;
-  border: 1px solid rgb(var(--v-theme-outline-variant));
-  border-top-color: transparent;
-  border-bottom-left-radius: 4px;
-  border-bottom-right-radius: 4px;
-}
-.drain-fold-footer:hover {
-  background: rgba(var(--v-theme-primary), 0.06);
-}
-.drain-col {
-  display: inline-block;
-  padding-right: 1ch;
-}
-.drain-static { color: #475569; }
-.drain-var { color: #e2e8f0; font-weight: 500; }
-
-/* ── Table block ── */
-.log-table-wrap {
-  margin: 4px 0;
-  padding-left: 48px;
-  overflow-x: auto;
-}
-.log-table {
-  font-family: 'JetBrains Mono', 'Fira Code', monospace;
-  font-size: 0.8rem;
-  background: transparent !important;
-}
-.log-table :deep(th) {
-  font-weight: 600 !important;
-  white-space: nowrap;
-  padding: 2px 12px !important;
-  height: auto !important;
-  font-size: 0.8rem !important;
-}
-.log-table :deep(td) {
-  white-space: nowrap;
-  padding: 2px 12px !important;
-  height: auto !important;
-  font-size: 0.8rem !important;
-}
-
-/* ── Long-line truncation ── */
-.log-expand-btn, .log-collapse-btn {
-  cursor: pointer;
-  color: rgb(var(--v-theme-primary));
-  font-size: 0.85em;
-  padding: 0 4px;
-  opacity: 0.8;
-}
-.log-expand-btn:hover, .log-collapse-btn:hover { opacity: 1; text-decoration: underline; }
-
-/* ── Search ── */
-.log-search-bar {
-  border-radius: 4px;
-  transition: all 0.15s ease;
-}
-.log-search-bar--active {
-  background: rgba(var(--v-theme-surface-variant), 0.5);
-  padding: 0 4px;
-}
-.log-search-input {
-  max-width: 180px;
-  font-size: 0.8rem;
-}
-.log-search-input :deep(input) {
-  font-family: 'JetBrains Mono', 'Fira Code', monospace;
-  font-size: 0.8rem;
-  padding: 2px 4px;
-}
-.search-hit {
-  outline: 2px solid rgb(var(--v-theme-warning));
-  outline-offset: -1px;
-  border-radius: 2px;
 }
 </style>

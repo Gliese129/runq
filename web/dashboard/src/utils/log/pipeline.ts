@@ -1,18 +1,35 @@
-// Full pipeline assembly: raw lines -> PipelineResult (processLog).
-import type { PipelineResult, ProcessorToggles, PreDrainRule, DisplayLine } from './types'
+// Full pipeline assembly: raw lines -> PipelineResult (processLog), plus
+// the reusable SEGMENT processor the incremental pipeline builds on.
+import type { PipelineResult, ProcessorToggles, PreDrainRule, DisplayLine, TracebackBlock, TableBlock } from './types'
 import { DEFAULT_PRE_DRAIN_RULES } from './types'
 import { applyCrFolder, annotateLine } from './lex'
 import { findTracebacks, findTableBlocks } from './structures'
-import { Drain, applyPreDrainRules } from './drain'
+import { Drain, applyCompiledPreDrainRules, compilePreDrainRules, type CompiledPreDrainRule } from './drain'
 import { detectMotifs } from './motifs'
 
-// ── Full Pipeline ────────────────────────────────────────────
+export interface SegmentResult {
+  display: DisplayLine[]
+  tracebacks: TracebackBlock[]
+  tableBlocks: TableBlock[]
+  /** cluster id per display line (-1 = structural, not drained) — kept so
+   *  a windowed caller can subtract this segment from the Drain again */
+  cids: number[]
+}
 
-export function processLog(
+/**
+ * Process one self-contained run of RAW lines: fold → annotate → detect
+ * structures → drain. Shared by the one-shot processLog and the
+ * incremental pipeline (which re-runs its pending tail through here).
+ * `baseIdx` offsets lineIdx / structure indices so segments concatenate
+ * into one coherent coordinate space; `drain` accumulates ACROSS segments.
+ */
+export function processSegment(
   rawLines: string[],
   toggles: ProcessorToggles,
-  rules: PreDrainRule[] = DEFAULT_PRE_DRAIN_RULES,
-): PipelineResult {
+  compiledRules: CompiledPreDrainRule[],
+  drain: Drain,
+  baseIdx: number,
+): SegmentResult {
   // ① crFolder
   let lines: string[]
   let tqdmFoldMap: Map<number, number>
@@ -30,7 +47,8 @@ export function processLog(
     annotateLine(line, tqdmFoldMap.get(i) ?? 0, toggles.crFolder),
   )
 
-  // ③ Structure detection (multi-line)
+  // ③ Structure detection (multi-line, local to this segment — the
+  // incremental caller guarantees structures never span segment cuts)
   const tracebacks = toggles.tracebackFold ? findTracebacks(annotations.map(a => a.text)) : []
   const tbMember = new Map<number, number>()
   for (let ti = 0; ti < tracebacks.length; ti++) {
@@ -56,18 +74,17 @@ export function processLog(
   }
 
   // ④ Drain — ALL non-structural lines participate
-  const drain = new Drain()
   const cids = new Array<number>(lines.length).fill(-1)
   for (let i = 0; i < lines.length; i++) {
     if (tbMember.has(i) || tableMember.has(i)) continue
-    const ruled = applyPreDrainRules(annotations[i].text, rules)
+    const ruled = applyCompiledPreDrainRules(annotations[i].text, compiledRules)
     cids[i] = drain.parse(ruled)
   }
 
-  // Assemble DisplayLines
-  const displayLines: DisplayLine[] = annotations.map((a, i) => ({
+  // Assemble DisplayLines in the caller's coordinate space
+  const display: DisplayLine[] = annotations.map((a, i) => ({
     text: a.text,
-    lineIdx: i,
+    lineIdx: baseIdx + i,
     timestamp: a.timestamp,
     tags: a.tags,
     rank: a.rank,
@@ -77,8 +94,23 @@ export function processLog(
     tracebackIdx: tbMember.get(i) ?? -1,
   }))
 
-  // ⑤ Motif detection — zero exclusion
-  const motifGroups = detectMotifs(displayLines, drain)
+  // Shift structure indices into the shared coordinate space
+  for (const tb of tracebacks) { tb.start += baseIdx; tb.end += baseIdx }
+  for (const t of tableBlocks) { t.start += baseIdx; t.end += baseIdx }
+  // tracebackIdx above is segment-local; the incremental caller re-bases it.
 
-  return { lines: displayLines, motifGroups, tracebacks, tableBlocks, drain }
+  return { display, tracebacks, tableBlocks, cids }
+}
+
+// ── Full Pipeline (one-shot) ─────────────────────────────────
+
+export function processLog(
+  rawLines: string[],
+  toggles: ProcessorToggles,
+  rules: PreDrainRule[] = DEFAULT_PRE_DRAIN_RULES,
+): PipelineResult {
+  const drain = new Drain()
+  const seg = processSegment(rawLines, toggles, compilePreDrainRules(rules), drain, 0)
+  const motifGroups = detectMotifs(seg.display, drain)
+  return { lines: seg.display, motifGroups, tracebacks: seg.tracebacks, tableBlocks: seg.tableBlocks, drain }
 }

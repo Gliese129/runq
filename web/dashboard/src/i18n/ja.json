@@ -232,6 +232,11 @@
   "log.follow": "フォロー",
   "log.load_earlier": "前を読み込む",
   "log.processors": "プロセッサ",
+  "log.regex_mode": "正規表現検索",
+  "log.search_prev": "前の一致",
+  "log.search_next": "次の一致",
+  "log.search_open": "ログ内を検索",
+  "log.search_close": "検索を閉じる",
   "activity.title": "アクティビティ",
   "activity.no_data": "アクティビティデータなし",
   "confirm.kill_job_title": "ジョブを停止しますか?",
@@ -240,5 +245,7 @@
   "confirm.kill_task_body": "タスク {id} が停止されます。この操作は取り消せません。",
   "settings.default_target": "デフォルトターゲット",
   "log.stream_lost": "ライブログの接続が切断されました",
-  "task.not_found": "タスクが見つかりません。削除された可能性があります"
+  "task.not_found": "タスクが見つかりません。削除された可能性があります",
+  "log.trimmed": "古い {n} 行をメモリから解放しました。完全なログはサーバーに残っています",
+  "log.reload_start": "最初から再読み込み"
 }

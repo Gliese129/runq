@@ -125,29 +125,44 @@ export interface FoldSummaryItem {
   variant: 'drain' | 'motif' | 'traceback'  // drives styling
 }
 
-/** Diff-view drain block: dim static tokens, highlight variable tokens */
-export interface DrainBlockItem {
-  type: 'drain-block'
+/** Which kind of expanded block a flattened item belongs to */
+export type BlockKind = 'drain' | 'motif'
+
+/**
+ * Header row of an expanded block. Expanded blocks are FLATTENED into
+ * top-level render items (head + N lines + tail) so the virtualizer sees
+ * every line — a single 22k-line block item defeats virtualization.
+ */
+export interface BlockHeadItem {
+  type: 'block-head'
   foldKey: string
-  lines: DisplayLine[]
-  template: string            // e.g. "INFO Epoch <*> loss=<*>"
-  templateTokens: string[]    // e.g. ["INFO","Epoch","<*>","loss=<*>"]
-  /** Per line: all tokens (whitespace-split of original text) */
-  tokens: string[][]
-  /** Which token indices are variable (<*> in template) */
-  varMask: boolean[]
-  /** Max char width per column for alignment */
-  colWidths: number[]
+  label: string          // drain: template string; motif: group label
+  blockKind: BlockKind
+  lineCount: number
+  repeats?: number       // interleaved motifs only
 }
 
-/** Visible length≥2 motif: lines grouped in a collapsible panel */
-export interface GroupBlockItem {
-  type: 'group-block'
+/** One line inside an expanded block — a top-level item (see BlockHeadItem) */
+export interface BlockLineItem {
+  type: 'block-line'
   foldKey: string
-  label: string
-  lines: DisplayLine[]
-  repeats: number
-  lineCount: number
+  blockKind: BlockKind
+  line: DisplayLine
+  /** Drain cluster ID (drain blocks only) — identifies the diff template */
+  cid?: number
+  /** Drain diff view, precomputed at flatten time: whitespace-split tokens */
+  tokens?: string[]
+  /** Shared per block (same array reference): which columns are variable */
+  varMask?: boolean[]
+  /** Shared per block (same array reference): max char width per column */
+  colWidths?: number[]
+}
+
+/** Footer row closing an expanded block */
+export interface BlockTailItem {
+  type: 'block-tail'
+  foldKey: string
+  blockKind: BlockKind
 }
 
 /** Rendered table block */
@@ -163,8 +178,9 @@ export interface TableBlockItem {
 export type RenderItem =
   | { type: 'line'; line: DisplayLine }
   | FoldSummaryItem
-  | DrainBlockItem
-  | GroupBlockItem
+  | BlockHeadItem
+  | BlockLineItem
+  | BlockTailItem
   | TableBlockItem
 
 /** Full pipeline output */

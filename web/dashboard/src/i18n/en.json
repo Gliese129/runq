@@ -230,6 +230,11 @@
   "log.follow": "Follow",
   "log.load_earlier": "Load earlier",
   "log.processors": "Processors",
+  "log.regex_mode": "Regex search",
+  "log.search_prev": "Previous match",
+  "log.search_next": "Next match",
+  "log.search_open": "Search in log",
+  "log.search_close": "Close search",
   "nav.utils": "Utils",
   "nav.log_viewer": "Log Viewer",
   "activity.title": "Activity",
@@ -240,5 +245,7 @@
   "confirm.kill_task_body": "Task {id} will be terminated. This cannot be undone.",
   "settings.default_target": "Default target",
   "log.stream_lost": "Live log stream disconnected",
-  "task.not_found": "Task not found — it may have been cleaned"
+  "task.not_found": "Task not found — it may have been cleaned",
+  "log.trimmed": "Oldest {n} lines released from memory — the full log remains on the server",
+  "log.reload_start": "Reload from start"
 }

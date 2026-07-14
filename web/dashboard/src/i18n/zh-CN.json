@@ -232,6 +232,11 @@
   "log.follow": "跟随",
   "log.load_earlier": "加载更早内容",
   "log.processors": "处理器",
+  "log.regex_mode": "正则搜索",
+  "log.search_prev": "上一个匹配",
+  "log.search_next": "下一个匹配",
+  "log.search_open": "在日志中搜索",
+  "log.search_close": "关闭搜索",
   "activity.title": "活跃度",
   "activity.no_data": "暂无活跃度数据",
   "confirm.kill_job_title": "终止此 Job?",
@@ -240,5 +245,7 @@
   "confirm.kill_task_body": "任务 {id} 将被终止,此操作不可撤销。",
   "settings.default_target": "默认 Target",
   "log.stream_lost": "实时日志流已断开",
-  "task.not_found": "任务不存在,可能已被清理"
+  "task.not_found": "任务不存在,可能已被清理",
+  "log.trimmed": "最早的 {n} 行已从内存释放,完整日志仍在服务端",
+  "log.reload_start": "从头重新加载"
 }

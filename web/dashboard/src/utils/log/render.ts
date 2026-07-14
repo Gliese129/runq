@@ -1,5 +1,5 @@
 // Render layer: fold state, render items and inline segments (step 6).
-import type { DisplayLine, PipelineResult, ProcessorToggles, RenderItem, DrainBlockItem, GroupBlockItem, FoldSummaryItem, TableBlockItem, TableBlock, TracebackBlock } from './types'
+import type { DisplayLine, PipelineResult, ProcessorToggles, RenderItem, TableBlock, TracebackBlock } from './types'
 import { AUTO_FOLD_THRESHOLD, MIN_BLOCK_SIZE } from './types'
 import type { Drain } from './drain'
 import { RANK_RE, rankColor } from './lex'
@@ -7,10 +7,13 @@ import { RANK_RE, rankColor } from './lex'
 // ── Step ⑥: Render Helpers ──────────────────────────────────
 
 /**
- * Build a diff-view drain-block: template identifies <*> positions,
- * static tokens dim, variable tokens highlighted + aligned.
+ * Flatten an expanded diff-view drain block into top-level render items:
+ * head + one block-line per line + tail. The template identifies <*>
+ * positions; static tokens dim, variable tokens highlighted + aligned.
+ * varMask/colWidths are computed once per block and SHARED (same array
+ * reference) across the block's lines.
  */
-function buildDiffBlock(foldKey: string, lines: DisplayLine[], drain: Drain, cid: number): DrainBlockItem {
+function buildDrainBlockItems(foldKey: string, lines: DisplayLine[], drain: Drain, cid: number): RenderItem[] {
   const templateTokens = drain.getTemplateTokens(cid)
   const template = drain.getTemplate(cid)
   const tokens = lines.map(l => l.text.trim().split(/\s+/))
@@ -36,7 +39,33 @@ function buildDiffBlock(foldKey: string, lines: DisplayLine[], drain: Drain, cid
     }
   }
 
-  return { type: 'drain-block', foldKey, lines, template, templateTokens, tokens, varMask, colWidths }
+  const items: RenderItem[] = [{
+    type: 'block-head', foldKey, label: template,
+    blockKind: 'drain', lineCount: lines.length,
+  }]
+  for (let i = 0; i < lines.length; i++) {
+    items.push({
+      type: 'block-line', foldKey, blockKind: 'drain',
+      line: lines[i], cid, tokens: tokens[i], varMask, colWidths,
+    })
+  }
+  items.push({ type: 'block-tail', foldKey, blockKind: 'drain' })
+  return items
+}
+
+/** Flatten an expanded interleaved-motif block: head + lines + tail. */
+function buildMotifBlockItems(
+  foldKey: string, label: string, lines: DisplayLine[], repeats: number,
+): RenderItem[] {
+  const items: RenderItem[] = [{
+    type: 'block-head', foldKey, label,
+    blockKind: 'motif', lineCount: lines.length, repeats,
+  }]
+  for (const line of lines) {
+    items.push({ type: 'block-line', foldKey, blockKind: 'motif', line })
+  }
+  items.push({ type: 'block-tail', foldKey, blockKind: 'motif' })
+  return items
 }
 
 /** Split sorted indices into contiguous sub-arrays */
@@ -81,7 +110,9 @@ export function computeDefaultFoldState(
  *   - Motif instances: foldKey = `m:${groupId}:${instIdx}`  (per-instance, not per-label)
  *   - Tracebacks:      foldKey = `tb:${idx}`
  *
- * Collapsed → fold-summary. Expanded → drain-block (len=1) or group-block (len≥2).
+ * Collapsed → fold-summary. Expanded → FLATTENED top-level items
+ * (block-head + N block-lines + block-tail) so virtualization stays
+ * effective for arbitrarily large blocks.
  */
 export function buildRenderItems(
   result: PipelineResult,
@@ -108,8 +139,9 @@ export function buildRenderItems(
     }
   }
 
-  // Motif rendering — instance-level fold keys
-  const motifItemAt = new Map<number, RenderItem>()
+  // Motif rendering — instance-level fold keys. Each anchor line maps to
+  // ONE OR MORE items (a collapsed summary, or a flattened expanded block).
+  const motifItemAt = new Map<number, RenderItem[]>()
   const motifConsumed = new Set<number>()
   const hiddenScatterIds = new Set<number>()
 
@@ -131,13 +163,13 @@ export function buildRenderItems(
         for (const seg of segments) {
           if (seg.length < MIN_BLOCK_SIZE) continue
           if (collapsed) {
-            motifItemAt.set(seg[0], {
+            motifItemAt.set(seg[0], [{
               type: 'fold-summary', foldKey, label: g.label,
               lineCount: seg.length, variant: 'drain',
-            })
+            }])
           } else {
             const blockLines = seg.map(li => result.lines[li])
-            motifItemAt.set(seg[0], buildDiffBlock(foldKey, blockLines, drain, g.pattern[0]))
+            motifItemAt.set(seg[0], buildDrainBlockItems(foldKey, blockLines, drain, g.pattern[0]))
           }
           for (const li of seg) motifConsumed.add(li)
         }
@@ -149,18 +181,17 @@ export function buildRenderItems(
         const foldKey = `m:${g.id}:${instIdx}`
         const collapsed = foldState.get(foldKey) ?? false
         if (collapsed) {
-          motifItemAt.set(inst.lineIndices[0], {
+          motifItemAt.set(inst.lineIndices[0], [{
             type: 'fold-summary', foldKey, label: g.label,
             lineCount: inst.lineIndices.length,
             repeats: inst.repeats, variant: 'motif',
-          })
+          }])
         } else {
           const blockLines = inst.lineIndices.map(li => result.lines[li])
-          motifItemAt.set(inst.lineIndices[0], {
-            type: 'group-block', foldKey, label: g.label,
-            lines: blockLines, repeats: inst.repeats,
-            lineCount: inst.lineIndices.length,
-          })
+          motifItemAt.set(
+            inst.lineIndices[0],
+            buildMotifBlockItems(foldKey, g.label, blockLines, inst.repeats),
+          )
         }
         for (const li of inst.lineIndices) motifConsumed.add(li)
       }
@@ -196,8 +227,8 @@ export function buildRenderItems(
     }
     if (tbConsumedLines.has(i)) continue
 
-    const mItem = motifItemAt.get(i)
-    if (mItem) { items.push(mItem); continue }
+    const mItems = motifItemAt.get(i)
+    if (mItems) { items.push(...mItems); continue }
     if (motifConsumed.has(i)) continue
     if (hiddenScatterIds.has(result.lines[i].clusterId)) continue
 

@@ -4,7 +4,7 @@ import type { LineTag, MetricMatch } from './types'
 
 // ── Constants ────────────────────────────────────────────────
 
-const TQDM_RE = /\d+%\|[^|]*\|\s*\d+\/\d+/
+export const TQDM_RE = /\d+%\|[^|]*\|\s*\d+\/\d+/
 export const TABLE_LINE_RE = /^\s*\|.*\|\s*$/
 export const TABLE_SEP_RE = /^\s*\|[-:| ]+\|\s*$/
 const TIMESTAMP_RE = /^\[?(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}[,.\d]*)\]?\s*/

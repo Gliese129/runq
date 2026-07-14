@@ -20,24 +20,62 @@ export function normalizeLine(line: string): string {
     .replace(/\b\d{2,}\b/g, '<NUM>')
 }
 
-export function applyPreDrainRules(line: string, rules: PreDrainRule[]): string {
-  let out = line
+/** A user rule with its pattern compiled once. */
+export interface CompiledPreDrainRule {
+  re: RegExp
+  replacement: string
+}
+
+/**
+ * Compile enabled rules once per pipeline run. The old per-line path
+ * constructed `new RegExp` for every line × every rule — on a 50k-line
+ * log with 5 rules that is 250k compilations per recompute, and it
+ * dominated pipeline cost. Invalid patterns are skipped here, so the
+ * hot loop needs no try/catch.
+ */
+export function compilePreDrainRules(rules: PreDrainRule[]): CompiledPreDrainRule[] {
+  const out: CompiledPreDrainRule[] = []
   for (const rule of rules) {
     if (!rule.enabled) continue
-    try { out = out.replace(new RegExp(rule.pattern, 'g'), rule.replacement) }
-    catch { /* invalid regex — skip */ }
+    try {
+      out.push({ re: new RegExp(rule.pattern, 'g'), replacement: rule.replacement })
+    } catch { /* invalid regex — skip */ }
   }
   return out
 }
 
+/** Hot path: apply pre-compiled rules to one line. (String.replace with a
+ *  global regex always scans from 0 and resets lastIndex — reuse is safe.) */
+export function applyCompiledPreDrainRules(line: string, compiled: CompiledPreDrainRule[]): string {
+  let out = line
+  for (const r of compiled) out = out.replace(r.re, r.replacement)
+  return out
+}
+
+/** Convenience wrapper for one-off callers and tests; the pipeline itself
+ *  compiles once and uses applyCompiledPreDrainRules in the loop. */
+export function applyPreDrainRules(line: string, rules: PreDrainRule[]): string {
+  return applyCompiledPreDrainRules(line, compilePreDrainRules(rules))
+}
+
 interface DrainNode {
   id: number
+  key: string // tree bucket, kept for O(1) removal
   template: string[]
   count: number
 }
 
+/**
+ * Streaming Drain clusterer with WINDOWED semantics: parse() adds a line,
+ * remove() subtracts one by cluster id (refcount). Removal is
+ * count-accurate but template-width-conservative — a template widened to
+ * `<*>` by a since-removed line never re-narrows (un-generalizing is
+ * unsound). Harmless for fold/motif display; do not treat template
+ * wildcards as an exact reflection of the current window.
+ */
 export class Drain {
   private tree = new Map<string, DrainNode[]>()
+  private byId = new Map<number, DrainNode>()
   private nextId = 0
   private simTh: number
 
@@ -73,24 +111,37 @@ export class Drain {
     }
 
     const id = this.nextId++
-    nodes.push({ id, template: [...tokens], count: 1 })
+    const node: DrainNode = { id, key, template: [...tokens], count: 1 }
+    nodes.push(node)
+    this.byId.set(id, node)
     return id
   }
 
-  getTemplate(id: number): string {
-    for (const nodes of this.tree.values()) {
-      const n = nodes.find(n => n.id === id)
-      if (n) return n.template.join(' ')
+  /** Subtract one line from its cluster (windowed trim / re-parse of the
+   *  pending tail). Refcounted; empty clusters are dropped entirely. */
+  remove(id: number): void {
+    const node = this.byId.get(id)
+    if (!node) return
+    if (--node.count > 0) return
+    this.byId.delete(id)
+    const bucket = this.tree.get(node.key)
+    if (bucket) {
+      const i = bucket.indexOf(node)
+      if (i >= 0) bucket.splice(i, 1)
+      if (bucket.length === 0) this.tree.delete(node.key)
     }
-    return ''
+  }
+
+  count(id: number): number {
+    return this.byId.get(id)?.count ?? 0
+  }
+
+  getTemplate(id: number): string {
+    return this.byId.get(id)?.template.join(' ') ?? ''
   }
 
   getTemplateTokens(id: number): string[] {
-    for (const nodes of this.tree.values()) {
-      const n = nodes.find(n => n.id === id)
-      if (n) return n.template
-    }
-    return []
+    return this.byId.get(id)?.template ?? []
   }
 }
 

@@ -226,6 +226,11 @@
   resolved "https://registry.npmjs.org/@tanstack/query-core/-/query-core-5.101.2.tgz"
   integrity sha512-hH5MLoJhF7KaIGd7q3xTXGXvslI+GYlM1Z/35aSHHWaCJWB7XvTSHYuV3eM7tw+aE0mT/xMro4M4Q9rCGHT0lw==
 
+"@tanstack/virtual-core@3.17.4":
+  version "3.17.4"
+  resolved "https://registry.npmjs.org/@tanstack/virtual-core/-/virtual-core-3.17.4.tgz"
+  integrity sha512-nGm5KteqxasUdThLc2izl6dHUqLv0LQj7Nuyo5gYalTPf/U8a9ermvsl7reT+6ioBW1l8WfpP/mcU338nLXpqw==
+
 "@tanstack/vue-query@^5.101.2":
   version "5.101.2"
   resolved "https://registry.npmjs.org/@tanstack/vue-query/-/vue-query-5.101.2.tgz"
@@ -235,6 +240,13 @@
     "@tanstack/query-core" "5.101.2"
     "@vue/devtools-api" "^6.6.3"
     vue-demi "^0.14.10"
+
+"@tanstack/vue-virtual@*":
+  version "3.13.32"
+  resolved "https://registry.npmjs.org/@tanstack/vue-virtual/-/vue-virtual-3.13.32.tgz"
+  integrity sha512-E8OCutx7QnwZdvpJijz0Q2PHsYDWBWjnGr3TvgWiqxTU35jB1kVhtkd93scRV7tTFuId2tg3x2iFiw+IE4evjQ==
+  dependencies:
+    "@tanstack/virtual-core" "3.17.4"
 
 "@types/chai@^5.2.2":
   version "5.2.3"
