@@ -164,6 +164,12 @@ func Build(ctx context.Context, cfg job.JobConfig, proj *project.Config, d Deps)
 	if gpusPerTask < 0 {
 		gpusPerTask = 0
 	}
+	// Contract boundary: only -1 means unlimited. Validated AFTER the
+	// override merge so a hand-written job.yaml can't smuggle an arbitrary
+	// negative past a clean project config.
+	if err := project.ValidateRetryBounds(maxRetry); err != nil {
+		return Plan{}, err
+	}
 
 	var timeoutSec int
 	timeoutStr := proj.Defaults.Timeout

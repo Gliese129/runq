@@ -29,8 +29,8 @@ params:
 
 # Defaults (can be overridden per-job in job.yaml → overrides)
 defaults:
-  gpus_per_task: 1
-  max_retry: 3       # 0 = unlimited retries
+  gpus_per_task: 1   # 0 = CPU-only
+  max_retry: 3       # -1 = unlimited, 0 = no retries
 
 # Resume configuration
 # Set enabled: true only if your training script supports checkpoint resume.

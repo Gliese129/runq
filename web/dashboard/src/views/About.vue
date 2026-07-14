@@ -12,11 +12,11 @@
       <v-card class="pa-4 mb-4 text-left">
         <div class="d-flex flex-column ga-2">
           <div class="d-flex align-center justify-space-between">
-            <span class="text-on-surface-variant">{{ t('settings.mode') }}</span>
-            <v-chip size="small" variant="tonal" color="primary">{{ config.mode }}</v-chip>
+            <span class="text-on-surface-variant">{{ t('settings.default_target') }}</span>
+            <v-chip size="small" variant="tonal" color="primary">{{ config.targetLabel }}</v-chip>
           </div>
           <div class="d-flex align-center justify-space-between">
-            <span class="text-on-surface-variant">Version</span>
+            <span class="text-on-surface-variant">{{ t('about.version') }}</span>
             <code class="text-body-2">dev</code>
           </div>
         </div>
@@ -38,7 +38,7 @@
           href="#"
         >
           <v-icon start size="16">mdi-book-open-variant</v-icon>
-          Docs
+          {{ t('about.docs') }}
         </v-btn>
       </div>
     </div>

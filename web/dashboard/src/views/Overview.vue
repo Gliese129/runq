@@ -18,13 +18,34 @@
       </v-card>
     </v-slide-y-transition>
 
+    <!-- First-load skeleton: metric cards + table rows instead of a blank page -->
+    <template v-if="jobsLoading">
+      <v-row dense class="mb-4">
+        <v-col v-for="i in 4" :key="i" cols="6" sm="3">
+          <v-card class="pa-3">
+            <v-skeleton-loader type="text" width="60%" />
+            <v-skeleton-loader type="heading" width="40%" />
+          </v-card>
+        </v-col>
+      </v-row>
+      <v-card class="pa-0">
+        <v-skeleton-loader type="table-row@6" />
+      </v-card>
+    </template>
+
     <!-- Metric row -->
-    <v-row dense class="mb-4">
+    <v-row v-if="!jobsLoading" dense class="mb-4">
       <v-col v-for="m in metrics" :key="m.key" cols="6" sm="3">
+        <!-- These cards are filter toggles — VCard adds no keyboard support
+             of its own, so role/tabindex/keydown are explicit here. -->
         <v-card
-          class="pa-3 cursor-pointer"
+          class="pa-3 cursor-pointer row-focus"
           :class="{ 'border-primary': activeFilter === m.key }"
+          role="button" tabindex="0"
+          :aria-pressed="activeFilter === m.key"
           @click="toggleFilter(m.key)"
+          @keydown.enter="toggleFilter(m.key)"
+          @keydown.space.prevent="toggleFilter(m.key)"
         >
           <div class="d-flex align-center justify-space-between">
             <div>
@@ -38,10 +59,10 @@
     </v-row>
 
     <!-- GPU bars (always visible in daemon mode) -->
-    <v-card v-if="config.caps.gpu_map && gpu.gpus.length > 0" class="mb-4 pa-3">
-      <div class="text-caption text-on-surface-variant mb-2">GPU</div>
+    <v-card v-if="config.caps.gpu_map && gpus.length > 0" class="mb-4 pa-3">
+      <div class="text-caption text-on-surface-variant mb-2">{{ t('nav.gpu') }}</div>
       <div class="d-flex flex-column ga-1">
-        <GPUBar v-for="g in gpu.gpus" :key="g.index" :slot="g" />
+        <GPUBar v-for="g in gpus" :key="g.index" :slot="g" />
       </div>
     </v-card>
 
@@ -52,16 +73,17 @@
           <StatusDot
             :status="activeFilter === 'done' ? 'done' : activeFilter"
             :kind="activeFilter === 'done' ? 'job' : 'task'"
+            :size="14"
           />
-          <span class="text-body-2 font-weight-medium">{{ filteredJobs.length }} jobs</span>
+          <span class="text-body-2 font-weight-medium">{{ t('overview.n_jobs', { n: filteredJobs.length }) }}</span>
         </div>
         <v-btn size="x-small" variant="text" @click="activeFilter = ''">
-          <v-icon size="14">mdi-close</v-icon> Clear
+          <v-icon size="14">mdi-close</v-icon> {{ t('common.clear') }}
         </v-btn>
       </div>
       <div class="overflow-x-auto">
         <table class="data-mono" style="width: 100%">
-          <thead><tr><th>ID</th><th>Project</th><th>Note</th><th>Tasks</th><th>Created</th></tr></thead>
+          <thead><tr><th>ID</th><th>{{ t('table.project') }}</th><th>{{ t('table.note') }}</th><th>{{ t('table.tasks') }}</th><th>{{ t('table.created') }}</th></tr></thead>
           <tbody>
             <tr
               v-for="j in filteredJobs.slice(0, 20)"
@@ -91,7 +113,7 @@
       <v-card class="pa-0">
         <div class="overflow-x-auto">
           <table class="data-mono" style="width: 100%">
-            <thead><tr><th></th><th>ID</th><th>Project</th><th>Note</th><th>Progress</th><th>Created</th></tr></thead>
+            <thead><tr><th></th><th>ID</th><th>{{ t('table.project') }}</th><th>{{ t('table.note') }}</th><th>{{ t('table.progress') }}</th><th>{{ t('table.created') }}</th></tr></thead>
             <tbody>
               <tr
                 v-for="j in recentJobs"
@@ -104,17 +126,15 @@
                 @keydown.enter="openJob(j.project, j.id)"
                 @keydown.space.prevent="openJob(j.project, j.id)"
               >
-                <td style="width: 24px"><StatusDot :status="j.status" kind="job" /></td>
+                <td style="width: 24px"><StatusDot :status="j.status" kind="job" :size="14" /></td>
                 <td><code>{{ j.id.slice(0, 8) }}</code></td>
                 <td class="font-weight-medium">{{ j.project }}</td>
                 <td class="text-on-surface-variant">{{ j.note || '—' }}</td>
                 <td>
                   <div class="d-flex align-center ga-2">
-                    <v-progress-linear
-                      :model-value="j.tasks.total > 0 ? (j.tasks.completed / j.tasks.total) * 100 : 0"
-                      color="success" height="3" rounded style="width: 50px"
-                    />
+                    <SegmentedProgress :counts="j.tasks" :height="3" style="width: 50px" />
                     <span class="text-on-surface-variant">{{ j.tasks.completed }}/{{ j.tasks.total }}</span>
+                    <span v-if="j.tasks.failed > 0" class="text-error">· {{ t('job.n_failed', { n: j.tasks.failed }) }}</span>
                   </div>
                 </td>
                 <td class="text-on-surface-variant">{{ relativeTime(j.created_at) }}</td>
@@ -126,7 +146,7 @@
     </div>
 
     <!-- Empty state -->
-    <v-card v-if="jobs.projects.length === 0 && !jobs.loading && !activeFilter" class="pa-8 text-center">
+    <v-card v-if="jobList.length === 0 && !jobsLoading && !activeFilter" class="pa-8 text-center">
       <v-icon size="40" color="primary" class="mb-3" style="opacity: 0.4">mdi-rocket-launch-outline</v-icon>
       <div class="text-h6 mb-1">{{ t('overview.no_projects') }}</div>
       <div class="text-body-2 text-on-surface-variant mb-4">{{ t('overview.no_projects_hint') }}</div>
@@ -142,7 +162,13 @@
          archived its jobs cascade-hide, so without this row it would have
          no discoverable way back. -->
     <v-card v-if="archivedProjects.length > 0" class="mt-3">
-      <div class="d-flex align-center ga-2 px-4 py-3 cursor-pointer text-on-surface-variant" @click="archivedOpen = !archivedOpen">
+      <div
+        class="d-flex align-center ga-2 px-4 py-3 cursor-pointer text-on-surface-variant"
+        role="button" tabindex="0" :aria-expanded="archivedOpen"
+        @click="archivedOpen = !archivedOpen"
+        @keydown.enter="archivedOpen = !archivedOpen"
+        @keydown.space.prevent="archivedOpen = !archivedOpen"
+      >
         <v-icon size="16">mdi-archive-outline</v-icon>
         <span class="text-subtitle-2">{{ t('archive.projects_section', { n: archivedProjects.length }) }}</span>
         <v-spacer />
@@ -151,12 +177,16 @@
       <div v-if="archivedOpen" class="px-2 pb-2">
         <div
           v-for="p in archivedProjects" :key="p.name"
-          class="d-flex align-center ga-2 px-2 py-1 rounded cursor-pointer"
+          class="d-flex align-center ga-2 px-2 py-1 rounded cursor-pointer row-focus"
+          role="link" tabindex="0"
+          :aria-label="t('a11y.open_project', { name: p.name })"
           @click="router.push({ name: 'project', params: { project: p.name } })"
+          @keydown.enter="router.push({ name: 'project', params: { project: p.name } })"
+          @keydown.space.prevent="router.push({ name: 'project', params: { project: p.name } })"
         >
           <v-icon size="14" color="on-surface-variant">mdi-folder-outline</v-icon>
           <span class="text-body-2">{{ p.name }}</span>
-          <span class="text-caption text-on-surface-variant">{{ p.job_count }} jobs</span>
+          <span class="text-caption text-on-surface-variant">{{ t('project.job_count', p.job_count) }}</span>
           <v-spacer />
           <v-btn size="x-small" variant="text" @click.stop="unarchiveProject(p.name)">
             <v-icon start size="12">mdi-archive-arrow-up-outline</v-icon> {{ t('archive.unarchive') }}
@@ -168,27 +198,36 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
-import { useJobsStore } from '@/stores/jobs'
 import { useProjectStore } from '@/stores/projects'
-import { useGPUStore } from '@/stores/gpu'
 import { useConfigStore } from '@/stores/config'
-import { usePolling } from '@/composables/usePolling'
 import { useConnection } from '@/composables/useConnection'
+import { useJobsListQuery } from '@/queries/useJobQueries'
+import { useGpuQuery } from '@/queries/useGpuQuery'
 import GPUBar from '@/components/GPUBar.vue'
 import StatusDot from '@/components/StatusDot.vue'
+import SegmentedProgress from '@/components/SegmentedProgress.vue'
 import { useSnackbar } from '@/composables/useSnackbar'
+import { relativeTime } from '@/utils/relativeTime'
 
 const { t } = useI18n()
 const router = useRouter()
-const jobs = useJobsStore()
 const projectStore = useProjectStore()
-const gpu = useGPUStore()
 const config = useConfigStore()
 const conn = useConnection()
 const snack = useSnackbar()
+
+// ── Server state: polling/dedupe/freshness live in the query layer. ──
+const jobsQuery = useJobsListQuery()
+const jobList = computed(() => jobsQuery.data.value ?? [])
+const jobsLoading = computed(() => jobsQuery.isLoading.value)
+const gpuQuery = useGpuQuery()
+const gpus = computed(() => gpuQuery.data.value ?? [])
+
+// Project list is low-churn: load on mount, mutations refresh it themselves.
+onMounted(() => { projectStore.fetch() })
 
 // ── Archived projects (recovery entry) — derived from the store ──
 const archivedOpen = ref(false)
@@ -198,24 +237,31 @@ async function unarchiveProject(name: string) {
   try {
     await projectStore.unarchive(name) // store action owns ALL refreshes
     snack.success(t('archive.project_back'))
-  } catch (e: any) { snack.error(e?.message || 'Unarchive failed') }
+  } catch (e: any) { snack.error(e?.message || t('common.error')) }
 }
 const activeFilter = ref('')
 
+const totals = computed(() => {
+  const acc = { running: 0, pending: 0, failed: 0, completed: 0 }
+  for (const j of jobList.value) {
+    acc.running += j.tasks.running
+    acc.pending += j.tasks.pending
+    acc.failed += j.tasks.failed
+    acc.completed += j.tasks.completed
+  }
+  return acc
+})
+
 const metrics = computed(() => [
-  { key: 'running', label: t('overview.running'), value: jobs.totalRunning, status: 'running' },
-  { key: 'pending', label: t('overview.pending'), value: jobs.totalPending, status: 'pending' },
-  { key: 'failed', label: t('overview.failed'), value: jobs.totalFailed, status: 'failed' },
-  { key: 'done', label: t('overview.completed'), value: totalCompleted.value, status: 'success' },
+  { key: 'running', label: t('overview.running'), value: totals.value.running, status: 'running' },
+  { key: 'pending', label: t('overview.pending'), value: totals.value.pending, status: 'pending' },
+  { key: 'failed', label: t('overview.failed'), value: totals.value.failed, status: 'failed' },
+  { key: 'done', label: t('overview.completed'), value: totals.value.completed, status: 'success' },
 ])
 
-const totalCompleted = computed(() =>
-  jobs.jobs.reduce((sum, job) => sum + job.tasks.completed, 0)
-)
-
 function retryConnection() {
-  jobs.fetchJobs()
-  if (config.caps.gpu_map) gpu.fetchGPU()
+  jobsQuery.refetch()
+  gpuQuery.refetch()
 }
 
 function openJob(project: string, id: string) {
@@ -224,7 +270,7 @@ function openJob(project: string, id: string) {
 
 const filteredJobs = computed(() => {
   if (!activeFilter.value) return []
-  return jobs.jobs.filter(j => {
+  return jobList.value.filter(j => {
     if (activeFilter.value === 'running') return j.tasks.running > 0
     if (activeFilter.value === 'pending') return j.tasks.pending > 0
     if (activeFilter.value === 'failed') return j.tasks.failed > 0
@@ -234,26 +280,12 @@ const filteredJobs = computed(() => {
 })
 
 const recentJobs = computed(() =>
-  [...jobs.jobs].sort((a, b) => b.created_at - a.created_at).slice(0, 10)
+  [...jobList.value].sort((a, b) => b.created_at - a.created_at).slice(0, 10)
 )
 
 function toggleFilter(status: string) {
   activeFilter.value = activeFilter.value === status ? '' : status
 }
-
-function relativeTime(ts: number): string {
-  const diff = Date.now() / 1000 - ts
-  if (diff < 60) return 'just now'
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`
-  return `${Math.floor(diff / 86400)}d ago`
-}
-
-usePolling((silent: boolean) => {
-  jobs.fetchJobs(silent)
-  projectStore.fetch()
-  if (config.caps.gpu_map) gpu.fetchGPU(silent)
-}, 5000)
 </script>
 
 <style scoped>

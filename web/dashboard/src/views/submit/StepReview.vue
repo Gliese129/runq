@@ -20,7 +20,7 @@
           <div v-if="resolvedNote" class="text-caption text-on-surface-variant text-truncate" style="font-family: monospace" :title="resolvedNote">
             {{ resolvedNote }}
           </div>
-          <div class="text-caption text-on-surface-variant text-truncate" style="font-family: monospace" :title="'scheduler job name template (rendered per task — see Rendered commands below)'">
+          <div class="text-caption text-on-surface-variant text-truncate" style="font-family: monospace" :title="t('submit.job_name_render_hint')">
             <v-icon size="10">mdi-tag-outline</v-icon> {{ effectiveJobName }}
           </div>
         </v-card>
@@ -63,7 +63,7 @@
         <div class="d-flex align-center ga-2">
           <div class="text-subtitle-2">{{ t('submit.preview') }}</div>
           <div v-if="fixedParamCount > 0" class="text-caption text-on-surface-variant">
-            {{ sweptParamNames.size }} swept · {{ fixedParamCount }} fixed
+            {{ t('submit.swept_fixed', { s: sweptParamNames.size, f: fixedParamCount }) }}
           </div>
         </div>
         <v-btn v-if="state.dryRunResult.length > 0" size="x-small" variant="text" color="primary" @click="state.step--">
@@ -114,7 +114,10 @@
     <v-card v-if="config.caps.submit_preview && state.dryRunResult.length > 0" class="mt-3">
       <div
         class="d-flex align-center ga-2 px-4 py-3 cursor-pointer"
+        role="button" tabindex="0" :aria-expanded="previewOpen"
         @click="previewOpen = !previewOpen"
+        @keydown.enter="previewOpen = !previewOpen"
+        @keydown.space.prevent="previewOpen = !previewOpen"
       >
         <v-icon size="16" color="primary">mdi-console-line</v-icon>
         <span class="text-subtitle-2">{{ t('submit.rendered_cmds', { n: state.dryRunResult.length }) }}</span>
@@ -133,7 +136,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, inject, onMounted, ref } from 'vue'
+import { computed, inject, onActivated, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { SUBMIT_STATE_KEY } from '@/types/submit'
 import { sweptParamNames as computeSwept, fixedParamPreview, buildJobConfig } from './submitFlow'
@@ -150,30 +153,30 @@ const previewOpen = ref(true)
 const previewText = ref('')
 const previewLoading = ref(false)
 const previewError = ref('')
-onMounted(async () => {
+// onActivated (not onMounted): this component lives inside <KeepAlive>,
+// so it must re-fetch every time the user re-enters review — a cached
+// preview of edited params would violate preview-is-backend-truth (U1).
+// onActivated also fires on the first mount.
+onActivated(async () => {
   if (!config.caps.submit_preview) return
   previewLoading.value = true
+  previewError.value = ''
   try {
     const cfg = buildJobConfig(state.projectName, state.note, state.rows, state.linkSets)
     if (state.jobName.trim()) cfg.name = state.jobName.trim()
     previewText.value = (await jobsApi.previewSubmit(cfg, !state.preflightEnabled)).preview
   } catch (e: any) {
-    previewError.value = e?.message || 'Preview failed'
+    previewError.value = e?.message || t('common.error')
   } finally {
     previewLoading.value = false
   }
 })
 
 // Final job name as it WILL be submitted ({{version}} already scanned) —
-// resolved by the backend, never simulated here (U1).
-const resolvedNote = ref('')
-onMounted(async () => {
-  if (!state.note.includes('{{')) { resolvedNote.value = state.note; return }
-  try {
-    const cfg = buildJobConfig(state.projectName, state.note, state.rows, state.linkSets)
-    resolvedNote.value = (await jobsApi.resolveNote(cfg)).resolved
-  } catch { resolvedNote.value = '' }
-})
+// resolved by the backend via POST /jobs/plan (runs on every entry into
+// review), never simulated here (U1).
+const resolvedNote = computed(() =>
+  state.note.includes('{{') ? state.noteResolved : state.note)
 
 // Effective scheduler job name TEMPLATE (override > project > default).
 // The rendered per-task value is backend truth — visible in the Rendered

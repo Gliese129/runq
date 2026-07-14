@@ -22,7 +22,47 @@ func (s *Store) Migrate() error {
 	if _, err := s.db.ExecContext(ctx, schemaSQL); err != nil {
 		return err
 	}
-	return s.addMissingColumns(ctx)
+	if err := s.addMissingColumns(ctx); err != nil {
+		return err
+	}
+	return s.reclassifyDoneJobs(ctx)
+}
+
+// reclassifyDoneJobs is the one-shot data migration for the terminal job
+// status split (done → done/failed/partial/killed). Older versions
+// collapsed every fully-terminal job into "done"; recompute the terminal
+// status from each job's task outcomes using the same rules as
+// TerminalJobStatus. Idempotent: after the first pass only all-success
+// jobs still carry "done", and recomputing those yields "done" again.
+// Guards: jobs with zero tasks keep "done" (nothing to aggregate), and
+// jobs with ANY task outside the known-terminal vocabulary
+// (success/failed/killed) are left untouched — that covers live states
+// (pending/running) AND unknown/legacy statuses alike. A blocklist here
+// would silently misclassify anything it didn't anticipate as
+// failed/partial; only rows whose every task is positively terminal are
+// safe to recompute (the live aggregator owns the rest).
+func (s *Store) reclassifyDoneJobs(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE jobs SET status = (
+			SELECT CASE
+				WHEN SUM(t.status = 'success') = COUNT(*) THEN 'done'
+				WHEN SUM(t.status = 'success') = 0 AND SUM(t.status = 'killed') = COUNT(*) THEN 'killed'
+				WHEN SUM(t.status = 'success') = 0 THEN 'failed'
+				ELSE 'partial'
+			END
+			FROM tasks t WHERE t.job_id = jobs.id
+		)
+		WHERE status = 'done'
+		  AND EXISTS (SELECT 1 FROM tasks t WHERE t.job_id = jobs.id)
+		  AND NOT EXISTS (
+			SELECT 1 FROM tasks t
+			WHERE t.job_id = jobs.id
+			  AND t.status NOT IN ('success', 'failed', 'killed')
+		  )`)
+	if err != nil {
+		return fmt.Errorf("reclassify done jobs: %w", err)
+	}
+	return nil
 }
 
 // addMissingColumns is the home for "tables already existed in an older schema,

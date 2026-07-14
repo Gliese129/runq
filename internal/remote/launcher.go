@@ -35,9 +35,17 @@ func (l *Launcher) Supervised() bool { return false }
 // Best-effort: errors are logged to the oplog; the task only becomes
 // "killed" in the DB once the cancel actually succeeds (Backend.Kill).
 func (l *Launcher) Kill(taskID string) {
-	if _, err := l.b.Kill(context.Background(), taskID); err != nil {
+	if err := l.KillErr(taskID); err != nil {
 		opLog("KILL FAIL task=%s err=%v", taskID, err)
 	}
+}
+
+// KillErr is the error-reporting cancel the scheduler's kill/submit race
+// path uses (RQ-69): a task may be recorded killed ONLY after the cancel
+// command actually succeeded, so the caller needs the verdict.
+func (l *Launcher) KillErr(taskID string) error {
+	_, err := l.b.Kill(context.Background(), taskID)
+	return err
 }
 
 // Launch replays the task's persisted submit.cmd and records the external id.
@@ -63,7 +71,16 @@ func (l *Launcher) Launch(ctx context.Context, t *scheduler.Task, _ map[string]s
 		return scheduler.LaunchResult{}, fmt.Errorf("%w: %v", scheduler.ErrLaunchTransient, werr)
 	}
 
-	out, exitCode, rerr := l.b.shellRunClassified(ctx, string(cmdBytes))
+	// RQ-69: deterministic per-attempt cancel handle, known BEFORE the
+	// submit. The runqd preset's `runq sbatch` adopts it as the remote task
+	// id (external_id = handle — the "submit id was lost" class dies for
+	// that lane); dialect schedulers (sbatch/qdel) ignore the variable.
+	// The attempt suffix keeps a stale verdict from a previous attempt from
+	// being attributed to this one — identity stays the task id alone.
+	handle := fmt.Sprintf("%s-a%d", t.ID, t.RetryCount)
+	cmd := "export RUNQ_SUBMIT_HANDLE=" + utils.ShellQuote(handle) + "\n" + string(cmdBytes)
+
+	out, exitCode, rerr := l.b.shellRunClassified(ctx, cmd)
 	if rerr != nil {
 		// Transport: the command never reached the scheduler.
 		opLog("SUBMIT TRANSPORT task=%s job=%s err=%v", t.ID, t.JobID, rerr)

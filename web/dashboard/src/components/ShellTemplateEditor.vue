@@ -5,7 +5,7 @@
         <v-icon size="16" color="primary" class="mr-2">mdi-console</v-icon>
         <code class="text-subtitle-2">{{ title }}</code>
         <v-spacer />
-        <v-btn icon size="x-small" variant="text" @click="cancel">
+        <v-btn icon size="x-small" variant="text" :aria-label="t('common.close')" @click="cancel">
           <v-icon size="16">mdi-close</v-icon>
         </v-btn>
       </div>
@@ -19,7 +19,7 @@
           size="x-small" variant="outlined" class="cursor-pointer"
           :color="ph.startsWith('param.') ? 'success' : undefined"
           style="font-family: monospace"
-          :title="ph.startsWith('param.') ? 'task param (from your sweep / fixed_params)' : 'runq built-in'"
+          :title="ph.startsWith('param.') ? t('editor.ph_param') : t('editor.ph_builtin')"
           @click="insertPlaceholder(ph)"
         >
           <v-icon start size="10">{{ ph.startsWith('param.') ? 'mdi-variable' : 'mdi-cog-outline' }}</v-icon>
@@ -101,7 +101,7 @@ function createEditor() {
         syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
         autocompletion({ override: [completions], activateOnTyping: true }),
         EditorView.lineWrapping,
-        cmPlaceholder(props.hint || 'shell command template...'),
+        cmPlaceholder(props.hint || t('editor.template_placeholder')),
         EditorView.theme({
           '&': { fontSize: '13px', minHeight: '96px' },
           '.cm-content': { fontFamily: 'monospace', padding: '10px 12px' },

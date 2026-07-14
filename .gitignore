@@ -13,7 +13,8 @@ CLAUDE.md
 demo/
 docs/*
 !docs/*.md
-scripts/
+# Root-only match: web/dashboard/scripts/ (gen-mdi-paths.mjs etc.) must be tracked
+/scripts/
 data/
 
 # Go
@@ -45,3 +46,4 @@ logs/
 # local progress tracking
 progress/
 .cache
+/docs/design_philosophy.md

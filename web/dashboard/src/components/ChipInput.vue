@@ -19,7 +19,7 @@
       <input
         ref="input"
         v-model="draft"
-        :placeholder="modelValue.length === 0 ? placeholder : ''"
+        :placeholder="modelValue.length === 0 ? (placeholder || t('submit.type_value_enter')) : ''"
         class="chip-input-field"
         @keydown.enter.prevent="add"
         @keydown.tab.prevent="add"
@@ -35,12 +35,12 @@
       <span v-if="exprPreview" class="text-caption" :class="exprPreview.values.length ? 'text-primary' : 'text-on-surface-variant'">
         <v-icon size="10">mdi-auto-fix</v-icon>
         {{ exprPreview.keyword }} →
-        {{ exprPreview.values.length ? exprPreview.values.join(', ') + ' · Enter to expand' : usageHint(exprPreview.keyword) }}
+        {{ exprPreview.values.length ? exprPreview.values.join(', ') + ' · ' + t('submit.enter_expand') : usageHint(exprPreview.keyword) }}
       </span>
       <span v-else-if="coerceWarning" class="text-caption text-warning">{{ coerceWarning }}</span>
       <span v-else />
       <span v-if="modelValue.length > 1" class="text-caption text-on-surface-variant">
-        {{ modelValue.length }} values
+        {{ modelValue.length }} {{ t('submit.values') }}
       </span>
     </div>
   </div>
@@ -48,7 +48,10 @@
 
 <script setup lang="ts">
 import { ref, computed } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { parseGeneratorExpr } from '@/views/submit/valueGenerators'
+
+const { t } = useI18n()
 
 const props = withDefaults(defineProps<{
   modelValue: string[]
@@ -61,7 +64,7 @@ const props = withDefaults(defineProps<{
   generatorSugar?: boolean
 }>(), {
   label: '',
-  placeholder: 'Type and press Enter',
+  placeholder: '',
   color: 'primary',
   paramType: '',
   generatorSugar: false,
@@ -82,21 +85,21 @@ const SPLIT_RE = /[,;\s]+/
  * Returns null if the value cannot be converted (should be dropped).
  */
 function coerceValue(raw: string, type: string): string | null {
-  const t = type.toLowerCase()
+  const kind = type.toLowerCase()
   const trimmed = raw.trim()
   if (!trimmed) return null
 
-  if (t === 'int') {
+  if (kind === 'int') {
     const n = Number(trimmed)
     if (isNaN(n)) return null
     return String(Math.trunc(n)) // 53.2 → 53, "62" → 62
   }
-  if (t === 'float') {
+  if (kind === 'float') {
     const n = Number(trimmed)
     if (isNaN(n)) return null
     return String(n) // .1 → 0.1
   }
-  if (t === 'bool') {
+  if (kind === 'bool') {
     const low = trimmed.toLowerCase()
     if (['true', '1', 'yes'].includes(low)) return 'true'
     if (['false', '0', 'no'].includes(low)) return 'false'

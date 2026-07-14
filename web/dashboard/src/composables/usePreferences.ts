@@ -110,6 +110,12 @@ function removePreferredWorkspace(path: string) {
   preferredWorkspaces.value = preferredWorkspaces.value.filter(p => p !== path)
 }
 
+// --- File browser: show hidden files (dotfiles) ---
+
+const showHiddenFiles = ref(load('show-hidden-files', false))
+
+watch(showHiddenFiles, (v) => save('show-hidden-files', v))
+
 // --- Job task table: visible columns per job ---
 
 const jobVisibleCols = ref<Record<string, string[]>>(load('job-cols', {}))
@@ -144,6 +150,7 @@ export function usePreferences() {
     preferredWorkspaces,
     addPreferredWorkspace,
     removePreferredWorkspace,
+    showHiddenFiles,
     setJobVisibleCols,
     getJobVisibleCols,
   }

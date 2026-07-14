@@ -1,7 +1,8 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { projectsApi } from '@/apis/projects'
-import { useJobsStore } from '@/stores/jobs'
+import { queryClient } from '@/queries/client'
+import { qk } from '@/queries/keys'
 import type { ProjectSummary } from '@/types/api'
 
 export const useProjectStore = defineStore('projects', () => {
@@ -48,8 +49,12 @@ export const useProjectStore = defineStore('projects', () => {
   }
 
   async function afterArchiveMutation() {
-    const jobs = useJobsStore()
-    await Promise.all([fetch(), jobs.fetchJobs(true), jobs.fetchArchived()])
+    // Project archive cascades over job visibility — refresh the project
+    // list AND invalidate every job-list query variant.
+    await Promise.all([
+      fetch(),
+      queryClient.invalidateQueries({ queryKey: qk.jobs }),
+    ])
   }
 
   return { list, visible, archived, loading, selected, current, fetch, select, archive, unarchive }

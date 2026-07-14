@@ -11,10 +11,12 @@ import en from '@/i18n/en.json'
 // Mount smoke guard: "the page is blank" is the worst failure mode.
 // The api client is mocked at module level (axios never runs).
 vi.mock('@/apis/client', () => {
+  const CAPS = { gpu_map: false, pause_resume: false, live_log: true, retry: true, state_model: 'poll', kill_async: true, submit_preview: true, activity_heatmap: false, log_search: false }
   const respond = (path: string) => {
-    if (path.includes('/hpc-config/presets')) return { names: ['slurm'], presets: { slurm: { submit_template: 's {{run_sh}}', submit_id_regex: 'j ([0-9]+)', kill_template: 'k {{ext_id}}' } } }
-    if (path.includes('/hpc-config')) return { exists: false, config: {}, placeholders: { submit_template: ['run_sh'] }, path: '/x' }
-    if (path.includes('/config')) return { mode: 'hpc', data_path: '', config_path: '/x', capabilities: { gpu_map: false, pause_resume: false, live_log: true, retry: true, state_model: 'poll', kill_async: true } }
+    // v1 contract (spec-first): targets replace /hpc-config*
+    if (path.includes('/targets/presets')) return { names: ['slurm'], presets: { slurm: { name: 'slurm', submit_template: 's {{run_sh}}', submit_id_regex: 'j ([0-9]+)', kill_template: 'k {{ext_id}}' } } }
+    if (path.includes('/targets')) return { items: [{ name: 'hpc-a', scheduler: 'slurm', submit_template: '', submit_id_regex: '', kill_template: '' }], placeholders: { submit_template: ['run_sh'] }, path: '/x' }
+    if (path.includes('/config')) return { data_path: '', config_path: '/x', default_target: 'hpc-a', targets: [{ name: 'hpc-a', type: 'remote', scheduler: 'slurm', capabilities: CAPS }] }
     if (path.includes('/webhook')) return { url: '', events: [] }
     return {}
   }
@@ -23,7 +25,9 @@ vi.mock('@/apis/client', () => {
       get: vi.fn(async (p: string) => respond(p)),
       post: vi.fn(async (p: string) => respond(p)),
       put: vi.fn(async (p: string) => respond(p)),
-      delete: vi.fn(async (p: string) => respond(p)),
+      del: vi.fn(async (p: string) => respond(p)),
+      getList: vi.fn(async () => []),
+      getEnvelope: vi.fn(async () => ({ items: [] })),
     },
   }
 })

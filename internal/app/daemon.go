@@ -187,7 +187,7 @@ func NewDaemonWith(opts DaemonOptions) (*Daemon, error) {
 	var localTargetNames []string
 	var localBe *backend.LocalBackend
 	for _, tc := range resolvedTargets {
-		if tc.Type() == config.TargetTypeHPC {
+		if tc.Type() == config.TargetTypeRemote {
 			if opts.Headless {
 				return nil, fmt.Errorf(
 					"target %q: ssh targets are not supported in server mode — configure remote targets on the client, the server only manages its own hardware", tc.Name)

@@ -87,6 +87,12 @@ type TaskSpec struct {
 	Name    string `json:"name,omitempty"`
 	TaskDir string `json:"task_dir"`
 	LogPath string `json:"log_path,omitempty"`
+	// Handle is the caller-chosen task id (RQ-69: the client's
+	// "{task_id}-a{attempt}" cancel handle). When set it becomes THIS
+	// server's task id, so the client can cancel/probe deterministically
+	// without ever depending on the submit response. Re-submitting an
+	// existing handle is an idempotent claim, not a duplicate.
+	Handle string `json:"handle,omitempty"`
 	// Project is the CLIENT's project name, carried through the protocol as
 	// a plain label (like a Slurm job name): it makes squeue/logs greppable
 	// but requires NO registration here — this ledger is a scheduler's,
@@ -109,6 +115,18 @@ func (b *LocalBackend) Enqueue(ctx context.Context, spec TaskSpec) (string, erro
 	now := time.Now()
 	jobID := utils.GenerateJobID()
 	taskID := utils.GenerateTaskID()
+	if spec.Handle != "" {
+		if !validHandle(spec.Handle) {
+			return "", fmt.Errorf("invalid handle %q: only [A-Za-z0-9._-] allowed", spec.Handle)
+		}
+		// Idempotent claim: the handle already existing means an earlier
+		// submit succeeded but its response was lost — adopt it instead of
+		// enqueueing a duplicate (clients resubmit with the same handle).
+		if existing, gerr := b.store.GetTask(ctx, spec.Handle); gerr == nil && existing != nil {
+			return spec.Handle, nil
+		}
+		taskID = spec.Handle
+	}
 	logPath := spec.LogPath
 	if logPath == "" {
 		logPath = filepath.Join(spec.TaskDir, taskID+".log")
@@ -134,6 +152,23 @@ func (b *LocalBackend) Enqueue(ctx context.Context, spec TaskSpec) (string, erro
 	}
 	b.queue.Push(TaskRowToSchedulerTask(&row))
 	return taskID, nil
+}
+
+// validHandle restricts caller-chosen task ids to filename/shell-safe
+// characters — the id lands in file paths (log name) and command lines.
+func validHandle(h string) bool {
+	if len(h) == 0 || len(h) > 128 {
+		return false
+	}
+	for _, c := range h {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9',
+			c == '-', c == '_', c == '.':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // DetectOrphansNow marks/clears orphan state for this local target's
@@ -207,6 +242,25 @@ func (b *LocalBackend) TaskLogTail(ctx context.Context, taskID string, maxLines 
 	}
 	defer r.Close()
 	return r.TailLines(maxLines)
+}
+
+func (b *LocalBackend) TaskLogPage(ctx context.Context, taskID string, req logfile.PageRequest) (*LogPage, error) {
+	task, err := b.store.GetTask(ctx, taskID)
+	if err != nil {
+		return nil, err
+	}
+	if task == nil {
+		return nil, fmt.Errorf("task %q: %w", taskID, ErrNotFound)
+	}
+	r, err := logfile.Open(task.LogPath, nil)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return &LogPage{Lines: []string{}, TotalLines: -1, StartLine: -1}, nil // pending
+		}
+		return nil, err
+	}
+	defer r.Close()
+	return r.ReadPage(req)
 }
 
 func (b *LocalBackend) TaskLogFollow(ctx context.Context, taskID string, offset int64) (LogFollower, error) {
@@ -440,6 +494,11 @@ func (b *LocalBackend) RetryTask(ctx context.Context, taskID string) error {
 
 	row, _ = b.store.GetTask(ctx, taskID)
 	task := TaskRowToSchedulerTask(row)
+	if b.scheduler != nil {
+		// Fresh attempt by explicit user intent — a stale kill flag must
+		// not assassinate it at its first lifecycle event (RQ-69).
+		b.scheduler.ClearKillRequest(taskID)
+	}
 	if !b.queue.RetryExisting(task) {
 		b.queue.Push(task)
 	}
@@ -462,8 +521,8 @@ func (b *LocalBackend) PauseJob(ctx context.Context, jobID string) error {
 	if j == nil {
 		return fmt.Errorf("job %q not found", jobID)
 	}
-	if j.Status == "done" {
-		return fmt.Errorf("job %q is already done", jobID)
+	if store.IsTerminalJobStatus(j.Status) {
+		return fmt.Errorf("job %q is already %s", jobID, j.Status)
 	}
 	b.scheduler.PauseJob(jobID)
 	return b.store.UpdateJobStatus(ctx, jobID, "paused")
@@ -757,6 +816,13 @@ func (b *LocalBackend) killJob(ctx context.Context, jobID string) (int, error) {
 			killed++
 		}
 	}
+	// Kill overrides pause (human intent supersedes human intent, latest
+	// wins): drop the flag so the aggregate below can land the terminal
+	// status instead of parking at "paused" forever. nil-guarded like every
+	// scheduler touchpoint here — test harnesses run without a scheduler.
+	if b.scheduler != nil {
+		b.scheduler.ClearPause(jobID)
+	}
 	if err := b.refreshJobStatus(ctx, jobID); err != nil {
 		return killed, err
 	}
@@ -769,28 +835,35 @@ func (b *LocalBackend) refreshJobStatus(ctx context.Context, jobID string) error
 		return err
 	}
 
-	counts := map[string]int{"running": 0, "pending": 0, "done": 0}
+	var running, pending, success, failed, killed int
 	for _, t := range tasks {
 		switch t.Status {
 		case "running":
-			counts["running"]++
+			running++
 		case "pending":
-			counts["pending"]++
-		case "success", "failed", "killed":
-			counts["done"]++
+			pending++
+		case "success":
+			success++
+		case "failed":
+			failed++
+		case "killed":
+			killed++
 		}
 	}
 
-	isStarted := (counts["running"] + counts["done"]) > 0
-	isEnded := (counts["pending"] + counts["running"]) == 0
+	isStarted := (running + success + failed + killed) > 0
+	isEnded := (pending + running) == 0
 
-	if !isEnded && b.scheduler != nil && b.scheduler.IsJobPaused(jobID) {
+	// Unconditional pause guard — mirrors scheduler.RefreshJobStatus: paused
+	// is a human control state that outlives task terminality; resume/kill
+	// are the only releases (both clear the set before re-aggregating).
+	if b.scheduler != nil && b.scheduler.IsJobPaused(jobID) {
 		return nil
 	}
 
 	var newStatus string
 	if isEnded {
-		newStatus = "done"
+		newStatus = store.TerminalJobStatus(success, failed, killed)
 	} else if isStarted {
 		newStatus = "running"
 	} else {

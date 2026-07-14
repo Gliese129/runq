@@ -1,5 +1,5 @@
 import type { ProjectParam } from '@/types/submit'
-import type { JobConfigPayload, ProjectPayload } from '@/types/api'
+import type { JobConfigPayload, ProjectConfig } from '@/types/api'
 import {
   compile, taskCount, validateTable, rowEffect, isBlank, activeValues,
   type ParamRow, type LinkSet,
@@ -114,24 +114,38 @@ export function parseEnvText(text: string): Record<string, string> | undefined {
   return Object.keys(out).length > 0 ? out : undefined
 }
 
-export function buildProjectPayload(project: SubmitProjectDraft): ProjectPayload {
-  const payload: ProjectPayload = {
+/**
+ * Read-modify-write: `base` is the project.Config as fetched — fields the
+ * form does not edit (target, env_file, defaults.timeout, resume, wandb)
+ * ride through untouched instead of being silently dropped on save.
+ * Form-owned fields always overwrite; clearing a form field clears it on
+ * the wire too (undefined keys are omitted by JSON serialization).
+ */
+export function buildProjectPayload(project: SubmitProjectDraft, base?: ProjectConfig): ProjectConfig {
+  const payload: ProjectConfig = {
+    ...base,
     project_name: project.name.trim(),
     working_dir: project.workDir,
     command_template: project.cmd,
     setup_command: project.setupCmd.trim() || undefined,
     job_name: project.jobName.trim() || undefined,
     environment: parseEnvText(project.envText),
-    defaults: { gpus_per_task: project.gpus, max_retry: project.maxRetry },
+    defaults: { ...base?.defaults, gpus_per_task: project.gpus, max_retry: project.maxRetry },
   }
+  // python_env is form-owned: an empty envType means "no managed env" —
+  // it must clear any previously stored env, not inherit it from base.
   if (project.envType) {
     payload.python_env = {
       type: project.envType,
       path: project.envPath || undefined,
       name: project.envName || undefined,
     }
+  } else {
+    payload.python_env = undefined
   }
 
+  // params are form-owned: the editor holds the full authoritative list.
+  payload.params = undefined
   const params = project.params.filter(p => p.name.trim())
   if (params.length > 0) {
     payload.params = params.map(p => {

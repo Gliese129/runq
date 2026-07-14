@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gliese129/runq/internal/job"
+	"github.com/gliese129/runq/internal/logfile"
 	"github.com/gliese129/runq/internal/project"
 	"github.com/gliese129/runq/internal/rfs"
 	"github.com/gliese129/runq/internal/store"
@@ -378,6 +379,14 @@ func (m *MultiBackend) TaskLogTail(ctx context.Context, taskID string, maxLines 
 		return nil, err
 	}
 	return be.TaskLogTail(ctx, taskID, maxLines)
+}
+
+func (m *MultiBackend) TaskLogPage(ctx context.Context, taskID string, req logfile.PageRequest) (*LogPage, error) {
+	be, err := m.resolveTask(ctx, taskID)
+	if err != nil {
+		return nil, err
+	}
+	return be.TaskLogPage(ctx, taskID, req)
 }
 
 func (m *MultiBackend) TaskLogFollow(ctx context.Context, taskID string, offset int64) (LogFollower, error) {

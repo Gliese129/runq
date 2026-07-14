@@ -1,13 +1,26 @@
-import { ref, computed, watch, nextTick, type Ref } from 'vue'
+import { ref, computed, watch, nextTick, onScopeDispose, type Ref } from 'vue'
 import { useLogViewerStore } from '@/stores/logViewer'
-import type { DisplayLine, DrainBlockItem, GroupBlockItem } from '@/utils/logProcessors'
+import type { DisplayLine } from '@/utils/logProcessors'
 import {
-  processLog,
   buildRenderItems,
   computeDefaultFoldState,
   segmentLine,
   LONG_LINE_THRESHOLD,
 } from '@/utils/logProcessors'
+import { IncrementalLogPipeline, MOTIF_THROTTLE_MS } from '@/utils/log/incremental'
+
+/** Client-side search caps: a 1-char query on a 20k buffer must not build
+ *  an unbounded match array. */
+const SEARCH_MATCH_CAP = 5000
+const SEARCH_DEBOUNCE_MS = 250
+
+function isLong(line: DisplayLine): boolean {
+  return line.text.length > LONG_LINE_THRESHOLD
+}
+
+function truncateText(text: string): string {
+  return text.slice(0, LONG_LINE_THRESHOLD)
+}
 
 /**
  * Shared log surface: the parse pipeline, unified fold state, motif-group
@@ -30,10 +43,6 @@ export function useLogSurface(
   const foldOverrides = ref(new Map<string, boolean>())
   const expandedLines = ref(new Set<number>())
 
-  function isLong(line: DisplayLine): boolean {
-    return line.text.length > LONG_LINE_THRESHOLD
-  }
-
   function isExpanded(line: DisplayLine): boolean {
     return expandedLines.value.has(line.lineIdx)
   }
@@ -43,11 +52,73 @@ export function useLogSurface(
     else expandedLines.value.add(line.lineIdx)
   }
 
-  function truncateText(text: string): string {
-    return text.slice(0, LONG_LINE_THRESHOLD)
+  // ── Incremental pipeline ──
+  // Appends feed the incremental engine (O(batch), not O(total)); a new
+  // array reference (reload / trim / paging replace) or a toggle/rule
+  // change rebuilds. pipelineVersion is the reactivity bridge: the engine
+  // itself is deliberately non-reactive (deep-reactive DisplayLines would
+  // cost more than the pipeline).
+  const engine = new IncrementalLogPipeline(logStore.processors, logStore.preDrainRules)
+  const pipelineVersion = ref(0)
+  let fedRef: string[] | null = null
+  let fedCount = 0
+
+  watch([logLines, () => logLines.value.length], () => {
+    const arr = logLines.value
+    if (arr !== fedRef || arr.length < fedCount) {
+      engine.reset(arr.slice())
+    } else if (arr.length > fedCount) {
+      engine.push(arr.slice(fedCount))
+    } else {
+      return
+    }
+    fedRef = arr
+    fedCount = arr.length
+    pipelineVersion.value++
+    scheduleMotifRefresh()
+  }, { immediate: true })
+
+  watch(
+    [() => ({ ...logStore.processors }), () => logStore.preDrainRules.map(r => ({ ...r }))],
+    () => {
+      engine.reset(logLines.value.slice(), logStore.processors, logStore.preDrainRules)
+      fedRef = logLines.value
+      fedCount = logLines.value.length
+      pipelineVersion.value++
+    },
+    { deep: true },
+  )
+
+  /** Notify the engine that the LAST line's text changed IN PLACE
+   *  (continues-fragment merge, log contract v2). The [ref, length] watch
+   *  above cannot detect a same-length content change, so the caller
+   *  mutates logLines[last] AND calls this; fedRef/fedCount stay valid
+   *  because the array reference and length are unchanged. */
+  function replaceTailLine(text: string) {
+    engine.replaceTailLine(text)
+    pipelineVersion.value++
+    scheduleMotifRefresh()
   }
 
-  const pipelineResult = computed(() => processLog(logLines.value, logStore.processors, logStore.preDrainRules))
+  // Motifs are throttled inside the engine; make sure the LAST batch's
+  // groups still surface once the quiet period ends.
+  let motifTimer: ReturnType<typeof setTimeout> | null = null
+  function scheduleMotifRefresh() {
+    if (!engine.motifsStale || motifTimer) return
+    motifTimer = setTimeout(() => {
+      motifTimer = null
+      if (engine.motifsStale) {
+        engine.recomputeMotifs()
+        pipelineVersion.value++
+      }
+    }, MOTIF_THROTTLE_MS)
+  }
+  onScopeDispose(() => { if (motifTimer) clearTimeout(motifTimer) })
+
+  const pipelineResult = computed(() => {
+    void pipelineVersion.value
+    return engine.result()
+  })
 
   /** Unified fold state: foldKey → collapsed. Merges auto-fold defaults with user overrides. */
   const foldState = computed(() => {
@@ -79,28 +150,51 @@ export function useLogSurface(
 
   /** Batch-toggle all instances of a group (from side panel) */
   function toggleGroup(groupId: number) {
-    const g = pipelineResult.value.motifGroups.find(g => g.id === groupId)
-    if (!g) return
-    const allCollapsed = g.instances.every((_, idx) =>
-      foldState.value.get(`m:${g.id}:${idx}`) ?? false,
+    const group = pipelineResult.value.motifGroups.find(candidate => candidate.id === groupId)
+    if (!group) return
+    const allCollapsed = group.instances.every((_, idx) =>
+      foldState.value.get(`m:${group.id}:${idx}`) ?? false,
     )
     const newVal = !allCollapsed
-    for (let idx = 0; idx < g.instances.length; idx++) {
-      foldOverrides.value.set(`m:${g.id}:${idx}`, newVal)
+    for (let idx = 0; idx < group.instances.length; idx++) {
+      foldOverrides.value.set(`m:${group.id}:${idx}`, newVal)
     }
   }
 
+  // ── Virtualized scrolling ──
+  // The render surface is virtualized (LogSurfaceView), so DOM queries no
+  // longer see off-screen items. LogSurfaceView injects its virtualizer's
+  // scrollToIndex here on mount; before injection scrolling is a no-op
+  // (scrollToBottom falls back to raw scrollTop on logContainer).
+  type ScrollAlign = 'start' | 'center' | 'end'
+  const scrollToIndexRef = ref<((idx: number, align?: ScrollAlign) => void) | null>(null)
+
+  function scrollToRenderItem(renderIdx: number) {
+    scrollToIndexRef.value?.(renderIdx, 'center')
+  }
+
   function scrollToGroup(groupId: number) {
-    const container = logContainer.value
-    if (!container) return
-    // Motif group foldKeys are `m:${groupId}:${instIdx}`; scroll to the first instance.
+    // Motif group foldKeys are `m:${groupId}:${instIdx}`; scroll to the
+    // first render item of the first instance.
     const prefix = `m:${groupId}:`
-    for (const el of container.querySelectorAll('[data-fold-key]')) {
-      const key = el.getAttribute('data-fold-key')
-      if (key && key.startsWith(prefix)) {
-        el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    const items = renderItems.value
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i]
+      if ('foldKey' in item && item.foldKey.startsWith(prefix)) {
+        scrollToRenderItem(i)
         return
       }
+    }
+  }
+
+  /** Pin the view to the last render item (follow mode). */
+  function scrollToBottom() {
+    const count = renderItems.value.length
+    if (scrollToIndexRef.value && count > 0) {
+      scrollToIndexRef.value(count - 1, 'end')
+    } else {
+      const el = logContainer.value
+      if (el) el.scrollTop = el.scrollHeight
     }
   }
 
@@ -130,25 +224,58 @@ export function useLogSurface(
   const searchQuery = ref('')
   const searchInput = ref<{ focus: () => void } | null>(null)
   const searchIdx = ref(0)
+  /** Interpret the query as a regular expression (case-insensitive). */
+  const searchRegex = ref(false)
+  /** Set when regex mode is on and the pattern doesn't compile. */
+  const searchError = ref('')
+  /** True when the match list hit SEARCH_MATCH_CAP (display as "5000+"). */
+  const searchTruncated = ref(false)
+
+  // Debounced: a short query over a 20k buffer re-scans on every keystroke
+  // otherwise. The scan itself is capped so pathological queries stay flat.
+  const debouncedQuery = ref('')
+  let searchTimer: ReturnType<typeof setTimeout> | null = null
+  watch([searchQuery, searchRegex], () => {
+    searchIdx.value = 0
+    if (searchTimer) clearTimeout(searchTimer)
+    searchTimer = setTimeout(() => {
+      searchTimer = null
+      debouncedQuery.value = searchQuery.value
+    }, SEARCH_DEBOUNCE_MS)
+  })
+  onScopeDispose(() => { if (searchTimer) clearTimeout(searchTimer) })
 
   const searchMatches = computed(() => {
-    if (!searchQuery.value) return [] as number[]
-    const q = searchQuery.value.toLowerCase()
+    searchTruncated.value = false
+    searchError.value = ''
+    const q = debouncedQuery.value
+    if (!q) return [] as number[]
+
+    let test: (text: string) => boolean
+    if (searchRegex.value) {
+      try {
+        const re = new RegExp(q, 'i')
+        test = (text) => re.test(text)
+      } catch (e: any) {
+        searchError.value = e?.message || 'invalid regex'
+        return []
+      }
+    } else {
+      const lq = q.toLowerCase()
+      test = (text) => text.toLowerCase().includes(lq)
+    }
+
     const matches: number[] = []
-    for (let i = 0; i < renderItems.value.length; i++) {
+    for (let i = 0; i < renderItems.value.length && matches.length < SEARCH_MATCH_CAP; i++) {
       const item = renderItems.value[i]
-      if (item.type === 'line') {
-        if ((item as any).line.text.toLowerCase().includes(q)) matches.push(i)
-      } else if (item.type === 'drain-block') {
-        if ((item as DrainBlockItem).lines.some(l => l.text.toLowerCase().includes(q))) matches.push(i)
-      } else if (item.type === 'group-block') {
-        if ((item as GroupBlockItem).lines.some(l => l.text.toLowerCase().includes(q))) matches.push(i)
+      // Expanded blocks are flattened, so block lines match individually.
+      if (item.type === 'line' || item.type === 'block-line') {
+        if (test(item.line.text)) matches.push(i)
       }
     }
+    if (matches.length >= SEARCH_MATCH_CAP) searchTruncated.value = true
     return matches
   })
-
-  watch(searchQuery, () => { searchIdx.value = 0 })
 
   function toggleSearch() {
     searchOpen.value = !searchOpen.value
@@ -162,18 +289,6 @@ export function useLogSurface(
   function closeSearch() {
     searchOpen.value = false
     searchQuery.value = ''
-  }
-
-  function scrollToRenderItem(renderIdx: number) {
-    const container = logContainer.value
-    if (!container) return
-    const children = container.children
-    // skip the "no log output" placeholder if present
-    const offset = logLines.value.length === 0 ? 1 : 0
-    const idx = renderIdx + offset
-    if (idx < children.length) {
-      children[idx].scrollIntoView({ behavior: 'smooth', block: 'center' })
-    }
   }
 
   function searchNext() {
@@ -200,8 +315,15 @@ export function useLogSurface(
     // pipeline
     pipelineResult, foldState, effectiveHidden, renderItems,
     toggleFold, toggleGroup, scrollToGroup, lineClasses, getSegments, resetPipeline,
+    replaceTailLine,
+    // scrolling (LogSurfaceView injects scrollToIndexRef and binds logContainer)
+    logContainer, scrollToIndexRef, scrollToBottom,
     // search
     searchOpen, searchQuery, searchInput, searchIdx, searchMatches,
+    searchRegex, searchError, searchTruncated,
     toggleSearch, closeSearch, scrollToRenderItem, searchNext, searchPrev, isSearchHit,
   }
 }
+
+/** The full surface object, passed as a single prop to LogSurfaceView. */
+export type LogSurface = ReturnType<typeof useLogSurface>

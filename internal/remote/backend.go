@@ -301,24 +301,28 @@ func (b *Backend) refreshJobStatus(ctx context.Context, jobID string) error {
 	if err != nil {
 		return err
 	}
-	var running, pending, done int
+	var running, pending, success, failed, killed int
 	for _, t := range tasks {
-		switch {
-		case t.Status == "running":
+		switch t.Status {
+		case "running":
 			running++
-		case t.Status == "pending":
+		case "pending":
 			pending++
-		case isTerminal(t.Status):
-			done++
+		case "success":
+			success++
+		case "failed":
+			failed++
+		case "killed":
+			killed++
 		}
 	}
-	started := running+done > 0
+	started := running+success+failed+killed > 0
 	ended := pending+running == 0
 
 	status := "pending"
 	switch {
 	case ended:
-		status = "done"
+		status = store.TerminalJobStatus(success, failed, killed)
 	case started:
 		status = "running"
 	}

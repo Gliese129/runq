@@ -3,13 +3,13 @@
     <div class="d-flex align-center justify-space-between mb-2">
       <div class="d-flex align-center ga-2">
         <v-icon size="18">mdi-alert-circle-outline</v-icon>
-        <span class="text-body-2 font-weight-medium">Preflight check failed</span>
+        <span class="text-body-2 font-weight-medium">{{ t('submit.preflight_failed') }}</span>
       </div>
       <div class="d-flex ga-1">
         <v-btn size="x-small" variant="tonal" @click="$emit('skip-preflight')">
-          <v-icon start size="12">mdi-skip-next</v-icon> Submit anyway
+          <v-icon start size="12">mdi-skip-next</v-icon> {{ t('submit.submit_anyway') }}
         </v-btn>
-        <v-btn v-if="closable" size="x-small" icon variant="text" @click="$emit('close')">
+        <v-btn v-if="closable" size="x-small" icon variant="text" :aria-label="t('common.close')" @click="$emit('close')">
           <v-icon size="14">mdi-close</v-icon>
         </v-btn>
       </div>
@@ -36,6 +36,9 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
+import { useI18n } from 'vue-i18n'
+
+const { t } = useI18n()
 
 const props = defineProps<{
   message: string
@@ -55,11 +58,13 @@ interface FindingGroup {
   items: string[]
 }
 
-const CATEGORY_META: Record<string, { label: string; icon: string; color: string }> = {
-  import: { label: 'Import errors', icon: 'mdi-package-variant-remove', color: 'error' },
-  pip_check: { label: 'Dependency conflicts', icon: 'mdi-package-variant', color: 'warning' },
-  env: { label: 'Environment', icon: 'mdi-console', color: 'error' },
-  file: { label: 'File issues', icon: 'mdi-file-alert-outline', color: 'warning' },
+// Labels are i18n keys — the category TOKENS come from the backend, but
+// the human-readable group titles are frontend copy and must localize.
+const CATEGORY_META: Record<string, { labelKey: string; icon: string; color: string }> = {
+  import: { labelKey: 'preflight.cat_import', icon: 'mdi-package-variant-remove', color: 'error' },
+  pip_check: { labelKey: 'preflight.cat_pip_check', icon: 'mdi-package-variant', color: 'warning' },
+  env: { labelKey: 'preflight.cat_env', icon: 'mdi-console', color: 'error' },
+  file: { labelKey: 'preflight.cat_file', icon: 'mdi-file-alert-outline', color: 'warning' },
 }
 
 const parsed = computed(() => {
@@ -89,8 +94,15 @@ const parsed = computed(() => {
 const groups = computed<FindingGroup[]>(() => {
   const result: FindingGroup[] = []
   for (const [cat, items] of Object.entries(parsed.value.groups)) {
-    const meta = CATEGORY_META[cat] || { label: cat, icon: 'mdi-alert-outline', color: 'warning' }
-    result.push({ category: cat, ...meta, items })
+    const meta = CATEGORY_META[cat]
+    result.push({
+      category: cat,
+      // Unknown categories fall back to the raw backend token.
+      label: meta ? t(meta.labelKey) : cat,
+      icon: meta?.icon ?? 'mdi-alert-outline',
+      color: meta?.color ?? 'warning',
+      items,
+    })
   }
   // Sort: errors first, then warnings
   return result.sort((a, b) => (a.color === 'error' ? 0 : 1) - (b.color === 'error' ? 0 : 1))

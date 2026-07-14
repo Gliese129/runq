@@ -116,12 +116,30 @@ type Page struct {
 	// scan, so it is set to -1 when unknown (large files). Callers must
 	// handle -1 gracefully.
 	TotalLines int `json:"total_lines"`
+
+	// StartLine is the 0-based absolute line number of the page's first
+	// line (log contract v2, count_lines=1). -1 when not computed.
+	StartLine int `json:"start_line"`
+
+	// Partial reports that the page's last entry is a FRAGMENT of a line
+	// longer than the byte budget; the chain continues at NextOffset.
+	Partial bool `json:"partial,omitempty"`
+
+	// Continues reports that the page's FIRST entry continues the previous
+	// page's unterminated last line (the byte before Offset is not '\n').
+	Continues bool `json:"continues,omitempty"`
+
+	// Rotated reports that the requested offset was beyond the current file
+	// size (log rotation); the page restarts from offset 0.
+	Rotated bool `json:"rotated,omitempty"`
 }
 
 // ReadLines reads up to n lines starting from the given byte offset.
 //
 // Algorithm:
-//  1. Seek to offset; snap backward to current line's start.
+//  1. Seek to offset (used AS-IS — log contract v2: offsets returned by
+//     this package are always line/fragment boundaries, so the historical
+//     backward snap-to-line-start was removed; NextOffset never rewinds).
 //  2. Read up to n lines via bufio.Reader.ReadBytes('\n').
 //  3. Strip ANSI; track raw byte positions for StartOffset / EndOffset.
 //  4. TotalBytes from r.size; TotalLines = -1 (lazy).
@@ -135,10 +153,7 @@ func (r *Reader) ReadLines(offset int64, n int) (*Page, error) {
 	}
 	_ = r.Refresh()
 
-	startOffset, err := snapToLineStart(r.f, offset, r.size)
-	if err != nil {
-		return nil, err
-	}
+	startOffset := min(offset, r.size)
 	if _, err := r.f.Seek(startOffset, io.SeekStart); err != nil {
 		return nil, err
 	}
@@ -203,6 +218,7 @@ func (r *Reader) ReadLines(offset int64, n int) (*Page, error) {
 		Size:       r.size,
 		Truncated:  truncated,
 		TotalLines: -1, // lazy: full-file line count not computed on read path
+		StartLine:  -1,
 	}, nil
 }
 
@@ -499,12 +515,11 @@ func ParseActivityTSV(path string, fs rfs.FS) ([]ActivityRecord, error) {
 	return records, nil
 }
 
-// snapWindow bounds how far snapToLineStart may rewind. It must stay well
-// below MaxPageSize: that is what guarantees the PROGRESS invariant — a
-// truncated-page continuation point sits page-budget bytes past its line
-// start, and an unbounded rewind would re-read the same page forever.
-// 64KB is generous for any sane line; beyond it the offset is deep inside
-// a mega-line and starting in place (continuation view) is the right call.
+// snapWindow bounds how far snapToLineStart may rewind. Snap-to-line-start
+// is now used by Search ONLY (log contract v2 removed it from the page
+// read path: page offsets never rewind). 64KB is generous for any sane
+// line; beyond it the offset is deep inside a mega-line and starting in
+// place is the right call.
 const snapWindow = int64(BufferSize)
 
 func snapToLineStart(f rfs.File, offset int64, fileSize int64) (lineStart int64, err error) {

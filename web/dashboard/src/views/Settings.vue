@@ -6,12 +6,14 @@
     <v-card class="mb-4 pa-5">
       <div class="text-subtitle-2 mb-3">{{ t('settings.system') }}</div>
       <div class="d-flex flex-column ga-3">
-        <div class="d-flex align-center justify-space-between">
-          <span class="text-on-surface-variant">{{ t('settings.mode') }}</span>
-          <v-btn-toggle v-model="globalMode" mandatory density="compact" variant="outlined" divided>
-            <v-btn value="daemon" size="small">{{ t('settings.mode_local') }}</v-btn>
-            <v-btn value="hpc" size="small">{{ t('settings.mode_hpc') }}</v-btn>
-          </v-btn-toggle>
+        <div class="d-flex align-center justify-space-between ga-4">
+          <span class="text-on-surface-variant flex-shrink-0">{{ t('settings.default_target') }}</span>
+          <v-select
+            v-model="globalDefaultTarget"
+            :items="config.targets.map(x => x.name)"
+            density="compact" variant="outlined" hide-details
+            style="max-width: 360px"
+          />
         </div>
         <div class="d-flex align-center justify-space-between ga-4">
           <span class="text-on-surface-variant flex-shrink-0">{{ t('settings.data_path') }}</span>
@@ -40,12 +42,20 @@
          whether or not it exists in the file yet -->
     <v-card class="mb-4 pa-5">
       <div class="d-flex align-center justify-space-between mb-1">
-        <div class="text-subtitle-2">{{ t('settings.hpc_title') }}</div>
+        <div class="d-flex align-center ga-3">
+          <div class="text-subtitle-2">{{ t('settings.hpc_title') }}</div>
+          <v-select
+            v-model="selectedTarget"
+            :items="targetNames"
+            density="compact" variant="outlined" hide-details
+            class="font-mono" style="min-width: 160px"
+          />
+        </div>
         <div class="d-flex ga-2">
-          <v-btn size="x-small" variant="tonal" @click="checkHPC">
+          <v-btn size="x-small" variant="tonal" :disabled="!selectedTarget" @click="checkHPC">
             <v-icon start size="12">mdi-stethoscope</v-icon> {{ t('settings.hpc_check') }}
           </v-btn>
-          <v-btn size="x-small" variant="tonal" color="primary" :loading="savingHPC" @click="saveHPC">{{ t('common.save') }}</v-btn>
+          <v-btn size="x-small" variant="tonal" color="primary" :loading="savingHPC" :disabled="!selectedTarget" @click="saveHPC">{{ t('common.save') }}</v-btn>
         </div>
       </div>
       <div class="text-caption text-on-surface-variant mb-3">
@@ -102,7 +112,7 @@
           </span>
           <v-icon size="14" color="on-surface-variant" class="flex-shrink-0">mdi-pencil-outline</v-icon>
         </div>
-        <v-btn icon size="x-small" variant="text" @click="hpcParser.splice(i, 1)">
+        <v-btn icon size="x-small" variant="text" :aria-label="t('common.delete')" :title="t('common.delete')" @click="hpcParser.splice(i, 1)">
           <v-icon size="14">mdi-close</v-icon>
         </v-btn>
       </div>
@@ -121,12 +131,12 @@
 
       <!-- Check results: same three-state grammar as preflight -->
       <div v-if="hpcResults.length > 0" class="mt-2">
-        <div v-for="r in hpcResults" :key="r.Name" class="d-flex align-start ga-2 py-1" style="font-size: 12px">
-          <v-icon size="14" :color="r.Status === 'ok' ? 'success' : r.Status === 'fail' ? 'error' : 'grey'">
-            {{ r.Status === 'ok' ? 'mdi-check' : r.Status === 'fail' ? 'mdi-alert-circle' : 'mdi-minus' }}
+        <div v-for="r in hpcResults" :key="r.name" class="d-flex align-start ga-2 py-1" style="font-size: 12px">
+          <v-icon size="14" :color="r.status === 'ok' ? 'success' : r.status === 'fail' ? 'error' : 'grey'">
+            {{ r.status === 'ok' ? 'mdi-check' : r.status === 'fail' ? 'mdi-alert-circle' : 'mdi-minus' }}
           </v-icon>
-          <code class="flex-shrink-0" style="width: 140px">{{ r.Name }}</code>
-          <span class="text-on-surface-variant font-mono" style="word-break: break-all">{{ r.Detail }}</span>
+          <code class="flex-shrink-0" style="width: 140px">{{ r.name }}</code>
+          <span class="text-on-surface-variant font-mono" style="word-break: break-all">{{ r.detail }}</span>
         </div>
       </div>
     </v-card>
@@ -239,7 +249,7 @@ import { useTheme } from 'vuetify'
 import { useConfigStore } from '@/stores/config'
 import { useSettingsStore } from '@/stores/settings'
 import { useSnackbar } from '@/composables/useSnackbar'
-import { configApi, type HPCConfig, type HPCCheckResult } from '@/apis/config'
+import { configApi, type TargetConfig, type HPCCheckResult } from '@/apis/config'
 import ShellTemplateEditor from '@/components/ShellTemplateEditor.vue'
 
 const { t, locale } = useI18n()
@@ -248,35 +258,53 @@ const config = useConfigStore()
 const settings = useSettingsStore()
 const snack = useSnackbar()
 
-// ── Global config (mode / data_path) ──
-const globalMode = ref('')
+// ── Global config (default_target / data_path — v1: mode is gone) ──
+const globalDefaultTarget = ref('')
 const globalDataPath = ref('')
 const savingGlobal = ref(false)
 const globalDirty = computed(() =>
-  config.loaded && (globalMode.value !== config.mode || globalDataPath.value !== config.dataPath),
+  config.loaded && (globalDefaultTarget.value !== config.defaultTarget || globalDataPath.value !== config.dataPath),
 )
 
 async function saveGlobal() {
   savingGlobal.value = true
   try {
-    await configApi.putGlobal(globalMode.value, globalDataPath.value)
+    await configApi.putGlobal(globalDataPath.value, globalDefaultTarget.value)
     snack.success(t('settings.global_saved'))
     await config.fetchConfig()
     syncGlobal()
   } catch (e: any) {
-    snack.error(e?.message || 'Save failed')
+    snack.error(e?.message || t('common.error'))
   } finally {
     savingGlobal.value = false
   }
 }
 
 function syncGlobal() {
-  globalMode.value = config.mode
+  globalDefaultTarget.value = config.defaultTarget
   globalDataPath.value = config.dataPath
 }
 
-// ── HPC templates (schema-driven: all fields always rendered) ──
+// ── Target scheduler templates (v1: /hpc-config* is retired — templates
+// live on the selected target; read-modify-write preserves unknown fields) ──
 type HPCFieldKey = 'submit_template' | 'submit_id_regex' | 'status_template' | 'kill_template'
+
+const targetItems = ref<TargetConfig[]>([])
+const targetNames = computed(() => targetItems.value.map(x => x.name))
+const selectedTarget = ref('')
+
+/** Populate the form from the selected target's stored config. */
+watch(selectedTarget, (name) => {
+  const item = targetItems.value.find(x => x.name === name)
+  hpcResults.value = []
+  hpcForm.value = {
+    submit_template: (item?.submit_template as string) || '',
+    submit_id_regex: (item?.submit_id_regex as string) || '',
+    status_template: (item?.status_template as string) || '',
+    kill_template: (item?.kill_template as string) || '',
+  }
+  hpcParser.value = [...((item?.status_parser as string[]) || [])]
+})
 const hpcFields: { key: HPCFieldKey; labelKey: string; hintKey: string; placeholder: string }[] = [
   { key: 'submit_template', labelKey: 'settings.hpc_f_submit', hintKey: 'settings.hpc_f_submit_hint', placeholder: 'sbatch --gpus={{gpus}} {{run_sh}}' },
   { key: 'submit_id_regex', labelKey: 'settings.hpc_f_regex', hintKey: 'settings.hpc_regex_hint', placeholder: 'Submitted batch job ([0-9]+)' },
@@ -329,26 +357,30 @@ function onEditorApply(value: string) {
   editorTarget = null
 }
 
-// ── Presets (same source as `hpc init --scheduler`) ──
+// ── Presets (same source as `runq target config add --preset`) ──
 const presetNames = ref<string[]>([])
-const presetMap = ref<Record<string, HPCConfig>>({})
+const presetMap = ref<Record<string, TargetConfig>>({})
 
 function loadPreset(name: string) {
   const p = presetMap.value[name]
   if (!p) return
   hpcForm.value = {
-    submit_template: p.submit_template || '',
-    submit_id_regex: p.submit_id_regex || '',
-    status_template: p.status_template || '',
-    kill_template: p.kill_template || '',
+    submit_template: (p.submit_template as string) || '',
+    submit_id_regex: (p.submit_id_regex as string) || '',
+    status_template: (p.status_template as string) || '',
+    kill_template: (p.kill_template as string) || '',
   }
-  hpcParser.value = [...(p.status_parser || [])]
+  hpcParser.value = [...((p.status_parser as string[]) || [])]
   hpcResults.value = []
   snack.info(t('settings.hpc_preset_loaded', { name }))
 }
 
-function collectHPC(): HPCConfig {
+/** Merge form fields over the stored TargetConfig — unknown fields survive. */
+function collectTarget(): TargetConfig {
+  const base = targetItems.value.find(x => x.name === selectedTarget.value) ?? { name: selectedTarget.value }
   return {
+    ...base,
+    name: selectedTarget.value,
     submit_template: hpcForm.value.submit_template,
     submit_id_regex: hpcForm.value.submit_id_regex,
     status_template: hpcForm.value.status_template || undefined,
@@ -358,25 +390,34 @@ function collectHPC(): HPCConfig {
 }
 
 async function checkHPC() {
+  if (!selectedTarget.value) return
   try {
-    const res = await configApi.checkHPC(collectHPC())
+    const res = await configApi.checkTarget(selectedTarget.value, collectTarget())
     hpcResults.value = res.results
   } catch (e: any) {
-    snack.error(e?.message || 'Check failed')
+    snack.error(e?.message || t('common.error'))
   }
 }
 
 async function saveHPC() {
+  if (!selectedTarget.value) return
   savingHPC.value = true
   try {
-    await configApi.putHPC(collectHPC())
+    await configApi.putTarget(selectedTarget.value, collectTarget())
+    await reloadTargets()
     await checkHPC()
     snack.success(t('settings.hpc_saved'))
   } catch (e: any) {
-    snack.error(e?.message || 'Save failed')
+    snack.error(e?.message || t('common.error'))
   } finally {
     savingHPC.value = false
   }
+}
+
+async function reloadTargets() {
+  const res = await configApi.listTargets()
+  targetItems.value = res.items ?? []
+  hpcPlaceholders.value = res.placeholders ?? {}
 }
 
 const webhookUrl = ref('')
@@ -436,7 +477,7 @@ async function testWebhook() {
     await settings.testWebhook()
     snack.success(t('settings.webhook_test_ok'))
   } catch (e: any) {
-    snack.error(e?.message || 'Webhook test failed')
+    snack.error(e?.message || t('common.error'))
   } finally {
     testing.value = false
   }
@@ -462,22 +503,18 @@ onMounted(async () => {
   syncGlobal()
 
   try {
-    const presets = await configApi.getHPCPresets()
-    presetNames.value = presets.names
-    presetMap.value = presets.presets
+    const presets = await configApi.targetPresets()
+    presetNames.value = presets.names ?? []
+    presetMap.value = presets.presets ?? {}
   } catch { /* presets unavailable */ }
 
   try {
-    const res = await configApi.getHPC()
-    hpcPlaceholders.value = res.placeholders
-    if (res.exists) {
-      hpcForm.value = {
-        submit_template: res.config.submit_template || '',
-        submit_id_regex: res.config.submit_id_regex || '',
-        status_template: res.config.status_template || '',
-        kill_template: res.config.kill_template || '',
-      }
-      hpcParser.value = [...(res.config.status_parser || [])]
+    await reloadTargets()
+    // Preselect the default target (watch populates the form).
+    if (!selectedTarget.value) {
+      selectedTarget.value = targetNames.value.includes(config.defaultTarget)
+        ? config.defaultTarget
+        : (targetNames.value[0] ?? '')
     }
   } catch { /* endpoint unavailable — leave schema-rendered empty fields */ }
 })

@@ -33,6 +33,16 @@ export interface LinkSet {
   members: string[]
 }
 
+/**
+ * Globally unique link-set id. Both creation paths (decompile on import /
+ * re-run, and manual Link in StepConfigure) MUST use this — two local
+ * `ls${n}` counters once collided, so unlink deleted both same-id sets.
+ * The id is frontend-internal and never enters the submit payload.
+ */
+export function newLinkSetId(): string {
+  return globalThis.crypto?.randomUUID?.() ?? `ls-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+}
+
 /** Link-set accent colors. Deliberately disjoint from statusGrammar's
  *  semantic colors (green/red/amber are taken by task states). */
 export const LINK_PALETTE = [
@@ -256,7 +266,6 @@ export function decompile(cfg: {
   const rows: ParamRow[] = []
   const linkSets: LinkSet[] = []
   const seen = new Set<string>()
-  let setCounter = 0
 
   const pushRow = (name: string, values: any[]) => {
     if (seen.has(name)) return
@@ -277,7 +286,7 @@ export function decompile(cfg: {
       names.push(name)
     }
     if (block.method === 'list' && names.length >= 2) {
-      linkSets.push({ id: `ls${setCounter++}`, members: names })
+      linkSets.push({ id: newLinkSetId(), members: names })
     }
   }
 

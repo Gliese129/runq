@@ -1,5 +1,5 @@
 import axios from 'axios'
-import { api } from './client'
+import { api, API_BASE } from './client'
 import type { LogPage } from '@/types/api'
 
 export interface UtilsLogSession {
@@ -15,7 +15,7 @@ export interface UtilsLogReadOptions {
 export const utilsApi = {
   /** Upload raw log content, get a session ID back. */
   uploadLog: async (body: string | Blob): Promise<UtilsLogSession> => {
-    const res = await axios.post<UtilsLogSession>('/api/dashboard/utils/log', body, {
+    const res = await axios.post<UtilsLogSession>(`${API_BASE}/log-sessions`, body, {
       headers: { 'Content-Type': 'application/octet-stream' },
       timeout: 60000,
     })
@@ -28,10 +28,10 @@ export const utilsApi = {
     if (opts.offset != null) params.set('offset', String(opts.offset))
     if (opts.lines != null) params.set('lines', String(opts.lines))
     const query = params.toString()
-    return api.get<LogPage>(`/utils/log/${encodeURIComponent(id)}${query ? `?${query}` : ''}`)
+    return api.get<LogPage>(`/log-sessions/${encodeURIComponent(id)}${query ? `?${query}` : ''}`)
   },
 
   /** Delete an uploaded log session. */
   deleteLog: (id: string) =>
-    api.del(`/utils/log/${encodeURIComponent(id)}`),
+    api.del(`/log-sessions/${encodeURIComponent(id)}`),
 }

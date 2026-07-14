@@ -13,9 +13,11 @@ import (
 // Keep this file free of business logic — only struct definitions.
 
 type JobSummary struct {
-	ID        string         `json:"id"`
-	Project   string         `json:"project"`
-	Note      string         `json:"note"`
+	ID      string `json:"id"`
+	Project string `json:"project"`
+	Note    string `json:"note"`
+	// Status: pending / running / paused while live; done / failed /
+	// partial / killed once terminal (see store.TerminalJobStatus).
 	Status    string         `json:"status"`
 	Target    string         `json:"target"`
 	Archived  bool           `json:"archived"`

@@ -500,6 +500,10 @@ func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 		writeErrorStatus(w, http.StatusBadRequest, fmt.Errorf("project_name is required"))
 		return
 	}
+	if err := project.ValidateRetryBounds(cfg.Defaults.MaxRetry); err != nil {
+		writeErrorStatus(w, http.StatusBadRequest, err)
+		return
+	}
 	if err := s.backend.CreateProject(r.Context(), cfg); err != nil {
 		writeError(w, err)
 		return
@@ -521,6 +525,10 @@ func (s *Server) handleUpdateProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg.ProjectName = name
+	if err := project.ValidateRetryBounds(cfg.Defaults.MaxRetry); err != nil {
+		writeErrorStatus(w, http.StatusBadRequest, err)
+		return
+	}
 	if err := s.backend.UpdateProject(r.Context(), cfg); err != nil {
 		writeError(w, err)
 		return
@@ -889,35 +897,74 @@ func (s *Server) handleGetTask(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, view)
 }
 
-// handleTaskLog reads a page of log lines starting at a byte offset.
+// handleTaskLog reads one page of log lines (log stream contract v2).
 // Query params:
-//   - offset: byte offset into the raw log file; ABSENT = tail view
-//     (TaskLogTail — the first-paint entry point)
-//   - lines:  number of lines to return (default 200, max 5000)
+//   - max_bytes:   page byte budget (default 256KB, cap 1MB); takes
+//     priority over the legacy `lines` param
+//   - offset:      byte offset into the raw log file
+//   - tail:        "1" opens at the tail (size − max_bytes, aligned past
+//     the first newline); also the default when offset is absent
+//   - count_lines: "1" adds total_lines + start_line (one scan, cached)
+//   - lines:       LEGACY line-count path (old CLI): honoured only when
+//     none of the v2 params are present
 //
-// Returns a logfile.Page JSON (offset / next_offset / size / truncated).
-// All path/FS resolution lives in the owning lane behind the Backend
-// interface — this handler never touches the filesystem.
+// Returns a logfile.Page JSON (offset / next_offset / size / truncated /
+// partial / continues / rotated / total_lines / start_line). All path/FS
+// resolution lives in the owning lane behind the Backend interface — this
+// handler never touches the filesystem.
 func (s *Server) handleTaskLog(w http.ResponseWriter, r *http.Request) {
-	lines := logfile.DefaultPageLines
-	if v := r.URL.Query().Get("lines"); v != "" {
-		if n, e := strconv.Atoi(v); e == nil && n > 0 && n <= logfile.MaxPageLines {
+	q := r.URL.Query()
+
+	// Legacy line-based path — kept byte-for-byte for old CLI clients,
+	// which always send `lines` and never the v2 params.
+	if q.Get("max_bytes") == "" && q.Get("tail") == "" && q.Get("count_lines") == "" && q.Get("lines") != "" {
+		lines := logfile.DefaultPageLines
+		if n, e := strconv.Atoi(q.Get("lines")); e == nil && n > 0 && n <= logfile.MaxPageLines {
 			lines = n
 		}
+		var page *backend.LogPage
+		var err error
+		if v := q.Get("offset"); v != "" {
+			offset, e := strconv.ParseInt(v, 10, 64)
+			if e != nil || offset < 0 {
+				writeErr(w, http.StatusBadRequest, backend.CodeBadRequest, "invalid offset")
+				return
+			}
+			page, err = s.backend.TaskLogRead(r.Context(), r.PathValue("id"), offset, lines)
+		} else {
+			page, err = s.backend.TaskLogTail(r.Context(), r.PathValue("id"), lines)
+		}
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, page)
+		return
 	}
 
-	var page *backend.LogPage
-	var err error
-	if v := r.URL.Query().Get("offset"); v != "" {
-		offset, e := strconv.ParseInt(v, 10, 64)
-		if e != nil || offset < 0 {
+	// v2 byte-budget path. Budget clamping lives in logfile.ReadPage.
+	req := logfile.PageRequest{MaxBytes: logfile.DefaultBudgetBytes}
+	if v := q.Get("max_bytes"); v != "" {
+		if n, e := strconv.ParseInt(v, 10, 64); e == nil && n > 0 {
+			req.MaxBytes = n
+		}
+	}
+	switch {
+	case q.Get("tail") == "1":
+		req.Tail = true
+	case q.Get("offset") != "":
+		n, e := strconv.ParseInt(q.Get("offset"), 10, 64)
+		if e != nil || n < 0 {
 			writeErr(w, http.StatusBadRequest, backend.CodeBadRequest, "invalid offset")
 			return
 		}
-		page, err = s.backend.TaskLogRead(r.Context(), r.PathValue("id"), offset, lines)
-	} else {
-		page, err = s.backend.TaskLogTail(r.Context(), r.PathValue("id"), lines)
+		req.Offset = n
+	default:
+		req.Tail = true // no coordinates yet: first paint is the tail
 	}
+	req.CountLines = q.Get("count_lines") == "1"
+
+	page, err := s.backend.TaskLogPage(r.Context(), r.PathValue("id"), req)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -925,9 +972,16 @@ func (s *Server) handleTaskLog(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, page)
 }
 
-// handleTaskLogStream streams new log lines via SSE.
+// handleTaskLogStream streams new log lines via SSE (log contract v2).
 // Query params:
-//   - offset: byte offset to start streaming from (default 0)
+//   - offset:    byte offset to start streaming from (default 0)
+//   - max_bytes: per-event page byte budget (default 256KB, cap 1MB)
+//
+// The Last-Event-ID request header (native EventSource reconnect) takes
+// priority over the URL offset: the URL still holds the FIRST connect's
+// position, the header holds the last event actually delivered. Every
+// event carries `id: <next_offset>` to feed that mechanism, and a
+// `retry: 2000` preamble sets the client's reconnect delay.
 //
 // Sends "lines" events containing logfile.Page JSON as new content appears.
 // The handler is a bare pull loop over LogFollower — poll cadence,
@@ -946,6 +1000,17 @@ func (s *Server) handleTaskLogStream(w http.ResponseWriter, r *http.Request) {
 			offset = n
 		}
 	}
+	if v := r.Header.Get("Last-Event-ID"); v != "" {
+		if n, e := strconv.ParseInt(v, 10, 64); e == nil && n >= 0 {
+			offset = n
+		}
+	}
+	maxBytes := int64(logfile.DefaultBudgetBytes)
+	if v := r.URL.Query().Get("max_bytes"); v != "" {
+		if n, e := strconv.ParseInt(v, 10, 64); e == nil && n > 0 {
+			maxBytes = n
+		}
+	}
 
 	f, err := s.backend.TaskLogFollow(r.Context(), r.PathValue("id"), offset)
 	if err != nil {
@@ -953,10 +1018,19 @@ func (s *Server) handleTaskLogStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer f.Close()
+	// The byte budget rides an optional capability: the real follower
+	// (*logfile.Follower) supports it; stubs/fakes may not — they keep
+	// their default and the stream stays correct, just differently sized.
+	if bf, ok := f.(interface{ SetMaxBytes(int64) }); ok {
+		bf.SetMaxBytes(maxBytes)
+	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
+
+	fmt.Fprint(w, "retry: 2000\n\n")
+	flusher.Flush()
 
 	for {
 		page, err := f.Next(r.Context())
@@ -964,7 +1038,7 @@ func (s *Server) handleTaskLogStream(w http.ResponseWriter, r *http.Request) {
 			return // ctx cancelled (client gone) or follower failed: end stream
 		}
 		data, _ := json.Marshal(page)
-		fmt.Fprintf(w, "event: lines\ndata: %s\n\n", data)
+		fmt.Fprintf(w, "id: %d\nevent: lines\ndata: %s\n\n", page.NextOffset, data)
 		flusher.Flush()
 	}
 }

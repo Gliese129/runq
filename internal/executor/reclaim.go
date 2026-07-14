@@ -85,7 +85,8 @@ func (r *Reclaimer) markDead(ctx context.Context, t *store.TaskRow) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	if t.Resumable && (t.MaxRetry == 0 || t.RetryCount < t.MaxRetry) {
+	// max_retry: -1 = unlimited, 0 = none (RQ-69: zero value must be safe).
+	if t.Resumable && (t.MaxRetry < 0 || t.RetryCount < t.MaxRetry) {
 		if err := r.Store.UpdateTaskStatus(ctx, t.ID, "pending", map[string]any{
 			"retry_count": t.RetryCount + 1,
 			"gpus":        nil,

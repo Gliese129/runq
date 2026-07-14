@@ -34,8 +34,8 @@
             </template>
             <v-list-item-title class="text-body-2 font-weight-medium">{{ p.name }}</v-list-item-title>
             <v-list-item-subtitle class="text-caption">
-              {{ p.job_count }} {{ p.job_count === 1 ? 'job' : 'jobs' }}
-              <span v-if="p.name === prefs.lastProject.value" class="text-primary"> · recent</span>
+              {{ t('project.job_count', { n: p.job_count }, p.job_count) }}
+              <span v-if="p.name === prefs.lastProject.value" class="text-primary"> · {{ t('submit.recent_tag') }}</span>
             </v-list-item-subtitle>
           </v-list-item>
 
@@ -75,7 +75,7 @@
           <span class="text-subtitle-1 font-weight-medium">{{ form.name }}</span>
           <v-chip size="x-small" variant="tonal">{{ envSummary }}</v-chip>
           <v-chip size="x-small" variant="tonal">{{ form.gpus }} GPU{{ form.gpus === 1 ? '' : 's' }}</v-chip>
-          <v-chip size="x-small" variant="tonal">retry {{ form.maxRetry }}</v-chip>
+          <v-chip size="x-small" variant="tonal">retry {{ form.maxRetry < 0 ? '∞' : form.maxRetry }}</v-chip>
         </div>
 
         <table class="summary-table">
@@ -202,7 +202,7 @@
                 >{{ seg }}</span>
               </template>
             </div>
-            <v-btn icon size="x-small" variant="text" @click="editWorkDir">
+            <v-btn icon size="x-small" variant="text" :aria-label="t('common.edit')" :title="t('common.edit')" @click="editWorkDir">
               <v-icon size="14" color="on-surface-variant">mdi-pencil-outline</v-icon>
             </v-btn>
           </div>
@@ -220,7 +220,7 @@
           <v-icon size="14" color="on-surface-variant" class="flex-shrink-0">mdi-pencil-outline</v-icon>
         </div>
         <div class="text-caption text-on-surface-variant mb-3">
-          <span v-text="argsPlaceholder" /> will be replaced with parameters
+          <span v-text="argsPlaceholder" /> {{ t('submit.args_replaced') }}
         </div>
         <ShellTemplateEditor
           v-model="cmdEditorOpen"
@@ -259,7 +259,7 @@
               v-model="form.gpus" :label="t('submit.gpus_per_task')"
               variant="outlined" density="compact" :min="0"
               control-variant="stacked"
-              :hint="config.isPoll ? 'HPC: only used as {{gpus}} in submit_template — set 0 for whole-node queues' : ''"
+              :hint="config.isPoll ? t('submit.gpus_hpc_hint') : ''"
               :persistent-hint="config.isPoll"
               :hide-details="!config.isPoll"
             />
@@ -267,7 +267,7 @@
           <v-col cols="6">
             <v-number-input
               v-model="form.maxRetry" :label="t('submit.max_retry')"
-              variant="outlined" density="compact" :min="0" hide-details
+              variant="outlined" density="compact" :min="-1" hide-details
               control-variant="stacked"
             />
           </v-col>
@@ -316,7 +316,7 @@
               />
 
               <div v-else class="text-caption text-on-surface-variant pa-2">
-                Uses system Python
+                {{ t('submit.system_python') }}
               </div>
             </v-col>
           </v-row>
@@ -327,11 +327,11 @@
           <div class="d-flex align-center justify-space-between mb-2">
             <div class="text-caption text-on-surface-variant d-flex align-center ga-1">
               <v-icon size="12">mdi-variable</v-icon>
-              Parameters
+              {{ t('submit.parameters') }}
               <v-chip size="x-small" variant="tonal">{{ includedParams.length }} / {{ form.params.length }}</v-chip>
             </div>
             <v-btn size="x-small" variant="tonal" color="primary" @click="showParamEditor = true">
-              <v-icon start size="12">mdi-pencil-outline</v-icon> Edit parameters
+              <v-icon start size="12">mdi-pencil-outline</v-icon> {{ t('submit.edit_params') }}
             </v-btn>
           </div>
           <div class="d-flex align-center flex-wrap ga-1">
@@ -341,7 +341,7 @@
               @click="showParamEditor = true"
             >{{ p.name }}<span v-if="p.default" class="text-on-surface-variant">&nbsp;= {{ p.default }}</span></v-chip>
             <span v-if="form.params.length === 0" class="text-caption text-on-surface-variant">
-              No parameters — select a script or add them in the editor
+              {{ t('submit.no_params_hint') }}
             </span>
           </div>
         </div>
@@ -409,19 +409,35 @@ const isCreating = computed(() => mode.value === 'create')
 // Path A is read-only by default; this expands the edit form.
 const editingProject = ref(false)
 
-// ── Dirty tracking ──
+// ── Dirty tracking (snapshot compare) ──
 // goNext saves the project ONLY when something was actually edited (or in
 // create mode). Selecting a project and clicking Next is side-effect free.
-let applying = false
-watch(
-  () => [form_(), state.newProject.params],
-  () => { if (!applying) state.newProject.dirty = true },
-  { deep: true },
-)
-function form_() {
+//
+// Snapshot-based on purpose: the previous `applying` boolean raced with
+// the deep watcher — watch callbacks are pre-flush (async), so by the time
+// they ran the whole synchronous apply had finished and the flag was
+// already false → every programmatic apply was misdetected as a user edit
+// and goNext silently rewrote project.yaml. Comparing against a baseline
+// taken AFTER each apply is immune to callback timing (and as a bonus,
+// edit-then-undo returns to clean).
+function formSnapshot() {
   const { name, workDir, cmd, setupCmd, envText, jobName, gpus, maxRetry, envType, envPath, envName } = state.newProject
   return { name, workDir, cmd, setupCmd, envText, jobName, gpus, maxRetry, envType, envPath, envName }
 }
+function snapshot(): string {
+  return JSON.stringify([formSnapshot(), state.newProject.params])
+}
+let appliedSnapshot = snapshot()
+/** Re-baseline after a programmatic apply: current state == persisted state. */
+function markClean() {
+  appliedSnapshot = snapshot()
+  state.newProject.dirty = false
+}
+watch(
+  () => [formSnapshot(), state.newProject.params],
+  () => { state.newProject.dirty = snapshot() !== appliedSnapshot },
+  { deep: true },
+)
 
 function enterEditMode() {
   editingProject.value = true
@@ -458,13 +474,16 @@ async function doRename() {
     const proj = state.matchedProjects.find(p => p.name === state.projectName)
     if (proj) proj.name = newName
     state.projectName = newName
-    applying = true
+    // Rename is already persisted server-side. If nothing else was edited,
+    // re-baseline (stay clean); if other edits are pending, dirty stays
+    // true and the new name rides along with the eventual save.
+    const otherEditsPending = snapshot() !== appliedSnapshot
     form.name = newName
-    applying = false
+    if (!otherEditsPending) markClean()
     prefs.lastProject.value = newName
     renameDialog.value = false
   } catch (e: any) {
-    form.error = e?.message || 'Rename failed'
+    form.error = e?.message || t('common.error')
   } finally {
     renaming.value = false
   }
@@ -482,7 +501,7 @@ const cmdPlaceholders = computed(() => [
 const defaultCmdTemplate = 'python train.py {{args}}'
 const argsPlaceholder = '{{args}}'
 const jobNamePlaceholderLiteral = 'rq-{{task_id}}'
-const jobNameHint = 'Scheduler job name ({{name}} in submit_template) - params + {{project}} {{job_id}} {{task_id}}. Sanitized automatically (never starts with a digit). Each submit can override it.'
+const jobNameHint = computed(() => t('submit.job_name_tmpl_hint'))
 const displayCmdTemplate = computed(() => form.cmd || defaultCmdTemplate)
 
 function onParamsEdited(params: import('@/types/submit').ProjectParam[]) {
@@ -508,28 +527,31 @@ async function selectProject(name: string) {
 }
 
 function applyProjectConfig(cfg: ProjectConfig, resetGroups = true) {
-  applying = true
+  // Keep the raw config: saves read-modify-write over it so fields the
+  // form doesn't edit (target/env_file/timeout/resume/wandb) are kept.
+  state.newProject.source = cfg
   form.name = cfg.project_name
   form.workDir = cfg.working_dir
   form.cmd = cfg.command_template
   form.setupCmd = cfg.setup_command || ''
   form.envText = Object.entries(cfg.environment || {}).map(([k, v]) => `${k}=${v}`).join('\n')
   form.jobName = cfg.job_name || ''
-  form.gpus = cfg.defaults?.gpus_per_task || 1
+  // ?? not ||: gpus_per_task 0 (CPU-only task) is a legal stored value and
+  // must round-trip — || coerced it to 1 and the save overwrote the base.
+  form.gpus = cfg.defaults?.gpus_per_task ?? 1
   form.maxRetry = cfg.defaults?.max_retry ?? 0
   form.envType = cfg.python_env?.type || ''
   form.envPath = cfg.python_env?.path || ''
   form.envName = cfg.python_env?.name || ''
   form.error = ''
-  const rawParams = ((cfg as any).params || []) as any[]
+  const rawParams = cfg.params || []
   form.params = rawParams.map(p => normalizeParam(p))
   // First-time heuristic ONLY: once any include flag has been persisted,
   // the user's curation is the truth — never clobber it.
   if (!rawParams.some(p => p.include !== undefined)) {
     autoIncludeCommonParams()
   }
-  state.newProject.dirty = false
-  applying = false
+  markClean()
   if (resetGroups) { state.rows = []; state.linkSets = [] }
 }
 
@@ -539,10 +561,8 @@ async function refreshParamsFromProject(cfg: ProjectConfig) {
   scriptPath.value = path
   try {
     const result = await filesApi.parseScript(path, { silent: true })
-    applying = true
     mergeParsedParams(result.args || [])
-    state.newProject.dirty = false
-    applying = false
+    markClean()
   } catch {
     // Keep persisted project.yaml params when script parsing is unavailable.
   }
@@ -631,7 +651,7 @@ function enterCreateMode() {
 }
 
 function resetProjectForm() {
-  applying = true
+  state.newProject.source = undefined
   form.name = ''
   form.workDir = ''
   form.cmd = ''
@@ -645,8 +665,7 @@ function resetProjectForm() {
   form.envName = ''
   form.error = ''
   form.params = []
-  state.newProject.dirty = false
-  applying = false
+  markClean()
   scriptPath.value = ''
   scriptPicked.value = false
   detectedSummary.value = ''
@@ -708,8 +727,8 @@ function autoIncludeCommonParams() {
   }
 }
 
-function normalizeType(t: string): string {
-  const lower = (t || '').toLowerCase()
+function normalizeType(rawType: string): string {
+  const lower = (rawType || '').toLowerCase()
   if (lower === 'str' || lower === 'string') return 'str'
   if (lower === 'int' || lower === 'integer') return 'int'
   if (lower === 'float' || lower === 'number') return 'float'
@@ -725,10 +744,10 @@ function normalizeType(t: string): string {
 /** Build a ProjectParam from a parsed arg or persisted def, moving default
  *  into values for str/file/folder. Persisted `include` is the user's
  *  curation and survives; absent include = never curated. */
-function normalizeParam(a: { name: string; type: string; default?: string; choices?: string[]; min?: number; max?: number; include?: boolean }): import('@/types/submit').ProjectParam {
+function normalizeParam(a: NonNullable<ProjectConfig['params']>[number]): import('@/types/submit').ProjectParam {
   const type = normalizeType(a.type)
   const def = a.default || ''
-  const values = Array.isArray((a as any).choices) ? (a as any).choices.map(String) : []
+  const values = Array.isArray(a.choices) ? a.choices.map(String) : []
   if (['str', 'file', 'folder'].includes(type) && def && !values.includes(def)) {
     values.unshift(def)
   }
@@ -736,8 +755,8 @@ function normalizeParam(a: { name: string; type: string; default?: string; choic
     name: a.name, type, default: def, include: a.include ?? true,
     values: values.length > 0 ? values : undefined,
     min: a.min, max: a.max,
-    strict: (a as any).strict || undefined,
-    scope: (a as any).scope || undefined,
+    strict: a.strict || undefined,
+    scope: a.scope || undefined,
   }
 }
 
@@ -786,7 +805,7 @@ async function onScriptPicked(entry: FSEntry) {
   const parts = dir.split(/[\\/]+/).filter(Boolean)
   if (!form.name) form.name = parts[parts.length - 1] || 'my-project'
   form.workDir = dir
-  const isShell = /\.sh$/.test(entry.name)
+  const isShell = entry.name.endsWith('.sh')
   form.cmd = isShell ? `bash ${entry.name} {{args}}` : `python ${entry.name} {{args}}`
 
   try {

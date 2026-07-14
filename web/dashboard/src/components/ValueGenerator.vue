@@ -3,7 +3,7 @@
     <template #activator="{ props: act }">
       <v-btn
         v-bind="act" icon size="x-small" variant="text" color="primary"
-        aria-label="Generate values" title="Generate values"
+        :aria-label="t('submit.generate_values')" :title="t('submit.generate_values')"
       >
         <v-icon size="15">mdi-auto-fix</v-icon>
       </v-btn>
@@ -52,17 +52,17 @@
         </template>
       </div>
 
-      <div class="text-caption text-on-surface-variant mb-1">Preview ({{ preview.length }})</div>
+      <div class="text-caption text-on-surface-variant mb-1">{{ t('submit.gen_preview') }} ({{ preview.length }})</div>
       <div class="d-flex flex-wrap ga-1 mb-3" style="max-height: 88px; overflow-y: auto">
         <v-chip v-for="v in preview" :key="v" size="x-small" variant="tonal" color="primary" class="font-mono">{{ v }}</v-chip>
         <span v-if="preview.length === 0" class="text-caption text-error">{{ emptyHint }}</span>
       </div>
 
       <div class="d-flex ga-2">
-        <v-btn size="small" variant="tonal" color="primary" :disabled="preview.length === 0" @click="apply('replace')">Replace</v-btn>
-        <v-btn size="small" variant="text" color="primary" :disabled="preview.length === 0" @click="apply('append')">Append</v-btn>
+        <v-btn size="small" variant="tonal" color="primary" :disabled="preview.length === 0" @click="apply('replace')">{{ t('common.replace') }}</v-btn>
+        <v-btn size="small" variant="text" color="primary" :disabled="preview.length === 0" @click="apply('append')">{{ t('common.append') }}</v-btn>
         <v-spacer />
-        <v-btn size="small" variant="text" @click="open = false">Cancel</v-btn>
+        <v-btn size="small" variant="text" @click="open = false">{{ t('common.cancel') }}</v-btn>
       </div>
 
       <div class="text-caption text-on-surface-variant mt-2">
@@ -74,9 +74,12 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import {
   linearSpace, logSpace, ratioSpace, aroundDefault, seedRange,
 } from '@/views/submit/valueGenerators'
+
+const { t } = useI18n()
 
 const props = withDefaults(defineProps<{
   type: string            // 'int' | 'float'

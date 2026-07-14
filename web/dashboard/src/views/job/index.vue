@@ -1,12 +1,15 @@
 <template>
-  <div v-if="store.detail">
+  <div v-if="detail">
     <JobHeader
-      :detail="store.detail"
+      :detail="detail"
       :top-runs="topRuns"
-      :metric-key="topMetricKey"
+      :metric-key="compareKey"
       :can-pause="config.caps.pause_resume"
       :is-poll="config.isPoll"
       :refreshing="refreshing"
+      :pausing="pausing"
+      :killing="killing"
+      :archiving="archiving"
       @pause="togglePause"
       @resume="togglePause"
       @kill="killJob"
@@ -18,9 +21,13 @@
 
     <!-- Filter bar -->
     <div class="d-flex align-center ga-2 mb-3 flex-wrap">
+      <!-- role=button + aria-pressed: VChip is a focusable span and already
+           handles Enter/Space itself; SR users just need the toggle semantics. -->
       <v-chip
         v-for="s in statusOptions"
         :key="s.value"
+        role="button"
+        :aria-pressed="statusFilter === s.value"
         :variant="statusFilter === s.value ? 'flat' : 'outlined'"
         :color="statusFilter === s.value ? 'primary' : undefined"
         size="small"
@@ -35,8 +42,8 @@
     <TaskTable
       :tasks="filteredTasks"
       :job-id="props.jobId"
-      :wandb="store.detail.wandb"
-      :metric-keys="store.detail.metric_keys"
+      :wandb="detail.wandb"
+      :metric-keys="detail.metric_keys"
       :swept-params="sweptParams"
       :can-retry="config.caps.retry"
       @kill-task="onKillTask"
@@ -45,8 +52,8 @@
     />
 
     <!-- W&B external link -->
-    <div v-if="store.detail.wandb" class="mt-4">
-      <v-btn size="small" variant="tonal" :href="store.detail.wandb.base_url" target="_blank">
+    <div v-if="detail.wandb" class="mt-4">
+      <v-btn size="small" variant="tonal" :href="detail.wandb.base_url" target="_blank">
         <v-icon start size="16">mdi-chart-scatter-plot</v-icon>
         W&B
         <v-icon end size="14">mdi-open-in-new</v-icon>
@@ -60,147 +67,173 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onUnmounted } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
-import { useJobDetailStore } from '@/stores/jobDetail'
-import { useJobsStore } from '@/stores/jobs'
 import { useConfigStore } from '@/stores/config'
 import { usePreferences } from '@/composables/usePreferences'
-import { usePolling } from '@/composables/usePolling'
 import { useSnackbar } from '@/composables/useSnackbar'
+import { useConfirm } from '@/composables/useConfirm'
+import { useCancelling } from '@/composables/useCancelling'
+import { useJobDetailQuery, useCompareQuery, useJobActions } from '@/queries/useJobQueries'
+import { useTaskActions } from '@/queries/useTaskQueries'
 import JobHeader from './JobHeader.vue'
 import TaskTable from './TaskTable.vue'
 import StatusDot from '@/components/StatusDot.vue'
 
 const props = defineProps<{ project: string; jobId: string }>()
 const router = useRouter()
-const store = useJobDetailStore()
 const config = useConfigStore()
 const prefs = usePreferences()
 const snack = useSnackbar()
-const jobsStore = useJobsStore()
 const { t } = useI18n()
+const { confirm: confirmDialog } = useConfirm()
+
+// ── Server state: the query cache is the single source of truth. ──
+// Responses land under their own key — a slow response for job A can
+// never overwrite job B, and navigation cancels in-flight fetches.
+const detailQuery = useJobDetailQuery(() => props.jobId)
+const detail = computed(() => detailQuery.data.value ?? null)
+
+const jobActions = useJobActions()
+const taskActions = useTaskActions(() => props.jobId)
+const { cancelling, prune, displayStatus } = useCancelling()
+
+// Clear transient cancelling entries as fresh polls land.
+watch(() => detail.value?.tasks, (tasks) => { if (tasks) prune(tasks) })
 
 const statusFilter = ref(prefs.lastStatusFilter.value)
 
 // Task-level filter — the "done" option matches success tasks, so it uses
-// the task success dot from statusGrammar.
-const statusOptions = [
-  { value: '', label: 'All', dot: '' },
-  { value: 'running', label: 'Running', dot: 'running' },
-  { value: 'done', label: 'Done', dot: 'success' },
-  { value: 'failed', label: 'Failed', dot: 'failed' },
-  { value: 'killed', label: 'Killed', dot: 'killed' },
-  { value: 'pending', label: 'Pending', dot: 'pending' },
-]
+// the task success dot from statusGrammar. Computed so labels follow
+// live locale switches.
+const statusOptions = computed(() => [
+  { value: '', label: t('common.all'), dot: '' },
+  { value: 'running', label: t('status.task.running'), dot: 'running' },
+  { value: 'done', label: t('common.done'), dot: 'success' },
+  { value: 'failed', label: t('status.task.failed'), dot: 'failed' },
+  { value: 'killed', label: t('status.task.killed'), dot: 'killed' },
+  { value: 'pending', label: t('status.task.pending'), dot: 'pending' },
+])
 
-const isActive = computed(() => {
-  const s = store.detail?.job.status
+const isActiveJob = computed(() => {
+  const s = detail.value?.job.status
   return s === 'running' || s === 'pending' || s === 'paused'
 })
 
 // Detect swept params: params that differ across tasks
 const sweptParams = computed(() => {
-  if (!store.detail || store.detail.tasks.length < 2) return []
-  const tasks = store.detail.tasks
+  if (!detail.value || detail.value.tasks.length < 2) return []
+  const tasks = detail.value.tasks
   const first = tasks[0].params || {}
   const varying = new Set<string>()
-  for (const t of tasks.slice(1)) {
-    for (const [k, v] of Object.entries(t.params || {})) {
+  for (const task of tasks.slice(1)) {
+    for (const [k, v] of Object.entries(task.params || {})) {
       if (first[k] !== v) varying.add(k)
     }
     for (const k of Object.keys(first)) {
-      if (!(k in (t.params || {}))) varying.add(k)
+      if (!(k in (task.params || {}))) varying.add(k)
     }
   }
   return [...varying]
 })
 
-// For JobHeader top runs — use first metric key
-const topMetricKey = computed(() => store.detail?.metric_keys?.[0] || '')
-const topRuns = computed(() => store.compare.slice(0, 3))
-
-// Auto-fetch compare for top runs display
-watch(() => store.detail?.metric_keys, (keys) => {
-  if (keys && keys.length > 0) {
-    const preferred = prefs.preferredMetrics.value[props.jobId]
-    const key = preferred && keys.includes(preferred) ? preferred : keys[0]
-    store.fetchCompare(props.jobId, key, true)
-  }
-}, { immediate: true })
+// ── Leaderboard: key selection is declarative; the query re-fetches when
+// the key changes (this replaces the watch that fired /compare per poll).
+const compareKey = computed(() => {
+  const keys = detail.value?.metric_keys ?? []
+  if (keys.length === 0) return ''
+  const preferred = prefs.preferredMetrics.value[props.jobId]
+  return preferred && keys.includes(preferred) ? preferred : keys[0]
+})
+const compareQuery = useCompareQuery(() => props.jobId, compareKey, () => true, isActiveJob)
+const topRuns = computed(() => (compareQuery.data.value ?? []).slice(0, 3))
 
 const filteredTasks = computed(() => {
-  if (!store.detail) return []
-  let tasks = store.detail.tasks
+  if (!detail.value) return []
+  let tasks = detail.value.tasks
   if (statusFilter.value === 'done') {
-    tasks = tasks.filter(t => t.status === 'success')
+    tasks = tasks.filter(task => task.status === 'success')
   } else if (statusFilter.value) {
-    tasks = tasks.filter(t => t.status === statusFilter.value)
+    tasks = tasks.filter(task => task.status === statusFilter.value)
   }
   // Overlay the frontend-local cancelling state (kill_async backends).
-  if (store.cancelling.size === 0) return tasks
-  return tasks.map(t => ({ ...t, status: store.displayStatus(t) }))
+  if (cancelling.value.size === 0) return tasks
+  return tasks.map(task => ({ ...task, status: displayStatus(task) }))
 })
 
 watch(statusFilter, (v) => { prefs.lastStatusFilter.value = v })
 
-function refresh(silent = false) { store.fetchDetail(props.jobId, silent) }
+// ── Actions: mutations own their invalidation; isPending drives the
+// button loading/double-click guards. ──
+const pausing = computed(() => jobActions.pause.isPending.value || jobActions.resume.isPending.value)
+const killing = computed(() => jobActions.kill.isPending.value)
+const archiving = computed(() => jobActions.archive.isPending.value || jobActions.unarchive.isPending.value)
+const refreshing = computed(() => jobActions.refresh.isPending.value)
+
+function togglePause() {
+  if (!detail.value || pausing.value) return
+  const m = detail.value.job.status === 'paused' ? jobActions.resume : jobActions.pause
+  m.mutateAsync(props.jobId)
+    .then(() => snack.success(t('common.done')))
+    .catch((e: any) => snack.error(e?.message || t('common.error')))
+}
+
+async function killJob() {
+  if (!detail.value || killing.value) return
+  const counts = detail.value.job.tasks
+  const ok = await confirmDialog({
+    title: t('confirm.kill_job_title'),
+    body: t('confirm.kill_job_body', { n: counts.running + counts.pending }),
+    confirmText: t('job.kill'),
+    danger: true,
+  })
+  if (!ok) return
+  jobActions.kill.mutateAsync(props.jobId)
+    .then(() => snack.success(t('job.killed')))
+    .catch((e: any) => snack.error(e?.message || t('common.error')))
+}
+
+async function onKillTask(id: string) {
+  const ok = await confirmDialog({
+    title: t('confirm.kill_task_title'),
+    body: t('confirm.kill_task_body', { id: id.slice(0, 8) }),
+    confirmText: t('job.kill'),
+    danger: true,
+  })
+  if (!ok) return
+  taskActions.kill.mutateAsync(id)
+    .catch((e: any) => snack.error(e?.message || t('common.error')))
+}
+
+function onRetryTask(id: string) {
+  taskActions.retry.mutateAsync(id)
+    .catch((e: any) => snack.error(e?.message || t('common.error')))
+}
 
 async function archiveJob() {
   try {
-    await jobsStore.archiveJob(props.jobId) // store action refreshes lists
+    await jobActions.archive.mutateAsync({ id: props.jobId, project: props.project })
     snack.success(t('archive.job_done'))
-    refresh(true)
-  } catch (e: any) { snack.error(e?.message || 'Archive failed') }
+  } catch (e: any) { snack.error(e?.message || t('common.error')) }
 }
 
 async function unarchiveJob() {
   try {
-    await jobsStore.unarchiveJob(props.jobId)
+    await jobActions.unarchive.mutateAsync({ id: props.jobId, project: props.project })
     snack.success(t('archive.job_back'))
-    refresh(true)
-  } catch (e: any) { snack.error(e?.message || 'Unarchive failed') }
+  } catch (e: any) { snack.error(e?.message || t('common.error')) }
 }
 
 // Manual reconcile (poll-model backends): forces the backend to re-read
-// external sources, then re-fetches. The button's loading state doubles as
-// a double-click guard against hammering the cluster scheduler.
-const refreshing = ref(false)
+// external sources; isPending doubles as the double-click guard.
 function onRefresh() {
   if (refreshing.value) return
-  refreshing.value = true
-  store.refreshJob(props.jobId)
-    .catch(() => snack.error('Refresh failed'))
-    .finally(() => { refreshing.value = false })
-}
-
-function togglePause() {
-  if (!store.detail) return
-  const p = store.detail.job.status === 'paused'
-    ? store.resumeJob(props.jobId)
-    : store.pauseJob(props.jobId)
-  p.then(() => { snack.success('Done'); refresh() })
-}
-
-function killJob() {
-  store.killJob(props.jobId).then(() => { snack.success('Job killed'); refresh() })
-}
-
-function onKillTask(id: string) {
-  store.killTask(id).then(() => refresh())
-}
-
-function onRetryTask(id: string) {
-  store.retryTask(id).then(() => refresh())
+  jobActions.refresh.mutateAsync(props.jobId)
+    .catch(() => snack.error(t('common.error')))
 }
 
 function onClickTask(id: string) {
   router.push({ name: 'task-detail', params: { project: props.project, jobId: props.jobId, taskId: id } })
 }
-
-// Poll-model backends reconcile via the scheduler (qstat) — be a polite
-// login-node citizen: 30s. Push-model (daemon) data is free: keep 3s live.
-usePolling(refresh, () => (config.isPoll ? 30000 : 3000), isActive)
-onUnmounted(() => { store.$reset() })
 </script>

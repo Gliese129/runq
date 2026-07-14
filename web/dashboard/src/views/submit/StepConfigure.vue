@@ -29,7 +29,7 @@
         />
       </div>
       <div class="d-flex align-center flex-wrap ga-1 mt-2">
-        <span class="text-caption text-on-surface-variant mr-1">→ {{ chipTarget === 'name' ? 'job name' : 'note' }}:</span>
+        <span class="text-caption text-on-surface-variant mr-1">→ {{ chipTarget === 'name' ? t('submit.target_job_name') : t('submit.target_note') }}:</span>
         <v-chip
           v-for="ph in activeChips" :key="ph"
           size="x-small" variant="outlined" class="cursor-pointer font-mono opacity-70"
@@ -54,10 +54,7 @@
       <!-- Speed tip (one-time, dismissible) -->
       <div v-if="!prefs.sugarTipDismissed.value" class="d-flex align-center ga-2 px-4 py-2 border-b text-caption text-on-surface-variant">
         <v-icon size="12" color="primary">mdi-lightning-bolt-outline</v-icon>
-        <span>
-          Speed tip: type <code>log 1e-4 1e-1 4</code>, <code>linear 1 5 1</code> or <code>seeds 3</code>
-          directly in a numeric cell — preview appears, Enter expands.
-        </span>
+        <span>{{ t('submit.speed_tip') }}</span>
         <v-spacer />
         <v-btn size="x-small" variant="text" @click="prefs.sugarTipDismissed.value = true">{{ t('submit.got_it') }}</v-btn>
       </div>
@@ -84,12 +81,12 @@
               v-if="isLinked(row.name)" size="13"
               :style="{ color: linkColorOf(row.name) }"
               class="cursor-pointer"
-              :title="'Show aligned view'"
+              :title="t('submit.show_aligned')"
               @click="toggleAligned(setIdOf(row.name))"
             >mdi-link</v-icon>
             <v-icon
               v-if="row.scope === 'scheduler'" size="12" color="warning"
-              title="scheduler param — consumed by the HPC submit_template, not your command"
+              :title="t('submit.scheduler_param_hint')"
             >mdi-server</v-icon>
             <span class="text-body-2 font-weight-medium text-truncate font-mono">{{ row.name }}</span>
           </div>
@@ -117,7 +114,7 @@
           <v-btn
             v-if="customNames.has(row.name)"
             icon size="x-small" variant="text" class="row-delete"
-            :aria-label="`Remove ${row.name}`" :title="`Remove ${row.name}`"
+            :aria-label="t('common.remove_item', { name: row.name })" :title="t('common.remove_item', { name: row.name })"
             @click="removeCustomParam(row.name)"
           >
             <v-icon size="13" color="on-surface-variant">mdi-close</v-icon>
@@ -152,7 +149,7 @@
                 />
               </td>
               <td>
-                <v-btn icon size="x-small" variant="text" @click="removeAlignedRow(i)">
+                <v-btn icon size="x-small" variant="text" :aria-label="t('common.delete')" :title="t('common.delete')" @click="removeAlignedRow(i)">
                   <v-icon size="12" color="on-surface-variant">mdi-close</v-icon>
                 </v-btn>
               </td>
@@ -160,7 +157,7 @@
           </tbody>
         </table>
         <v-btn size="x-small" variant="text" class="mt-1" :style="{ color: alignedColor }" @click="addAlignedRow">
-          <v-icon start size="12">mdi-plus</v-icon> Add pair
+          <v-icon start size="12">mdi-plus</v-icon> {{ t('submit.add_pair') }}
         </v-btn>
       </div>
 
@@ -169,7 +166,7 @@
         <v-combobox
           v-model="newParamName"
           :items="hiddenParamSuggestions"
-          placeholder="custom param..."
+          :placeholder="t('submit.custom_param')"
           density="compact" variant="underlined" hide-details
           class="font-mono" style="max-width: 260px; font-size: 13px"
           @keydown.enter="addCustomParam"
@@ -177,12 +174,13 @@
           <template #item="{ item, props: itemProps }">
             <v-list-item v-bind="itemProps" density="compact">
               <template #append>
-                <span class="text-caption text-on-surface-variant">project param</span>
+                <span class="text-caption text-on-surface-variant">{{ t('submit.project_param') }}</span>
               </template>
             </v-list-item>
           </template>
         </v-combobox>
-        <v-btn icon size="x-small" variant="text" color="primary" :disabled="!(newParamName || '').trim()" @click="addCustomParam">
+        <v-btn icon size="x-small" variant="text" color="primary" :disabled="!(newParamName || '').trim()"
+          :aria-label="t('submit.add_param')" :title="t('submit.add_param')" @click="addCustomParam">
           <v-icon size="14">mdi-plus</v-icon>
         </v-btn>
         <v-spacer />
@@ -193,18 +191,18 @@
     <!-- Selection action bar -->
     <v-slide-y-reverse-transition>
       <v-card v-if="selected.size > 0" class="mt-3 px-4 py-2 d-flex align-center ga-3">
-        <span class="text-caption text-on-surface-variant">{{ selected.size }} selected</span>
+        <span class="text-caption text-on-surface-variant">{{ t('submit.n_selected', { n: selected.size }) }}</span>
         <v-btn
           v-if="canLink" size="small" variant="tonal" color="primary"
           @click="linkSelected"
         >
-          <v-icon start size="14">mdi-link</v-icon> Link
+          <v-icon start size="14">mdi-link</v-icon> {{ t('submit.link') }}
         </v-btn>
         <v-btn
           v-if="canUnlink" size="small" variant="tonal"
           @click="unlinkSelected"
         >
-          <v-icon start size="14">mdi-link-off</v-icon> Unlink
+          <v-icon start size="14">mdi-link-off</v-icon> {{ t('submit.unlink') }}
         </v-btn>
         <span v-if="linkPreview" class="text-caption" :class="linkPreview.warn ? 'text-error' : 'text-on-surface-variant'">
           {{ linkPreview.text }}
@@ -216,7 +214,7 @@
 
     <p v-if="state.rows.length > 1 && state.linkSets.length === 0 && !hintDismissed" class="text-caption text-on-surface-variant mt-2 px-1">
       <v-icon size="12">mdi-lightbulb-outline</v-icon>
-      Want some params to vary together (zip)? Select their rows, then Link.
+      {{ t('submit.link_hint') }}
       <v-btn size="x-small" variant="text" @click="hintDismissed = true">{{ t('submit.got_it') }}</v-btn>
     </p>
   </div>
@@ -230,7 +228,7 @@ import { usePreferences } from '@/composables/usePreferences'
 import { SUBMIT_STATE_KEY } from '@/types/submit'
 import { inject } from 'vue'
 import {
-  activeValues, linkColor, rowEffect, validateTable, taskCount,
+  activeValues, linkColor, rowEffect, validateTable, taskCount, newLinkSetId,
   type LinkSet, type ParamRow,
 } from './paramTable'
 import { sweepSummary, buildJobConfig } from './submitFlow'
@@ -244,7 +242,6 @@ const selected = reactive(new Set<string>())
 const newParamName = ref('')
 const customNames = reactive(new Set<string>())
 const hintDismissed = ref(false)
-let setCounter = 0
 
 function placeholderText(ph: string): string {
   return `{{${ph}}}`
@@ -256,7 +253,7 @@ watch(
   () => {
     const byName = new Map(state.rows.map(r => [r.name, r]))
     const next: ParamRow[] = []
-    for (const p of state.newProject.params.filter(p => p.include)) {
+    for (const p of state.newProject.params.filter(projectParam => projectParam.include)) {
       const existing = byName.get(p.name)
       if (existing) {
         existing.type = p.type || existing.type
@@ -322,10 +319,13 @@ const linkPreview = computed(() => {
   if (!canLink.value) return null
   const lengths = [...selected].map(n => activeValues(rowByName(n) ?? { values: [] }).length)
   const merging = [...selected].some(n => isLinked(n))
-  const verb = merging ? 'merge into one zip' : 'zip'
+  const joined = lengths.join(' + ')
   const uniq = new Set(lengths)
-  if (uniq.size === 1) return { text: `${lengths.join(' + ')} values → ${verb} ×${lengths[0]}`, warn: false }
-  return { text: `${lengths.join(' + ')} values → lengths must match after linking`, warn: true }
+  if (uniq.size === 1) {
+    const key = merging ? 'submit.link_preview_merge' : 'submit.link_preview'
+    return { text: t(key, { lengths: joined, n: lengths[0] }), warn: false }
+  }
+  return { text: t('submit.link_preview_mismatch', { lengths: joined }), warn: true }
 })
 
 function linkSelected() {
@@ -335,7 +335,7 @@ function linkSelected() {
   const touched = new Set([...selected].map(n => setIdOf(n)).filter(Boolean))
   state.linkSets = state.linkSets.filter(s => !touched.has(s.id))
   const members = state.rows.filter(r => selected.has(r.name)).map(r => r.name)
-  state.linkSets.push({ id: `ls${setCounter++}`, members })
+  state.linkSets.push({ id: newLinkSetId(), members })
   if (alignedSetId.value && touched.has(alignedSetId.value)) alignedSetId.value = null
   selected.clear()
 }
@@ -396,8 +396,8 @@ function rowByName(name: string): ParamRow | undefined {
 }
 
 function suggestionsFor(name: string): string[] {
-  const p = (state.newProject.params || []).find(p => p.name === name)
-  return (p as any)?.values || []
+  const projectParam = (state.newProject.params || []).find(candidate => candidate.name === name)
+  return projectParam?.values || []
 }
 
 // Project params hidden by curation (include=false) — surfaced as
@@ -530,9 +530,10 @@ watch(
     if (!state.note.includes('{{')) { resolvedNote.value = ''; return }
     noteTimer = setTimeout(async () => {
       try {
+        // v1: resolve-note is merged into /jobs/plan (cheap local expansion)
         const cfg = buildJobConfig(state.projectName, state.note, state.rows, state.linkSets)
-        const res = await jobsApi.resolveNote(cfg)
-        resolvedNote.value = res.resolved
+        const res = await jobsApi.plan(cfg)
+        resolvedNote.value = res.note_resolved
       } catch { resolvedNote.value = '' }
     }, 500)
   },
@@ -542,7 +543,9 @@ watch(
 const formula = computed(() => {
   const summary = sweepSummary(state.rows, state.linkSets)
   const n = taskCount(state.rows, state.linkSets)
-  return summary ? `${summary} = ${n} ${n === 1 ? 'task' : 'tasks'}` : '1 task (no sweep)'
+  return summary
+    ? `${summary} = ${t('submit.task_count', { n }, n)}`
+    : t('submit.no_sweep')
 })
 </script>
 

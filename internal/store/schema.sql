@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     description  TEXT,
     note         TEXT,                -- user-supplied experiment note (--note flag or job.yaml note: field)
     config_json  TEXT NOT NULL,       -- serialized job.JobConfig as JSON
-    status       TEXT NOT NULL DEFAULT 'pending',  -- pending/running/paused/done
+    status       TEXT NOT NULL DEFAULT 'pending',  -- pending/running/paused | done/failed/partial/killed (terminal)
     total_tasks  INTEGER NOT NULL DEFAULT 0,
     target       TEXT NOT NULL DEFAULT 'local',    -- compute target name (Phase 1: MultiBackend routing)
     created_at   INTEGER,             -- Unix timestamp
@@ -39,7 +39,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     target       TEXT NOT NULL DEFAULT 'local',    -- compute target name (Phase 1: MultiBackend routing)
     status       TEXT NOT NULL DEFAULT 'pending',
     retry_count  INTEGER NOT NULL DEFAULT 0,
-    max_retry    INTEGER NOT NULL DEFAULT 0,  -- 0 = unlimited
+    max_retry    INTEGER NOT NULL DEFAULT 0,  -- -1 = unlimited, 0 = no retries
     pid          INTEGER,
     start_time   INTEGER,            -- /proc starttime for reclaim validation
     log_path     TEXT,

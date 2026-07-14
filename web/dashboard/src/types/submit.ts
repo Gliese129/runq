@@ -1,5 +1,5 @@
 import type { InjectionKey } from 'vue'
-import type { ProjectSummary } from '@/types/api'
+import type { ProjectConfig, ProjectSummary } from '@/types/api'
 import type { ParamRow, LinkSet } from '@/views/submit/paramTable'
 
 // ── Parameter types ──
@@ -47,6 +47,10 @@ export interface SubmitState {
     // goNext only saves the project when dirty (or when creating) — selecting
     // an existing project and clicking Next is side-effect free.
     dirty: boolean
+    // The project.Config as fetched (select mode) — buildProjectPayload
+    // read-modify-writes over it so fields the form doesn't edit
+    // (target/env_file/timeout/resume/wandb) survive a save.
+    source?: ProjectConfig
   }
   note: string
   // Per-submit scheduler job name override; '' = use the project's
@@ -63,6 +67,8 @@ export interface SubmitState {
   dryRunLoading: boolean
   dryRunError: string
   dryRunHeaders: { title: string; key: string }[]
+  /** backend-resolved note from POST /jobs/plan ({{version}} scanned) */
+  noteResolved: string
   submitting: boolean
   preflightEnabled: boolean
   prefs: any

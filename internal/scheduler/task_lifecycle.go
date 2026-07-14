@@ -117,21 +117,86 @@ func (s *Scheduler) runTask(task *Task) {
 //     status.json. Never retry (double submission).
 //   - REJECTED (scheduler said no, exit != 0): deterministic — permanent
 //     failure with the scheduler's own words in the error.
+//
+// launchAsync submits an unsupervised task and settles the outcome against
+// the kill flag. The kill × launch-outcome semantics (RQ-69) are:
+//
+//	outcome     │ no flag              │ flag set
+//	────────────┼──────────────────────┼────────────────────────────────────
+//	OK          │ await verdict        │ cancel late job (fallible!);
+//	            │                      │ consume+killed on success,
+//	            │                      │ RETAIN flag on cancel failure
+//	transient   │ requeue (no attempt) │ consume+killed (never reached
+//	            │                      │ the scheduler — settle honestly)
+//	rejected    │ permanent failure    │ consume+killed (same reasoning)
+//	untracked   │ await reconcile      │ RETAIN flag (a cluster job may be
+//	            │                      │ running — we will not lie; the
+//	            │                      │ verdict path settles it)
+//
+// Principles: a user kill wins over every path that would resubmit; a task
+// is marked killed ONLY when no unmanaged remote job can exist (never
+// submitted, or cancel confirmed); a retained flag is honored by the next
+// lifecycle event (handleFailure / verdict) and cleared on any terminal
+// transition, so it cannot outlive the attempt.
 func (s *Scheduler) launchAsync(task *Task) {
 	_, err := s.launcher.Launch(s.ctx, task, nil, nil)
 	switch {
 	case err == nil:
 		s.logger.Info("task submitted to remote scheduler", "task", task.ID, "job", task.JobID)
+		if s.killPending(task.ID) {
+			// Kill raced the submit: the external id exists only now.
+			// Cancel is fallible — only a CONFIRMED cancel may settle
+			// killed (the kill never lies); on failure the flag survives
+			// for the next lifecycle event.
+			if kerr := s.killViaLauncher(task.ID); kerr != nil {
+				s.logger.Warn("late cancel failed — kill intent retained",
+					"task", task.ID, "error", kerr)
+				return
+			}
+			s.settleKilled(task, "late cancel confirmed")
+		}
 	case errors.Is(err, ErrLaunchTransient):
+		if s.settleKilled(task, "transient launch — never reached the scheduler") {
+			return
+		}
 		s.logger.Warn("scheduler unreachable, task returned to queue",
 			"task", task.ID, "error", err)
 		s.requeueTransient(task)
 	case errors.Is(err, ErrLaunchUntracked):
+		// A cluster job may exist without a handle. If a kill is pending we
+		// keep the flag (no lying); the verdict path settles it.
 		s.logger.Error("task submitted but untracked", "task", task.ID, "error", err)
 	default:
+		if s.settleKilled(task, "rejected submission — no remote job") {
+			return
+		}
 		s.logger.Error("submission rejected", "task", task.ID, "error", err)
 		s.FinishTaskNoRetry(task, map[string]any{"status_source": "submit"})
 	}
+}
+
+// settleKilled consumes a pending kill flag and drives the task to killed.
+// Returns false (and does nothing) when no kill was requested. Callers
+// must have established that recording killed is HONEST at this point: no
+// unmanaged remote job can exist (never submitted, or cancel confirmed).
+func (s *Scheduler) settleKilled(task *Task, reason string) bool {
+	if !s.consumeKillRequest(task.ID) {
+		return false
+	}
+	s.logger.Info("kill honored", "task", task.ID, "at", reason)
+	s.FinishTask(task, StatusKilled, map[string]any{"status_source": "kill"})
+	return true
+}
+
+// killViaLauncher cancels through the launcher, surfacing the error when
+// the launcher can report one (remote lanes). Launchers without error
+// reporting keep the legacy best-effort contract.
+func (s *Scheduler) killViaLauncher(taskID string) error {
+	if kr, ok := s.launcher.(interface{ KillErr(string) error }); ok {
+		return kr.KillErr(taskID)
+	}
+	s.launcher.Kill(taskID)
+	return nil
 }
 
 // requeueTransient puts an unsupervised task back to pending after a launch
@@ -174,7 +239,7 @@ func (s *Scheduler) FinishTask(task *Task, status TaskStatus, extra map[string]a
 
 // FinishTaskNoRetry records a permanent failure that must NOT enter the
 // retry policy — deterministic scheduler rejections (submission ran, exit
-// non-zero): retrying replays the same answer and, with max_retry=0
+// non-zero): retrying replays the same answer and, with max_retry=-1
 // (unlimited), becomes a log storm.
 func (s *Scheduler) FinishTaskNoRetry(task *Task, extra map[string]any) {
 	s.finishTaskInner(task, StatusFailed, extra, false)
@@ -223,6 +288,22 @@ func (s *Scheduler) finishTaskInner(task *Task, status TaskStatus, extra map[str
 		}
 		defer s.pool.Release(task.ID)
 	}
+	// Kill wins over retry — the ONE verdict-side checkpoint (the launch-
+	// side table lives on launchAsync). A failed verdict with a pending
+	// kill settles killed instead of re-entering the retry policy; success
+	// stands (facts win) and completeTask clears any leftover flag. Placed
+	// AFTER the staleness gate on purpose: a stale attempt's verdict must
+	// not consume a flag aimed at the current attempt.
+	if status == StatusFailed && s.consumeKillRequest(task.ID) {
+		s.logger.Info("kill honored on failure verdict", "task", task.ID, "retry", task.RetryCount)
+		status = StatusKilled
+		merged := make(map[string]any, len(extra)+1)
+		for k, v := range extra {
+			merged[k] = v
+		}
+		merged["status_source"] = "kill"
+		extra = merged
+	}
 	switch {
 	case status == StatusSuccess || status == StatusKilled:
 		s.completeTask(task, status, extra)
@@ -241,7 +322,13 @@ func (s *Scheduler) finishTaskInner(task *Task, status TaskStatus, extra map[str
 func (s *Scheduler) completeTask(task *Task, status TaskStatus, extra map[string]any) {
 	dbCtx, cancel := context.WithTimeout(s.ctx, 5*time.Second)
 	defer cancel()
-	fields := map[string]any{"finished_at": time.Now().Unix()}
+	fields := map[string]any{
+		"finished_at": time.Now().Unix(),
+		// Stale scheduler-state tokens must not survive into a terminal row
+		// ("Killed" + native_state "running" is a lie). A verdict that DOES
+		// know the final native state passes it via extra and overrides.
+		"native_state": nil,
+	}
 	for k, v := range extra {
 		fields[k] = v
 	}
@@ -251,6 +338,10 @@ func (s *Scheduler) completeTask(task *Task, status TaskStatus, extra map[string
 	if err := s.queue.Complete(task.ID, status); err != nil {
 		s.logger.Error("complete in queue failed", "task", task.ID, "error", err)
 	}
+	// A kill flag never outlives the attempt it was aimed at: whatever the
+	// terminal state (success beats a late kill; killed already consumed
+	// it), leftover intent must not leak into a future manual retry.
+	s.ClearKillRequest(task.ID)
 }
 
 // reapMetrics ingests a finished task's metrics.jsonl into the store
@@ -315,11 +406,18 @@ func (s *Scheduler) MonitorReattached(task *Task, ch <-chan executor.ReattachRes
 }
 
 // handleFailure decides whether to retry or permanently fail a task.
-// MaxRetry == 0 means unlimited retries. extra fields (may be nil) are
-// persisted only with the permanent-failure transition; a requeue resets
-// state instead.
+// MaxRetry < 0 means unlimited retries; 0 means none. extra fields (may
+// be nil) are persisted only with the permanent-failure transition; a
+// requeue resets state instead.
 func (s *Scheduler) handleFailure(task *Task, extra map[string]any) {
-	canRetry := task.MaxRetry == 0 || task.RetryCount < task.MaxRetry
+	// No kill handling here: the failed×kill decision is made ONCE in
+	// finishTaskInner's funnel checkpoint before this is even reached.
+	//
+	// Retry budget semantics (changed with RQ-69): -1 = unlimited
+	// (explicit opt-in), 0 = no retries. The zero value is now the SAFE
+	// behavior — under the old "0 = unlimited" rule, a project that simply
+	// omitted max_retry defaulted into an infinite resubmit loop.
+	canRetry := task.MaxRetry < 0 || task.RetryCount < task.MaxRetry
 	if canRetry {
 		nextRetry := task.RetryCount + 1
 		dbCtx, cancel := context.WithTimeout(s.ctx, 5*time.Second)

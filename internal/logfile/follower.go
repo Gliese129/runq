@@ -12,7 +12,7 @@ import (
 // Follower is a pull-based Page iterator over a growing log file. It keeps
 // ONE file handle open across polls (the resource shape of a human running
 // tail -f) and adapts its poll interval to activity. All content flows
-// through ReadLines — the follower owns no read/clamp/strip logic.
+// through ReadPage — the follower owns no read/clamp/strip logic.
 //
 // Not safe for concurrent use; one Follower per consumer.
 type Follower struct {
@@ -21,6 +21,7 @@ type Follower struct {
 	r        *Reader // nil until the file exists (pending task)
 	offset   int64
 	interval time.Duration
+	maxBytes int64 // per-page byte budget (log contract v2)
 }
 
 const (
@@ -41,6 +42,7 @@ func Follow(path string, fsys rfs.FS, offset int64) (*Follower, error) {
 		fs:       fsys,
 		offset:   offset,
 		interval: MinInterval,
+		maxBytes: DefaultBudgetBytes,
 	}
 	r, err := Open(path, fsys)
 	switch {
@@ -53,6 +55,11 @@ func Follow(path string, fsys rfs.FS, offset int64) (*Follower, error) {
 	}
 	return f, nil
 }
+
+// SetMaxBytes sets the per-page byte budget for subsequent Next calls
+// (clamped like the GET handler's max_bytes). Call before the first Next;
+// it is not synchronised against a concurrent Next.
+func (f *Follower) SetMaxBytes(n int64) { f.maxBytes = clampBudget(n) }
 
 // Close releases the underlying handle. Idempotent; safe when the file
 // never appeared.
@@ -67,8 +74,9 @@ func (f *Follower) Close() error {
 
 // Next blocks until new data is available, then returns one page and
 // advances. It returns ctx.Err() promptly on cancellation and never
-// returns an empty page (it waits instead). After rotation (size <
-// offset) the next page's Offset is 0 — the caller's view-reset signal.
+// returns an empty non-rotated page (it waits instead). After rotation
+// (size < offset) the returned page carries Rotated=true and restarts
+// from offset 0 — the caller's view-reset signal.
 func (f *Follower) Next(ctx context.Context) (*Page, error) {
 	for {
 		if f.r == nil { // pending: wait for the file to appear
@@ -95,17 +103,19 @@ func (f *Follower) Next(ctx context.Context) (*Page, error) {
 			}
 			continue
 		}
-		if f.r.Size() < f.offset { // rotation: restart from 0
-			f.offset = 0
-		}
-		if f.r.Size() > f.offset {
-			page, err := f.r.ReadLines(f.offset, DefaultPageLines)
+		if f.r.Size() != f.offset { // new data OR rotation (size < offset)
+			page, err := f.r.ReadPage(PageRequest{Offset: f.offset, MaxBytes: f.maxBytes})
 			if err != nil {
 				return nil, err
 			}
-			f.offset = page.NextOffset
-			f.interval = MinInterval // data flowing: reset backoff
-			return page, nil
+			// A rotated page is delivered even when empty (view reset);
+			// an empty non-rotated page is the EOF wait state (an
+			// unterminated short line) — sleep and re-poll instead.
+			if page.Rotated || len(page.Lines) > 0 {
+				f.offset = page.NextOffset
+				f.interval = MinInterval // data flowing: reset backoff
+				return page, nil
+			}
 		}
 
 		if err := f.sleep(ctx); err != nil {

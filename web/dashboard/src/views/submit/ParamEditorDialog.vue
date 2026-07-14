@@ -5,33 +5,33 @@
       <div class="d-flex align-center justify-space-between pa-3 px-4" style="border-bottom: 0.5px solid rgb(var(--v-theme-outline-variant))">
         <div class="d-flex align-center ga-2">
           <v-icon size="18" color="primary">mdi-tune-variant</v-icon>
-          <span class="text-subtitle-1 font-weight-medium">Parameters</span>
+          <span class="text-subtitle-1 font-weight-medium">{{ t('submit.parameters') }}</span>
           <v-chip size="x-small" variant="tonal">{{ includedCount }} / {{ params.length }}</v-chip>
         </div>
         <div class="d-flex align-center ga-1">
           <v-btn size="small" variant="text" @click="($refs.fileInput as HTMLInputElement).click()">
-            <v-icon start size="14">mdi-file-upload-outline</v-icon> Import
+            <v-icon start size="14">mdi-file-upload-outline</v-icon> {{ t('common.import') }}
           </v-btn>
           <input ref="fileInput" type="file" accept=".yaml,.yml,.json" hidden @change="onFileSelect" />
-          <v-btn icon size="small" variant="text" @click="cancel"><v-icon>mdi-close</v-icon></v-btn>
+          <v-btn icon size="small" variant="text" :aria-label="t('common.close')" @click="cancel"><v-icon>mdi-close</v-icon></v-btn>
         </div>
       </div>
 
       <!-- Import preview banner -->
       <div v-if="importPreview" class="d-flex align-center ga-2 px-4 py-2" style="border-bottom: 0.5px solid rgb(var(--v-theme-outline-variant)); background: rgb(var(--v-theme-surface-variant), 0.3)">
         <div class="text-caption flex-grow-1">
-          <span class="font-weight-medium">{{ importPreview.length }}</span> params from {{ importFileName }}
-          <span class="text-on-surface-variant ml-1">· Append overwrites on conflict</span>
+          {{ t('submit.params_from', { n: importPreview.length, file: importFileName }) }}
+          <span class="text-on-surface-variant ml-1">· {{ t('submit.import_append_note') }}</span>
         </div>
-        <v-btn size="small" variant="tonal" color="primary" @click="confirmImport('replace')">Replace</v-btn>
-        <v-btn size="small" variant="outlined" @click="confirmImport('append')">Append</v-btn>
-        <v-btn size="x-small" icon variant="text" @click="importPreview = null"><v-icon size="14">mdi-close</v-icon></v-btn>
+        <v-btn size="small" variant="tonal" color="primary" @click="confirmImport('replace')">{{ t('common.replace') }}</v-btn>
+        <v-btn size="small" variant="outlined" @click="confirmImport('append')">{{ t('common.append') }}</v-btn>
+        <v-btn size="x-small" icon variant="text" :aria-label="t('common.close')" @click="importPreview = null"><v-icon size="14">mdi-close</v-icon></v-btn>
       </div>
 
       <!-- Filter bar -->
       <div class="d-flex align-center ga-2 px-4 py-2" style="border-bottom: 0.5px solid rgb(var(--v-theme-outline-variant))">
         <v-text-field
-          v-model="filter" placeholder="Filter..." prepend-inner-icon="mdi-magnify"
+          v-model="filter" :placeholder="t('submit.filter')" prepend-inner-icon="mdi-magnify"
           density="compact" variant="outlined" hide-details clearable style="max-width: 220px"
         />
       </div>
@@ -41,11 +41,11 @@
         <table class="param-table">
           <thead>
             <tr>
-              <th style="width: 36px" title="Checked = appears in the next step's param table">Use</th>
-              <th class="text-left">Name</th>
-              <th style="width: 120px">Type</th>
-              <th>Value / Default</th>
-              <th style="width: 200px">Constraints</th>
+              <th style="width: 36px" :title="t('submit.include_hint')">{{ t('table.use') }}</th>
+              <th class="text-left">{{ t('table.name') }}</th>
+              <th style="width: 120px">{{ t('table.type') }}</th>
+              <th>{{ t('table.value') }}</th>
+              <th style="width: 200px">{{ t('table.constraints') }}</th>
               <th style="width: 36px"></th>
             </tr>
           </thead>
@@ -70,13 +70,13 @@
                     :variant="p.default === opt ? 'flat' : 'outlined'"
                     @click="setBoolDefault(p, opt)"
                   >{{ opt }}</v-chip>
-                  <span v-if="!p.default" class="text-caption text-on-surface-variant align-self-center">no default</span>
+                  <span v-if="!p.default" class="text-caption text-on-surface-variant align-self-center">{{ t('submit.no_default') }}</span>
                 </div>
                 <!-- list: inline chips -->
                 <div v-else-if="p.type === 'list'" class="d-flex flex-wrap align-center ga-1">
                   <v-chip v-for="(v, i) in (p.values || [])" :key="i" size="x-small" closable variant="tonal" @click:close="p.values!.splice(i, 1)">{{ v }}</v-chip>
                   <input
-                    class="inline-add" placeholder="+ add"
+                    class="inline-add" :placeholder="'+ ' + t('common.add')"
                     @keydown.enter.prevent="addListFromInline(p, $event.target as HTMLInputElement)"
                   />
                 </div>
@@ -109,17 +109,19 @@
                 <v-menu v-else-if="p.type === 'str'" :close-on-content-click="false" location="bottom end">
                   <template #activator="{ props: menu }">
                     <v-btn v-bind="menu" size="x-small" variant="tonal" class="text-none">
-                      {{ (p.values || []).length }} values
+                      {{ t('submit.n_values', { n: (p.values || []).length }, (p.values || []).length) }}
                       <v-icon end size="12">mdi-chevron-down</v-icon>
                     </v-btn>
                   </template>
                   <v-card class="pa-3" style="min-width: 280px; max-width: 400px">
                     <div class="d-flex align-center justify-space-between mb-2">
-                      <span class="text-caption text-on-surface-variant">Selectable values — first is the default</span>
+                      <span class="text-caption text-on-surface-variant">{{ t('submit.selectable_values') }}</span>
+                      <!-- "strict" itself stays English: it is the project.yaml
+                           field name, and the hint explains it in the UI locale. -->
                       <v-checkbox-btn
                         v-model="p.strict"
                         density="compact" color="warning"
-                        :title="'strict: values outside this list fail at submit'"
+                        :title="t('submit.strict_hint')"
                         style="flex: none"
                       >
                         <template #label><span class="text-caption">strict</span></template>
@@ -132,19 +134,19 @@
                         :color="i === 0 ? 'primary' : undefined"
                         @click:close="p.values!.splice(i, 1)"
                       >
-                        {{ val }}<span v-if="i === 0" class="text-caption ml-1 opacity-60">default</span>
+                        {{ val }}<span v-if="i === 0" class="text-caption ml-1 opacity-60">{{ t('submit.default_tag') }}</span>
                       </v-chip>
-                      <span v-if="!p.values?.length" class="text-caption text-on-surface-variant">None yet</span>
+                      <span v-if="!p.values?.length" class="text-caption text-on-surface-variant">{{ t('submit.none_yet') }}</span>
                     </div>
                     <div class="d-flex ga-1">
                       <v-text-field
                         v-model="valueInputs[p.name]"
-                        placeholder="Add value + Enter"
+                        :placeholder="t('submit.type_value_enter')"
                         density="compact" variant="underlined" hide-details
                         style="font-family: monospace; font-size: 12px"
                         @keydown.enter.prevent="addValue(p)"
                       />
-                      <v-btn size="x-small" icon variant="text" color="primary" @click="addValue(p)">
+                      <v-btn size="x-small" icon variant="text" color="primary" :aria-label="t('common.add')" @click="addValue(p)">
                         <v-icon size="14">mdi-plus</v-icon>
                       </v-btn>
                     </div>
@@ -158,18 +160,20 @@
                     size="x-small" variant="tonal" class="text-none"
                     @click="openBrowseFor(p)"
                   >
-                    <v-icon start size="12">mdi-folder-search-outline</v-icon> Browse
+                    <v-icon start size="12">mdi-folder-search-outline</v-icon> {{ t('common.browse') }}
                   </v-btn>
                   <!-- Has values → popover with list + browse button -->
                   <v-menu v-else :close-on-content-click="false" location="bottom end">
                     <template #activator="{ props: menu }">
                       <v-btn v-bind="menu" size="x-small" variant="tonal" class="text-none">
-                        {{ p.values!.length }} {{ p.type === 'file' ? 'files' : 'folders' }}
+                        {{ p.type === 'file'
+                          ? t('submit.n_files', { n: p.values!.length }, p.values!.length)
+                          : t('submit.n_folders', { n: p.values!.length }, p.values!.length) }}
                         <v-icon end size="12">mdi-chevron-down</v-icon>
                       </v-btn>
                     </template>
                     <v-card class="pa-3" style="min-width: 280px; max-width: 400px">
-                      <div class="text-caption text-on-surface-variant mb-2">Selectable paths</div>
+                      <div class="text-caption text-on-surface-variant mb-2">{{ t('submit.selectable_paths') }}</div>
                       <div class="d-flex flex-wrap ga-1 mb-2">
                         <v-chip v-for="(val, i) in p.values" :key="i" size="small" closable variant="tonal" @click:close="p.values!.splice(i, 1)">
                           {{ val.split('/').pop() || val }}
@@ -177,9 +181,9 @@
                         </v-chip>
                       </div>
                       <div class="d-flex ga-1">
-                        <v-text-field v-model="valueInputs[p.name]" placeholder="Add path + Enter" density="compact" variant="underlined" hide-details style="font-family: monospace; font-size: 12px" @keydown.enter.prevent="addValue(p)" />
-                        <v-btn size="x-small" icon variant="text" color="primary" @click="addValue(p)"><v-icon size="14">mdi-plus</v-icon></v-btn>
-                        <v-btn size="x-small" icon variant="text" @click="openBrowseFor(p)"><v-icon size="14">mdi-folder-search-outline</v-icon></v-btn>
+                        <v-text-field v-model="valueInputs[p.name]" :placeholder="t('submit.add_path_enter')" density="compact" variant="underlined" hide-details style="font-family: monospace; font-size: 12px" @keydown.enter.prevent="addValue(p)" />
+                        <v-btn size="x-small" icon variant="text" color="primary" :aria-label="t('common.add')" @click="addValue(p)"><v-icon size="14">mdi-plus</v-icon></v-btn>
+                        <v-btn size="x-small" icon variant="text" :aria-label="t('submit.browse')" @click="openBrowseFor(p)"><v-icon size="14">mdi-folder-search-outline</v-icon></v-btn>
                       </div>
                     </v-card>
                   </v-menu>
@@ -191,14 +195,15 @@
                 <v-btn
                   icon size="x-small" variant="text"
                   :color="p.scope === 'scheduler' ? 'warning' : undefined"
-                  :title="p.scope === 'scheduler' ? 'scheduler param (submit_template only) — click to make it a command param' : 'command param — click to make it scheduler-only (h_rt, queue, ...)'"
+                  :aria-label="p.scope === 'scheduler' ? t('submit.scope_scheduler_hint') : t('submit.scope_command_hint')"
+                  :title="p.scope === 'scheduler' ? t('submit.scope_scheduler_hint') : t('submit.scope_command_hint')"
                   @click="p.scope = p.scope === 'scheduler' ? undefined : 'scheduler'"
                 >
                   <v-icon size="14">{{ p.scope === 'scheduler' ? 'mdi-server' : 'mdi-console-line' }}</v-icon>
                 </v-btn>
                 <v-btn
                   icon size="x-small" variant="text" class="row-delete"
-                  :aria-label="`Delete ${p.name}`" :title="`Delete ${p.name}`"
+                  :aria-label="t('common.remove_item', { name: p.name })" :title="t('common.remove_item', { name: p.name })"
                   @click="removeParam(p.name)"
                 >
                   <v-icon size="14" color="on-surface-variant">mdi-close</v-icon>
@@ -209,7 +214,7 @@
         </table>
 
         <div v-if="filteredParams.length === 0" class="text-center text-on-surface-variant pa-8">
-          <div class="text-caption">{{ filter ? 'No matches' : 'No parameters — click Import above' }}</div>
+          <div class="text-caption">{{ filter ? t('log.no_results') : t('submit.no_params_import') }}</div>
         </div>
       </div>
 
@@ -223,9 +228,9 @@
 
       <!-- ═══ Footer ═══ -->
       <div class="d-flex align-center justify-end pa-3 ga-2" style="border-top: 0.5px solid rgb(var(--v-theme-outline-variant))">
-        <v-btn variant="text" @click="cancel">Cancel</v-btn>
+        <v-btn variant="text" @click="cancel">{{ t('common.cancel') }}</v-btn>
         <v-btn variant="tonal" color="primary" @click="done">
-          <v-icon start size="16">mdi-check</v-icon> Done
+          <v-icon start size="16">mdi-check</v-icon> {{ t('common.done') }}
         </v-btn>
       </div>
     </v-card>
@@ -235,9 +240,12 @@
 <script setup lang="ts">
 import { ref, reactive, computed, watch } from 'vue'
 import * as YAML from 'js-yaml'
+import { useI18n } from 'vue-i18n'
 import { useSnackbar } from '@/composables/useSnackbar'
 import { PARAM_TYPES, type ProjectParam } from '@/types/submit'
 import FileBrowserDialog from '@/components/FileBrowserDialog.vue'
+
+const { t } = useI18n()
 
 const props = defineProps<{
   modelValue: boolean
@@ -392,7 +400,7 @@ async function parseImportFile(file: File) {
     if (file.name.endsWith('.json')) data = JSON.parse(text)
     else data = YAML.load(text)
     const arr = Array.isArray(data) ? data : (data?.params || data?.parameters || [])
-    if (!Array.isArray(arr) || arr.length === 0) { snack.error('No params found'); return }
+    if (!Array.isArray(arr) || arr.length === 0) { snack.error(t('submit.no_params_found')); return }
     importPreview.value = arr.map((p: any) => {
       const values = Array.isArray(p.values)
         ? p.values
@@ -406,7 +414,7 @@ async function parseImportFile(file: File) {
         values: values.map(String),
       }
     }).filter((p: ProjectParam) => p.name)
-  } catch (e: any) { snack.error(`Parse error: ${e.message}`) }
+  } catch (e: any) { snack.error(t('submit.parse_error', { msg: e.message })) }
 }
 
 function confirmImport(mode: 'replace' | 'append') {
@@ -418,7 +426,7 @@ function confirmImport(mode: 'replace' | 'append') {
     params.value = Array.from(m.values())
   }
   importPreview.value = null
-  snack.success(`${mode === 'replace' ? 'Replaced' : 'Merged'} ${params.value.length} params`)
+  snack.success(t(mode === 'replace' ? 'submit.params_replaced' : 'submit.params_merged', { n: params.value.length }))
 }
 </script>
 

@@ -2,12 +2,7 @@ import { api } from './client'
 import type { MessageResponse, ProjectConfig, ProjectPayload, ProjectSummary } from '@/types/api'
 
 export const projectsApi = {
-  list: () => api.get<ProjectSummary[]>('/projects'),
-
-  match: (dir: string) => {
-    const params = new URLSearchParams({ dir })
-    return api.get<ProjectSummary[]>(`/projects/match?${params}`)
-  },
+  list: () => api.getList<ProjectSummary>('/projects'),
 
   get: (name: string) =>
     api.get<ProjectConfig>(`/projects/${encodeURIComponent(name)}`),

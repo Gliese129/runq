@@ -20,7 +20,12 @@ function cleanNumber(v: number, isInt: boolean): string {
 export function linearSpace(min: number, max: number, step: number, isInt: boolean): string[] {
   if (!(step > 0) || min > max) return []
   const out: string[] = []
-  for (let v = min; v <= max + 1e-9 && out.length < MAX_GENERATED; v += step) {
+  // min + i*step (not v += step): accumulation compounds float error, and
+  // the old absolute 1e-9 epsilon dropped the endpoint at large magnitudes
+  // (one ulp of 1e10 is already > 1e-9). Epsilon scales with step instead.
+  for (let i = 0; out.length < MAX_GENERATED; i++) {
+    const v = min + i * step
+    if (v > max + step * 1e-9) break
     out.push(cleanNumber(v, isInt))
   }
   return dedupe(out)

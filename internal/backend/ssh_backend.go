@@ -495,7 +495,7 @@ func (b *SSHBackend) ListJobs(ctx context.Context, projectScope string) ([]JobSu
 		return nil, err
 	}
 	for _, j := range jobs {
-		if j.Status != "done" {
+		if !store.IsTerminalJobStatus(j.Status) {
 			_ = b.backend.EnsureFresh(ctx, j.ID, DefaultReadTTL)
 		}
 	}
@@ -828,9 +828,19 @@ func (b *SSHBackend) KillTask(ctx context.Context, taskID string) error {
 	// remotely — settle through the lifecycle funnel. In-flight-but-untracked
 	// tasks are queue-running, so they fall through to backend.Kill, which
 	// refuses honestly (no external id → cannot cancel).
-	if qt := b.queue.Get(taskID); qt != nil && qt.Status == scheduler.StatusPending {
-		b.sched.FinishTask(qt, scheduler.StatusKilled, map[string]any{"status_source": "runq"})
-		return nil
+	if qt := b.queue.Get(taskID); qt != nil {
+		if qt.Status == scheduler.StatusPending {
+			b.sched.FinishTask(qt, scheduler.StatusKilled, map[string]any{"status_source": "runq"})
+			return nil
+		}
+		// Running in the queue (submit in flight or on the cluster): plant
+		// the kill flag FIRST (RQ-69 ownership protocol). If backend.Kill
+		// below is refused for a missing external id, the flag survives and
+		// the next lifecycle event (submit completion, failure verdict)
+		// settles the task killed instead of resubmitting it.
+		if qt.Status == scheduler.StatusRunning {
+			b.sched.RequestKill(taskID)
+		}
 	}
 	if err := b.backend.EnsureFresh(ctx, task.JobID, 0); err != nil {
 		return fmt.Errorf("reconcile before kill: %w", err)
@@ -895,6 +905,28 @@ func (b *SSHBackend) TaskLogTail(ctx context.Context, taskID string, maxLines in
 	defer r.Close()
 
 	return r.TailLines(maxLines) // LogPage = logfile.Page: no mapping
+}
+
+// TaskLogPage — dashboard log contract v2: byte-budget page (positional /
+// tail / rotation / optional line count) through the owning target's FS.
+func (b *SSHBackend) TaskLogPage(ctx context.Context, taskID string, req logfile.PageRequest) (*LogPage, error) {
+	b.touchActivity()
+	task, err := b.store.GetTask(ctx, taskID)
+	if err != nil {
+		return nil, fmt.Errorf("task log page: %w", err)
+	}
+	if task == nil {
+		return nil, fmt.Errorf("task %q: %w", taskID, ErrNotFound)
+	}
+	r, err := logfile.Open(task.LogPath, b.backend.FS)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return &LogPage{Lines: []string{}, TotalLines: -1, StartLine: -1}, nil // pending
+		}
+		return nil, err
+	}
+	defer r.Close()
+	return r.ReadPage(req)
 }
 
 // TaskLogFollow — pure assembly: resolve the task, hand path+FS+offset to
@@ -975,6 +1007,9 @@ func (b *SSHBackend) RetryTask(ctx context.Context, taskID string) error {
 		row, _ = b.store.GetTask(ctx, taskID)
 		task := TaskRowToSchedulerTask(row)
 		task.GPUsNeeded = 1
+		// Fresh attempt by explicit user intent — a stale kill flag from an
+		// earlier refused kill must not assassinate it (RQ-69).
+		b.sched.ClearKillRequest(taskID)
 		if !b.queue.RetryExisting(task) {
 			b.queue.Push(task)
 		}
@@ -987,10 +1022,16 @@ func (b *SSHBackend) KillJob(ctx context.Context, jobID string) error {
 	b.touchActivity()
 	// Settle locally-queued tasks first: they have no cluster job to cancel,
 	// and marking them killed here means backend.Kill (below) skips them as
-	// terminal instead of refusing over a missing external id.
+	// terminal instead of refusing over a missing external id. Queue-running
+	// tasks (submit in flight) get the kill flag instead (RQ-69): if the
+	// remote cancel below is refused for a missing external id, the flag
+	// settles them at their next lifecycle event instead of resubmitting.
 	for _, qt := range b.queue.ListByJob(jobID) {
-		if qt.Status == scheduler.StatusPending {
+		switch qt.Status {
+		case scheduler.StatusPending:
 			b.sched.FinishTask(qt, scheduler.StatusKilled, map[string]any{"status_source": "runq"})
+		case scheduler.StatusRunning:
+			b.sched.RequestKill(qt.ID)
 		}
 	}
 	if err := b.backend.EnsureFresh(ctx, jobID, 0); err != nil {

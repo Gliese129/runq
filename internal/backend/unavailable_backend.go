@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/gliese129/runq/internal/job"
+	"github.com/gliese129/runq/internal/logfile"
 	"github.com/gliese129/runq/internal/project"
 	"github.com/gliese129/runq/internal/workspace"
 )
@@ -73,6 +74,10 @@ func (b *UnavailableBackend) TaskLogRead(ctx context.Context, taskID string, off
 }
 
 func (b *UnavailableBackend) TaskLogTail(ctx context.Context, taskID string, maxLines int) (*LogPage, error) {
+	return nil, b.wrap()
+}
+
+func (b *UnavailableBackend) TaskLogPage(ctx context.Context, taskID string, req logfile.PageRequest) (*LogPage, error) {
 	return nil, b.wrap()
 }
 

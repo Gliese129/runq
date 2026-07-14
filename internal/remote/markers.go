@@ -7,6 +7,7 @@ import (
 	"path"
 	"strings"
 
+	"github.com/gliese129/runq/internal/store"
 	"github.com/gliese129/runq/internal/utils"
 )
 
@@ -123,7 +124,7 @@ func (b *Backend) HasInFlight(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	for _, j := range jobs {
-		if j.Status != "done" {
+		if !store.IsTerminalJobStatus(j.Status) {
 			return true, nil
 		}
 	}

@@ -41,12 +41,19 @@ describe('log motif rendering', () => {
     const folded = buildRenderItems(result, foldState, result.drain)
     expect(folded.some(item => item.type === 'fold-summary')).toBe(true)
 
-    // Expanded: group-block (panel with lines)
+    // Expanded: flattened motif block (head + lines + tail)
     const expanded = buildRenderItems(result, new Map(), result.drain)
-    expect(expanded.some(item => item.type === 'group-block')).toBe(true)
+    const head = expanded.find(item => item.type === 'block-head')
+    expect(head).toBeTruthy()
+    if (head?.type === 'block-head') {
+      expect(head.blockKind).toBe('motif')
+      expect(head.repeats).toBeGreaterThan(1)
+    }
+    expect(expanded.filter(i => i.type === 'block-line' && i.blockKind === 'motif')).toHaveLength(9)
+    expect(expanded.some(i => i.type === 'block-tail')).toBe(true)
   })
 
-  it('creates diff-view drain-blocks for length=1 motifs', () => {
+  it('flattens diff-view drain blocks for length=1 motifs', () => {
     const lines = [
       'INFO Epoch 1 loss=0.5 lr=0.001',
       'INFO Epoch 2 loss=0.4 lr=0.001',
@@ -57,15 +64,52 @@ describe('log motif rendering', () => {
     const motif = result.motifGroups.find(g => g.motifLength === 1)
     expect(motif).toBeTruthy()
 
-    // Expanded: drain-block with diff view
+    // Expanded: block-head + one block-line per line + block-tail
     const items = buildRenderItems(result, new Map(), result.drain)
-    const block = items.find(item => item.type === 'drain-block')
-    expect(block).toBeTruthy()
-    if (block?.type === 'drain-block') {
-      expect(block.lines).toHaveLength(3)
-      expect(block.varMask.length).toBeGreaterThan(0)
-      expect(block.foldKey).toMatch(/^m:\d+:\d+$/)
+    const head = items.find(item => item.type === 'block-head')
+    expect(head).toBeTruthy()
+    if (head?.type === 'block-head') {
+      expect(head.blockKind).toBe('drain')
+      expect(head.lineCount).toBe(3)
+      expect(head.foldKey).toMatch(/^m:\d+:\d+$/)
     }
+    const blockLines = items.filter(i => i.type === 'block-line')
+    expect(blockLines).toHaveLength(3)
+    for (const bl of blockLines) {
+      if (bl.type !== 'block-line') continue
+      // Diff view is precomputed per line, alignment arrays shared per block
+      expect(bl.cid).toBeGreaterThanOrEqual(0)
+      expect(bl.tokens!.length).toBeGreaterThan(0)
+      expect(bl.varMask!.length).toBeGreaterThan(0)
+      expect(bl.colWidths!.length).toBe(bl.varMask!.length)
+    }
+    const tailIdx = items.findIndex(i => i.type === 'block-tail')
+    const headIdx = items.findIndex(i => i.type === 'block-head')
+    expect(tailIdx).toBe(headIdx + 4) // head, 3 lines, tail — contiguous
+  })
+
+  it('flattens a large expanded block and folds it to a single summary', () => {
+    // Well above AUTO_FOLD_THRESHOLD — the case virtualization exists for
+    const lines: string[] = []
+    for (let i = 0; i < 200; i++) lines.push(`INFO step ${i} loss=0.${i}`)
+
+    const result = processLog(lines, toggles)
+    const motif = result.motifGroups.find(g => g.motifLength === 1)
+    expect(motif).toBeTruthy()
+
+    // Expanded: every line is a TOP-LEVEL item (head + N lines + tail)
+    const expanded = buildRenderItems(result, new Map(), result.drain)
+    const head = expanded.find(i => i.type === 'block-head')
+    expect(head).toBeTruthy()
+    const lineItems = expanded.filter(i => i.type === 'block-line')
+    expect(lineItems.length).toBe(motif!.totalLines)
+    if (head?.type === 'block-head') expect(head.lineCount).toBe(lineItems.length)
+    expect(expanded.filter(i => i.type === 'block-tail')).toHaveLength(1)
+
+    // Collapsed (default auto-fold): one fold-summary, no block items
+    const folded = buildRenderItems(result, computeDefaultFoldState(result), result.drain)
+    expect(folded.filter(i => i.type === 'fold-summary')).toHaveLength(1)
+    expect(folded.some(i => i.type === 'block-head' || i.type === 'block-line' || i.type === 'block-tail')).toBe(false)
   })
 
   it('uses unified fold state for tracebacks', () => {

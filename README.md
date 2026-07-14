@@ -275,7 +275,7 @@ GPU isolation uses `CUDA_VISIBLE_DEVICES`. Each task sees only its assigned GPUs
 
 runq is designed for the "submit before going home" workflow:
 
-- **Auto-retry** — failed tasks retry up to `max_retry` times.
+- **Auto-retry** — failed tasks retry up to `max_retry` times (`-1` = unlimited, `0` = no retries).
 - **Timeout** — optional per-task timeout kills runaway processes.
 - **Daemon crash recovery** — restarts reclaim still-running processes and restore the full queue from SQLite. Nothing is lost.
 - **GPU leak detection** — checks for residual processes after each task exits.
