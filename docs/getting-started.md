@@ -140,4 +140,4 @@ experiment log. Don't parse these paths in scripts — use `--json` output.
 
 Next steps: [configuration.md](./configuration.md) for the full YAML
 reference · [hpc.md](./hpc.md) to run the same workflow on a cluster ·
-[SKILLS.md](../SKILLS.md) if an AI agent will drive runq for you.
+[runq skill](../.skills/runq/SKILL.md) if an AI agent will drive runq for you.

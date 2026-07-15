@@ -2,7 +2,7 @@
 
 > Internal reference for the runq Python SDK (`sdk/python/runq/`).
 > For user-facing API overview, see the "Python SDK" section in `README.md`.
-> For setup guidance, see `SKILLS.md` section 7.
+> For setup guidance, see the skill's [setup reference](../.skills/runq/references/setup.md).
 
 ## Architecture
 

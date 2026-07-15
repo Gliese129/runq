@@ -27,6 +27,9 @@ jobs:
           go-version: '1.25'
           cache: 'true'
 
+      - name: Run Go tests
+        run: go test ./...
+
       - name: Build CLI-only binary
         env:
           GOOS: ${{ matrix.goos }}
@@ -34,7 +37,9 @@ jobs:
           CGO_ENABLED: 0
         run: |
           BINARY_NAME="runq-${{ matrix.goos }}-${{ matrix.goarch }}"
-          go build -o "$BINARY_NAME" ./cmd/runq
+          go build \
+            -ldflags "-X github.com/gliese129/runq/internal/version.Version=${GITHUB_REF_NAME}" \
+            -o "$BINARY_NAME" ./cmd/runq
 
       - name: Set up node
         uses: actions/setup-node@v4
@@ -61,7 +66,16 @@ jobs:
           CGO_ENABLED: 0
         run: |
           BINARY_NAME="runq-dashboard-${{ matrix.goos }}-${{ matrix.goarch }}"
-          go build -tags dashboard -o "$BINARY_NAME" ./cmd/runq
+          go build \
+            -tags dashboard \
+            -ldflags "-X github.com/gliese129/runq/internal/version.Version=${GITHUB_REF_NAME}" \
+            -o "$BINARY_NAME" ./cmd/runq
+
+      - name: Verify stamped version
+        if: matrix.goarch == 'amd64'
+        run: |
+          test "$(./runq-${{ matrix.goos }}-${{ matrix.goarch }} version)" = "${GITHUB_REF_NAME}"
+          test "$(./runq-dashboard-${{ matrix.goos }}-${{ matrix.goarch }} version)" = "${GITHUB_REF_NAME}"
 
       - name: Upload Release
         uses: softprops/action-gh-release@v2
@@ -72,10 +86,47 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  build-python-sdk:
+  build-skills:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build skill bundle
+        run: |
+          mkdir -p release/runq
+          cp -R .skills/runq/. release/runq/
+          cd release
+          zip -r "../runq-skills-${GITHUB_REF_NAME}.zip" runq
+
+      - name: Verify skill bundle contents
+        run: |
+          ARCHIVE="runq-skills-${GITHUB_REF_NAME}.zip"
+          unzip -Z1 "$ARCHIVE" | grep -qx 'runq/SKILL.md'
+          unzip -Z1 "$ARCHIVE" | grep -qx 'runq/references/migration.md'
+          unzip -Z1 "$ARCHIVE" | grep -qx 'runq/references/sdk.md'
+          unzip -Z1 "$ARCHIVE" | grep -qx 'runq/references/setup.md'
+
+      - name: Upload skill bundle
+        uses: softprops/action-gh-release@v2
+        with:
+          files: runq-skills-${{ github.ref_name }}.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-python-sdk:
+    needs:
+      - build-go
+      - build-skills
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/runq-sdk
+    permissions:
+      contents: write
+      id-token: write
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -87,10 +138,23 @@ jobs:
           cache: 'pip'
           cache-dependency-path: sdk/python/pyproject.toml
 
-      - name: Build Python SDK
+      - name: Install Python build and test dependencies
         run: |
           python -m pip install --upgrade build
+          python -m pip install -e "./sdk/python[dev]"
+
+      - name: Test Python SDK
+        run: python -m pytest sdk/python/tests -q
+
+      - name: Build Python SDK
+        run: |
           python -m build sdk/python
+
+      - name: Verify Python distribution
+        run: |
+          python -m venv /tmp/runq-wheel-test
+          /tmp/runq-wheel-test/bin/pip install sdk/python/dist/*.whl
+          /tmp/runq-wheel-test/bin/python -c "import runq; assert runq.__version__ == '${GITHUB_REF_NAME#v}'"
 
       - name: Upload Python SDK
         uses: softprops/action-gh-release@v2
@@ -100,3 +164,8 @@ jobs:
             sdk/python/dist/*.tar.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish Python SDK to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: sdk/python/dist/

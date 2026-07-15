@@ -1,6 +1,6 @@
 # runq
 
-**If you are an AI agent, read [SKILLS.md](./SKILLS.md) first.**
+**If you are an AI agent, read the [runq skill](./.skills/runq/SKILL.md) first.**
 **If you are a human, [docs/getting-started.md](./docs/getting-started.md) walks you through your first sweep in five minutes.**
 
 A lightweight GPU job scheduler for research labs.
@@ -80,7 +80,7 @@ Each release ships four artifacts, all pinned to the same version tag:
 | `runq-*` | CLI core (slim) | Always |
 | `runq-dashboard-*` | CLI with the web dashboard embedded | You want a GUI |
 | `runq-skills-*.zip` | Agent skill bundle | Your AI agent operates runq |
-| `runq` on PyPI (`pip install runq`) | Python SDK | Metrics / checkpoints / early-stop in training code |
+| `runq-sdk` on PyPI (`pip install runq-sdk`) | Python SDK | Metrics / checkpoints / early-stop in training code |
 
 Daemon mode needs `nvidia-smi` on PATH. HPC mode needs only a working
 cluster CLI (`sbatch`/`qsub`). Check any setup with `runq doctor`.
@@ -214,7 +214,7 @@ on GPUs.
 | [docs/cli.md](./docs/cli.md) | Every command and flag |
 | [docs/sdk_reference.md](./docs/sdk_reference.md) | Python SDK architecture |
 | [docs/design_philosophy.md](./docs/design_philosophy.md) | Why runq behaves the way it does |
-| [SKILLS.md](./SKILLS.md) | Operating manual for AI agents |
+| [.skills/runq/](./.skills/runq/) | Installable operating skill for AI agents |
 
 ## Your AI agent already knows runq
 
@@ -224,11 +224,11 @@ Claude Code / Codex-style agents the correct workflow (dry-run first,
 they configure and drive runq correctly instead of reinventing a scheduler
 in bash. Grab `runq-skills-*.zip` from Releases and drop it into your
 repo's `.claude/skills/` (or `.codex/skills/`); a `runq skills install`
-command is on the roadmap. Details in [SKILLS.md](./SKILLS.md).
+command is on the roadmap. Details in the [runq skill](./.skills/runq/SKILL.md).
 
 ## Python SDK
 
-`pip install runq` integrates with your training script: typed params
+`pip install runq-sdk` integrates with your training script: typed params
 auto-merged from the sweep, `runq.log_metric()` (feeds `runq best`),
 atomic `safe_save()` checkpoints, cooperative preemption, early stopping.
 Works in daemon mode, file-only mode (HPC), or with no runq at all.
