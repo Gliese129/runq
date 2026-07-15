@@ -10,6 +10,8 @@ cmd/*/runqd
 AGENTS.md
 CLAUDE.md
 
+skill-eval
+
 demo/
 docs/*
 !docs/*.md

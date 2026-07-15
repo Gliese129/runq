@@ -1,44 +1,53 @@
-# runq job configuration
+# runq job configuration — one SELECTION over the project catalog
 #
-# Submit with:  runq submit .              (from this directory, looks for job.yaml)
+# Submit with:  runq submit .              (from this directory, reads job.yaml)
 #          or:  runq submit path/to/job.yaml
 #
-# Preview expanded tasks:  runq submit job.yaml --dry-run
-# Submit and watch:        runq submit job.yaml --watch
+# Preview first (free, prints the exact expansion, submits nothing):
+#     runq submit job.yaml --dry
+# Submit and watch:  runq submit job.yaml --watch
+# Machine-readable:  runq submit job.yaml --json   → {"job_id": ..., "total_tasks": ...}
 #
 # ─── How sweep expansion works ───
 #
-# "sweep" is a list of blocks. Each block expands independently,
-# then all blocks are combined via cartesian product.
+# "sweep" is a list of blocks. Each block expands independently, then all
+# blocks combine via CARTESIAN PRODUCT (documented semantics).
 #
-# method: grid  → cartesian product of all parameters within the block
-# method: list  → zip parameters 1-to-1 (all lists must have same length)
+#   method: grid  → cartesian product of the parameters within the block
+#   method: list  → zip the parameters 1-to-1 (all lists same length) —
+#                   use this for values that BELONG TOGETHER and must never
+#                   be cross-multiplied (batch_size + its num_workers,
+#                   benchmark + its walltime, model + its parser)
 #
-# Example below:
-#   block 1: grid(lr × optimizer) = 3 × 2 = 6 combinations
-#   block 2: list(batch_size, num_workers) = 3 paired combos
-#   total: 6 × 3 = 18 tasks
+# This example:
+#   block 1: grid(lr × optimizer)          = 3 × 2 = 6 combinations
+#   block 2: list(batch_size ⟷ num_workers) = 3 paired combos
+#   total:   6 × 3 = 18 tasks
 
 project: resnet50
 description: "LR × optimizer sweep with tied batch/worker configs"
 
+# Human label — labels live HERE, never as sweep params. Placeholders:
+# params, {{project}} {{user}} {{date}} {{time}} {{sweep}} {{version}}.
+# Re-running the same named config auto-numbers it (foo, foo-v2, foo-v3).
+note: "lr-optimizer sweep {{date}}"
+
 sweep:
-  # Grid block: all combinations of lr and optimizer
+  # Grid block: every lr with every optimizer.
   - method: grid
     parameters:
       lr: [0.001, 0.01, 0.1]
       optimizer: [adam, sgd]
 
-  # List block: batch_size and num_workers are paired 1-to-1
-  # (all parameter lists must have the same length)
+  # List block: batch_size and num_workers are paired 1-to-1.
   - method: list
     parameters:
       batch_size: [32, 64, 128]
       num_workers: [4, 8, 16]
 
-# Optional: override project defaults for this job
+# Optional: override project defaults for this job only.
 # overrides:
 #   gpus_per_task: 4
-#   max_retry: 5       # -1 = unlimited, 0 = no retries
+#   max_retry: 0
 #   env:
 #     WANDB_RUN_GROUP: sweep-v2

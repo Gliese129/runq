@@ -1,0 +1,57 @@
+# HPC example — model × benchmark evaluation on a cluster (Slurm/PBS/SGE).
+#
+# The pattern this pair of files demonstrates is the one people (and AI
+# agents) most often get wrong when migrating a legacy qsub loop:
+#
+#   * per-benchmark walltime  → a `scope: scheduler` param, zip-paired with
+#     the benchmark in job.yaml — NOT hardcoded in a wrapper script, NOT
+#     three separate submissions
+#   * secrets (HF_TOKEN)      → working_dir/.env — NOT in this file
+#   * model pre-download      → setup_command, once per submit on the
+#     login node — NOT a task, NOT a loop in a shell script
+#
+# One-time target setup (see docs/hpc.md):
+#   runq target add tsubame --template=tsubame --host=... --user=...
+#   runq target check tsubame
+#   runq connect tsubame
+#
+# Submit:
+#   runq submit job.yaml --project-file project.yaml -t tsubame --dry
+#   runq submit job.yaml --project-file project.yaml -t tsubame
+
+project_name: llm-eval
+working_dir: /gs/bs/mylab/eval-pipeline
+command_template: python eval_harness.py {{args}}
+
+environment:                       # also prefixed onto the submit command,
+  HF_HOME: /gs/bs/mylab/cache      # so submit_template can reference $HF_HOME
+# HF_TOKEN goes in working_dir/.env — sourced at task start, never stored
+# by runq, never written into any yaml. Keep a .env.example in git instead.
+
+params:
+  - name: model
+    type: str
+    default: llama3-8b
+    choices: [llama3-8b, qwen2-7b, qwen3-8b]   # strict: typos fail at
+    strict: true                               # submit, not after 4h in queue
+  - { name: benchmark, type: str, default: mmlu,
+      choices: [mmlu, gsm8k, humaneval], strict: true }
+  - { name: num_shots, type: int, default: 5 }
+  # Scheduler knobs: consumed by submit_template as {{param.h_rt}} /
+  # {{param.node_kind}}; exempt from the command, never in {{args}}.
+  - { name: h_rt, type: str, scope: scheduler, default: "4:00:00" }
+  - { name: node_kind, type: str, scope: scheduler, default: node_q,
+      choices: [node_q, node_h, node_f], strict: true }
+
+defaults:
+  gpus_per_task: 1
+  max_retry: 2
+
+# Runs once per submit on the login node (compute nodes have no internet).
+# Fixed params only — if your legacy script looped downloads over swept
+# models, either download the full set here unconditionally or keep the
+# download as a documented manual step.
+setup_command: bash scripts/predownload.sh
+
+job_name: "ev-{{model}}-{{benchmark}}"   # rendered into {{name}} for the
+                                         # scheduler; always sanitized

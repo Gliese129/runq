@@ -1,0 +1,29 @@
+# HPC example — one selection over hpc/project.yaml.
+#
+# Preview:  runq submit job.yaml --project-file project.yaml -t tsubame --dry
+#
+# The shape to remember:
+#   models are independent            → grid block
+#   benchmark and ITS walltime are a  → list block (zip 1-to-1); pairing
+#   pair that must never cross        them here is what lets ONE job carry
+#                                     per-benchmark time limits
+#
+# Expansion: model(2) × [benchmark+h_rt](3) = 6 tasks
+#   llama3-8b × (mmlu, 4h) (gsm8k, 2h) (humaneval, 1h)
+#   qwen2-7b  × (mmlu, 4h) (gsm8k, 2h) (humaneval, 1h)
+
+project: llm-eval
+note: "eval sweep {{date}}: {{sweep}}"
+
+sweep:
+  - method: grid
+    parameters:
+      model: [llama3-8b, qwen2-7b]
+
+  - method: list                    # zip: element i pairs with element i
+    parameters:
+      benchmark: [mmlu, gsm8k, humaneval]
+      h_rt: ["4:00:00", "2:00:00", "1:00:00"]
+
+# Everything not listed here uses the catalog defaults from project.yaml
+# (num_shots=5, node_kind=node_q, 1 GPU, retry 2).

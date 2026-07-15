@@ -1,6 +1,7 @@
 # runq
 
-**If you are an AI agent, please read [SKILLS.md](./SKILLS.md)**
+**If you are an AI agent, read [SKILLS.md](./SKILLS.md) first.**
+**If you are a human, [docs/getting-started.md](./docs/getting-started.md) walks you through your first sweep in five minutes.**
 
 A lightweight GPU job scheduler for research labs.
 
@@ -42,7 +43,10 @@ runq sweep lr=0.001,0.01,0.1 batch_size=32,64
 # Each task has its own log, tagged with the exact params that produced it.
 ```
 
-One binary, no containers, no cluster admin. runq is not an ops tool — it just helps you stop copy-pasting shell commands, stop digging through logs to figure out which run used which hyperparameters, and stop wasting GPU hours overnight.
+One binary, no containers, no cluster admin. runq is not an ops tool — it
+just helps you stop copy-pasting shell commands, stop digging through logs
+to figure out which run used which hyperparameters, and stop wasting GPU
+hours overnight.
 
 ## Why not just...
 
@@ -54,12 +58,14 @@ One binary, no containers, no cluster admin. runq is not an ops tool — it just
 | "Which log had lr=0.01?" | `runq task show <id>` | Good luck with `log37_lr_1e-2--batch_32--20250514_0347.txt` | Job name conventions |
 | Task fails at 3 AM | Auto-retry, next task starts | Dead. GPUs idle till morning | Depends on config |
 | Lab has 3 users | Fair scheduling by GPU-hours | "Hey, are you using GPU 2?" | Built-in, but overkill |
-| Disk fills up | Auto-pause + alert (planned) | Everything dies, good morning | Rarely an issue (dedicated storage) |
-| Works on HPC / SLURM | Yes (template mode) | Nope (login node thread limits) | It *is* SLURM |
+| Your AI agent drives it | Ships with an agent skill + `--json` everywhere | Agent hand-rolls a scheduler every time | Agent scrapes qstat output |
+| Works on HPC / SLURM | Yes (target mode) | Nope (login node thread limits) | It *is* SLURM |
 
-runq fills the gap between "everyone just runs stuff manually" and "we need a full cluster scheduler." If your lab moves between shared GPU machines and HPC jobs, this is meant to be the lightweight layer that keeps the workflow consistent.
-
-It also works on HPC clusters (SLURM, PBS, SGE) — runq doesn't replace the cluster scheduler, it just handles sweep expansion, param injection, and log management on top of it. Same workflow, whether you're on a lab machine or submitting to TSUBAME.
+runq fills the gap between "everyone just runs stuff manually" and "we need
+a full cluster scheduler." It also works *on top of* HPC clusters (SLURM,
+PBS, SGE): runq handles sweep expansion, param injection, and log
+management; the cluster's own scheduler keeps scheduling. Same workflow on
+a lab machine and on TSUBAME.
 
 ## Install
 
@@ -67,324 +73,180 @@ It also works on HPC clusters (SLURM, PBS, SGE) — runq doesn't replace the clu
 go install github.com/gliese129/runq/cmd/runq@latest
 ```
 
-This installs the CLI core. The dashboard UI and Python SDK are optional.
+Each release ships four artifacts, all pinned to the same version tag:
 
-For the dashboard, download a `runq-dashboard-*` binary from GitHub Releases, or build it from source:
+| Artifact | What | When you need it |
+|---|---|---|
+| `runq-*` | CLI core (slim) | Always |
+| `runq-dashboard-*` | CLI with the web dashboard embedded | You want a GUI |
+| `runq-skills-*.zip` | Agent skill bundle | Your AI agent operates runq |
+| `runq` on PyPI (`pip install runq`) | Python SDK | Metrics / checkpoints / early-stop in training code |
 
-```bash
-git clone https://github.com/gliese129/runq.git && cd runq
-cd web/dashboard && yarn install --frozen-lockfile && yarn build
-cd ../..
-go build -tags dashboard -o runq ./cmd/runq
-```
+Daemon mode needs `nvidia-smi` on PATH. HPC mode needs only a working
+cluster CLI (`sbatch`/`qsub`). Check any setup with `runq doctor`.
 
-During dashboard UI development, run the backend with local assets:
-
-```bash
-runq dashboard --assets-dir internal/dashboard/dist
-```
-
-For the Python SDK:
+## Quickstart — local GPU machine
 
 ```bash
-pip install runq
-```
+runq daemon start -d        # auto-detects your GPUs
 
-Daemon mode requires `nvidia-smi` on PATH. Run `runq doctor` to check your setup.
-HPC mode requires only a working cluster CLI (`sbatch`/`qsub`).
-
-## Quickstart — Daemon (Local GPU Machine)
-
-```bash
-# 1. Start the daemon (auto-detects your GPUs)
-runq daemon start
-
-# 2. Set up your experiment directory
 cd ~/experiments/resnet50
-runq init train.py          # scans argparse, generates project.yaml + job.yaml
+runq init train.py          # scans argparse → project.yaml + job.yaml
+runq project add .          # register the project
 
-# 3. Submit
-runq submit .               # or just: runq sweep lr=0.001,0.01,0.1 batch_size=32,64
-
-# 4. Check on things
-runq ps                     # task status
-runq gpu                    # GPU allocation
-runq logs <task_id>         # tail output
+runq submit job.yaml --dry  # preview: exact task expansion, nothing submitted
+runq submit job.yaml        # go — or skip YAML: runq sweep lr=1e-3,1e-2 bs=32,64
 ```
 
-That's it. runq expands the parameter sweep, queues the tasks, assigns GPUs, and retries failures.
-
-## Quickstart — HPC (Slurm / PBS / SGE)
-
-On a shared cluster, runq compiles your sweep, writes per-task workspaces, and delegates scheduling to the cluster's native job manager. No resident daemon needed.
+Then check on things:
 
 ```bash
-# 1. Add the cluster as a target (presets fill the scheduler templates), then validate
+runq ps                     # job table (ps <job_id> = that job's tasks)
+runq gpu                    # per-GPU allocation
+runq logs <task_id>         # tail + follow a task (--no-follow to just print)
+runq best <job_id> --key val_loss     # best task by a logged metric (--max for accuracy-style)
+```
+
+Full walkthrough: [docs/getting-started.md](./docs/getting-started.md).
+
+## Quickstart — HPC cluster (SLURM / PBS / SGE)
+
+runq compiles your sweep, writes per-task workspaces, and delegates
+scheduling to the cluster's native job manager. No resident daemon needed.
+
+```bash
 runq target add tsubame --template=tsubame --host=login.t4.gsic.titech.ac.jp --user=alice
-runq target check tsubame           # renders every template with sample values
+runq target check tsubame   # renders every template with sample values — free
+runq connect tsubame        # verify SSH + host key, install remote CLI, start forward
 
-# 2. Connect: verify the host key with you, install the remote CLI, start the forward
-runq connect tsubame
+runq submit job.yaml --project-file project.yaml -t tsubame --dry
+runq submit job.yaml --project-file project.yaml -t tsubame
+runq target use tsubame     # or make -t the session default
 
-# 3. Write project.yaml + job.yaml (see examples/), preview, then submit
-runq submit job.yaml --project-file project.yaml --target tsubame --dry-run
-runq submit job.yaml --project-file project.yaml --target tsubame
-
-# 4. Monitor (same commands as local — target-aware)
-runq ps                              # jobs; `runq ps <job_id>` for its tasks
-runq status <job_id>                 # refresh + show tasks
-runq best <job_id> --key loss        # best task by metric
-runq collect <job_id> --key loss     # all tasks ranked by metric
+runq ps                     # same commands as local — target-aware
+runq status <job_id>
+runq collect <job_id> --key loss
 ```
 
-After `runq target add`, edit `~/.runq/config.yaml` to match your cluster — the `submit_template`, `submit_id_regex`, and `kill_template` fields must be correct for your scheduler (also editable in the dashboard Settings page, with presets, placeholder hints and a built-in checker). Presets for Slurm, PBS, SGE, TSUBAME and ABCI are provided as starting points.
+After `target add`, customise `submit_template` / `submit_id_regex` /
+`kill_template` in `~/.runq/config.yaml` for your cluster (presets for
+Slurm, PBS, SGE, TSUBAME, ABCI included), then re-run `target check`.
+Details, per-task walltime/queue knobs, and login-node behavior:
+[docs/hpc.md](./docs/hpc.md).
 
-Per-task scheduler knobs (walltime, queue) can live in the sweep and be referenced from `submit_template` as `{{param.h_rt}}`, `{{param.node_kind}}` — one job can carry per-benchmark time limits. Declare them with `scope: scheduler` in project.yaml so they're consumed by the submit command, not your training command (see Configuration).
-
-### How runq behaves on the login node
-
-runq is a polite login-node citizen. Task state comes primarily from each task's `status.json`, written by the generated run.sh at start, at exit, and — via a signal trap — when the scheduler kills the task (walltime, `qdel`): those are local file reads, not scheduler queries. The `status_template` probe only covers tasks that died without last words, is rate-limited per job (20s floor for the dashboard's automatic polling; explicit `runq status` / the Refresh button always probe), and listing-style templates like the presets' full `qstat` cost ONE scheduler call per pass regardless of task count. When nothing asks, nothing polls.
-
-Each task runs **from the project's `working_dir`** (relative paths in your command just work), with all output redirected to its own log (`runq logs <task_id>` and the dashboard read it; `-o/-e` in your submit_template only catches scheduler-level noise). Workspaces live under `.runq/<note>-<job id>/<task id>/` — ids carry `jb`/`tk` prefixes, and the job dir starts with your note so `ls .runq/` reads like an experiment log. runq's own operation log (every submit/kill with the rendered command and scheduler output) is at `~/.runq/logs/runq.log`; `runq doctor` checks the right paths per mode.
-
-## Usage
-
-### Quick one-off run
+## Everyday commands
 
 ```bash
-runq run resnet50 --gpus 2 -- --lr 0.01 --epochs 100
+runq ps [job_id]             # jobs, or one job's tasks   (--json for machines)
+runq status [job_id]         # daemon/queue summary, or refresh+show one job
+runq logs <task_id>          # tail + follow; --no-follow to print and exit
+runq kill <task_id|job_id>   # stop one task or a whole job
+runq task retry <task_id>    # requeue a failed task
+runq job pause|resume <id>   # stop/resume dispatching (running tasks continue)
+runq job archive <id>        # hide from lists (reversible; data untouched)
+runq clean --show            # preview cleanup; `runq clean` deletes IRREVERSIBLY
 ```
 
-### Parameter sweep from CLI
+Every read command takes `--json`. Job ids look like `jb…`, task ids like
+`tk…` — scripts should take them from `--json` output, not parse tables.
+The complete command reference: [docs/cli.md](./docs/cli.md).
 
-```bash
-runq sweep --project resnet50 lr=0.001,0.01,0.1 batch_size=32,64
-# Creates 6 tasks (cartesian product), submits as a job
-```
-
-### Parameter sweep from YAML
+## Configuration in 20 lines
 
 ```yaml
-# job.yaml
-project: resnet50
-
-sweep:
-  - method: grid
-    parameters:
-      lr: [0.001, 0.01, 0.1]
-      optimizer: [adam, sgd]
-
-  - method: list
-    parameters:
-      batch_size: [32, 64, 128]
-      num_workers: [4, 8, 16]
-```
-
-Sweep blocks combine via cross-product. This produces 6 × 3 = 18 tasks.
-
-```bash
-runq submit .                # reads ./job.yaml
-runq submit --dry-run .      # preview tasks without submitting
-```
-
-### Job control
-
-```bash
-runq job archive <job_id>    # hide from default lists (reversible; data untouched)
-runq project archive <name>  # hide a project and (in global lists) its jobs
-runq job pause <job_id>      # pause scheduling (running tasks continue)
-runq job resume <job_id>
-runq job kill <job_id>       # kill all tasks in a job
-runq kill <task_id>          # kill one task
-runq task retry <task_id>    # retry a failed task
-```
-
-### Monitoring
-
-```bash
-runq ps                      # running + pending
-runq ps -a                   # include completed
-runq ps --status failed      # filter
-runq gpu                     # per-GPU allocation
-runq logs <task_id>          # tail output
-runq task show <task_id>     # params, status, timing, log path
-```
-
-## Configuration
-
-### project.yaml
-
-```yaml
+# project.yaml — the parameter CATALOG: what CAN vary, and defaults
 project_name: resnet50
 working_dir: /home/user/experiments/resnet50
-command_template: python train.py {{args}}
-
+command_template: python train.py {{args}}    # {{args}} = --key=value for all params
 environment:
   WANDB_PROJECT: resnet-experiments
-
+params:
+  - { name: lr, type: float, default: 0.001 }
+  - { name: optimizer, type: str, default: adam, choices: [adam, sgd], strict: true }
 defaults:
   gpus_per_task: 1
   max_retry: 3
-
-resume:
-  enabled: true
-  extra_args: --resume --ckpt latest
 ```
 
-Command templates support `{{args}}` (auto-generates `--key=value` for all parameters) and `{{param_name}}` (inserts a specific parameter). You can mix both: `python train.py --lr {{lr}} {{args}}`.
+```yaml
+# job.yaml — one SELECTION over the catalog: what varies THIS time
+project: resnet50
+sweep:
+  - method: grid                    # cartesian product within the block
+    parameters: { lr: [0.001, 0.01, 0.1], optimizer: [adam, sgd] }
+  - method: list                    # zip 1-to-1 — for values that belong together
+    parameters: { batch_size: [32, 64], num_workers: [4, 8] }
+# blocks cross-multiply: grid(3×2) × list(2) = 12 tasks
+```
 
-More project-level fields:
+`project.yaml` is the source of truth — hand-edits are picked up on the
+next use; CLI and GUI can never disagree. `.env` in `working_dir` is
+sourced at task start and never stored by runq (tokens stay out of the DB,
+logs, and UIs). Every field, placeholder, and priority rule:
+[docs/configuration.md](./docs/configuration.md).
 
-- `params:` — the parameter **catalog** (`type` / `default` / `choices` / `include` / `strict` / `scope`). The dashboard builds its submit form from this; a job.yaml is just one selection over it (`grid` = cross product, `list` = zip).
-  - `strict: true` upgrades `choices` from suggestions to a contract: any submitted value outside the list fails at submit time (CLI and GUI alike).
-  - `scope: scheduler` declares a param consumed by the HPC `submit_template` (`{{param.h_rt}}`) instead of the command — it is exempt from command-template consumption and never injected into `{{args}}`. Recommended pattern for queue-like knobs:
+Copy-paste starting points live in [`examples/`](./examples/) — fully
+annotated project.yaml / job.yaml, a minimal starter, and an
+[`examples/hpc/`](./examples/hpc/) pair showing the model × benchmark
+pattern with per-benchmark walltimes (`scope: scheduler` + zip pairing).
 
-    ```yaml
-    params:
-      - { name: node_kind, type: str, scope: scheduler, default: node_q, choices: [node_q, node_h, node_f], strict: true }
-    ```
-- `setup_command:` — runs once per submit, before anything is persisted (e.g. `hf download {{model}}`). May reference fixed params only; failure aborts cleanly.
-- `environment:` — injected into every task AND prefixed onto the HPC submit command, so `$TSUBAME_GROUP`-style references in `submit_template` resolve from project config.
-- `job_name:` — template for the per-task scheduler job name, exposed to `submit_template` as `{{name}}` (params + `{{project}}` `{{job_id}}` `{{task_id}}`; default `rq-{{task_id}}`). Always sanitized — scheduler-safe charset, never digit-first. job.yaml `name:` overrides per submission.
-- `.env` in `working_dir` is sourced at task start automatically (override with `env_file:`). runq never stores its values — tokens stay out of the DB, logs and UIs. Explicit `environment:` always wins.
-- Job `note` supports placeholders: params, `{{project}}` `{{user}}` `{{date}}` `{{time}}` `{{sweep}}`, and `{{version}}` — re-running the same named config auto-numbers it (`foo`, `foo-v2`, `foo-v3`), with timestamp differences ignored when finding the family.
+## Scheduling & reliability
 
-### Python environments
+Two strategies at daemon startup: **FIFO** or **fair-share** (users with
+fewer consumed GPU-hours get priority), both with backfill and a 15-minute
+anti-starvation reservation. GPU isolation via `CUDA_VISIBLE_DEVICES` —
+each task sees only its assigned GPUs.
 
-runq auto-detects uv, venv, and conda environments in your project directory and activates them before running tasks. Detection happens during `runq init` and can be overridden in project.yaml.
+Built for the "submit before going home" workflow: auto-retry up to
+`max_retry`, optional per-task timeout, daemon crash recovery from SQLite
+(running processes are reclaimed, the queue is restored), GPU leak
+detection after each task, and awareness of non-runq processes squatting
+on GPUs.
 
-### Config priority
+## Documentation
 
-CLI flag > job.yaml override > project.yaml default > built-in default.
-
-`project.yaml` is the source of truth: hand-edits are picked up automatically the next time the project is selected or submitted (the DB copy is just a cache and re-syncs on read) — CLI and GUI can never disagree about a project.
-
-## Scheduling
-
-Two strategies, selectable at daemon startup:
-
-**FIFO** — first submitted, first scheduled. Simple.
-
-**Fair-share** — users who have consumed fewer GPU-hours get priority. If one person submits a 50-task sweep, everyone else doesn't have to wait till next week.
-
-Both include backfill (small tasks run in gaps while big tasks wait for GPUs) and reservation (tasks waiting longer than 15 minutes get priority, preventing starvation).
-
-GPU isolation uses `CUDA_VISIBLE_DEVICES`. Each task sees only its assigned GPUs.
-
-## Reliability
-
-runq is designed for the "submit before going home" workflow:
-
-- **Auto-retry** — failed tasks retry up to `max_retry` times (`-1` = unlimited, `0` = no retries).
-- **Timeout** — optional per-task timeout kills runaway processes.
-- **Daemon crash recovery** — restarts reclaim still-running processes and restore the full queue from SQLite. Nothing is lost.
-- **GPU leak detection** — checks for residual processes after each task exits.
-- **External GPU awareness** — detects non-runq processes on GPUs and avoids those slots.
-
-
-<details>
-<summary><strong>CLI Reference — Daemon</strong></summary>
-
-| Command | Description |
+| Doc | For |
 |---|---|
-| `runq init [script.py]` | Scaffold project.yaml + job.yaml |
-| `runq submit [path] [--note "..."]` | Submit a job from YAML |
-| `runq sweep [--note "..."]` | Submit a sweep from CLI args |
-| `runq run <project> -- <args>` | Quick single-task run |
-| `runq ps` | List tasks |
-| `runq gpu` | GPU allocation |
-| `runq status` | Daemon/queue summary |
-| `runq logs <task_id>` | Tail task output |
-| `runq kill <id>` | Kill task or job |
-| `runq job ls/show/pause/resume/kill/rm` | Job management |
-| `runq task show/retry` | Task management |
-| `runq project add/ls/show/edit/rm` | Project management |
-| `runq daemon start/stop/restart` | Daemon lifecycle |
-| `runq doctor` | Environment check |
-| `runq clean --older-than <dur>` | Remove finished tasks, workspaces, and orphan jobs |
+| [examples/](./examples/) | Annotated, copy-paste config starting points (incl. an HPC pair) |
+| [docs/getting-started.md](./docs/getting-started.md) | First sweep in 5 minutes (local machine) |
+| [docs/configuration.md](./docs/configuration.md) | project.yaml / job.yaml full reference |
+| [docs/hpc.md](./docs/hpc.md) | Cluster targets: setup, templates, login-node behavior |
+| [docs/cli.md](./docs/cli.md) | Every command and flag |
+| [docs/sdk_reference.md](./docs/sdk_reference.md) | Python SDK architecture |
+| [docs/design_philosophy.md](./docs/design_philosophy.md) | Why runq behaves the way it does |
+| [SKILLS.md](./SKILLS.md) | Operating manual for AI agents |
 
-</details>
+## Your AI agent already knows runq
 
-<details>
-<summary><strong>CLI Reference — HPC</strong></summary>
-
-| Command | Description |
-|---|---|
-| `runq target add <name> --template=<scheduler>` | Add a cluster target (presets: slurm\|pbs\|sge\|tsubame\|abci) |
-| `runq target check <name>` | Validate templates: placeholders, regex, sample render |
-| `runq connect <name>...` | Verify SSH + host key, install remote CLI, start socket forward |
-| `runq target disconnect <name>...` | Stop the forward, disable remote_cli |
-| `runq submit <job.yaml> --target <name>` | Compile sweep + submit each task to the cluster |
-| `runq status <job_id>` | Refresh and show task status |
-| `runq kill <job_id\|task_id>` | Cancel via kill_template |
-| `runq best <job_id> --key <metric>` | Show the task with the best metric value |
-| `runq collect <job_id> --key <metric>` | Per-task params + best metric, ranked |
-| `runq clean` | Interactive cleanup (all-or-nothing per selection) |
-
-</details>
-
-<details>
-<summary><strong>File Locations</strong></summary>
-
-| Path | Description |
-|---|---|
-| `~/.runq/config.yaml` | Global config (`data_path`, `default_target`) + `targets:` list (scheduler templates per target) |
-| `~/.runq/runq.db` | SQLite database (daemon) |
-| `~/.runq/runq.sock` | Unix domain socket (daemon) |
-| `~/.runq/daemon.pid` | PID file (daemon) |
-| `<root>/<job_id>/<task_id>/` | Per-task workspace |
-| `<task_dir>/params.json` | Sweep-expanded parameters |
-| `<task_dir>/metrics.jsonl` | Training metrics |
-| `<task_dir>/checkpoints/` | Checkpoint directory |
-| `<task_dir>/run.sh` | Generated wrapper script (HPC only) |
-| `<task_dir>/status.json` | Self-reported task status (HPC only) |
-
-By default `<root>` is `<working_dir>/.runq/`. If `data_path` is set in `config.yaml`, physical storage moves to `<data_path>/<project>/` and `.runq` becomes a convenience symlink.
-
-</details>
+runq ships an agent skill — a compact operating manual that teaches
+Claude Code / Codex-style agents the correct workflow (dry-run first,
+`--json` everywhere, never hand-assign GPUs) and the sweep semantics, so
+they configure and drive runq correctly instead of reinventing a scheduler
+in bash. Grab `runq-skills-*.zip` from Releases and drop it into your
+repo's `.claude/skills/` (or `.codex/skills/`); a `runq skills install`
+command is on the roadmap. Details in [SKILLS.md](./SKILLS.md).
 
 ## Python SDK
 
-runq ships an optional Python SDK (`pip install runq`) that integrates with your training script. The SDK handles parameter injection, checkpoint safety, metrics logging, and cooperative preemption — all without changing your training loop structure.
+`pip install runq` integrates with your training script: typed params
+auto-merged from the sweep, `runq.log_metric()` (feeds `runq best`),
+atomic `safe_save()` checkpoints, cooperative preemption, early stopping.
+Works in daemon mode, file-only mode (HPC), or with no runq at all.
 
 ```python
 import runq
 
-ctx = runq.context()
-
-# Typed params — auto-merged from sweep parameters
 @runq.dataclass(auto_overwrite=True)
 class Params:
     lr: float = 0.001
-    batch_size: int = 32
 
-cfg = Params()  # cfg.lr may be overridden by the sweep
-
-# Training loop with preemption + early stop
-for step in runq.range(1000):
-    loss = train(model, cfg)
-    runq.log_metric("loss", loss)
-    runq.report({"val_loss": evaluate(model)})  # early-stop check
+cfg = Params()                       # sweep params merged in
+for step in runq.range(1000):        # preemption + early-stop aware
+    runq.log_metric("loss", train_step(cfg))
     runq.safe_save("ckpt.pt", model.state_dict(), keep_last_n=3)
-
-# Resume
-ckpt = runq.latest_checkpoint()  # or runq.best_checkpoint()
 ```
 
-Key features:
-
-- **`runq.range()` / `runq.loop()`** — drop-in iterators with SIGTERM preemption and early-stop. `range()` for numeric loops, `loop()` for arbitrary iterables (dataloaders).
-- **`@runq.dataclass`** — typed parameter class with `to_json`/`from_json`/`to_yaml`/`from_yaml`. `auto_overwrite=True` merges sweep params at instantiation.
-- **`runq.safe_save()`** — atomic checkpoint writes (tmp + fsync + rename). Catches ENOSPC mid-write, triggers freeze flow in daemon mode. Manifest-scoped cleanup via `keep_last_n` / `keep_best`.
-- **`runq.seed`** — deterministic per-task seed derived from task ID.
-- **`runq.report()`** — early-stop evaluation with pluggable policies (`patience`, `threshold`, `convergence`).
-- **Tri-mode** — works with daemon (Unix socket), without daemon (file-only), or in manual mode (no runq infrastructure at all).
-
-The SDK is in `sdk/python/`. Install from the repo:
-
-```bash
-cd sdk/python && pip install -e .
-```
+See [docs/sdk_reference.md](./docs/sdk_reference.md) and `sdk/python/examples/`.
 
 ## License
 

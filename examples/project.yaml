@@ -1,57 +1,74 @@
-# runq project configuration
+# runq project configuration — the parameter CATALOG
 #
 # Register with:  runq project add .          (from this directory)
 #            or:  runq project add myname     (override name via CLI)
 #
-# Config priority: CLI flag > YAML field > built-in default
+# This file is the source of truth: hand-edits are picked up automatically
+# on the next use (the DB copy is a self-healing cache). No re-registration.
+# Config priority: CLI flag > job.yaml override > this file > built-in default.
 
 project_name: resnet50
-working_dir: /home/user/projects/resnet50
+working_dir: /home/user/projects/resnet50    # must exist at submit time
 command_template: python train.py {{args}}
+# command_template placeholders:
+#   {{args}}        → --key=value for every param not otherwise consumed
+#   {{lr}} etc.     → one param's value, anywhere (even inside quoted strings)
+#   {{project}} {{task_id}} → identity of the current project / task
+# You can mix: python train.py --lr {{lr}} {{args}}
+# Every sweep param must be consumed by this template (or, on HPC, by the
+# submit_template via {{param.*}}) — an unconsumed param fails at submit.
 
-# Environment variables injected into every task.
-# In HPC mode they are ALSO prefixed onto the submit command, so
-# $MY_GROUP-style references in submit_template resolve from here.
+# Environment variables injected into every task. In HPC mode they are ALSO
+# prefixed onto the submit command, so $MY_GROUP-style references in
+# submit_template resolve from here. NEVER put secrets here (not even
+# placeholders) — put them in working_dir/.env, which is sourced at task
+# start and never stored by runq. Override the file with `env_file:`.
 environment:
   WANDB_PROJECT: resnet-experiments
 
-# Parameter catalog (optional). The dashboard builds its submit form from
-# this; a job.yaml is one selection over it.
+# Parameter catalog. The dashboard builds its submit form from this; a
+# job.yaml is one selection over it.
 #   type:    str | int | float | bool | file | folder
 #   choices: suggestions — add `strict: true` to make them a hard contract
+#            (out-of-list values fail at submit time, CLI and GUI alike)
 #   include: false hides the param from the default GUI form
-#   scope: scheduler — consumed by HPC submit_template ({{param.NAME}}),
+#   scope: scheduler — consumed by the HPC submit_template ({{param.NAME}}),
 #          exempt from command_template and never injected into {{args}}
 params:
   - { name: lr, type: float, default: 0.001 }
+  - { name: batch_size, type: int, default: 32 }
   - { name: optimizer, type: str, default: adam, choices: [adam, sgd], strict: true }
   - { name: h_rt, type: str, scope: scheduler, default: "4:00:00" }
 
-# Defaults (can be overridden per-job in job.yaml → overrides)
+# Defaults (overridable per-job in job.yaml → overrides).
+# gpus_per_task is THE way to ask for GPUs — runq assigns the actual
+# devices via CUDA_VISIBLE_DEVICES; never hardcode GPU indices anywhere.
 defaults:
-  gpus_per_task: 1   # 0 = CPU-only
-  max_retry: 3       # -1 = unlimited, 0 = no retries
+  gpus_per_task: 1
+  max_retry: 3       # 0 = unlimited retries
 
-# Resume configuration
-# Set enabled: true only if your training script supports checkpoint resume.
-# extra_args are appended to the command when a crashed task is auto-restarted.
+# Optional: runs ONCE per submit, before anything is persisted (e.g. model
+# pre-download on an HPC login node). May reference FIXED params only;
+# failure aborts the submit cleanly.
+# setup_command: hf download {{base_model}}
+
+# Optional: template for the per-task scheduler job name (HPC), exposed to
+# submit_template as {{name}}. Always sanitized (scheduler-safe charset,
+# never digit-first). Default: rq-{{task_id}}.
+# job_name: "{{project}}-{{task_id}}"
+
+# Resume configuration — enable only if your script supports checkpoint
+# resume. extra_args are appended when a crashed task is auto-restarted.
 resume:
   enabled: true
   extra_args: --resume --ckpt latest
 
-# L2-C: optional wandb integration.
-# When this block is present, daemon writes <task_dir>/wandb_config.json and
-# injects RUNQ_WANDB_CONFIG_FILE into the task env. The Python SDK reads it
-# via ctx.wandb_cfg and the user can spread it into wandb.init:
-#
-#     import wandb, runq
-#     ctx = runq.context()
-#     wandb.init(**ctx.wandb_cfg)
-#
-# Omit the entire block to disable wandb integration; the SDK will still log
-# metrics locally to metrics.jsonl, just without forwarding to wandb.
+# Optional wandb integration. When present, runq writes
+# <task_dir>/wandb_config.json and the Python SDK exposes it as
+# ctx.wandb_cfg — spread it into wandb.init(**ctx.wandb_cfg). Omit the
+# block to disable; SDK metrics still land in metrics.jsonl locally.
 # wandb:
 #   project: my-experiment
 #   entity:  my-team             # optional
-#   tags:    [vision, baseline]  # optional; SDK may append more via with_tags
-#   mode:    online              # online / offline / disabled (optional)
+#   tags:    [vision, baseline]  # optional
+#   mode:    online              # online / offline / disabled

@@ -138,4 +138,5 @@ const usageTemplate = `{{if .Runnable}}{{underline "Usage:"}}
 {{- end}}
 
 Use "{{.CommandPath}} [command] --help" for more information about a command.
+{{dim "Docs & annotated config examples: https://github.com/gliese129/runq — docs/ and examples/"}}
 `

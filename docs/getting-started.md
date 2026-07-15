@@ -1,0 +1,143 @@
+# Getting started — your first sweep in 5 minutes
+
+This walkthrough assumes a shared lab machine with NVIDIA GPUs. For HPC
+clusters (SLURM / PBS / SGE) do steps 1–3 here, then switch to
+[hpc.md](./hpc.md).
+
+## 1. Install and check
+
+```bash
+go install github.com/gliese129/runq/cmd/runq@latest
+runq doctor
+```
+
+`doctor` tells you exactly what's missing (e.g. `nvidia-smi` not on PATH)
+and how to fix it. Fix what it flags, re-run until green.
+
+## 2. Start the daemon
+
+```bash
+runq daemon start -d
+```
+
+The daemon auto-detects your GPUs, owns the queue, and survives your
+logout. One daemon per machine — if a labmate already started it, skip
+this step. `runq status` shows the queue summary any time.
+
+## 3. Turn your script into a project
+
+```bash
+cd ~/experiments/resnet50
+runq init train.py
+```
+
+`init` scans `train.py`'s argparse arguments and generates two files:
+
+- **project.yaml** — the parameter *catalog*: every argument it found, with
+  types and defaults, plus `command_template`, `working_dir`, and GPU
+  defaults. This describes what *can* vary.
+- **job.yaml** — one *selection* over that catalog: which values to sweep
+  *this time*.
+
+Open project.yaml and sanity-check three things: `working_dir` (must
+exist), `command_template` (how your script is invoked; `{{args}}` expands
+to `--key=value` for every parameter), and `defaults.gpus_per_task`.
+
+Your script doesn't use argparse? Copy the annotated examples in
+[configuration.md](./configuration.md) and fill in the params by hand.
+
+Then register:
+
+```bash
+runq project add .
+```
+
+## 4. Describe the sweep
+
+Edit job.yaml:
+
+```yaml
+project: resnet50
+note: "first sweep"           # human label; shows up in runq ps
+sweep:
+  - method: grid              # cartesian product
+    parameters:
+      lr: [0.001, 0.01, 0.1]
+      batch_size: [32, 64]
+```
+
+Or skip the file entirely for quick things:
+
+```bash
+runq sweep lr=0.001,0.01,0.1 batch_size=32,64      # same 6 tasks, no YAML
+runq run resnet50 --gpus 2 -- --lr 0.01            # one-off single task
+```
+
+## 5. Preview, then submit
+
+```bash
+runq submit job.yaml --dry
+```
+
+`--dry` prints the exact expanded task list — `lr(3) × batch_size(2) = 6
+tasks` — and submits nothing. It costs nothing; make it a habit. When the
+expansion looks right:
+
+```bash
+runq submit job.yaml
+```
+
+runq queues 6 tasks, assigns free GPUs as they become available, isolates
+each task to its GPUs via `CUDA_VISIBLE_DEVICES`, retries failures up to
+`max_retry`, and gives each task its own log tagged with its exact params.
+
+## 6. Watch, and collect results
+
+```bash
+runq ps                      # job table: id, status, done/total, note
+runq ps <job_id>             # that job's tasks with their params
+runq gpu                     # who is on which GPU
+runq logs <task_id>          # tail + follow (Ctrl-C to stop; --no-follow to just print)
+```
+
+If your script logs metrics (via the Python SDK's `runq.log_metric()`, or
+by writing `metrics.jsonl` in the task workspace):
+
+```bash
+runq best <job_id> --key val_loss          # single best task + its params
+runq best <job_id> --key accuracy --max    # higher-is-better metrics need --max
+runq collect <job_id> --key val_loss       # every task, ranked
+```
+
+## 7. When something goes wrong
+
+```bash
+runq task show <task_id>     # params, status, retry count, log path
+runq task retry <task_id>    # requeue just that one
+runq kill <task_id>          # stop one task
+runq kill <job_id>           # stop the whole job
+runq job pause <job_id>      # stop dispatching; running tasks continue
+```
+
+runq's own operation log (every submit/kill with the rendered command) is
+at `~/.runq/logs/runq.log`. And when a run is truly over:
+
+```bash
+runq clean --show            # preview what would be deleted
+runq clean --older-than 720h # delete finished tasks + artifacts (IRREVERSIBLE)
+```
+
+## Where things live
+
+| Path | What |
+|---|---|
+| `~/.runq/config.yaml` | Global config + HPC targets |
+| `~/.runq/runq.db` | Queue state (SQLite; daemon crash recovery reads this) |
+| `<working_dir>/.runq/<note>-<job_id>/<task_id>/` | Per-task workspace: log, params.json, metrics.jsonl, checkpoints/ |
+
+The job directory starts with your `note`, so `ls .runq/` reads like an
+experiment log. Don't parse these paths in scripts — use `--json` output.
+
+Next steps: [configuration.md](./configuration.md) for the full YAML
+reference · [hpc.md](./hpc.md) to run the same workflow on a cluster ·
+[SKILLS.md](../SKILLS.md) if an AI agent will drive runq for you.
