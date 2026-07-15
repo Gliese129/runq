@@ -1,6 +1,6 @@
 # Python SDK — instrumenting training code
 
-`pip install runq`, then `import runq` in the training script. The SDK
+`pip install runq-sdk`, then `import runq` in the training script. The SDK
 handles parameter injection, metrics logging, checkpoint safety, cooperative
 preemption, and early stopping — without changing the training loop
 structure.

@@ -1,16 +1,20 @@
 # Installing runq and configuring environments
 
-## Install — three pieces, install only what's needed
+## Install — four pieces, install only what's needed
 
 | Piece | When | How |
 |---|---|---|
-| CLI core | Always | `go install github.com/gliese129/runq/cmd/runq@latest`, or a release binary |
-| Dashboard | User wants a web GUI | release binary with embedded UI (`runq-dashboard-*`) |
-| Python SDK | Training script needs metrics / checkpoints / early-stop | `pip install runq` |
+| CLI/client core | Always | `curl -fsSL https://raw.githubusercontent.com/Gliese129/runq/main/install.sh \| sh` |
+| Dashboard | User wants a web GUI | answer yes in the installer, or set `RUNQ_WITH_UI=1` |
+| Linux executor (`runqd`) | Linux local GPU machine | installed automatically next to `runq`; not installed on macOS |
+| Python SDK | Training script needs metrics / checkpoints / early-stop | `pip install runq-sdk` (import name: `runq`) |
 
-Start with CLI core only. Daemon mode needs `nvidia-smi` on PATH.
-HPC mode needs only a working cluster CLI (`sbatch`/`qsub`).
-Verify any setup with `runq doctor`.
+The installer supports Linux/macOS and amd64/arm64, verifies checksums, and
+starts the client daemon in the background. For non-interactive use set
+`RUNQ_WITH_UI=0` or `1`; use `RUNQ_START_DAEMON=0` to skip startup.
+Linux local execution needs `nvidia-smi` on PATH. macOS/HPC client mode
+needs only the relevant SSH or cluster CLI. Verify any setup with
+`runq doctor`.
 
 ## Align with the user before touching config
 
@@ -25,7 +29,7 @@ Verify any setup with `runq doctor`.
 
 ```
 runq doctor                    # verify GPU environment
-runq daemon start -d
+runq daemon start -d           # installer already starts it
 # write project.yaml + job.yaml (or runq init <script.py>)
 runq project add .
 runq submit . --dry            # confirm with the user

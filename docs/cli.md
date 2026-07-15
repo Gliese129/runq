@@ -49,13 +49,18 @@ they state what's wrong and how to fix it, and exit non-zero.
 project.yaml is the source of truth: hand-edits are picked up on next use.
 There is no re-registration step.
 
-## Daemon (local machines)
+## Daemons
 
 | Command | What it does |
 |---|---|
-| `runq daemon start [-d]` | Start the scheduler daemon (`-d` = background) |
-| `runq daemon stop / restart` | Stop / restart (restart always backgrounds) |
+| `runq daemon start [-d]` | Start the cross-platform client/dashboard daemon (`-d` = background); a Linux local target starts sibling `runqd` on demand |
+| `runq daemon stop / restart` | Stop / restart the client daemon (restart always backgrounds) |
 | `runq doctor` | Static self-check of this machine, with fixes |
+
+`runqd` is the separate Linux-only headless scheduler/executor. Normal
+installs place it next to `runq`; the client locates and starts it when the
+configured target is local. macOS installs only `runq` and can control
+remote Linux `runqd` or HPC targets.
 
 ## HPC targets
 

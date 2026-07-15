@@ -43,7 +43,7 @@ runq sweep lr=0.001,0.01,0.1 batch_size=32,64
 # Each task has its own log, tagged with the exact params that produced it.
 ```
 
-One binary, no containers, no cluster admin. runq is not an ops tool — it
+Native binaries, no containers, no cluster admin. runq is not an ops tool — it
 just helps you stop copy-pasting shell commands, stop digging through logs
 to figure out which run used which hyperparameters, and stop wasting GPU
 hours overnight.
@@ -70,25 +70,42 @@ a lab machine and on TSUBAME.
 ## Install
 
 ```bash
-go install github.com/gliese129/runq/cmd/runq@latest
+curl -fsSL https://raw.githubusercontent.com/Gliese129/runq/main/install.sh | sh
 ```
 
-Each release ships four artifacts, all pinned to the same version tag:
+The installer detects Linux/macOS and amd64/arm64, asks whether to install
+the embedded web UI, verifies SHA-256 checksums, and starts the runq client
+daemon in the background. On Linux it also installs the sibling `runqd`
+execution daemon; macOS is currently a client/control-plane target and does
+not install `runqd`.
+
+For automation, skip the prompt with `RUNQ_WITH_UI=0` or
+`RUNQ_WITH_UI=1`. Set `RUNQ_START_DAEMON=0` to install without starting,
+`RUNQ_INSTALL_DIR` to choose a destination, or `RUNQ_VERSION=v…` to pin a
+release.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Gliese129/runq/main/install.sh \
+  | RUNQ_WITH_UI=1 RUNQ_VERSION=v0.5.0rc2 sh
+```
+
+Each release ships these artifacts, all pinned to the same version tag:
 
 | Artifact | What | When you need it |
 |---|---|---|
-| `runq-*` | CLI core (slim) | Always |
-| `runq-dashboard-*` | CLI with the web dashboard embedded | You want a GUI |
+| `runq-{linux,darwin}-{amd64,arm64}` | Cross-platform CLI/client core | Always |
+| `runq-dashboard-{linux,darwin}-{amd64,arm64}` | Same CLI with the web dashboard embedded | You want a GUI |
+| `runqd-linux-{amd64,arm64}` | Headless scheduler/executor for a Linux GPU machine | Linux local execution |
 | `runq-skills-*.zip` | Agent skill bundle | Your AI agent operates runq |
 | `runq-sdk` on PyPI (`pip install runq-sdk`) | Python SDK | Metrics / checkpoints / early-stop in training code |
 
-Daemon mode needs `nvidia-smi` on PATH. HPC mode needs only a working
-cluster CLI (`sbatch`/`qsub`). Check any setup with `runq doctor`.
+Linux local execution needs `nvidia-smi` on PATH. macOS and HPC client mode
+need only the relevant SSH/cluster tools. Check any setup with `runq doctor`.
 
 ## Quickstart — local GPU machine
 
 ```bash
-runq daemon start -d        # auto-detects your GPUs
+runq daemon start -d        # installer already does this; safe for manual installs
 
 cd ~/experiments/resnet50
 runq init train.py          # scans argparse → project.yaml + job.yaml

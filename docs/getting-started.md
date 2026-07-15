@@ -7,12 +7,23 @@ clusters (SLURM / PBS / SGE) do steps 1–3 here, then switch to
 ## 1. Install and check
 
 ```bash
-go install github.com/gliese129/runq/cmd/runq@latest
+curl -fsSL https://raw.githubusercontent.com/Gliese129/runq/main/install.sh | sh
 runq doctor
 ```
 
-`doctor` tells you exactly what's missing (e.g. `nvidia-smi` not on PATH)
-and how to fix it. Fix what it flags, re-run until green.
+The installer supports Linux and macOS on amd64/arm64. It asks whether to
+install the embedded UI build, verifies the downloaded checksums, installs
+`runq` (plus Linux-only `runqd`), and starts `runq` in the background.
+`doctor` then tells you exactly what's missing and how to fix it.
+
+The one-liner remains scriptable: set `RUNQ_WITH_UI=0` or `1`,
+`RUNQ_START_DAEMON=0` to skip startup, `RUNQ_INSTALL_DIR` for a custom
+destination, and `RUNQ_VERSION=v…` to pin a release.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Gliese129/runq/main/install.sh \
+  | RUNQ_WITH_UI=1 RUNQ_VERSION=v0.5.0rc2 sh
+```
 
 ## 2. Start the daemon
 
@@ -20,9 +31,12 @@ and how to fix it. Fix what it flags, re-run until green.
 runq daemon start -d
 ```
 
-The daemon auto-detects your GPUs, owns the queue, and survives your
-logout. One daemon per machine — if a labmate already started it, skip
-this step. `runq status` shows the queue summary any time.
+The installer already runs this command; use it after a manual install or
+after stopping the client daemon. `runq` owns the cross-platform client and
+dashboard process. On a Linux local target it finds the sibling `runqd` and
+starts that headless scheduler/executor as needed. `runqd` is intentionally
+separate so the client can also run on macOS and drive Linux/HPC targets.
+`runq status` shows the queue summary any time.
 
 ## 3. Turn your script into a project
 

@@ -5,18 +5,8 @@ on:
       - 'v*'
 
 jobs:
-  build-go:
+  test-go:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    strategy:
-      matrix:
-        include:
-          - goos: linux
-            goarch: amd64
-          - goos: linux
-            goarch: arm64
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -30,6 +20,33 @@ jobs:
       - name: Run Go tests
         run: go test ./...
 
+  build-go:
+    needs: test-go
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: 'true'
+
       - name: Build CLI-only binary
         env:
           GOOS: ${{ matrix.goos }}
@@ -40,6 +57,18 @@ jobs:
           go build \
             -ldflags "-X github.com/gliese129/runq/internal/version.Version=${GITHUB_REF_NAME}" \
             -o "$BINARY_NAME" ./cmd/runq
+
+      - name: Build headless execution daemon
+        if: matrix.goos == 'linux'
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          BINARY_NAME="runqd-${{ matrix.goos }}-${{ matrix.goarch }}"
+          go build \
+            -ldflags "-X github.com/gliese129/runq/internal/version.Version=${GITHUB_REF_NAME}" \
+            -o "$BINARY_NAME" ./cmd/runqd
 
       - name: Set up node
         uses: actions/setup-node@v4
@@ -72,17 +101,44 @@ jobs:
             -o "$BINARY_NAME" ./cmd/runq
 
       - name: Verify stamped version
-        if: matrix.goarch == 'amd64'
+        if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
         run: |
           test "$(./runq-${{ matrix.goos }}-${{ matrix.goarch }} version)" = "${GITHUB_REF_NAME}"
           test "$(./runq-dashboard-${{ matrix.goos }}-${{ matrix.goarch }} version)" = "${GITHUB_REF_NAME}"
 
-      - name: Upload Release
+      - name: Build checksums
+        run: |
+          sha256sum "runq-${{ matrix.goos }}-${{ matrix.goarch }}" \
+            > "runq-${{ matrix.goos }}-${{ matrix.goarch }}.sha256"
+          sha256sum "runq-dashboard-${{ matrix.goos }}-${{ matrix.goarch }}" \
+            > "runq-dashboard-${{ matrix.goos }}-${{ matrix.goarch }}.sha256"
+          if [ "${{ matrix.goos }}" = "linux" ]; then
+            sha256sum "runqd-${{ matrix.goos }}-${{ matrix.goarch }}" \
+              > "runqd-${{ matrix.goos }}-${{ matrix.goarch }}.sha256"
+          fi
+
+      - name: Upload runq release assets
         uses: softprops/action-gh-release@v2
         with:
+          fail_on_unmatched_files: true
+          prerelease: ${{ contains(github.ref_name, 'rc') || contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') }}
           files: |
             runq-${{ matrix.goos }}-${{ matrix.goarch }}
+            runq-${{ matrix.goos }}-${{ matrix.goarch }}.sha256
             runq-dashboard-${{ matrix.goos }}-${{ matrix.goarch }}
+            runq-dashboard-${{ matrix.goos }}-${{ matrix.goarch }}.sha256
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload runqd release assets
+        if: matrix.goos == 'linux'
+        uses: softprops/action-gh-release@v2
+        with:
+          fail_on_unmatched_files: true
+          prerelease: ${{ contains(github.ref_name, 'rc') || contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') }}
+          files: |
+            runqd-${{ matrix.goos }}-${{ matrix.goarch }}
+            runqd-${{ matrix.goos }}-${{ matrix.goarch }}.sha256
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -109,15 +165,27 @@ jobs:
           unzip -Z1 "$ARCHIVE" | grep -qx 'runq/references/sdk.md'
           unzip -Z1 "$ARCHIVE" | grep -qx 'runq/references/setup.md'
 
-      - name: Upload skill bundle
+      - name: Verify installer
+        run: |
+          sh -n install.sh
+          sh tests/install/test_install.sh
+          sha256sum install.sh > install.sh.sha256
+
+      - name: Upload skill bundle and installer
         uses: softprops/action-gh-release@v2
         with:
-          files: runq-skills-${{ github.ref_name }}.zip
+          fail_on_unmatched_files: true
+          prerelease: ${{ contains(github.ref_name, 'rc') || contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') }}
+          files: |
+            runq-skills-${{ github.ref_name }}.zip
+            install.sh
+            install.sh.sha256
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   build-python-sdk:
     needs:
+      - test-go
       - build-go
       - build-skills
     runs-on: ubuntu-latest
@@ -159,6 +227,8 @@ jobs:
       - name: Upload Python SDK
         uses: softprops/action-gh-release@v2
         with:
+          fail_on_unmatched_files: true
+          prerelease: ${{ contains(github.ref_name, 'rc') || contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') }}
           files: |
             sdk/python/dist/*.whl
             sdk/python/dist/*.tar.gz
