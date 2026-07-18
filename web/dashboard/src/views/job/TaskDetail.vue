@@ -8,8 +8,10 @@
           <TaskStatusBadge :status="displayStatus" />
         </div>
         <div class="d-flex ga-1">
+          <!-- unknown (RQ-74): kill is the user's escape hatch for a
+               submission whose outcome reconcile cannot settle -->
           <v-btn
-            v-if="displayStatus === 'running'"
+            v-if="displayStatus === 'running' || displayStatus === 'unknown'"
             size="x-small"
             variant="tonal"
             color="error"
@@ -76,12 +78,14 @@
       </v-row>
     </v-card>
 
-    <!-- RQ-74: pre-run failure self-report — the task never ran, so there is
-         no log to explain the death; show the scheduler's own words verbatim. -->
-    <v-card v-if="task.failure_detail" variant="tonal" color="error" class="mb-4 pa-3">
+    <!-- RQ-74: submit-phase self-report — the task has no log yet, so its
+         submit evidence explains the state: red = rejected (dead), amber =
+         retrying (pending) or outcome unknown (awaiting reconcile). The
+         evidence itself is always verbatim, never interpreted. -->
+    <v-card v-if="task.failure_detail" variant="tonal" :color="failureCard.color" class="mb-4 pa-3">
       <div class="d-flex align-center ga-2 mb-2">
-        <v-icon size="18">mdi-alert-circle-outline</v-icon>
-        <span class="text-body-2 font-weight-medium">{{ t('task.failed_before_running') }}</span>
+        <v-icon size="18">{{ failureCard.icon }}</v-icon>
+        <span class="text-body-2 font-weight-medium">{{ failureCard.title }}</span>
         <v-spacer />
         <v-btn size="x-small" variant="tonal" @click="copyFailureDetail">
           <v-icon start size="12">mdi-content-copy</v-icon>
@@ -738,6 +742,24 @@ async function retryTask() {
     snack.error(e?.message || t('common.error'))
   }
 }
+
+// RQ-74: the submit-evidence card's tone follows the task status — red only
+// when the verdict is settled (rejected/failed), amber for live states
+// (retrying, outcome unknown).
+const failureCard = computed(() => {
+  switch (task.value?.status) {
+    case 'pending':
+      return { color: 'warning', icon: 'mdi-autorenew', title: t('task.submit_retrying') }
+    case 'unknown':
+      return { color: 'warning', icon: 'mdi-help-circle-outline', title: t('task.outcome_unknown') }
+    default:
+      return {
+        color: 'error',
+        icon: 'mdi-alert-circle-outline',
+        title: t('task.failed_before_running'),
+      }
+  }
+})
 
 // RQ-74: copy the pre-run failure evidence (scheduler stderr + rendered
 // command) so the user can paste it into a ticket / terminal search.

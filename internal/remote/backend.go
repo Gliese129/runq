@@ -301,13 +301,17 @@ func (b *Backend) refreshJobStatus(ctx context.Context, jobID string) error {
 	if err != nil {
 		return err
 	}
-	var running, pending, success, failed, killed int
+	var running, pending, unknown, success, failed, killed int
 	for _, t := range tasks {
 		switch t.Status {
 		case "running":
 			running++
 		case "pending":
 			pending++
+		case "unknown":
+			// RQ-74: live work — blocks the terminal split until reconcile
+			// settles it.
+			unknown++
 		case "success":
 			success++
 		case "failed":
@@ -316,8 +320,8 @@ func (b *Backend) refreshJobStatus(ctx context.Context, jobID string) error {
 			killed++
 		}
 	}
-	started := running+success+failed+killed > 0
-	ended := pending+running == 0
+	started := running+unknown+success+failed+killed > 0
+	ended := pending+running+unknown == 0
 
 	status := "pending"
 	switch {

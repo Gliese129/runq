@@ -5,8 +5,9 @@
 // heatmap). No view may hard-code a status color.
 //
 // Two enums exist BY DESIGN (different abstraction levels):
-//   task: pending | running | success | failed | killed
-//         (+ cancelling — a frontend-only transitional state, never persisted)
+//   task: pending | running | success | failed | killed | unknown
+//         (+ cancelling — a frontend-only transitional state, never persisted;
+//         unknown = outcome-lost submission awaiting reconcile, RQ-74)
 //   job:  pending | running | paused | done | failed | partial | killed
 //         (terminal split mirrors store.TerminalJobStatus on the backend)
 //
@@ -50,7 +51,12 @@ const BLUE = 'rgb(var(--v-theme-info))'
 /** Empty-track tint for progress bars — derived from the pending slate. */
 export const TRACK_CSS = 'rgba(148, 163, 184, 0.25)'
 
-const UNKNOWN: StatusStyle = { color: SLATE, css: SLATE, icon: 'mdi-help-circle-outline', variant: 'outlined' }
+const UNKNOWN: StatusStyle = {
+  color: SLATE,
+  css: SLATE,
+  icon: 'mdi-help-circle-outline',
+  variant: 'outlined',
+}
 
 export const taskStatusStyles: Record<string, StatusStyle> = {
   pending: { color: SLATE, css: SLATE, icon: 'mdi-clock-outline', variant: 'outlined' },
@@ -58,9 +64,27 @@ export const taskStatusStyles: Record<string, StatusStyle> = {
   success: { color: 'success', css: GREEN, icon: 'mdi-check', variant: 'tonal' },
   failed: { color: 'error', css: RED, icon: 'mdi-alert-circle', variant: 'tonal' },
   killed: { color: 'warning', css: AMBER, icon: 'mdi-stop', variant: 'tonal' },
+  // RQ-74: the submission started but its outcome was lost — runq openly
+  // does not know whether a cluster job exists. Hollow ring (the doctor
+  // three-state philosophy: "no verdict" is its own visual, distinct from
+  // both waiting and failure); darker slate separates it from pending in
+  // progress bars, where hollow can't render.
+  unknown: {
+    color: SLATE,
+    css: '#64748B',
+    icon: 'mdi-help-circle-outline',
+    variant: 'outlined',
+    hollow: true,
+  },
   // Frontend-only: shown between "kill requested" and the next poll/event
   // confirming it. Never persisted (core philosophy #1).
-  cancelling: { color: 'warning', css: AMBER, icon: 'mdi-loading', variant: 'outlined', animated: true },
+  cancelling: {
+    color: 'warning',
+    css: AMBER,
+    icon: 'mdi-loading',
+    variant: 'outlined',
+    animated: true,
+  },
 }
 
 export const jobStatusStyles: Record<string, StatusStyle> = {

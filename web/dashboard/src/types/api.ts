@@ -17,6 +17,8 @@ export interface TaskCountGroup {
   completed: number
   /** failed + killed tasks (the backend folds killed in here) */
   failed: number
+  /** RQ-74: outcome-unknown submissions awaiting reconcile (absent when 0) */
+  unknown?: number
 }
 
 export interface JobSummary {

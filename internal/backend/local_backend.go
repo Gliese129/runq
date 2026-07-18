@@ -835,13 +835,18 @@ func (b *LocalBackend) refreshJobStatus(ctx context.Context, jobID string) error
 		return err
 	}
 
-	var running, pending, success, failed, killed int
+	var running, pending, unknown, success, failed, killed int
 	for _, t := range tasks {
 		switch t.Status {
 		case "running":
 			running++
 		case "pending":
 			pending++
+		case "unknown":
+			// RQ-74: outcome-unknown submission (remote lane only, but this
+			// rollup mirrors the others) — live work, blocks the terminal
+			// split.
+			unknown++
 		case "success":
 			success++
 		case "failed":
@@ -851,8 +856,8 @@ func (b *LocalBackend) refreshJobStatus(ctx context.Context, jobID string) error
 		}
 	}
 
-	isStarted := (running + success + failed + killed) > 0
-	isEnded := (pending + running) == 0
+	isStarted := (running + unknown + success + failed + killed) > 0
+	isEnded := (pending + running + unknown) == 0
 
 	// Unconditional pause guard — mirrors scheduler.RefreshJobStatus: paused
 	// is a human control state that outlives task terminality; resume/kill

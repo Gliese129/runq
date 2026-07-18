@@ -35,6 +35,9 @@ type TaskCountGroup struct {
 	Running   int `json:"running"`
 	Completed int `json:"completed"`
 	Failed    int `json:"failed"`
+	// RQ-74: outcome-unknown submissions awaiting reconcile. Rendered as its
+	// own segment so a job with unknown tasks never looks silently done.
+	Unknown int `json:"unknown,omitempty"`
 }
 
 type WandbInfo struct {

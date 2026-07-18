@@ -56,6 +56,12 @@ type Scheduler struct {
 	// requeued the task) must not clobber the new attempt.
 	finishMu sync.Mutex
 
+	// transientNote deduplicates the visible "submit failed, retrying" note
+	// (RQ-74): taskID → last failure_detail text persisted for a transient
+	// launch failure. SSH being down makes every tick fail with the same
+	// message; without this the DB would take one UPDATE per task per tick.
+	transientNote sync.Map
+
 	// L2-C: optional disk-freeze state machine. nil means freeze disabled.
 	// When set, tick() filters on FrozenJobs/FrozenMounts and runTask calls
 	// freeze.RemoveTask on every exit so auto-thaw fires when the last

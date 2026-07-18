@@ -2,10 +2,12 @@ package remote
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path"
 	"strings"
 
+	"github.com/gliese129/runq/internal/rfs"
 	"github.com/gliese129/runq/internal/scheduler"
 	"github.com/gliese129/runq/internal/utils"
 )
@@ -82,7 +84,19 @@ func (l *Launcher) Launch(ctx context.Context, t *scheduler.Task, _ map[string]s
 
 	out, exitCode, rerr := l.b.shellRunClassified(ctx, cmd)
 	if rerr != nil {
-		// Transport: the command never reached the scheduler.
+		// Two transport classes, split on FACTS not heuristics (RQ-74):
+		//   - the command never started (session/dial failure) → TRANSIENT,
+		//     retry is safe;
+		//   - the command STARTED but the verdict was lost (connection died
+		//     mid-flight) → outcome unknown: the scheduler may have accepted
+		//     the job. Resubmitting risks a duplicate cluster job, so this
+		//     maps to ErrLaunchUntracked and the task waits for reconcile.
+		if errors.Is(rerr, rfs.ErrExecInterrupted) {
+			opLog("SUBMIT INTERRUPTED task=%s job=%s err=%v\npartial output: %s", t.ID, t.JobID, rerr, out)
+			return scheduler.LaunchResult{}, fmt.Errorf(
+				"%w: submit command interrupted mid-flight — a cluster job may exist: %v\npartial output:\n%s",
+				scheduler.ErrLaunchUntracked, rerr, strings.TrimSpace(out))
+		}
 		opLog("SUBMIT TRANSPORT task=%s job=%s err=%v", t.ID, t.JobID, rerr)
 		return scheduler.LaunchResult{}, fmt.Errorf("%w: %v", scheduler.ErrLaunchTransient, rerr)
 	}
@@ -107,7 +121,12 @@ func (l *Launcher) Launch(ctx context.Context, t *scheduler.Task, _ map[string]s
 			scheduler.ErrLaunchUntracked, t.ID, err, out)
 	}
 
-	if uerr := l.b.Store.UpdateTaskStatus(ctx, t.ID, "pending", map[string]any{"external_id": extID}); uerr != nil {
+	// failure_detail: nil clears a transient "will retry" note from earlier
+	// ticks (RQ-74) — the handoff has now succeeded, the wait is over.
+	if uerr := l.b.Store.UpdateTaskStatus(ctx, t.ID, "pending", map[string]any{
+		"external_id":    extID,
+		"failure_detail": nil,
+	}); uerr != nil {
 		return scheduler.LaunchResult{}, fmt.Errorf(
 			"%w: record external id %s for %s: %v", scheduler.ErrLaunchUntracked, extID, t.ID, uerr)
 	}

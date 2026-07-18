@@ -176,7 +176,11 @@ func (b *Backend) HeartbeatProbe(ctx context.Context, silenceAfter time.Duration
 // attempt. Wrapper files on disk belong to the PREVIOUS attempt and must not
 // be reconciled against — remote.Launcher resets them at the next launch.
 func awaitingRelaunch(tk store.TaskRow) bool {
-	return tk.ExternalID == "" && tk.RetryCount > 0
+	// Only PENDING rows can be "requeued but not relaunched". An `unknown`
+	// task (RQ-74) also has no external id and may have retry_count > 0, but
+	// it is exactly the task reconcile must look at — its on-disk wrapper
+	// state is the evidence that settles it.
+	return tk.Status == "pending" && tk.ExternalID == "" && tk.RetryCount > 0
 }
 
 // persistDecision writes a reconcile decision. A terminal transition of a

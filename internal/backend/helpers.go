@@ -35,6 +35,8 @@ func BuildJobSummary(job store.JobRow, tasks []store.TaskRow) JobSummary {
 			counts.Pending++
 		case "running":
 			counts.Running++
+		case "unknown":
+			counts.Unknown++
 		case "success":
 			counts.Completed++
 		case "failed", "killed":

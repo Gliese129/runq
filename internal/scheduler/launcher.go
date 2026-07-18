@@ -9,11 +9,13 @@ import (
 )
 
 // ErrLaunchUntracked is returned (wrapped) by unsupervised launchers when the
-// task WAS handed to the external scheduler but runq failed to record its
-// external id. The task must NOT be retried — a retry would submit a second
-// cluster job while the first may be running untracked. The scheduler leaves
-// such tasks in flight; reconcile heals them via status.json if they run.
-var ErrLaunchUntracked = errors.New("task submitted but external id unknown")
+// submission STARTED but its outcome is unknown: the submit command was
+// interrupted mid-flight, or it succeeded but runq failed to record the
+// external id. The task must NOT be retried — a retry could submit a second
+// cluster job while the first may be running untracked. The scheduler marks
+// such tasks `unknown` (RQ-74) with the error as visible evidence; reconcile
+// settles them from facts (status.json marker / scheduler probe).
+var ErrLaunchUntracked = errors.New("task launch outcome unknown")
 
 // ErrLaunchTransient is returned (wrapped) by unsupervised launchers when the
 // submission NEVER REACHED the scheduler (transport/file layer: SSH down,

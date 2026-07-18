@@ -36,7 +36,7 @@ func colorize(color, text string) string {
 // Mapping mirrors the dashboard's statusGrammar (CI convention):
 // running→cyan, pending→yellow, success/done→green, failed→red,
 // killed/partial→yellow (human decision / mixed outcome, not failure red),
-// paused/unknown→no color.
+// unknown→gray (no verdict yet — RQ-74), paused→no color.
 func StatusColor(status string) string {
 	var color string
 	switch status {
@@ -50,6 +50,10 @@ func StatusColor(status string) string {
 		color = red
 	case "killed", "partial":
 		color = yellow
+	case "unknown":
+		// RQ-74: outcome-unknown submission — gray, mirroring the dashboard
+		// statusGrammar's slate ("no verdict" earns no outcome color).
+		color = gray
 	default:
 		color = ""
 	}

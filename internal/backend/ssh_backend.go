@@ -291,12 +291,22 @@ func (b *SSHBackend) restoreLane(ctx context.Context) {
 		}
 		t := TaskRowToSchedulerTask(&row)
 		t.GPUsNeeded = 1 // one submission slot per remote task
-		if row.ExternalID != "" {
+		switch {
+		case row.Status == "unknown":
+			// RQ-74: outcome-unknown submission survives the restart AS
+			// unknown — a cluster job may exist, so it must NOT be pushed
+			// for relaunch (double submit). It holds a slot and waits for
+			// reconcile, exactly as before the restart.
+			_ = b.pool.Reserve(nil, row.ID) // never fails for slots
+			t.Status = scheduler.StatusUnknown
+			b.queue.Restore(t)
+			restored++
+		case row.ExternalID != "":
 			_ = b.pool.Reserve(nil, row.ID) // never fails for slots
 			t.Status = scheduler.StatusRunning
 			b.queue.Restore(t)
 			restored++
-		} else {
+		default:
 			b.queue.Push(t)
 			queued++
 		}
@@ -833,12 +843,13 @@ func (b *SSHBackend) KillTask(ctx context.Context, taskID string) error {
 			b.sched.FinishTask(qt, scheduler.StatusKilled, map[string]any{"status_source": "runq"})
 			return nil
 		}
-		// Running in the queue (submit in flight or on the cluster): plant
-		// the kill flag FIRST (RQ-69 ownership protocol). If backend.Kill
-		// below is refused for a missing external id, the flag survives and
-		// the next lifecycle event (submit completion, failure verdict)
-		// settles the task killed instead of resubmitting it.
-		if qt.Status == scheduler.StatusRunning {
+		// Running or unknown in the queue (submit in flight, on the cluster,
+		// or outcome lost): plant the kill flag FIRST (RQ-69 ownership
+		// protocol). If backend.Kill below is refused for a missing external
+		// id, the flag survives and the next lifecycle event (submit
+		// completion, failure verdict) settles the task killed instead of
+		// resubmitting it.
+		if qt.Status == scheduler.StatusRunning || qt.Status == scheduler.StatusUnknown {
 			b.sched.RequestKill(taskID)
 		}
 	}
@@ -851,6 +862,19 @@ func (b *SSHBackend) KillTask(ctx context.Context, taskID string) error {
 	}
 	if task == nil || task.Status == "success" || task.Status == "failed" || task.Status == "killed" {
 		return nil
+	}
+	// RQ-74: an `unknown` task with no external id has nothing to cancel and
+	// no verdict on the horizon if the submission truly never landed — the
+	// user's explicit kill is the escape hatch. Settling killed here is a
+	// DELIBERATE deviation from "killed only when no unmanaged job can
+	// exist": the user is taking responsibility for the (reconcile-checked,
+	// still-unresolved) residual risk. If a phantom cluster job does run,
+	// its marker is later swept as stale bookkeeping.
+	if task.Status == "unknown" && task.ExternalID == "" {
+		if qt := b.queue.Get(taskID); qt != nil && qt.Status == scheduler.StatusUnknown {
+			b.sched.FinishTask(qt, scheduler.StatusKilled, map[string]any{"status_source": "runq"})
+			return nil
+		}
 	}
 	_, err = b.backend.Kill(ctx, taskID)
 	return err

@@ -15,6 +15,14 @@ const (
 	StatusSuccess TaskStatus = "success"
 	StatusFailed  TaskStatus = "failed"
 	StatusKilled  TaskStatus = "killed"
+	// StatusUnknown (RQ-74): the submission STARTED but its outcome was lost
+	// (connection dropped mid-submit, submit succeeded but the external id
+	// could not be parsed/persisted). runq openly does not know whether a
+	// cluster job exists, so it neither retries (double-submit risk) nor
+	// fails (may be running fine). Not terminal: reconcile settles it from
+	// facts (status.json marker / scheduler probe); until then the task
+	// carries its error message in failure_detail.
+	StatusUnknown TaskStatus = "unknown"
 )
 
 // Task represents the smallest schedulable unit.
@@ -158,6 +166,25 @@ func (q *Queue) MarkRunning(taskID string) error {
 	t.Status = StatusRunning
 	now := time.Now()
 	t.StartedAt = &now
+	return nil
+}
+
+// MarkUnknown transitions an in-flight (running) task to unknown: the
+// dispatch started but its outcome was lost (RQ-74). The task keeps its
+// submission slot — a cluster job may exist — and leaves unknown only
+// through Complete (reconcile verdict / user kill) or Requeue (manual retry).
+func (q *Queue) MarkUnknown(taskID string) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	t := q.findLocked(taskID)
+	if t == nil {
+		return fmt.Errorf("task %q not found in queue", taskID)
+	}
+	if t.Status != StatusRunning {
+		return fmt.Errorf("task %q is %s, expected running", taskID, t.Status)
+	}
+	t.Status = StatusUnknown
 	return nil
 }
 

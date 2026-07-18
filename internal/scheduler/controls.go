@@ -121,13 +121,18 @@ func (s *Scheduler) RefreshJobStatus(jobID string) {
 		return
 	}
 
-	var running, pending, success, failed, killed int
+	var running, pending, unknown, success, failed, killed int
 	for _, t := range tasks {
 		switch t.Status {
 		case "running":
 			running++
 		case "pending":
 			pending++
+		case "unknown":
+			// RQ-74: outcome-unknown submission — live work as far as the
+			// job is concerned (reconcile may still settle it either way),
+			// so it blocks the terminal split like pending/running do.
+			unknown++
 		case "success":
 			success++
 		case "failed":
@@ -137,8 +142,8 @@ func (s *Scheduler) RefreshJobStatus(jobID string) {
 		}
 	}
 
-	isStarted := (running + success + failed + killed) > 0
-	isEnded := (pending + running) == 0
+	isStarted := (running + unknown + success + failed + killed) > 0
+	isEnded := (pending + running + unknown) == 0
 
 	// Preserve the "paused" control state — UNCONDITIONALLY. Pause is a human
 	// intent (same grammar as the kill flag, RQ-69): it outlives mechanical

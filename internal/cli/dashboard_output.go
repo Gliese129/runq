@@ -125,17 +125,27 @@ func printDashboardTasks(tasks []backend.TaskView) error {
 }
 
 // printTaskFailures appends a self-report section under the task table: any
-// task that died BEFORE running (submit rejection, spawn error) carries its
-// failure evidence in failure_detail (RQ-74) — surface the first lines right
-// here so a qsub rejection is readable in `runq ps <job>` without digging
-// into daemon logs.
+// task whose submit phase left evidence in failure_detail (RQ-74) — a
+// rejection, a transient retry loop, an outcome-unknown handoff — surfaces
+// its first lines right here so a qsub rejection is readable in
+// `runq ps <job>` without digging into daemon logs. The headline states what
+// the status means; the evidence below is verbatim.
 func printTaskFailures(tasks []backend.TaskView) {
 	const previewLines = 3
 	for _, task := range tasks {
 		if task.FailureDetail == "" {
 			continue
 		}
-		fmt.Printf("\n%s failed before running:\n", utils.IDColor(task.ID))
+		var headline string
+		switch task.Status {
+		case "pending":
+			headline = "submit retrying (last error below):"
+		case "unknown":
+			headline = "submit outcome unknown — awaiting reconcile:"
+		default:
+			headline = "failed before running:"
+		}
+		fmt.Printf("\n%s %s\n", utils.IDColor(task.ID), headline)
 		lines := strings.Split(strings.TrimSpace(task.FailureDetail), "\n")
 		for i, line := range lines {
 			if i >= previewLines {
