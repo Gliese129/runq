@@ -88,7 +88,25 @@ func init() {
 // Execute is the entry point called from main.
 func Execute() error {
 	rootCmd.SetOut(os.Stdout)
+	printRemoteContextBanner()
 	return rootCmd.Execute()
+}
+
+// printRemoteContextBanner prints ONE stderr line before every command when
+// runq is running as a remote CLI (RUNQ_SOCKET set by the login-node env
+// file): which target this shell is bound to, i.e. whose daemon the command
+// will reach. With several machines forwarding to one cluster account this
+// is the cheapest guard against submitting through the wrong context
+// (RQ-74). stderr on purpose — `runq ps --json | jq` must stay parseable.
+func printRemoteContextBanner() {
+	if os.Getenv("RUNQ_SOCKET") == "" {
+		return
+	}
+	target := os.Getenv("RUNQ_TARGET")
+	if target == "" {
+		target = "(RUNQ_TARGET unset)"
+	}
+	fmt.Fprintf(os.Stderr, "%s\n", utils.Dimf("runq target: %s (remote CLI)", target))
 }
 
 // usageTemplate is a customized Cobra usage template with grouped commands

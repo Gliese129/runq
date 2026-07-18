@@ -509,6 +509,18 @@ func (d *Daemon) StartRemoteForward(name string) error {
 	return nil
 }
 
+// ForwardStatuses snapshots every remote CLI forward's observable state,
+// keyed by target name (RQ-74) — the /health "forwards" section.
+func (d *Daemon) ForwardStatuses() map[string]rfs.ForwardStatus {
+	d.fwdMu.Lock()
+	defer d.fwdMu.Unlock()
+	out := make(map[string]rfs.ForwardStatus, len(d.forwards))
+	for name, fwd := range d.forwards {
+		out[name] = fwd.Status()
+	}
+	return out
+}
+
 // contactRecorderFor binds the daemon's contact recorder to one target for
 // use as a forward OnEstablished hook (RQ-74). Returns nil when no recorder
 // is wired (runqd deployment), keeping the hook optional end to end.

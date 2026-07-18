@@ -131,6 +131,7 @@ func newClientDaemon(dataDir string, paths utils.DataDirPaths, logger *slog.Logg
 	// (POST /targets/{name}/connect) — no daemon restart for the forward.
 	d.Dashboard.SetForwardStarter(d.StartRemoteForward)
 	d.Dashboard.SetForwardStopper(d.StopRemoteForward)
+	d.Dashboard.SetForwardStatus(d.ForwardStatuses)
 	dashCfg := storageCfg.Dashboard
 	if dashCfg == nil || dashCfg.Enabled {
 		listen := "127.0.0.1:8077"

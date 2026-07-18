@@ -9,6 +9,7 @@ import (
 
 	"github.com/gliese129/runq/internal/backend"
 	"github.com/gliese129/runq/internal/config"
+	"github.com/gliese129/runq/internal/rfs"
 )
 
 // ErrForwardRestartRequired is returned (wrapped) by the forward starter
@@ -144,6 +145,10 @@ func (s *Server) handleCheckTarget(w http.ResponseWriter, r *http.Request) {
 
 // SetForwardStarter installs the runtime forward hook (client daemon only).
 func (s *Server) SetForwardStarter(fn func(name string) error) { s.forwardStarter = fn }
+
+// SetForwardStatus wires the client daemon's forward-status snapshot into
+// /health (RQ-74).
+func (s *Server) SetForwardStatus(fn func() map[string]rfs.ForwardStatus) { s.forwardStatus = fn }
 
 // SetForwardStopper wires the client daemon's runtime forward teardown
 // (POST /targets/{name}/disconnect).

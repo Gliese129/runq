@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"os"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -20,6 +21,7 @@ import (
 	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/logfile"
 	"github.com/gliese129/runq/internal/project"
+	"github.com/gliese129/runq/internal/rfs"
 	"github.com/gliese129/runq/internal/version"
 	"github.com/gliese129/runq/internal/workspace"
 )
@@ -54,6 +56,9 @@ type Server struct {
 	// a restart). nil on deployments without forwards (runqd) → 501.
 	forwardStarter func(name string) error
 	forwardStopper func(name string) error
+	// forwardStatus, when set (client daemon), snapshots every remote CLI
+	// forward's observable state for /health (RQ-74).
+	forwardStatus func() map[string]rfs.ForwardStatus
 
 	// Per-job forced-refresh floor (D22): memory-only — a restart forgiving
 	// the throttle is harmless.
@@ -406,11 +411,24 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if ph, ok := s.backend.(interface{ PerTargetHealth() []backend.TargetHealth }); ok {
 		targets = ph.PerTargetHealth()
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	body := map[string]any{
 		"version":        s.version,
 		"uptime_seconds": int64(time.Since(s.startedAt).Seconds()),
 		"targets":        targets,
-	})
+	}
+	// Identity (RQ-74): a remote CLI reaching this endpoint through a
+	// forwarded socket needs to know WHOSE daemon answered — with several
+	// machines running runq against one cluster account, "the socket
+	// responds" alone can hide a wrong-owner takeover.
+	if hn, err := os.Hostname(); err == nil {
+		body["hostname"] = hn
+	}
+	// Per-forward observability (RQ-74): up since / attempts / last error —
+	// the data behind doctor's forward line and the dashboard target panel.
+	if s.forwardStatus != nil {
+		body["forwards"] = s.forwardStatus()
+	}
+	writeJSON(w, http.StatusOK, body)
 }
 
 // handleListTasks — GET /tasks?job=&status=&target=&limit=&offset= (spec
