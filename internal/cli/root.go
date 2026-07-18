@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"os"
+	"strings"
 	"text/template"
 
 	"github.com/gliese129/runq/internal/utils"
@@ -89,7 +90,26 @@ func init() {
 func Execute() error {
 	rootCmd.SetOut(os.Stdout)
 	printRemoteContextBanner()
-	return rootCmd.Execute()
+	err := rootCmd.Execute()
+	if err != nil && os.Getenv("RUNQ_SOCKET") != "" && isSocketDialError(err) {
+		// Remote-CLI perspective (RQ-74): a dead forwarded socket means the
+		// OWNING machine is gone, not this login node — every command says
+		// so, not just doctor, and says what (not) to do about it.
+		return fmt.Errorf("%w\n\nremote CLI: the runq daemon on your own machine is not reachable through the forward (asleep / offline / stopped). It reconnects automatically once that machine is back — nothing to fix on this login node. Details: runq doctor", err)
+	}
+	return err
+}
+
+// isSocketDialError matches the failure shapes of a unix-socket dial against
+// a forward whose owning daemon is gone (refused / file missing / EOF).
+func isSocketDialError(err error) bool {
+	msg := strings.ToLower(err.Error())
+	for _, sig := range []string{"dial unix", "connection refused", "no such file or directory", "broken pipe"} {
+		if strings.Contains(msg, sig) {
+			return true
+		}
+	}
+	return false
 }
 
 // printRemoteContextBanner prints ONE stderr line before every command when

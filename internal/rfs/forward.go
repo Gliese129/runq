@@ -61,12 +61,16 @@ type RemoteForwardConfig struct {
 	Logger *slog.Logger
 }
 
-// Forward reconnect/keepalive tuning.
+// Forward reconnect/keepalive tuning. Backoff max and keepalive interval
+// were tightened from 60s/30s (RQ-74): after a laptop wakes from sleep the
+// forward should be back within seconds, not "keepalive lag + a minute of
+// backoff". Worst case is now ~25s (one keepalive round to notice + one
+// max-backoff wait); the extra traffic is one tiny SSH request per 15s.
 const (
 	forwardBackoffMin   = 2 * time.Second
-	forwardBackoffMax   = time.Minute
+	forwardBackoffMax   = 10 * time.Second
 	forwardHealthyAfter = 2 * time.Minute // session older than this resets backoff
-	forwardKeepalive    = 30 * time.Second
+	forwardKeepalive    = 15 * time.Second
 )
 
 // Forward state labels (ForwardStatus.State).

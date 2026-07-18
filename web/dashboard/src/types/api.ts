@@ -239,10 +239,26 @@ export interface TargetHealth {
   last_checked: number
 }
 
+/** One remote CLI forward's observable state (RQ-74, mirrors rfs.ForwardStatus). */
+export interface ForwardStatus {
+  state: 'up' | 'reconnecting' | 'closed'
+  /** unix: when the current state was entered */
+  since: number
+  /** unix: last moment the forward was serving; absent = never online */
+  last_online?: number
+  /** consecutive failed sessions since last up */
+  attempts?: number
+  last_error?: string
+}
+
 export interface HealthResponse {
   version: string
   uptime_seconds: number
   targets: TargetHealth[]
+  /** daemon identity — whose daemon answered (RQ-74) */
+  hostname?: string
+  /** per-target remote CLI forward state, keyed by target name (RQ-74) */
+  forwards?: Record<string, ForwardStatus>
 }
 
 /** POST /jobs/plan — merged dry-run + resolve-note (single wizard call). */

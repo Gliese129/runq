@@ -413,5 +413,12 @@
   "submit.strict_hint": "strict：提交时列表之外的值将报错",
   "common.browse": "浏览",
   "a11y.open_project": "打开项目 {name}",
-  "task.all_series_hidden": "已隐藏全部序列——在上方选择一个指标"
+  "task.all_series_hidden": "已隐藏全部序列——在上方选择一个指标",
+  "statusbar.connected": "已连接",
+  "statusbar.reconnecting": "daemon 连接断开 — 自动重连中…",
+  "statusbar.reconnect_banner": "daemon 连接已断开 — 正在自动重连。下方数据为最后已知状态。",
+  "statusbar.targets": "targets {n}/{total} 在线",
+  "statusbar.forward_reconnecting": "{name} forward 重连中（第 {attempts} 次）",
+  "statusbar.forward_stopped": "{name} forward 已停止",
+  "statusbar.up": "运行 {dur}"
 }

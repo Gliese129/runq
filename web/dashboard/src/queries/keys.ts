@@ -10,4 +10,5 @@ export const qk = {
   task: (id: string) => ['task', id] as const,
   taskMetrics: (id: string) => ['task', id, 'metrics'] as const,
   gpu: ['gpu'] as const,
+  health: ['health'] as const,
 }

@@ -1,4 +1,5 @@
 import { api } from './client'
+import type { RequestOptions } from './client'
 import type { ActionResponse, ConfigResponse, HealthResponse, RefreshReceipt } from '@/types/api'
 
 /**
@@ -46,7 +47,7 @@ export const configApi = {
   putGlobal: (dataPath: string, defaultTarget = '') =>
     api.put<ActionResponse>('/config', { data_path: dataPath, default_target: defaultTarget }),
 
-  health: () => api.get<HealthResponse>('/health', { silent: true }),
+  health: (opts?: RequestOptions) => api.get<HealthResponse>('/health', { silent: true, ...opts }),
 
   // ── Targets management (spec §5.2, D10 — /hpc-config* is retired) ──
 
@@ -57,8 +58,7 @@ export const configApi = {
   putTarget: (name: string, cfg: TargetConfig) =>
     api.put<ActionResponse>(`/targets/${encodeURIComponent(name)}`, cfg),
 
-  deleteTarget: (name: string) =>
-    api.del<ActionResponse>(`/targets/${encodeURIComponent(name)}`),
+  deleteTarget: (name: string) => api.del<ActionResponse>(`/targets/${encodeURIComponent(name)}`),
 
   checkTarget: (name: string, cfg: TargetConfig) =>
     api.post<{ results: HPCCheckResult[] }>(`/targets/${encodeURIComponent(name)}/check`, cfg),

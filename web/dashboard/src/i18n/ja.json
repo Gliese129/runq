@@ -413,5 +413,12 @@
   "submit.strict_hint": "strict: リスト外の値は送信時にエラーになります",
   "common.browse": "参照",
   "a11y.open_project": "プロジェクト {name} を開く",
-  "task.all_series_hidden": "すべての系列が非表示です——上のチップから選択してください"
+  "task.all_series_hidden": "すべての系列が非表示です——上のチップから選択してください",
+  "statusbar.connected": "接続中",
+  "statusbar.reconnecting": "daemon 切断 — 自動再接続中…",
+  "statusbar.reconnect_banner": "daemon との接続が切れました — 自動再接続中。以下は最後に取得したデータです。",
+  "statusbar.targets": "targets {n}/{total} オンライン",
+  "statusbar.forward_reconnecting": "{name} forward 再接続中（{attempts} 回目）",
+  "statusbar.forward_stopped": "{name} forward 停止中",
+  "statusbar.up": "稼働 {dur}"
 }

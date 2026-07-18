@@ -413,5 +413,12 @@
   "submit.strict_hint": "strict: values outside this list fail at submit",
   "common.browse": "Browse",
   "a11y.open_project": "Open project {name}",
-  "task.all_series_hidden": "All series hidden — select a metric above"
+  "task.all_series_hidden": "All series hidden — select a metric above",
+  "statusbar.connected": "connected",
+  "statusbar.reconnecting": "daemon disconnected — reconnecting…",
+  "statusbar.reconnect_banner": "Daemon connection lost — reconnecting automatically. The data below is the last known state.",
+  "statusbar.targets": "targets {n}/{total} online",
+  "statusbar.forward_reconnecting": "{name} forward reconnecting (attempt {attempts})",
+  "statusbar.forward_stopped": "{name} forward stopped",
+  "statusbar.up": "up {dur}"
 }
