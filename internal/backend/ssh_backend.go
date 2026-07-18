@@ -637,6 +637,11 @@ func (b *SSHBackend) GetTask(ctx context.Context, taskID string) (*TaskView, err
 // know the difference, and neither should callers).
 func (b *SSHBackend) FS() rfs.FS { return b.backend.FS }
 
+// RecordContactOK forwards a daemon-observed reachability proof to the
+// lane's passive contact record (RQ-74) — e.g. the remote CLI forward
+// session coming up after `runq connect`.
+func (b *SSHBackend) RecordContactOK() { b.backend.RecordContactOK() }
+
 // TargetHealth is this lane's passive reachability row for /health (D6):
 // a snapshot of the most recent transport outcome — never a probe.
 func (b *SSHBackend) TargetHealth() TargetHealth {

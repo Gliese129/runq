@@ -109,11 +109,15 @@ func newClientDaemon(dataDir string, paths utils.DataDirPaths, logger *slog.Logg
 	for name := range targets {
 		d.laneNames[name] = true
 	}
+	// Forward establishment doubles as a reachability proof (RQ-74):
+	// OnEstablished records lane contact so doctor's "no contact yet"
+	// clears the moment the forward is up.
+	d.contactRecorder = multiBe.RecordTargetContact
 	for _, tc := range storageCfg.ResolveTargets() {
 		if !tc.RemoteCLI || tc.SSH == nil {
 			continue
 		}
-		fwd, ferr := newRemoteCLIForward(tc, d.Dashboard.RemoteCLIHandler(tc.Name), logger)
+		fwd, ferr := newRemoteCLIForward(tc, d.Dashboard.RemoteCLIHandler(tc.Name), logger, d.contactRecorderFor(tc.Name))
 		if ferr != nil {
 			// Non-fatal by design: the lane itself still works; the user
 			// just doesn't get the remote CLI until the config is fixed.
@@ -147,7 +151,7 @@ func newClientDaemon(dataDir string, paths utils.DataDirPaths, logger *slog.Logg
 // auth resolution) but deliberately NOT the same connection: the forward is
 // a persistent service, exempt from the lane's idle-disconnect etiquette
 // (see rfs.RemoteForward).
-func newRemoteCLIForward(tc config.TargetConfig, handler http.Handler, logger *slog.Logger) (*rfs.RemoteForward, error) {
+func newRemoteCLIForward(tc config.TargetConfig, handler http.Handler, logger *slog.Logger, onEstablished func()) (*rfs.RemoteForward, error) {
 	// Same alias resolution as the lane: `host:` may be an ~/.ssh/config
 	// alias; explicit target fields win over ssh_config values.
 	sshHost, sshPort, sshUser, sshKey := rfs.ResolveSSHConfigDefaults(
@@ -173,7 +177,8 @@ func newRemoteCLIForward(tc config.TargetConfig, handler http.Handler, logger *s
 			}
 			return err
 		},
-		Logger: logger.With("target", tc.Name),
+		OnEstablished: onEstablished,
+		Logger:        logger.With("target", tc.Name),
 	}), nil
 }
 

@@ -282,6 +282,17 @@ func (m *MultiBackend) TargetFS(name string) (rfs.FS, error) {
 // PerTargetHealth collects each lane's passive reachability row (/health,
 // D6). Lanes without the concept (e.g. a pure-push local backend, always
 // reachable by construction) report reachable with LastChecked = now.
+// RecordTargetContact records a daemon-observed reachability proof for one
+// target's lane (RQ-74). No-op for unknown targets and lanes without a
+// contact record (local).
+func (m *MultiBackend) RecordTargetContact(name string) {
+	if be, ok := m.targets[name]; ok {
+		if rc, ok := be.(interface{ RecordContactOK() }); ok {
+			rc.RecordContactOK()
+		}
+	}
+}
+
 func (m *MultiBackend) PerTargetHealth() []TargetHealth {
 	out := make([]TargetHealth, 0, len(m.targets))
 	for name, be := range m.targets {

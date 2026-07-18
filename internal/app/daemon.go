@@ -59,6 +59,12 @@ type Daemon struct {
 	// target is new — a restart is genuinely needed".
 	laneNames map[string]bool
 
+	// contactRecorder, when set (client deployment), records a
+	// daemon-observed reachability proof for one target — wired to
+	// MultiBackend.RecordTargetContact and called from forward
+	// OnEstablished hooks (RQ-74).
+	contactRecorder func(name string)
+
 	// pidPath is this deployment's PID file (client: daemon.pid,
 	// runqd: runqd.pid) — the two daemons coexist on one machine.
 	pidPath string
@@ -485,7 +491,7 @@ func (d *Daemon) StartRemoteForward(name string) error {
 
 	// RemoteCLIHandler, not Handler: the runtime path must wear the same
 	// guard as the boot path — an unguarded forward is the RQ-45 escalation.
-	fwd, err := newRemoteCLIForward(*tc, d.Dashboard.RemoteCLIHandler(name), d.Logger)
+	fwd, err := newRemoteCLIForward(*tc, d.Dashboard.RemoteCLIHandler(name), d.Logger, d.contactRecorderFor(name))
 	if err != nil {
 		return err
 	}
@@ -501,6 +507,16 @@ func (d *Daemon) StartRemoteForward(name string) error {
 	go fwd.Run(context.Background())
 	d.Logger.Info("remote CLI forward (re)started at runtime", "target", name)
 	return nil
+}
+
+// contactRecorderFor binds the daemon's contact recorder to one target for
+// use as a forward OnEstablished hook (RQ-74). Returns nil when no recorder
+// is wired (runqd deployment), keeping the hook optional end to end.
+func (d *Daemon) contactRecorderFor(name string) func() {
+	if d.contactRecorder == nil {
+		return nil
+	}
+	return func() { d.contactRecorder(name) }
 }
 
 // StopRemoteForward tears down one target's remote CLI forward at runtime

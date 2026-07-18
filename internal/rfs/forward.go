@@ -50,6 +50,14 @@ type RemoteForwardConfig struct {
 	// triggers a reconnect cycle.
 	Serve func(net.Listener) error
 
+	// OnEstablished, when set, is called once per established forward
+	// session, right before Serve — the moment the remote socket is bound
+	// and listening. The daemon uses it to record target reachability
+	// (RQ-74): a forward coming up is transport-level proof of contact, so
+	// doctor's "no contact yet" clears without waiting for the next
+	// scheduled sensor pass. Must be fast and non-blocking.
+	OnEstablished func()
+
 	Logger *slog.Logger
 }
 
@@ -199,6 +207,9 @@ func (f *RemoteForward) session(ctx context.Context) error {
 	}()
 
 	f.logger.Info("remote socket forward up", "host", f.cfg.SSH.Host, "socket", sockPath)
+	if f.cfg.OnEstablished != nil {
+		f.cfg.OnEstablished()
+	}
 	if err := f.cfg.Serve(ln); err != nil {
 		return fmt.Errorf("serve: %w", err)
 	}

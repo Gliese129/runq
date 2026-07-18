@@ -183,6 +183,13 @@ func (b *Backend) recordContact(transportErr error) {
 	}
 }
 
+// RecordContactOK records a daemon-observed successful contact with this
+// target from OUTSIDE the normal exec paths (RQ-74): the remote CLI forward
+// session coming up after `runq connect`, or any other transport-level proof
+// of reachability. Doctor's "no contact yet" clears the moment the daemon
+// has such proof, instead of waiting for the next scheduled sensor pass.
+func (b *Backend) RecordContactOK() { b.recordContact(nil) }
+
 // LastContact returns the passive reachability snapshot for /health:
 // zero time = no contact since boot.
 func (b *Backend) LastContact() (at time.Time, ok bool, lastErr string) {
