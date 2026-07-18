@@ -55,6 +55,12 @@ type TaskRow struct {
 	// wrapper/scheduler/runq terminals are final. Empty for daemon tasks.
 	StatusSource string
 
+	// RQ-74: verbatim failure evidence for pre-run failures (submit rejection:
+	// scheduler stderr + exit code + rendered command; local spawn errors).
+	// Empty for tasks that reached the run phase — those self-report through
+	// logs/status.json. Cleared on requeue (a new attempt starts clean).
+	FailureDetail string
+
 	// Phase 2D: scheduler-native state token (e.g. "CONFIGURING", "COMPLETING").
 	// Written by the probe layer before ParseSignal collapses it. Empty for
 	// daemon tasks or when no probe has run yet.
@@ -81,31 +87,32 @@ const allTaskColumns = `id, job_id, project_name, command, params_json,
 	pid, start_time, log_path, working_dir, env_json,
 	resumable, extra_args, uid, timeout,
 	enqueued_at, started_at, finished_at, task_dir, target, external_id, status_source,
-	native_state, queue`
+	native_state, queue, failure_detail`
 
 // scanTask reads one result row into a TaskRow.
 // Column order must match allTaskColumns.
 func scanTask(scanner interface{ Scan(dest ...any) error }) (*TaskRow, error) {
 	var t TaskRow
 	var (
-		gpus         sql.NullString
-		pid          sql.NullInt64
-		startTime    sql.NullInt64
-		logPath      sql.NullString
-		workingDir   sql.NullString
-		envJSON      sql.NullString
-		resumable    int
-		extraArgs    sql.NullString
-		uid          sql.NullInt64
-		timeout      sql.NullInt64
-		enqueuedAt   int64
-		startedAt    sql.NullInt64
-		finishedAt   sql.NullInt64
-		taskDir      sql.NullString
-		externalID   sql.NullString
-		statusSource sql.NullString
-		nativeState  sql.NullString
-		queue        sql.NullString
+		gpus          sql.NullString
+		pid           sql.NullInt64
+		startTime     sql.NullInt64
+		logPath       sql.NullString
+		workingDir    sql.NullString
+		envJSON       sql.NullString
+		resumable     int
+		extraArgs     sql.NullString
+		uid           sql.NullInt64
+		timeout       sql.NullInt64
+		enqueuedAt    int64
+		startedAt     sql.NullInt64
+		finishedAt    sql.NullInt64
+		taskDir       sql.NullString
+		externalID    sql.NullString
+		statusSource  sql.NullString
+		nativeState   sql.NullString
+		queue         sql.NullString
+		failureDetail sql.NullString
 	)
 
 	var target sql.NullString
@@ -115,7 +122,7 @@ func scanTask(scanner interface{ Scan(dest ...any) error }) (*TaskRow, error) {
 		&pid, &startTime, &logPath, &workingDir, &envJSON,
 		&resumable, &extraArgs, &uid, &timeout, &enqueuedAt, &startedAt, &finishedAt,
 		&taskDir, &target, &externalID, &statusSource,
-		&nativeState, &queue,
+		&nativeState, &queue, &failureDetail,
 	)
 	if err != nil {
 		return nil, err
@@ -143,6 +150,7 @@ func scanTask(scanner interface{ Scan(dest ...any) error }) (*TaskRow, error) {
 	t.StatusSource = statusSource.String
 	t.NativeState = nativeState.String
 	t.Queue = queue.String
+	t.FailureDetail = failureDetail.String
 
 	return &t, nil
 }
@@ -155,8 +163,8 @@ func (s *Store) InsertTask(ctx context.Context, t *TaskRow) error {
 		pid, start_time, log_path, working_dir, env_json,
 		resumable, extra_args, uid, timeout,
 		enqueued_at, started_at, finished_at, task_dir, target, external_id, status_source,
-		native_state, queue
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+		native_state, queue, failure_detail
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	resumable := 0
 	if t.Resumable {
@@ -172,7 +180,7 @@ func (s *Store) InsertTask(ctx context.Context, t *TaskRow) error {
 		t.EnqueuedAt.Unix(),
 		nullTimeToUnix(t.StartedAt), nullTimeToUnix(t.FinishedAt),
 		nullString(t.TaskDir), targetOrDefault(t.Target), nullString(t.ExternalID), nullString(t.StatusSource),
-		nullString(t.NativeState), nullString(t.Queue),
+		nullString(t.NativeState), nullString(t.Queue), nullString(t.FailureDetail),
 	)
 	return err
 }
@@ -185,8 +193,8 @@ func (s *Store) InsertTaskTx(ctx context.Context, tx *sql.Tx, t *TaskRow) error 
 		pid, start_time, log_path, working_dir, env_json,
 		resumable, extra_args, uid, timeout,
 		enqueued_at, started_at, finished_at, task_dir, target, external_id, status_source,
-		native_state, queue
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+		native_state, queue, failure_detail
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	resumable := 0
 	if t.Resumable {
@@ -202,7 +210,7 @@ func (s *Store) InsertTaskTx(ctx context.Context, tx *sql.Tx, t *TaskRow) error 
 		t.EnqueuedAt.Unix(),
 		nullTimeToUnix(t.StartedAt), nullTimeToUnix(t.FinishedAt),
 		nullString(t.TaskDir), targetOrDefault(t.Target), nullString(t.ExternalID), nullString(t.StatusSource),
-		nullString(t.NativeState), nullString(t.Queue),
+		nullString(t.NativeState), nullString(t.Queue), nullString(t.FailureDetail),
 	)
 	return err
 }
@@ -211,20 +219,21 @@ func (s *Store) InsertTaskTx(ctx context.Context, tx *sql.Tx, t *TaskRow) error 
 // accepts. Any key not in this set is rejected to prevent accidental SQL
 // injection from future callers.
 var allowedStatusFields = map[string]bool{
-	"pid":           true,
-	"gpus":          true,
-	"start_time":    true,
-	"started_at":    true,
-	"finished_at":   true,
-	"retry_count":   true,
-	"log_path":      true,
-	"working_dir":   true,
-	"env_json":      true,
-	"external_id":   true,
-	"status_source": true,
-	"extra_args":    true,
-	"native_state":  true,
-	"queue":         true,
+	"pid":            true,
+	"gpus":           true,
+	"start_time":     true,
+	"started_at":     true,
+	"finished_at":    true,
+	"retry_count":    true,
+	"log_path":       true,
+	"working_dir":    true,
+	"env_json":       true,
+	"external_id":    true,
+	"status_source":  true,
+	"extra_args":     true,
+	"native_state":   true,
+	"queue":          true,
+	"failure_detail": true,
 }
 
 // UpdateTaskStatus updates a task's status and any extra fields.

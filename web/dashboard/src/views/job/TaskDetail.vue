@@ -8,12 +8,26 @@
           <TaskStatusBadge :status="displayStatus" />
         </div>
         <div class="d-flex ga-1">
-          <v-btn v-if="displayStatus === 'running'" size="x-small" variant="tonal" color="error"
-            :loading="killing" :disabled="killing" @click="killTask">
+          <v-btn
+            v-if="displayStatus === 'running'"
+            size="x-small"
+            variant="tonal"
+            color="error"
+            :loading="killing"
+            :disabled="killing"
+            @click="killTask"
+          >
             <v-icon start size="14">mdi-stop</v-icon> {{ t('job.kill') }}
           </v-btn>
-          <v-btn v-if="config.caps.retry && (task.status === 'failed' || task.status === 'killed')" size="x-small" variant="tonal" color="primary"
-            :loading="retrying" :disabled="retrying" @click="retryTask">
+          <v-btn
+            v-if="config.caps.retry && (task.status === 'failed' || task.status === 'killed')"
+            size="x-small"
+            variant="tonal"
+            color="primary"
+            :loading="retrying"
+            :disabled="retrying"
+            @click="retryTask"
+          >
             <v-icon start size="14">mdi-refresh</v-icon> {{ t('job.retry') }}
           </v-btn>
         </div>
@@ -23,7 +37,9 @@
       <v-row dense>
         <v-col cols="6" sm="3">
           <div class="text-caption text-on-surface-variant">{{ t('job.elapsed') }}</div>
-          <div class="text-body-2 font-weight-medium">{{ task.elapsed_seconds ? formatDuration(task.elapsed_seconds) : '—' }}</div>
+          <div class="text-body-2 font-weight-medium">
+            {{ task.elapsed_seconds ? formatDuration(task.elapsed_seconds) : '—' }}
+          </div>
         </v-col>
         <v-col cols="6" sm="3">
           <div class="text-caption text-on-surface-variant">{{ t('job.step') }}</div>
@@ -32,7 +48,9 @@
         <v-col cols="6" sm="3">
           <div class="text-caption text-on-surface-variant">{{ t('task.retries') }}</div>
           <!-- -1 = unlimited (explicit opt-in); 0 legitimately means "no retries" -->
-          <div class="text-body-2 font-weight-medium">{{ task.retry_count || 0 }} / {{ task.max_retry < 0 ? '∞' : task.max_retry }}</div>
+          <div class="text-body-2 font-weight-medium">
+            {{ task.retry_count || 0 }} / {{ task.max_retry < 0 ? '∞' : task.max_retry }}
+          </div>
         </v-col>
         <v-col cols="6" sm="3">
           <div class="text-caption text-on-surface-variant">{{ t('task.gpus') }}</div>
@@ -43,7 +61,9 @@
       <v-row v-if="task.external_id" dense class="mt-1">
         <v-col cols="6" sm="3">
           <div class="text-caption text-on-surface-variant">{{ t('task.external_id') }}</div>
-          <div class="text-body-2 font-weight-medium"><code>{{ task.external_id }}</code></div>
+          <div class="text-body-2 font-weight-medium">
+            <code>{{ task.external_id }}</code>
+          </div>
         </v-col>
         <v-col cols="6" sm="3">
           <div class="text-caption text-on-surface-variant">{{ t('task.scheduler_state') }}</div>
@@ -56,17 +76,39 @@
       </v-row>
     </v-card>
 
+    <!-- RQ-74: pre-run failure self-report — the task never ran, so there is
+         no log to explain the death; show the scheduler's own words verbatim. -->
+    <v-card v-if="task.failure_detail" variant="tonal" color="error" class="mb-4 pa-3">
+      <div class="d-flex align-center ga-2 mb-2">
+        <v-icon size="18">mdi-alert-circle-outline</v-icon>
+        <span class="text-body-2 font-weight-medium">{{ t('task.failed_before_running') }}</span>
+        <v-spacer />
+        <v-btn size="x-small" variant="tonal" @click="copyFailureDetail">
+          <v-icon start size="12">mdi-content-copy</v-icon>
+          {{ detailCopied ? t('task.copied') : t('task.copy_detail') }}
+        </v-btn>
+      </div>
+      <pre class="failure-detail text-caption">{{ task.failure_detail }}</pre>
+    </v-card>
+
     <!-- Parameters / Metrics / Log -->
     <v-expansion-panels v-model="openPanels" multiple>
       <v-expansion-panel value="params">
         <v-expansion-panel-title>
           <span class="text-subtitle-2">{{ t('submit.parameters') }}</span>
-          <v-chip size="x-small" variant="tonal" class="ml-2">{{ Object.keys(task.params || {}).length }}</v-chip>
+          <v-chip size="x-small" variant="tonal" class="ml-2">{{
+            Object.keys(task.params || {}).length
+          }}</v-chip>
         </v-expansion-panel-title>
         <v-expansion-panel-text>
           <div class="overflow-x-auto">
             <table class="data-mono" style="width: 100%">
-              <thead><tr><th>{{ t('table.name') }}</th><th>{{ t('table.value') }}</th></tr></thead>
+              <thead>
+                <tr>
+                  <th>{{ t('table.name') }}</th>
+                  <th>{{ t('table.value') }}</th>
+                </tr>
+              </thead>
               <tbody>
                 <tr v-for="(val, key) in task.params" :key="key">
                   <td class="font-weight-medium">{{ key }}</td>
@@ -86,8 +128,11 @@
           <v-spacer />
           <v-btn
             v-if="task.wandb_run_id"
-            size="x-small" variant="text" class="mr-2"
-            :href="wandbRunURL(task.wandb_run_id)" target="_blank"
+            size="x-small"
+            variant="text"
+            class="mr-2"
+            :href="wandbRunURL(task.wandb_run_id)"
+            target="_blank"
             @click.stop
           >
             <v-icon start size="14">mdi-open-in-new</v-icon> W&B
@@ -101,24 +146,34 @@
       <v-expansion-panel value="log" class="log-panel">
         <v-expansion-panel-title>
           <span class="text-subtitle-2">{{ t('log.title') }}</span>
-          <v-chip v-if="totalBytes > 0" size="x-small" variant="tonal" class="ml-2">{{ formatBytes(totalBytes) }}</v-chip>
+          <v-chip v-if="totalBytes > 0" size="x-small" variant="tonal" class="ml-2">{{
+            formatBytes(totalBytes)
+          }}</v-chip>
           <v-spacer />
           <div class="d-flex align-center ga-1 mr-2" @click.stop>
             <v-btn
               v-if="canLoadEarlier"
-              size="x-small" variant="text" :loading="loadingEarlier" @click="loadEarlier"
+              size="x-small"
+              variant="text"
+              :loading="loadingEarlier"
+              @click="loadEarlier"
             >
               {{ t('log.load_earlier') }}
             </v-btn>
             <v-btn
               v-if="!following && endOffset < totalBytes"
-              size="x-small" variant="text" :loading="loadingMore" @click="loadMore"
+              size="x-small"
+              variant="text"
+              :loading="loadingMore"
+              @click="loadMore"
             >
               {{ t('log.load_more') }}
             </v-btn>
             <v-switch
               v-model="following"
-              density="compact" hide-details inline
+              density="compact"
+              hide-details
+              inline
               :color="streamState === 'reconnecting' ? 'warning' : 'primary'"
               :label="streamState === 'reconnecting' ? t('log.reconnecting') : t('log.follow')"
             />
@@ -128,9 +183,19 @@
           <!-- Ring-buffer notice: memory released, server file complete.
                "Reload from start" is the interim recovery path until the
                open-at-tail / scroll-up backfill work (RQ-22) lands. -->
-          <div v-if="trimmedLines > 0" class="d-flex align-center text-caption text-on-surface-variant px-2 pb-1">
-            <v-icon size="12" class="mr-1">mdi-history</v-icon>{{ t('log.trimmed', { n: trimmedLines }) }}
-            <v-btn size="x-small" variant="text" color="primary" class="ml-2" @click="reloadFromStart">
+          <div
+            v-if="trimmedLines > 0"
+            class="d-flex align-center text-caption text-on-surface-variant px-2 pb-1"
+          >
+            <v-icon size="12" class="mr-1">mdi-history</v-icon
+            >{{ t('log.trimmed', { n: trimmedLines }) }}
+            <v-btn
+              size="x-small"
+              variant="text"
+              color="primary"
+              class="ml-2"
+              @click="reloadFromStart"
+            >
               {{ t('log.reload_start') }}
             </v-btn>
           </div>
@@ -165,10 +230,16 @@
 
   <!-- 404: stale link / cleaned task — a spinner forever was the old bug -->
   <v-card v-else-if="notFound" class="pa-8 text-center">
-    <v-icon size="40" color="on-surface-variant" class="mb-3" style="opacity: 0.5">mdi-file-question-outline</v-icon>
+    <v-icon size="40" color="on-surface-variant" class="mb-3" style="opacity: 0.5"
+      >mdi-file-question-outline</v-icon
+    >
     <div class="text-h6 mb-1">{{ t('task.not_found') }}</div>
-    <v-btn class="mt-3" variant="tonal" color="primary"
-      :to="{ name: 'job-detail', params: { project: props.project, jobId: props.jobId } }">
+    <v-btn
+      class="mt-3"
+      variant="tonal"
+      color="primary"
+      :to="{ name: 'job-detail', params: { project: props.project, jobId: props.jobId } }"
+    >
       {{ t('common.back') }}
     </v-btn>
   </v-card>
@@ -214,8 +285,9 @@ const task = computed(() => taskQuery.data.value ?? null)
 const isActive = computed(() => !!task.value && ['running', 'pending'].includes(task.value.status))
 // client.ts mutes 404 snackbars by design — the page must render the
 // absence itself instead of spinning forever.
-const notFound = computed(() =>
-  taskQuery.error.value instanceof ApiError && taskQuery.error.value.status === 404)
+const notFound = computed(
+  () => taskQuery.error.value instanceof ApiError && taskQuery.error.value.status === 404,
+)
 
 const metricsQuery = useTaskMetricsQuery(() => props.taskId, isActive)
 const metricPoints = computed(() => metricsQuery.data.value ?? [])
@@ -223,7 +295,9 @@ const metricPoints = computed(() => metricsQuery.data.value ?? [])
 // Kill in flight — shared overlay, same state the job page renders.
 const { cancelling, prune, displayStatus: overlayStatus } = useCancelling()
 const displayStatus = computed(() => (task.value ? overlayStatus(task.value) : ''))
-watch(task, (v) => { if (v) prune([v]) })
+watch(task, (v) => {
+  if (v) prune([v])
+})
 void cancelling
 
 // ── Log state (byte-offset based, log stream contract v2) ──
@@ -242,7 +316,8 @@ const startLine = ref(-1)
 // Absolute line numbers only in the archive view with a known base and an
 // untrimmed buffer; the live view hides the column (contract v2).
 const lineNumberBase = computed(() =>
-  !isActive.value && startLine.value >= 0 && trimmedLines.value === 0 ? startLine.value : -1)
+  !isActive.value && startLine.value >= 0 && trimmedLines.value === 0 ? startLine.value : -1,
+)
 
 // ── Log stream lifecycle ──
 // One explicit state instead of independent booleans whose combinations
@@ -288,7 +363,9 @@ async function fetchWandbInfo() {
     if (detail.wandb?.base_url) {
       wandbBaseUrl.value = detail.wandb.base_url
     }
-  } catch { /* best effort */ }
+  } catch {
+    /* best effort */
+  }
 }
 function wandbRunURL(runId: string): string {
   return `${wandbBaseUrl.value}/runs/${runId}`
@@ -299,8 +376,13 @@ function wandbRunURL(runId: string): string {
 // and follow mode need are destructured here. ──
 const surface = useLogSurface(logLines, logContainer)
 const {
-  pipelineResult, effectiveHidden, renderItems,
-  toggleGroup, scrollToGroup, scrollToBottom, replaceTailLine,
+  pipelineResult,
+  effectiveHidden,
+  renderItems,
+  toggleGroup,
+  scrollToGroup,
+  scrollToBottom,
+  replaceTailLine,
 } = surface
 
 // ── Apply pages through the pure cursor state machine (utils/log/cursor).
@@ -308,7 +390,9 @@ const {
 // resync instead of applying the page. ──
 function acceptPage(page: LogPage): boolean {
   const action = applyCursorPage(
-    { endOffset: endOffset.value, tailPartial: tailPartial.value }, page)
+    { endOffset: endOffset.value, tailPartial: tailPartial.value },
+    page,
+  )
   switch (action.kind) {
     case 'ignore':
       return true
@@ -355,8 +439,8 @@ function seedFromTail(page: LogPage, active: boolean) {
   endOffset.value = page.next_offset
   totalBytes.value = page.size
   tailPartial.value = !!page.partial
-  startLine.value = !active && page.start_line != null && page.start_line >= 0
-    ? page.start_line : -1
+  startLine.value =
+    !active && page.start_line != null && page.start_line >= 0 ? page.start_line : -1
 }
 
 // ── Open / reload: live AND archive both open from the tail; only the
@@ -364,7 +448,9 @@ function seedFromTail(page: LogPage, active: boolean) {
 async function reloadTail() {
   const active = isActive.value
   const page = await tasksApi.log(props.taskId, {
-    tail: true, maxBytes: DEFAULT_LOG_MAX_BYTES, countLines: !active,
+    tail: true,
+    maxBytes: DEFAULT_LOG_MAX_BYTES,
+    countLines: !active,
   })
   seedFromTail(page, active)
   nextTick(() => scrollToBottom())
@@ -383,8 +469,11 @@ async function reloadFromStart() {
     totalBytes.value = page.size
     tailPartial.value = !!page.partial
     startLine.value = 0 // buffer head IS the file head
-  } catch { /* ignore */ }
-  finally { logLoading.value = false }
+  } catch {
+    /* ignore */
+  } finally {
+    logLoading.value = false
+  }
   streamState.value = 'ready'
 }
 
@@ -394,11 +483,15 @@ async function loadMore() {
   loadingMore.value = true
   try {
     const page = await tasksApi.log(props.taskId, {
-      offset: endOffset.value, maxBytes: DEFAULT_LOG_MAX_BYTES,
+      offset: endOffset.value,
+      maxBytes: DEFAULT_LOG_MAX_BYTES,
     })
     if (!acceptPage(page)) void resync()
-  } catch { /* ignore */ }
-  finally { loadingMore.value = false }
+  } catch {
+    /* ignore */
+  } finally {
+    loadingMore.value = false
+  }
 }
 
 // ── Backward paging (archive "Load earlier") ──
@@ -409,8 +502,9 @@ async function loadMore() {
 // = 1 line accounting still holds, so start_line just decrements by the
 // prepended count. No auto-trim on backward paging (contract v2).
 const loadingEarlier = ref(false)
-const canLoadEarlier = computed(() =>
-  !isActive.value && !following.value && firstOffset.value > 0 && trimmedLines.value === 0)
+const canLoadEarlier = computed(
+  () => !isActive.value && !following.value && firstOffset.value > 0 && trimmedLines.value === 0,
+)
 
 async function loadEarlier() {
   if (loadingEarlier.value || firstOffset.value <= 0) return
@@ -432,8 +526,11 @@ async function loadEarlier() {
       const base = startLine.value - lines.length
       startLine.value = page.partial || base < 0 ? -1 : base
     }
-  } catch { /* ignore */ }
-  finally { loadingEarlier.value = false }
+  } catch {
+    /* ignore */
+  } finally {
+    loadingEarlier.value = false
+  }
 }
 
 // ── SSE follow mode ──
@@ -458,7 +555,9 @@ function startFollow() {
       // (server file keeps everything; a banner explains the gap).
       trimmedLines.value += trimLogBuffer(logLines.value)
       nextTick(() => scrollToBottom())
-    } catch { /* ignore parse errors */ }
+    } catch {
+      /* ignore parse errors */
+    }
   })
   eventSource.onopen = () => {
     // Stream (re)established: reconnecting → following, backoff resets.
@@ -494,9 +593,14 @@ function scheduleReconnect() {
     reconnectDelay = Math.min(reconnectDelay * 2, 10_000)
     try {
       const from = endOffset.value
-      const page = await tasksApi.log(props.taskId, { offset: from, maxBytes: DEFAULT_LOG_MAX_BYTES })
+      const page = await tasksApi.log(props.taskId, {
+        offset: from,
+        maxBytes: DEFAULT_LOG_MAX_BYTES,
+      })
       if (endOffset.value === from) acceptPage(page)
-    } catch { /* backend still down — the reopened stream will error again */ }
+    } catch {
+      /* backend still down — the reopened stream will error again */
+    }
     if (streamState.value === 'reconnecting') startFollow() // onopen flips back
   }, reconnectDelay)
 }
@@ -514,14 +618,19 @@ async function resync(restartStream = false) {
     let ok = false
     try {
       const page = await tasksApi.log(props.taskId, {
-        offset: from, maxBytes: DEFAULT_LOG_MAX_BYTES,
+        offset: from,
+        maxBytes: DEFAULT_LOG_MAX_BYTES,
       })
       // If something already advanced the cursor meanwhile, that path
       // owns the buffer now — this resync is settled.
       ok = endOffset.value !== from || acceptPage(page)
-    } catch { ok = false }
+    } catch {
+      ok = false
+    }
     if (!ok) {
-      try { await reloadTail() } catch {
+      try {
+        await reloadTail()
+      } catch {
         // Backend unreachable. If we were following, the intent survives:
         // hand recovery to the infinite reconnect loop instead of giving
         // up (tail -f semantics). Outside follow, surface it once.
@@ -531,7 +640,9 @@ async function resync(restartStream = false) {
       }
     }
     if (restartStream && streamState.value === 'following') startFollow()
-  } finally { resyncing = false }
+  } finally {
+    resyncing = false
+  }
 }
 
 function stopFollow() {
@@ -554,7 +665,10 @@ watch(streamState, (state, prev) => {
     scheduleReconnect()
   } else {
     stopFollow()
-    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer)
+      reconnectTimer = null
+    }
     reconnectDelay = 1_000
   }
 })
@@ -578,13 +692,16 @@ watch(isActive, async (active, prev) => {
       try {
         const tailFrom = endOffset.value
         const page = await tasksApi.log(props.taskId, {
-          offset: tailFrom, maxBytes: DEFAULT_LOG_MAX_BYTES,
+          offset: tailFrom,
+          maxBytes: DEFAULT_LOG_MAX_BYTES,
         })
         // Generation guard: if SSE advanced the offset while this request
         // was in flight, the same lines already rendered — drop the page.
         if (endOffset.value !== tailFrom) return
         if (!acceptPage(page)) void resync()
-      } catch { /* best effort */ }
+      } catch {
+        /* best effort */
+      }
     }
   }
 })
@@ -607,7 +724,9 @@ async function killTask() {
     await taskActions.kill.mutateAsync(props.taskId)
     if (config.killAsync) snack.info(t('task.cancel_requested'))
     else snack.success(t('task.killed_ok'))
-  } catch (e: any) { snack.error(e?.message || t('common.error')) }
+  } catch (e: any) {
+    snack.error(e?.message || t('common.error'))
+  }
 }
 
 async function retryTask() {
@@ -615,7 +734,25 @@ async function retryTask() {
   try {
     await taskActions.retry.mutateAsync(props.taskId)
     snack.success(t('task.retried'))
-  } catch (e: any) { snack.error(e?.message || t('common.error')) }
+  } catch (e: any) {
+    snack.error(e?.message || t('common.error'))
+  }
+}
+
+// RQ-74: copy the pre-run failure evidence (scheduler stderr + rendered
+// command) so the user can paste it into a ticket / terminal search.
+const detailCopied = ref(false)
+function copyFailureDetail() {
+  if (!task.value?.failure_detail) return
+  navigator.clipboard
+    .writeText(task.value.failure_detail)
+    .then(() => {
+      detailCopied.value = true
+      setTimeout(() => {
+        detailCopied.value = false
+      }, 2000)
+    })
+    .catch(() => snack.error(t('common.error')))
 }
 
 function formatBytes(b: number): string {
@@ -644,8 +781,13 @@ onMounted(async () => {
   await waitForTask()
   if (notFound.value) return
   logLoading.value = true
-  try { await reloadTail() } catch { /* ignore */ }
-  finally { logLoading.value = false }
+  try {
+    await reloadTail()
+  } catch {
+    /* ignore */
+  } finally {
+    logLoading.value = false
+  }
   streamState.value = 'ready' // GET settled: offsets are now trustworthy
   // Query cache may already have the task (navigated from the job page);
   // the immediate isActive value seeds follow, the watch handles flips.
@@ -655,7 +797,10 @@ onMounted(async () => {
 
 onUnmounted(() => {
   stopFollow()
-  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer)
+    reconnectTimer = null
+  }
 })
 </script>
 
@@ -664,5 +809,16 @@ onUnmounted(() => {
    The log surface itself (lines, folds, search) lives in LogSurfaceView. */
 .log-panel :deep(.v-expansion-panel-text__wrapper) {
   padding: 0;
+}
+
+/* RQ-74: verbatim scheduler output — monospace, wrapped, no reflow of the
+   scheduler's own formatting. */
+.failure-detail {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+  max-height: 260px;
+  overflow-y: auto;
 }
 </style>

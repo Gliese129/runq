@@ -129,6 +129,15 @@ func (s *Store) addMissingColumns(ctx context.Context) error {
 	if err := addColumnIfMissing(ctx, s.db, "tasks", "queue", "TEXT"); err != nil {
 		return fmt.Errorf("add tasks.queue: %w", err)
 	}
+	// RQ-74: failure_detail carries the verbatim evidence for failures that
+	// happen BEFORE the task runs (submit rejection: scheduler stderr + exit
+	// code + rendered command). The run phase self-reports through logs and
+	// status.json; this column extends the same honesty to the birth phase so
+	// the death cause is visible in `runq task show` / the dashboard instead
+	// of only in daemon logs.
+	if err := addColumnIfMissing(ctx, s.db, "tasks", "failure_detail", "TEXT"); err != nil {
+		return fmt.Errorf("add tasks.failure_detail: %w", err)
+	}
 	return nil
 }
 

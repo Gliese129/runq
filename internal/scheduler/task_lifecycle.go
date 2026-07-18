@@ -79,7 +79,9 @@ func (s *Scheduler) runTask(task *Task) {
 	})
 	if err != nil {
 		s.logger.Error("task start failed", "task", task.ID, "error", err)
-		s.FinishTask(task, StatusFailed, nil)
+		// RQ-74: the process never ran, so no log file explains this death —
+		// persist the spawn error as the task's own failure evidence.
+		s.FinishTask(task, StatusFailed, map[string]any{"failure_detail": failureDetail(err)})
 		return
 	}
 
@@ -171,7 +173,14 @@ func (s *Scheduler) launchAsync(task *Task) {
 			return
 		}
 		s.logger.Error("submission rejected", "task", task.ID, "error", err)
-		s.FinishTaskNoRetry(task, map[string]any{"status_source": "submit"})
+		// RQ-74: the scheduler's own words (stderr + exit code + rendered
+		// command, composed by the launcher) become the task's permanent
+		// failure evidence — visible in task show / ps / dashboard, not
+		// only in the daemon log.
+		s.FinishTaskNoRetry(task, map[string]any{
+			"status_source":  "submit",
+			"failure_detail": failureDetail(err),
+		})
 	}
 }
 
@@ -431,6 +440,9 @@ func (s *Scheduler) handleFailure(task *Task, extra map[string]any) {
 			// means a NEW submission — probing the old id would track a dead
 			// cluster job. Harmless no-op for local tasks (column unused).
 			"external_id": nil,
+			// A new attempt starts with a clean slate — stale failure
+			// evidence from the previous attempt must not survive into it.
+			"failure_detail": nil,
 		}); err != nil {
 			s.logger.Error("persist requeue failed", "task", task.ID, "error", err)
 		}
@@ -445,6 +457,21 @@ func (s *Scheduler) handleFailure(task *Task, extra map[string]any) {
 	s.completeTask(task, StatusFailed, extra)
 	s.RefreshJobStatus(task.JobID)
 	s.logger.Warn("task failed permanently", "task", task.ID, "retry", task.RetryCount, "max_retry", task.MaxRetry)
+}
+
+// maxFailureDetailLen caps the persisted failure evidence. Scheduler stderr is
+// normally a few lines; the cap only guards against a pathological submit
+// command spewing megabytes into the DB row.
+const maxFailureDetailLen = 8 << 10
+
+// failureDetail renders an error as the task's persisted failure evidence
+// (tasks.failure_detail, RQ-74), truncated to maxFailureDetailLen.
+func failureDetail(err error) string {
+	msg := err.Error()
+	if len(msg) > maxFailureDetailLen {
+		msg = msg[:maxFailureDetailLen] + "\n… (truncated)"
+	}
+	return msg
 }
 
 // persistFields updates arbitrary columns on a running task in DB. Non-critical — logs on error.

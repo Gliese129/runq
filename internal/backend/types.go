@@ -69,6 +69,10 @@ type TaskView struct {
 	// Capabilities.StateModel == "poll" before rendering.
 	ExternalID   string `json:"external_id,omitempty"`
 	StatusSource string `json:"status_source,omitempty"`
+	// RQ-74: verbatim failure evidence for pre-run failures (submit
+	// rejection stderr + exit code + rendered command; local spawn errors).
+	// Present on both lanes; empty once a task reached the run phase.
+	FailureDetail string `json:"failure_detail,omitempty"`
 	// Phase 2D: scheduler-native state token (e.g. "CONFIGURING") and
 	// queue/partition name. Only populated in poll-model backends.
 	NativeState string `json:"native_state,omitempty"`

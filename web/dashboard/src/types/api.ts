@@ -86,6 +86,8 @@ export interface TaskView {
   /** HPC-specific; empty in daemon mode. Check caps.state_model == 'poll'. */
   external_id?: string
   status_source?: string
+  /** RQ-74: verbatim pre-run failure evidence (submit rejection stderr + exit code + rendered command). */
+  failure_detail?: string
   /** Raw scheduler state token before signal mapping (e.g. "COMPLETING", "R"). */
   native_state?: string
   /** Scheduler queue/partition name (e.g. "gpu-a100", "cpu-batch"). */

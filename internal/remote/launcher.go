@@ -88,9 +88,15 @@ func (l *Launcher) Launch(ctx context.Context, t *scheduler.Task, _ map[string]s
 	}
 	if exitCode != 0 {
 		// The scheduler RAN and said no — deterministic rejection; its own
-		// words go into the permanent failure.
+		// words go into the permanent failure. The error carries the full
+		// evidence (output + exit code + the rendered command that was run):
+		// the scheduler persists it as the task's failure_detail (RQ-74), so
+		// the death cause reaches `runq task show` / the dashboard verbatim
+		// instead of living only in the oplog.
 		opLog("SUBMIT REJECTED task=%s job=%s exit=%d\ncmd file: %s\noutput: %s", t.ID, t.JobID, exitCode, cmdFile, out)
-		return scheduler.LaunchResult{}, fmt.Errorf("submit %s rejected (exit %d):\n%s", t.ID, exitCode, strings.TrimSpace(out))
+		return scheduler.LaunchResult{}, fmt.Errorf(
+			"submit %s rejected (exit %d):\n%s\n\nsubmit command (%s):\n%s",
+			t.ID, exitCode, strings.TrimSpace(out), cmdFile, strings.TrimSpace(string(cmdBytes)))
 	}
 
 	extID, err := utils.ExtractSubmitID(out, l.b.Cfg.SubmitIDRegex)

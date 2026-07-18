@@ -117,7 +117,34 @@ func printDashboardTasks(tasks []backend.TaskView) error {
 				step, elapsed, compactJSON(task.Params))
 		}
 	}
-	return w.Flush()
+	if err := w.Flush(); err != nil {
+		return err
+	}
+	printTaskFailures(tasks)
+	return nil
+}
+
+// printTaskFailures appends a self-report section under the task table: any
+// task that died BEFORE running (submit rejection, spawn error) carries its
+// failure evidence in failure_detail (RQ-74) — surface the first lines right
+// here so a qsub rejection is readable in `runq ps <job>` without digging
+// into daemon logs.
+func printTaskFailures(tasks []backend.TaskView) {
+	const previewLines = 3
+	for _, task := range tasks {
+		if task.FailureDetail == "" {
+			continue
+		}
+		fmt.Printf("\n%s failed before running:\n", utils.IDColor(task.ID))
+		lines := strings.Split(strings.TrimSpace(task.FailureDetail), "\n")
+		for i, line := range lines {
+			if i >= previewLines {
+				fmt.Printf("    … (full detail: runq task show %s)\n", task.ID)
+				break
+			}
+			fmt.Printf("    %s\n", line)
+		}
+	}
 }
 
 func compactJSON(v any) string {
