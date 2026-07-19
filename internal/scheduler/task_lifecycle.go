@@ -204,6 +204,10 @@ func (s *Scheduler) launchAsync(task *Task) {
 // may exist. Reconcile is the only path out (verdict → FinishTask), plus
 // user kill.
 func (s *Scheduler) markUnknown(task *Task, cause error) {
+	// The unknown evidence replaces any earlier transient note — drop the
+	// dedup entry so a FUTURE transient failure with the same text (after a
+	// manual retry) is not silently swallowed against a stale memory.
+	s.transientNote.Delete(task.ID)
 	if err := s.queue.MarkUnknown(task.ID); err != nil {
 		s.logger.Error("mark unknown in queue failed", "task", task.ID, "error", err)
 	}
@@ -225,6 +229,16 @@ func (s *Scheduler) markUnknown(task *Task, cause error) {
 func (s *Scheduler) noteTransientFailure(task *Task, cause error) {
 	detail := "submit not reaching the scheduler yet — will retry automatically:\n" + failureDetail(cause)
 	if prev, ok := s.transientNote.Load(task.ID); ok && prev.(string) == detail {
+		return
+	}
+	// Under finishMu, gated on the queue's CURRENT view: a user kill can
+	// settle the task in the window between requeueTransient and this
+	// write, and an unconditional UPDATE (status=pending) would resurrect
+	// a killed row. The queue is the authority — only a still-pending
+	// entry takes the note.
+	s.finishMu.Lock()
+	defer s.finishMu.Unlock()
+	if qt := s.queue.Get(task.ID); qt == nil || qt.Status != StatusPending {
 		return
 	}
 	dbCtx, cancel := context.WithTimeout(s.ctx, 5*time.Second)

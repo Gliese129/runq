@@ -122,6 +122,15 @@ func printRemoteContextBanner() {
 	if os.Getenv("RUNQ_SOCKET") == "" {
 		return
 	}
+	// Never during shell-completion callbacks: cobra's __complete protocol
+	// runs `runq __complete ...` on every TAB, and some shells surface
+	// stderr — a banner there would garble completion for remote users.
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case cobra.ShellCompRequestCmd, cobra.ShellCompNoDescRequestCmd, "completion":
+			return
+		}
+	}
 	target := os.Getenv("RUNQ_TARGET")
 	if target == "" {
 		target = "(RUNQ_TARGET unset)"
