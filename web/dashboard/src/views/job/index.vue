@@ -184,7 +184,9 @@ async function killJob() {
   const counts = detail.value.job.tasks
   const ok = await confirmDialog({
     title: t('confirm.kill_job_title'),
-    body: t('confirm.kill_job_body', { n: counts.running + counts.pending }),
+    // unknown tasks are live work too (RQ-74) — the confirm must not
+    // undercount what the kill will actually touch.
+    body: t('confirm.kill_job_body', { n: counts.running + counts.pending + (counts.unknown ?? 0) }),
     confirmText: t('job.kill'),
     danger: true,
   })

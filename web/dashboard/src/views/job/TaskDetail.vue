@@ -286,7 +286,12 @@ const { confirm: confirmDialog } = useConfirm()
 // stops on terminal states, pauses in background tabs). ──
 const taskQuery = useTaskQuery(() => props.taskId)
 const task = computed(() => taskQuery.data.value ?? null)
-const isActive = computed(() => !!task.value && ['running', 'pending'].includes(task.value.status))
+// `unknown` counts as active (RQ-74): reconcile may settle it any moment —
+// keep polling task/metrics and let the log follower arm (the log file
+// appears the instant the cluster job turns out to be alive).
+const isActive = computed(
+  () => !!task.value && ['running', 'pending', 'unknown'].includes(task.value.status),
+)
 // client.ts mutes 404 snackbars by design — the page must render the
 // absence itself instead of spinning forever.
 const notFound = computed(

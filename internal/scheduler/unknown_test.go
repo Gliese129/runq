@@ -86,6 +86,34 @@ func TestTransientLaunchLeavesVisibleNote(t *testing.T) {
 	}
 }
 
+// RQ-74 review finding 1: reconcile confirming a live job flips the queue
+// entry unknown → running, and the resumed task remains fully killable /
+// finishable through the normal lifecycle.
+func TestResumeUnknownFlipsQueueToRunning(t *testing.T) {
+	cause := fmt.Errorf("%w: verdict lost", ErrLaunchUntracked)
+	fl := &fakeRemoteLauncher{launchErr: cause}
+	s, q, _ := newKillRaceHarness(t, fl)
+	task := seedRunningTask(t, s, q, "t-unknown-resume")
+	s.launchAsync(task)
+
+	if qt := q.Get(task.ID); qt == nil || qt.Status != StatusUnknown {
+		t.Fatalf("precondition: queue status = %v, want unknown", qt)
+	}
+	s.ResumeUnknown(task.ID)
+	if qt := q.Get(task.ID); qt == nil || qt.Status != StatusRunning {
+		t.Fatalf("queue status after resume = %v, want running", qt)
+	}
+
+	// Resumed task goes through the normal verdict funnel.
+	s.FinishTask(task, StatusSuccess, map[string]any{"status_source": "wrapper"})
+	if got := taskStatus(t, s, task.ID); got != "success" {
+		t.Fatalf("db status = %q, want success", got)
+	}
+
+	// Resuming a non-unknown task is a no-op, not an error path.
+	s.ResumeUnknown(task.ID)
+}
+
 // Sanity: the rejected path (plain error) still fails permanently with
 // evidence — unknown must not swallow deterministic rejections.
 func TestRejectedStillFailsPermanently(t *testing.T) {

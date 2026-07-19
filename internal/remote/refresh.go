@@ -202,6 +202,25 @@ func (b *Backend) persistDecision(ctx context.Context, tk store.TaskRow, d Decis
 		fields["native_state"] = "gone"
 		fields["queue"] = ""
 	}
+	// Leaving `unknown` (RQ-74 review finding 1): the resolved state must
+	// not keep the submit-era evidence — a task reconcile just confirmed
+	// RUNNING would otherwise still render "failed before running" — and
+	// the scheduler queue must follow the DB out of unknown, or the kill
+	// path keeps matching against a stale unknown-state condition.
+	// (Explicitly clearing failure_detail is idempotent with the terminal
+	// branch: completeTask's defaults clear it there anyway.)
+	if tk.Status == "unknown" && d.Status != "unknown" {
+		if _, ok := fields["failure_detail"]; !ok {
+			fields["failure_detail"] = nil
+		}
+		// Queue sync only for non-terminal exits (unknown → running);
+		// terminal exits settle the queue through FinishTask below.
+		if !isTerminal(d.Status) {
+			if ru, ok := b.Finisher.(interface{ ResumeUnknown(taskID string) }); ok {
+				ru.ResumeUnknown(tk.ID)
+			}
+		}
+	}
 	if b.Finisher != nil && isTerminal(d.Status) && !isTerminal(tk.Status) {
 		b.Finisher.FinishTask(rowToTask(tk), scheduler.TaskStatus(d.Status), fields)
 		return nil

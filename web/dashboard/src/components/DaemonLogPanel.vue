@@ -116,14 +116,18 @@ async function reload() {
   loading.value = true
   try {
     const res = await daemonLogsApi.list()
-    files.value = res.files
+    // Defensive on purpose (RQ-74 review finding 3): an older daemon (404
+    // handler variants), a proxy, or a test mock may answer with a shape
+    // that lacks `files`. A debug aid must degrade to "no logs", never
+    // crash the Settings render.
+    files.value = Array.isArray(res?.files) ? res.files : []
     if (files.value.length === 0) return
     if (!files.value.some((f) => f.name === selected.value)) {
       selected.value = files.value[0].name
     }
     const page = await daemonLogsApi.page(selected.value, { tail: true })
-    rawLines.value = page.lines
-    endOffset.value = page.next_offset
+    rawLines.value = Array.isArray(page?.lines) ? page.lines : []
+    endOffset.value = page?.next_offset ?? 0
   } catch {
     /* silent — the panel is a debug aid, not a critical path */
   } finally {
@@ -137,10 +141,11 @@ let timer: ReturnType<typeof setInterval> | null = null
 async function poll() {
   try {
     const page = await daemonLogsApi.page(selected.value, { offset: endOffset.value })
+    if (!page || !Array.isArray(page.lines)) return // malformed response: skip this tick
     if (page.rotated || page.size < endOffset.value) {
       const tail = await daemonLogsApi.page(selected.value, { tail: true })
-      rawLines.value = tail.lines
-      endOffset.value = tail.next_offset
+      rawLines.value = Array.isArray(tail?.lines) ? tail.lines : []
+      endOffset.value = tail?.next_offset ?? 0
       return
     }
     if (page.lines.length > 0) {

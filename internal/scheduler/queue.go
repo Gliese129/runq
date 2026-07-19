@@ -188,6 +188,25 @@ func (q *Queue) MarkUnknown(taskID string) error {
 	return nil
 }
 
+// ResumeUnknown transitions unknown → running: reconcile confirmed a live
+// cluster job behind an outcome-lost submission (RQ-74). A task in any
+// other state is left alone (a verdict may have raced the resume) — the
+// no-op returns nil, only a missing task errors.
+func (q *Queue) ResumeUnknown(taskID string) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	t := q.findLocked(taskID)
+	if t == nil {
+		return fmt.Errorf("task %q not found in queue", taskID)
+	}
+	if t.Status != StatusUnknown {
+		return nil
+	}
+	t.Status = StatusRunning
+	return nil
+}
+
 // Complete transitions a task to a terminal state (success/failed/killed).
 func (q *Queue) Complete(taskID string, status TaskStatus) error {
 	q.mu.Lock()

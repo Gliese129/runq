@@ -238,6 +238,19 @@ func (s *Scheduler) noteTransientFailure(task *Task, cause error) {
 	s.transientNote.Store(task.ID, detail)
 }
 
+// ResumeUnknown flips an unknown queue entry back to running: reconcile
+// confirmed (wrapper facts) that a live cluster job exists behind an
+// outcome-lost submission (RQ-74). Under finishMu so it cannot interleave
+// with a concurrent verdict delivery; the DB write is the caller's
+// (reconcile is the DB's writer on this lane — this only syncs the queue).
+func (s *Scheduler) ResumeUnknown(taskID string) {
+	s.finishMu.Lock()
+	defer s.finishMu.Unlock()
+	if err := s.queue.ResumeUnknown(taskID); err != nil {
+		s.logger.Warn("resume unknown: queue sync failed", "task", taskID, "error", err)
+	}
+}
+
 // settleKilled consumes a pending kill flag and drives the task to killed.
 // Returns false (and does nothing) when no kill was requested. Callers
 // must have established that recording killed is HONEST at this point: no
