@@ -297,6 +297,11 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/v1/tasks/{id}/kill", s.handleKillTask)
 	s.mux.HandleFunc("POST /api/v1/tasks/{id}/retry", s.handleRetryTask)
 
+	// ── runq self-logs（RQ-74: 死因至少能在浏览器里读到）────────────────
+	s.mux.HandleFunc("GET /api/v1/daemon/logs", s.handleDaemonLogList)
+	s.mux.HandleFunc("GET /api/v1/daemon/logs/{name}", s.handleDaemonLog)
+	s.mux.HandleFunc("GET /api/v1/daemon/logs/{name}/stream", s.handleDaemonLogStream)
+
 	// ── §5.6 Log sessions（原 /utils/log）──────────────────────────────
 	s.mux.HandleFunc("POST /api/v1/log-sessions", s.handleUtilsLogUpload)
 	s.mux.HandleFunc("GET /api/v1/log-sessions/{id}", s.handleUtilsLogRead)

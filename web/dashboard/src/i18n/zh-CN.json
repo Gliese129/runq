@@ -420,5 +420,10 @@
   "statusbar.targets": "targets {n}/{total} 在线",
   "statusbar.forward_reconnecting": "{name} forward 重连中（第 {attempts} 次）",
   "statusbar.forward_stopped": "{name} forward 已停止",
-  "statusbar.up": "运行 {dur}"
+  "statusbar.up": "运行 {dur}",
+  "settings.runq_logs": "runq 日志",
+  "settings.runq_logs_hint": "daemon 自身的日志 — UI 推送不到的失败（启动错误、sensor/forward 波动）都落在这里。",
+  "settings.no_daemon_logs": "本机还没有 daemon 日志文件。",
+  "settings.log_level": "级别",
+  "settings.log_keyword": "过滤…"
 }

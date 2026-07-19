@@ -420,5 +420,10 @@
   "statusbar.targets": "targets {n}/{total} online",
   "statusbar.forward_reconnecting": "{name} forward reconnecting (attempt {attempts})",
   "statusbar.forward_stopped": "{name} forward stopped",
-  "statusbar.up": "up {dur}"
+  "statusbar.up": "up {dur}",
+  "settings.runq_logs": "runq logs",
+  "settings.runq_logs_hint": "The daemon's own log — failures that can't reach the UI (startup errors, sensor/forward churn) land here.",
+  "settings.no_daemon_logs": "No daemon log files found on this machine yet.",
+  "settings.log_level": "Level",
+  "settings.log_keyword": "Filter…"
 }

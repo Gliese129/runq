@@ -420,5 +420,10 @@
   "statusbar.targets": "targets {n}/{total} オンライン",
   "statusbar.forward_reconnecting": "{name} forward 再接続中（{attempts} 回目）",
   "statusbar.forward_stopped": "{name} forward 停止中",
-  "statusbar.up": "稼働 {dur}"
+  "statusbar.up": "稼働 {dur}",
+  "settings.runq_logs": "runq ログ",
+  "settings.runq_logs_hint": "daemon 自身のログ — UI に届かない失敗（起動エラー、sensor/forward の変動）はここに残ります。",
+  "settings.no_daemon_logs": "このマシンにはまだ daemon ログファイルがありません。",
+  "settings.log_level": "レベル",
+  "settings.log_keyword": "フィルター…"
 }

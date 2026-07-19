@@ -239,6 +239,10 @@
         </v-expansion-panel>
       </v-expansion-panels>
     </v-card>
+
+    <!-- RQ-74: runq self-logs — deaths the UI can't push still land in
+         daemon.log; read it here instead of grepping files. -->
+    <DaemonLogPanel />
   </div>
 </template>
 
@@ -251,6 +255,7 @@ import { useSettingsStore } from '@/stores/settings'
 import { useSnackbar } from '@/composables/useSnackbar'
 import { configApi, type TargetConfig, type HPCCheckResult } from '@/apis/config'
 import ShellTemplateEditor from '@/components/ShellTemplateEditor.vue'
+import DaemonLogPanel from '@/components/DaemonLogPanel.vue'
 
 const { t, locale } = useI18n()
 const theme = useTheme()
