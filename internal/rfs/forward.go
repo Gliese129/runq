@@ -214,7 +214,7 @@ func (f *RemoteForward) session(ctx context.Context) error {
 	hostKeys := f.cfg.SSH.HostKeyCallback
 	if hostKeys == nil {
 		var err error
-		if hostKeys, err = StrictHostKeyCallback(); err != nil {
+		if hostKeys, err = policyHostKeyCallback(f.cfg.SSH.HostKeyPolicy); err != nil {
 			return err
 		}
 	}

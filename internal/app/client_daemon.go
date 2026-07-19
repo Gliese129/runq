@@ -170,6 +170,8 @@ func newRemoteCLIForward(tc config.TargetConfig, handler http.Handler, logger *s
 			Host:        host,
 			User:        sshUser,
 			AuthMethods: auth,
+			// RQ-74: same accept-new passthrough as the lane connection.
+			HostKeyPolicy: rfs.ResolveHostKeyPolicy(tc.SSH.Host),
 		},
 		Serve: func(ln net.Listener) error {
 			err := (&http.Server{Handler: handler}).Serve(ln)

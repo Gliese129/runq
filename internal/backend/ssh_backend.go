@@ -208,6 +208,10 @@ func NewSSHBackend(cfg SSHBackendConfig) (*SSHBackend, error) {
 			Host:        host,
 			User:        sshUser,
 			AuthMethods: auth,
+			// RQ-74: honor the user's own `StrictHostKeyChecking
+			// accept-new` for this alias — runq is never more ceremonious
+			// than their ssh. Mismatch still hard-fails.
+			HostKeyPolicy: rfs.ResolveHostKeyPolicy(t.SSH.Host),
 			// Idle disconnect: with the sensor loops running every ~2min
 			// while tasks are in flight, the connection stays warm during
 			// activity and closes ~10min after the queue drains — a normal

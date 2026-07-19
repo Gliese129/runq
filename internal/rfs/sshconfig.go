@@ -70,6 +70,46 @@ type sshConfigValues struct {
 	user         string
 	port         string
 	identityFile string
+	// strictHostKeyChecking mirrors the ssh_config option of the same name
+	// (RQ-74: runq honors accept-new so it is never more ceremonious than
+	// the user's own ssh).
+	strictHostKeyChecking string
+}
+
+// Host key policy values consumed by sshConn/RemoteForward.
+const (
+	// HostKeyStrict is the default: unknown or changed keys refuse the
+	// connection (typed errors naming the fix).
+	HostKeyStrict = ""
+	// HostKeyAcceptNew auto-trusts and records UNKNOWN hosts (no prompt);
+	// a CHANGED key still hard-fails.
+	HostKeyAcceptNew = "accept-new"
+)
+
+// ResolveHostKeyPolicy reads StrictHostKeyChecking for an ssh_config alias
+// and maps it to runq's policy: `accept-new` and `no`/`off` both become
+// HostKeyAcceptNew (runq deliberately caps `no` at accept-new semantics —
+// tolerating a CHANGED key would disable MITM protection outright);
+// everything else (unset, `yes`, `ask`) stays strict — `ask` has a human
+// only in `runq connect`, which prompts there regardless.
+func ResolveHostKeyPolicy(host string) string {
+	if host == "" || strings.Contains(host, ":") {
+		return HostKeyStrict
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return HostKeyStrict
+	}
+	data, err := os.ReadFile(filepath.Join(home, ".ssh", "config"))
+	if err != nil {
+		return HostKeyStrict
+	}
+	switch strings.ToLower(resolveSSHAlias(string(data), host).strictHostKeyChecking) {
+	case "accept-new", "no", "off":
+		return HostKeyAcceptNew
+	default:
+		return HostKeyStrict
+	}
 }
 
 // resolveSSHAlias walks an ssh_config document and collects the effective
@@ -113,6 +153,10 @@ func resolveSSHAlias(content, alias string) sshConfigValues {
 		case "identityfile":
 			if v.identityFile == "" {
 				v.identityFile = args[0]
+			}
+		case "stricthostkeychecking":
+			if v.strictHostKeyChecking == "" {
+				v.strictHostKeyChecking = args[0]
 			}
 		}
 	}

@@ -29,18 +29,39 @@ type UnknownHostKeyError struct {
 }
 
 func (e *UnknownHostKeyError) Error() string {
-	return fmt.Sprintf("unknown host key for %s (%s) — run `runq connect` to verify and trust it, or ssh once manually", e.Host, e.Fingerprint)
+	return fmt.Sprintf("unknown host key for %s (%s) — run `runq connect` to verify and trust it, or ssh once manually. To trust new hosts automatically, set `StrictHostKeyChecking accept-new` for this host in ~/.ssh/config (runq honors it)", e.Host, e.Fingerprint)
 }
 
 // HostKeyMismatchError: the host's key CHANGED. Deliberately alarming —
-// this is either a server reinstall or an interception.
+// this is either a server reinstall, a login-node pool member with its own
+// key, or an interception. Never promptable and never auto-accepted (even
+// under accept-new): the way out is a copy-paste command, not a click
+// (RQ-74 — the error carries its own fix).
 type HostKeyMismatchError struct {
 	Host        string
 	Fingerprint string
 }
 
 func (e *HostKeyMismatchError) Error() string {
-	return fmt.Sprintf("HOST KEY MISMATCH for %s (now %s): the server's key differs from ~/.ssh/known_hosts — possible MITM; verify out of band and update known_hosts manually", e.Host, e.Fingerprint)
+	return fmt.Sprintf("HOST KEY MISMATCH for %s (now %s): the server's key differs from ~/.ssh/known_hosts — possible MITM; verify against the cluster's published fingerprints before trusting.\n"+
+		"Common benign causes: the cluster was reinstalled/rotated its keys, or this hostname fronts a POOL of login nodes with differing keys (another pool member answered this time).\n"+
+		"If verified, reset and re-trust with:\n"+
+		"    ssh-keygen -R %s && runq connect\n"+
+		"(Note: \"StrictHostKeyChecking accept-new\" in ~/.ssh/config auto-trusts NEW hosts only — a changed key always stops here.)",
+		e.Host, e.Fingerprint, sshKeygenTarget(e.Host))
+}
+
+// sshKeygenTarget renders a host the way `ssh-keygen -R` expects it:
+// bare hostname for port 22, bracketed [host]:port otherwise.
+func sshKeygenTarget(host string) string {
+	h, p, err := net.SplitHostPort(host)
+	if err != nil {
+		return host
+	}
+	if p == "22" {
+		return h
+	}
+	return fmt.Sprintf("[%s]:%s", h, p)
 }
 
 // knownHostsFile returns ~/.ssh/known_hosts, creating an empty one (and
@@ -88,6 +109,37 @@ func StrictHostKeyCallback() (ssh.HostKeyCallback, error) {
 			return &HostKeyMismatchError{Host: hostname, Fingerprint: ssh.FingerprintSHA256(key)}
 		}
 		return err
+	}, nil
+}
+
+// policyHostKeyCallback maps a HostKeyPolicy to its callback — the shared
+// "HostKeyCallback is nil" path of sshConn and RemoteForward.
+func policyHostKeyCallback(policy string) (ssh.HostKeyCallback, error) {
+	if policy == HostKeyAcceptNew {
+		return AcceptNewHostKeyCallback()
+	}
+	return StrictHostKeyCallback()
+}
+
+// AcceptNewHostKeyCallback is the ssh_config `StrictHostKeyChecking
+// accept-new` passthrough (RQ-74): an UNKNOWN host is trusted and recorded
+// without a prompt — exactly what the user's own ssh would do under that
+// setting, so runq is never more ceremonious than ssh. A MISMATCH still
+// hard-fails: OpenSSH's `no` would tolerate even that, but silently
+// accepting a CHANGED key disables the MITM protection entirely — runq
+// caps the passthrough at accept-new semantics on purpose.
+func AcceptNewHostKeyCallback() (ssh.HostKeyCallback, error) {
+	strict, err := StrictHostKeyCallback()
+	if err != nil {
+		return nil, err
+	}
+	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+		err := strict(hostname, remote, key)
+		var unknown *UnknownHostKeyError
+		if !errors.As(err, &unknown) {
+			return err // nil, mismatch, or IO error
+		}
+		return AppendKnownHost(hostname, key)
 	}, nil
 }
 
