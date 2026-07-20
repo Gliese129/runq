@@ -33,6 +33,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/gliese129/runq/internal/genfile"
 )
 
 // GlobalConfig is the top-level section of ~/.runq/config.yaml.
@@ -52,6 +54,12 @@ type GlobalConfig struct {
 	// Target type is inferred from fields: gpus → local, scheduler → HPC.
 	// SSH section determines filesystem: present → SSHFS, absent → LocalFS.
 	Targets []TargetConfig `yaml:"targets,omitempty"`
+
+	// Generation is the SEMANTIC content hash of config.yaml at Load time
+	// (RQ-75, computed by genfile — reformatting and comments do not move
+	// it). Never serialized: it describes the file, it does not live in it.
+	// Empty for a missing config file.
+	Generation string `yaml:"-" json:"-"`
 }
 
 // ── Target configuration ───────────────────────────────────────────────────
@@ -280,6 +288,7 @@ func DBPath() string { return filepath.Join(ConfigDir(), "runq.db") }
 
 // Load reads the global section of config.yaml. A missing file is not an error
 // — it returns a zero GlobalConfig (data_path empty = project_path mode).
+// The returned config carries its semantic Generation (RQ-75).
 func Load() (*GlobalConfig, error) {
 	buf, err := os.ReadFile(ConfigPath())
 	if os.IsNotExist(err) {
@@ -291,6 +300,11 @@ func Load() (*GlobalConfig, error) {
 	var f configFile
 	if err := yaml.Unmarshal(buf, &f); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", ConfigPath(), err)
+	}
+	// Same bytes we just parsed — the generation cannot disagree with the
+	// content this config was built from.
+	if gen, gerr := genfile.SemanticHash(buf); gerr == nil {
+		f.GlobalConfig.Generation = gen
 	}
 	return &f.GlobalConfig, nil
 }

@@ -329,6 +329,12 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		DefaultTarget: s.cfg.ResolveDefaultTarget(),
 		Targets:       []backend.TargetSummary{},
 	}
+	// Generation is read FRESH (RQ-75): s.cfg is the boot snapshot, but the
+	// generation must describe the file as it is now — it is what If-Match
+	// writes will be compared against.
+	if fresh, err := config.Load(); err == nil {
+		resp.ConfigGeneration = fresh.Generation
+	}
 	caps := map[string]backend.Capabilities{}
 	if mt, ok := s.backend.(interface {
 		PerTargetCapabilities() map[string]backend.Capabilities

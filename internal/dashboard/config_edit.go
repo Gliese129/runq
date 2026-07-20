@@ -28,6 +28,10 @@ type targetsListResponse struct {
 	Items        []config.TargetConfig `json:"items"`
 	Placeholders map[string][]string   `json:"placeholders"`
 	Path         string                `json:"path"`
+	// ConfigGeneration is config.yaml's semantic content hash at read time
+	// (RQ-75). The edit form stores it and sends it back as If-Match; a
+	// mismatch on save means someone else changed the file in between.
+	ConfigGeneration string `json:"config_generation"`
 }
 
 type targetCheckResponse struct {
@@ -61,9 +65,10 @@ func (s *Server) handleListTargets(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, targetsListResponse{
-		Items:        cfg.ResolveTargets(),
-		Placeholders: config.HPCPlaceholders,
-		Path:         config.ConfigPath(),
+		Items:            cfg.ResolveTargets(),
+		Placeholders:     config.HPCPlaceholders,
+		Path:             config.ConfigPath(),
+		ConfigGeneration: cfg.Generation,
 	})
 }
 

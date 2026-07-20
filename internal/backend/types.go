@@ -128,6 +128,9 @@ type ConfigResponse struct {
 	ConfigPath    string          `json:"config_path"`
 	DefaultTarget string          `json:"default_target"`
 	Targets       []TargetSummary `json:"targets"`
+	// ConfigGeneration: config.yaml's semantic content hash (RQ-75) at the
+	// time of this response — freshly computed, not the boot snapshot's.
+	ConfigGeneration string `json:"config_generation,omitempty"`
 }
 
 // TargetSummary is one target's bootstrap entry (spec §4): identity +
