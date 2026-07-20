@@ -3,7 +3,6 @@ package dashboard
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"time"
 
@@ -12,11 +11,8 @@ import (
 	"github.com/gliese129/runq/internal/rfs"
 )
 
-// ErrForwardRestartRequired is returned (wrapped) by the forward starter
-// when the target has no lane in the running daemon — the one case where
-// only a restart helps. Declared here so the hook's provider (app) and
-// consumer (this handler) agree without an import cycle.
-var ErrForwardRestartRequired = errors.New("restart required")
+// (ErrForwardRestartRequired is gone — RQ-75's lane reconciler builds a
+// missing lane on the spot, so "restart to build a lane" no longer exists.)
 
 // Targets management endpoints (spec §5.2, D10): /hpc-config* is retired,
 // scheduler templates belong to targets. GET /targets is the management
@@ -104,6 +100,7 @@ func (s *Server) handlePutTarget(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	s.notifyConfigChanged() // RQ-75: converge lanes now, not next tick
 	writeJSON(w, http.StatusOK, backend.ActionResponse{OK: true})
 }
 
@@ -133,6 +130,7 @@ func (s *Server) handleDeleteTarget(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	s.notifyConfigChanged() // RQ-75: converge lanes now, not next tick
 	writeJSON(w, http.StatusOK, backend.ActionResponse{OK: true})
 }
 
@@ -155,6 +153,18 @@ func (s *Server) SetForwardStarter(fn func(name string) error) { s.forwardStarte
 // /health (RQ-74).
 func (s *Server) SetForwardStatus(fn func() map[string]rfs.ForwardStatus) { s.forwardStatus = fn }
 
+// SetConfigChanged wires the daemon's config reconciler (RQ-75): called
+// after every successful API write to config.yaml so lanes converge
+// immediately instead of waiting for the next watch tick.
+func (s *Server) SetConfigChanged(fn func()) { s.configChanged = fn }
+
+// notifyConfigChanged fires the reconciler hook if one is wired.
+func (s *Server) notifyConfigChanged() {
+	if s.configChanged != nil {
+		s.configChanged()
+	}
+}
+
 // SetForwardStopper wires the client daemon's runtime forward teardown
 // (POST /targets/{name}/disconnect).
 func (s *Server) SetForwardStopper(fn func(name string) error) { s.forwardStopper = fn }
@@ -175,21 +185,16 @@ func (s *Server) handleDisconnectTarget(w http.ResponseWriter, r *http.Request) 
 }
 
 // handleConnectTarget — POST /targets/{name}/connect: start or replace the
-// target's remote CLI forward NOW, against the just-saved config. This is
-// what lets `runq connect` take effect without a daemon restart. The one
-// genuine restart case — the target has no lane because it was added after
-// daemon start — comes back as 409 with the restart instruction.
+// target's remote CLI forward NOW, against the just-saved config. The
+// forward starter runs a reconcile pass first (RQ-75), so even a target
+// added moments ago gets its lane built on the spot — no restart case left.
 func (s *Server) handleConnectTarget(w http.ResponseWriter, r *http.Request) {
 	if s.forwardStarter == nil {
 		notImplemented(w, "remote CLI forward")
 		return
 	}
 	if err := s.forwardStarter(r.PathValue("name")); err != nil {
-		status := http.StatusBadRequest
-		if errors.Is(err, ErrForwardRestartRequired) {
-			status = http.StatusConflict
-		}
-		writeErr(w, status, backend.CodeInvalidState, err.Error())
+		writeErr(w, http.StatusBadRequest, backend.CodeInvalidState, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, backend.ActionResponse{OK: true})
@@ -244,5 +249,6 @@ func (s *Server) handlePutGlobalConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	s.notifyConfigChanged() // RQ-75: default_target is hot; data_path stays restart-bound (logged)
 	writeJSON(w, http.StatusOK, backend.ActionResponse{OK: true})
 }

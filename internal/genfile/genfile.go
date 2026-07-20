@@ -145,11 +145,15 @@ func normalize(v any) any {
 //   - otherwise the file's CURRENT semantic generation must equal ifMatch,
 //     or Save returns *ConflictError carrying the current generation.
 //
+// defaultMode is the permission for a NEWLY created file (0 → 0600); an
+// existing file always keeps its own permission bits — a deliberately
+// tightened config.yaml stays tight, a repo-normal project yaml stays 0644.
+//
 // The compare and the replace run under an advisory flock (path + ".lock"),
 // and the replace itself is atomic (same-dir temp file + rename), so a
 // concurrent reader never sees a torn file and a concurrent writer loses
 // the race loudly instead of silently.
-func Save(path string, newBytes []byte, ifMatch string) error {
+func Save(path string, newBytes []byte, ifMatch string, defaultMode os.FileMode) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
@@ -177,8 +181,12 @@ func Save(path string, newBytes []byte, ifMatch string) error {
 	}
 
 	// Preserve the existing file's permission bits (config files may be
-	// deliberately tightened, e.g. 0600 for config.yaml — RQ-45).
-	mode := os.FileMode(0o600)
+	// deliberately tightened, e.g. 0600 for config.yaml — RQ-45); new
+	// files take the caller's default.
+	mode := defaultMode
+	if mode == 0 {
+		mode = 0o600
+	}
 	if info, serr := os.Stat(path); serr == nil {
 		mode = info.Mode().Perm()
 	}

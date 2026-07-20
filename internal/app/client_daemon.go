@@ -46,40 +46,46 @@ func newClientDaemon(dataDir string, paths utils.DataDirPaths, logger *slog.Logg
 	}
 	defaultTarget := storageCfg.ResolveDefaultTarget()
 
-	targets := make(map[string]backend.Backend)
-	var lanes []*backend.SSHBackend
-	for _, tc := range storageCfg.ResolveTargets() {
-		var be *backend.SSHBackend
-		var berr error
+	// buildLane is THE lane constructor — boot and the RQ-75 reconciler
+	// build lanes through the same function, so a runtime rebuild can never
+	// diverge from what a restart would have produced.
+	buildLane := func(tc config.TargetConfig, cfg *config.GlobalConfig) (backend.Backend, error) {
 		if tc.Type() == config.TargetTypeRemote {
-			be, berr = backend.NewSSHBackend(backend.SSHBackendConfig{
-				Target: tc, Store: st, GlobalCfg: storageCfg, Logger: logger,
+			be, berr := backend.NewSSHBackend(backend.SSHBackendConfig{
+				Target: tc, Store: st, GlobalCfg: cfg, Logger: logger,
 			})
 			if berr == nil {
 				logger.Info("remote lane registered", "target", tc.Name, "host", tc.SSH.Host)
 			}
-		} else {
-			// Local-GPUs target: synthesize a localhost-runqd lane. Same
-			// machinery, LocalFS transport; plumbing commands default to
-			// runqd.sock, so the preset templates are verbatim portable.
-			synth, serr := synthLocalRunqdTarget(tc, dataDir)
-			if serr != nil {
-				return nil, fmt.Errorf("target %q: %w", tc.Name, serr)
-			}
-			ensureRunqd(logger, dataDir)
-			be, berr = backend.NewSSHBackend(backend.SSHBackendConfig{
-				Target: synth, Store: st, GlobalCfg: storageCfg, Logger: logger,
-				FS: rfs.NewLocalFS(),
-			})
-			if berr == nil {
-				logger.Info("localhost runqd lane registered", "target", tc.Name)
-			}
+			return be, berr
 		}
+		// Local-GPUs target: synthesize a localhost-runqd lane. Same
+		// machinery, LocalFS transport; plumbing commands default to
+		// runqd.sock, so the preset templates are verbatim portable.
+		synth, serr := synthLocalRunqdTarget(tc, dataDir)
+		if serr != nil {
+			return nil, fmt.Errorf("target %q: %w", tc.Name, serr)
+		}
+		ensureRunqd(logger, dataDir)
+		be, berr := backend.NewSSHBackend(backend.SSHBackendConfig{
+			Target: synth, Store: st, GlobalCfg: cfg, Logger: logger,
+			FS: rfs.NewLocalFS(),
+		})
+		if berr == nil {
+			logger.Info("localhost runqd lane registered", "target", tc.Name)
+		}
+		return be, berr
+	}
+
+	targets := make(map[string]backend.Backend)
+	laneMap := make(map[string]backend.Backend)
+	for _, tc := range storageCfg.ResolveTargets() {
+		be, berr := buildLane(tc, storageCfg)
 		if berr != nil {
 			return nil, fmt.Errorf("build lane for target %q: %w", tc.Name, berr)
 		}
 		targets[tc.Name] = be
-		lanes = append(lanes, be)
+		laneMap[tc.Name] = be
 	}
 
 	multiBe, err := backend.NewMultiBackend(targets, st, defaultTarget)
@@ -88,11 +94,16 @@ func newClientDaemon(dataDir string, paths utils.DataDirPaths, logger *slog.Logg
 	}
 
 	d := &Daemon{
-		Store:       st,
-		Logger:      logger,
-		sshBackends: lanes,
-		pidPath:     paths.PIDPath,
-		socketPath:  paths.SocketPath,
+		Store:        st,
+		Logger:       logger,
+		lanes:        laneMap,
+		multiBe:      multiBe,
+		buildLane:    buildLane,
+		lastTargets:  targetsByName(storageCfg),
+		lastDefault:  defaultTarget,
+		bootDataPath: storageCfg.DataPath,
+		pidPath:      paths.PIDPath,
+		socketPath:   paths.SocketPath,
 	}
 
 	// The dashboard mux is the client's ONLY server surface: always built
@@ -105,10 +116,6 @@ func newClientDaemon(dataDir string, paths utils.DataDirPaths, logger *slog.Logg
 	// into the mux above — the remote `runq` is just another socket client.
 	// Serve reuses the full middleware chain (version gate included).
 	d.forwards = map[string]*rfs.RemoteForward{}
-	d.laneNames = map[string]bool{}
-	for name := range targets {
-		d.laneNames[name] = true
-	}
 	// Forward establishment doubles as a reachability proof (RQ-74):
 	// OnEstablished records lane contact so doctor's "no contact yet"
 	// clears the moment the forward is up.
@@ -132,6 +139,15 @@ func newClientDaemon(dataDir string, paths utils.DataDirPaths, logger *slog.Logg
 	d.Dashboard.SetForwardStarter(d.StartRemoteForward)
 	d.Dashboard.SetForwardStopper(d.StopRemoteForward)
 	d.Dashboard.SetForwardStatus(d.ForwardStatuses)
+	// RQ-75: API writes to config.yaml notify the reconciler directly —
+	// the file watcher would catch them anyway, one tick later.
+	d.Dashboard.SetConfigChanged(func() {
+		go func() {
+			if err := d.ReconcileConfig("api write"); err != nil {
+				logger.Warn("config reconcile failed", "error", err)
+			}
+		}()
+	})
 	dashCfg := storageCfg.Dashboard
 	if dashCfg == nil || dashCfg.Enabled {
 		listen := "127.0.0.1:8077"

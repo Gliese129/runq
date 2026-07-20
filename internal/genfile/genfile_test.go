@@ -54,7 +54,7 @@ func TestSaveCAS(t *testing.T) {
 	path := filepath.Join(dir, "config.yaml")
 
 	// Unconditional first write.
-	if err := Save(path, []byte("a: 1\n"), ""); err != nil {
+	if err := Save(path, []byte("a: 1\n"), "", 0); err != nil {
 		t.Fatal(err)
 	}
 	doc, err := Load(path)
@@ -63,12 +63,12 @@ func TestSaveCAS(t *testing.T) {
 	}
 
 	// CAS with the right generation succeeds.
-	if err := Save(path, []byte("a: 2\n"), doc.Generation); err != nil {
+	if err := Save(path, []byte("a: 2\n"), doc.Generation, 0); err != nil {
 		t.Fatalf("matching ifMatch rejected: %v", err)
 	}
 
 	// CAS with the now-stale generation conflicts and reports current.
-	err = Save(path, []byte("a: 3\n"), doc.Generation)
+	err = Save(path, []byte("a: 3\n"), doc.Generation, 0)
 	var conflict *ConflictError
 	if !errors.As(err, &conflict) {
 		t.Fatalf("want ConflictError, got %v", err)
@@ -87,7 +87,7 @@ func TestSaveCAS(t *testing.T) {
 		t.Fatal(err)
 	}
 	cur2, _ := Load(path)
-	if err := Save(path, []byte("a: 4\n"), cur2.Generation); err != nil {
+	if err := Save(path, []byte("a: 4\n"), cur2.Generation, 0); err != nil {
 		t.Fatalf("reformat-only drift must not conflict: %v", err)
 	}
 }
@@ -98,7 +98,7 @@ func TestSavePreservesMode(t *testing.T) {
 	if err := os.WriteFile(path, []byte("a: 1\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := Save(path, []byte("a: 2\n"), ""); err != nil {
+	if err := Save(path, []byte("a: 2\n"), "", 0); err != nil {
 		t.Fatal(err)
 	}
 	info, _ := os.Stat(path)
@@ -110,7 +110,7 @@ func TestSavePreservesMode(t *testing.T) {
 func TestSaveAgainstMissingFileWithIfMatchConflicts(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "gone.yaml")
-	err := Save(path, []byte("a: 1\n"), "deadbeef")
+	err := Save(path, []byte("a: 1\n"), "deadbeef", 0)
 	var conflict *ConflictError
 	if !errors.As(err, &conflict) {
 		t.Fatalf("want ConflictError for ifMatch against missing file, got %v", err)

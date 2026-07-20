@@ -59,6 +59,9 @@ type Server struct {
 	// forwardStatus, when set (client daemon), snapshots every remote CLI
 	// forward's observable state for /health (RQ-74).
 	forwardStatus func() map[string]rfs.ForwardStatus
+	// configChanged, when set (client daemon), notifies the RQ-75 lane
+	// reconciler after a successful API write to config.yaml.
+	configChanged func()
 
 	// Per-job forced-refresh floor (D22): memory-only — a restart forgiving
 	// the throttle is harmless.

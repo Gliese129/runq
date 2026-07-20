@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/gliese129/runq/internal/job"
@@ -17,10 +18,80 @@ import (
 // MultiBackend routes operations to per-target backends. ListJobs aggregates
 // across all targets; Submit/Kill/Get look up the target from the DB and
 // delegate. Project operations are global (routed to the default target).
+//
+// The target map is MUTABLE at runtime (RQ-75 hot reload): the config
+// reconciler adds/replaces/removes lanes as config.yaml changes. mu guards
+// targets and defaultTarget; every reader goes through get/snapshot/
+// defaultName so a rebuild never races an in-flight request.
 type MultiBackend struct {
+	mu            sync.RWMutex
 	targets       map[string]Backend
-	store         *store.Store
 	defaultTarget string
+
+	store *store.Store
+	// registry is the ONE routed project registry shared by every lane
+	// (RQ-65); kept here so lanes added at runtime get the same wiring
+	// assembly-time lanes got.
+	registry *project.Registry
+}
+
+// get returns the named backend under the read lock.
+func (m *MultiBackend) get(name string) (Backend, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	be, ok := m.targets[name]
+	return be, ok
+}
+
+// snapshot copies the current target map — iteration must never hold the
+// lock across backend calls (a slow SSH lane would serialize the world).
+func (m *MultiBackend) snapshot() map[string]Backend {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make(map[string]Backend, len(m.targets))
+	for k, v := range m.targets {
+		out[k] = v
+	}
+	return out
+}
+
+// defaultName returns the routing default under the read lock.
+func (m *MultiBackend) defaultName() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.defaultTarget
+}
+
+// SetTarget adds or replaces a lane at runtime (RQ-75), wiring the shared
+// project registry exactly as assembly does. The caller owns the OLD
+// backend's shutdown (replace first, then close — no routing gap).
+func (m *MultiBackend) SetTarget(name string, be Backend) {
+	if sq, ok := be.(interface{ setProjectRegistry(*project.Registry) }); ok {
+		sq.setProjectRegistry(m.registry)
+	}
+	m.mu.Lock()
+	m.targets[name] = be
+	m.mu.Unlock()
+}
+
+// RemoveTarget drops a lane from routing. The caller closes the backend
+// AFTER removal so no new request can reach a closing lane.
+func (m *MultiBackend) RemoveTarget(name string) {
+	m.mu.Lock()
+	delete(m.targets, name)
+	m.mu.Unlock()
+}
+
+// SetDefaultTarget changes the routing default at runtime. Unknown names
+// are rejected — a default that routes nowhere is worse than a stale one.
+func (m *MultiBackend) SetDefaultTarget(name string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.targets[name]; !ok {
+		return fmt.Errorf("default target %q not in targets map", name)
+	}
+	m.defaultTarget = name
+	return nil
 }
 
 // NewMultiBackend creates a routing backend. targets must contain at least
@@ -49,6 +120,7 @@ func NewMultiBackend(targets map[string]Backend, st *store.Store, defaultTarget 
 		}
 		return fsys
 	})
+	m.registry = reg
 	for _, be := range m.targets {
 		if sq, ok := be.(interface{ setProjectRegistry(*project.Registry) }); ok {
 			sq.setProjectRegistry(reg)
@@ -61,10 +133,12 @@ func NewMultiBackend(targets map[string]Backend, st *store.Store, defaultTarget 
 
 // resolve returns the backend for the named target. Empty falls back to default.
 func (m *MultiBackend) resolve(target string) (Backend, error) {
+	m.mu.RLock()
 	if target == "" {
 		target = m.defaultTarget
 	}
 	be, ok := m.targets[target]
+	m.mu.RUnlock()
 	if !ok {
 		return nil, fmt.Errorf("unknown target %q", target)
 	}
@@ -97,6 +171,8 @@ func (m *MultiBackend) resolveTask(ctx context.Context, taskID string) (Backend,
 
 // defaultBackend returns the default target's backend.
 func (m *MultiBackend) defaultBackend() Backend {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	return m.targets[m.defaultTarget]
 }
 
@@ -112,15 +188,16 @@ func (m *MultiBackend) Capabilities() Capabilities {
 // dashboard gates per-job UI (retry, live log, poll cadence) by the job's
 // target through this map.
 func (m *MultiBackend) PerTargetCapabilities() map[string]Capabilities {
-	out := make(map[string]Capabilities, len(m.targets))
-	for name, be := range m.targets {
+	targets := m.snapshot()
+	out := make(map[string]Capabilities, len(targets))
+	for name, be := range targets {
 		out[name] = be.Capabilities()
 	}
 	return out
 }
 
 // DefaultTargetName exposes the routing default for config responses.
-func (m *MultiBackend) DefaultTargetName() string { return m.defaultTarget }
+func (m *MultiBackend) DefaultTargetName() string { return m.defaultName() }
 
 // ReconcileAll fans the dashboard's activity-gated background reconcile out
 // to every target that supports it (remote lanes). Local targets are push
@@ -128,7 +205,7 @@ func (m *MultiBackend) DefaultTargetName() string { return m.defaultTarget }
 // fresher (30s cadence) than the lanes' own 25min alignment loops.
 func (m *MultiBackend) ReconcileAll(ctx context.Context) error {
 	var firstErr error
-	for _, be := range m.targets {
+	for _, be := range m.snapshot() {
 		if r, ok := be.(interface{ ReconcileAll(context.Context) error }); ok {
 			if err := r.ReconcileAll(ctx); err != nil && firstErr == nil {
 				firstErr = err
@@ -152,7 +229,7 @@ func (m *MultiBackend) RefreshJob(ctx context.Context, jobID string) error {
 func (m *MultiBackend) ListJobs(ctx context.Context, projectScope string) ([]JobSummary, error) {
 	var all []JobSummary
 	var firstErr error
-	for _, be := range m.targets {
+	for _, be := range m.snapshot() {
 		jobs, err := be.ListJobs(ctx, projectScope)
 		if err != nil {
 			if firstErr == nil {
@@ -208,7 +285,7 @@ func (m *MultiBackend) CompareMetrics(ctx context.Context, jobID, key string, de
 // stamped with their target name for panel grouping.
 func (m *MultiBackend) GPUStatus(ctx context.Context) ([]GPUSlot, error) {
 	var all []GPUSlot
-	for name, be := range m.targets {
+	for name, be := range m.snapshot() {
 		slots, err := be.GPUStatus(ctx)
 		if err != nil {
 			continue
@@ -269,7 +346,7 @@ func (m *MultiBackend) TaskLogRead(ctx context.Context, taskID string, offset in
 // #44): the fs browser and python-envs operate on the TARGET's disk, not
 // the daemon's. Lanes without an FS concept fall back to LocalFS.
 func (m *MultiBackend) TargetFS(name string) (rfs.FS, error) {
-	be, ok := m.targets[name]
+	be, ok := m.get(name)
 	if !ok {
 		return nil, fmt.Errorf("target %q: %w", name, ErrNotFound)
 	}
@@ -286,7 +363,7 @@ func (m *MultiBackend) TargetFS(name string) (rfs.FS, error) {
 // target's lane (RQ-74). No-op for unknown targets and lanes without a
 // contact record (local).
 func (m *MultiBackend) RecordTargetContact(name string) {
-	if be, ok := m.targets[name]; ok {
+	if be, ok := m.get(name); ok {
 		if rc, ok := be.(interface{ RecordContactOK() }); ok {
 			rc.RecordContactOK()
 		}
@@ -294,8 +371,9 @@ func (m *MultiBackend) RecordTargetContact(name string) {
 }
 
 func (m *MultiBackend) PerTargetHealth() []TargetHealth {
-	out := make([]TargetHealth, 0, len(m.targets))
-	for name, be := range m.targets {
+	targets := m.snapshot()
+	out := make([]TargetHealth, 0, len(targets))
+	for name, be := range targets {
 		if h, ok := be.(interface{ TargetHealth() TargetHealth }); ok {
 			out = append(out, h.TargetHealth())
 			continue
@@ -348,7 +426,7 @@ func (m *MultiBackend) SyncInfo(ctx context.Context, target string) (refreshedAt
 		return 0, false, false
 	}
 	first := true
-	for _, be := range m.targets {
+	for _, be := range m.snapshot() {
 		sy, ok := be.(syncer)
 		if !ok {
 			continue
@@ -496,7 +574,7 @@ func (m *MultiBackend) DryRunForTarget(ctx context.Context, target string, cfg j
 
 func (m *MultiBackend) ListArchivedJobs(ctx context.Context) ([]JobSummary, error) {
 	var all []JobSummary
-	for _, be := range m.targets {
+	for _, be := range m.snapshot() {
 		jobs, err := be.ListArchivedJobs(ctx)
 		if err != nil {
 			continue
@@ -547,7 +625,7 @@ func (m *MultiBackend) Clean(ctx context.Context, opts CleanOptions) (*CleanResu
 	// simply contributes no NEW marks (its guardrails also prevent false
 	// ones), and must not block cleaning the others.
 	if opts.Orphan {
-		for name, be := range m.targets {
+		for name, be := range m.snapshot() {
 			if opts.Target != "" && name != opts.Target {
 				continue
 			}
@@ -592,7 +670,7 @@ func (m *MultiBackend) CreateProject(ctx context.Context, cfg project.Config) er
 	// is aimed by default). A project registered "against tsubame" must
 	// SAY tsubame — implicit defaults rot when default_target changes.
 	if cfg.Target == "" {
-		cfg.Target = m.defaultTarget
+		cfg.Target = m.defaultName()
 	}
 	return m.defaultBackend().CreateProject(ctx, cfg)
 }
