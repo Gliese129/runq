@@ -240,33 +240,96 @@ func CheckConfigPermissions() (warning string, err error) {
 }
 
 func SaveGlobal(cfg *GlobalConfig) error {
-	path := ConfigPath()
-	// Preserve unmanaged YAML sections (e.g. hpc:) by reading the existing
-	// file as a generic map, then overlaying our fields.
-	doc := map[string]any{}
-	if buf, err := os.ReadFile(path); err == nil {
-		_ = yaml.Unmarshal(buf, &doc)
-	}
-	if cfg.DefaultTarget != "" {
-		doc["default_target"] = cfg.DefaultTarget
-	}
-	if cfg.DataPath != "" {
-		doc["data_path"] = cfg.DataPath
-	}
-	if cfg.Dashboard != nil {
-		doc["dashboard"] = cfg.Dashboard
-	}
-	if len(cfg.Targets) > 0 {
-		doc["targets"] = cfg.Targets
-	}
-	out, err := yaml.Marshal(doc)
+	return saveGlobalWith(cfg, "")
+}
+
+// SaveGlobalIfMatch persists cfg with optimistic concurrency (RQ-75): the
+// file's current SEMANTIC generation must equal ifMatch or the save fails
+// with *genfile.ConflictError carrying the current generation. Empty
+// ifMatch degrades to the unconditional SaveGlobal (legacy CLI writers).
+func SaveGlobalIfMatch(cfg *GlobalConfig, ifMatch string) error {
+	return saveGlobalWith(cfg, ifMatch)
+}
+
+func saveGlobalWith(cfg *GlobalConfig, ifMatch string) error {
+	out, err := renderGlobalYAML(cfg)
 	if err != nil {
-		return fmt.Errorf("marshal config: %w", err)
+		return err
 	}
 	if err := os.MkdirAll(ConfigDir(), 0o755); err != nil {
 		return fmt.Errorf("create config dir: %w", err)
 	}
-	return os.WriteFile(path, out, 0o644)
+	// genfile.Save: flock + generation compare + tmp/rename atomic replace.
+	// Even the unconditional path gains atomicity over the old WriteFile.
+	return genfile.Save(ConfigPath(), out, ifMatch, 0o644)
+}
+
+// renderGlobalYAML builds config.yaml's new bytes by SURGICALLY updating
+// the current file's node tree (SetKey's technique, extended to the whole
+// managed set): comments and unmanaged sections (hpc:) outside the replaced
+// keys survive an API write. Comments INSIDE a replaced section (targets)
+// are necessarily lost when that section changes — a form edit rewrites it.
+func renderGlobalYAML(cfg *GlobalConfig) ([]byte, error) {
+	doc, err := readConfigNode()
+	if err != nil {
+		return nil, err
+	}
+	root := doc.Content[0]
+	if cfg.DefaultTarget != "" {
+		setMappingScalar(root, "default_target", cfg.DefaultTarget)
+	}
+	if cfg.DataPath != "" {
+		setMappingScalar(root, "data_path", cfg.DataPath)
+	}
+	if cfg.Dashboard != nil {
+		n, nerr := encodeNode(cfg.Dashboard)
+		if nerr != nil {
+			return nil, nerr
+		}
+		setMappingNode(root, "dashboard", n)
+	}
+	// Targets are authoritative on every save: callers always start from
+	// Load(), so an empty list MEANS "no targets" — remove the key. (The
+	// old map-overlay skipped empty lists, which made deleting the last
+	// target a silent no-op.)
+	if len(cfg.Targets) > 0 {
+		n, nerr := encodeNode(cfg.Targets)
+		if nerr != nil {
+			return nil, nerr
+		}
+		setMappingNode(root, "targets", n)
+	} else {
+		removeMappingValue(root, "targets")
+	}
+	out, err := yaml.Marshal(doc)
+	if err != nil {
+		return nil, fmt.Errorf("marshal config: %w", err)
+	}
+	return out, nil
+}
+
+// encodeNode marshals v into a yaml node for surgical insertion.
+func encodeNode(v any) (*yaml.Node, error) {
+	n := &yaml.Node{}
+	if err := n.Encode(v); err != nil {
+		return nil, fmt.Errorf("encode config section: %w", err)
+	}
+	return n, nil
+}
+
+// setMappingNode sets key to an arbitrary node value (setMappingScalar's
+// sibling for non-scalar sections).
+func setMappingNode(root *yaml.Node, key string, val *yaml.Node) {
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		if root.Content[i].Value == key {
+			root.Content[i+1] = val
+			return
+		}
+	}
+	root.Content = append(root.Content,
+		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key},
+		val,
+	)
 }
 
 // ConfigDir resolves the directory that holds config.yaml (and, for HPC, the

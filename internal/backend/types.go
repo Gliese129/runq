@@ -321,6 +321,10 @@ type ErrorResponse struct {
 	Code              string `json:"code"`
 	Details           string `json:"details,omitempty"`
 	RetryAfterSeconds int    `json:"retry_after_seconds,omitempty"`
+	// CurrentGeneration accompanies CodeGenerationConflict (RQ-75): the
+	// file's generation as it exists NOW, so the client can re-read, show a
+	// diff against the user's pending edit, and retry with a fresh If-Match.
+	CurrentGeneration string `json:"current_generation,omitempty"`
 }
 
 // v1 error codes (spec §2) × HTTP status. Keep in sync with the protocol
@@ -335,6 +339,9 @@ const (
 	CodeTargetUnreachable = "target_unreachable" // 502
 	CodeMinInterval       = "min_interval"       // 429: refresh blocked by the 5min floor
 	CodeInternal          = "internal"           // 500
+	// 409: If-Match generation mismatch — the config file changed since the
+	// client read it (RQ-75). Response carries current_generation.
+	CodeGenerationConflict = "generation_conflict"
 )
 
 // Project summary for sidebar.

@@ -3,11 +3,14 @@ package dashboard
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gliese129/runq/internal/backend"
 	"github.com/gliese129/runq/internal/config"
+	"github.com/gliese129/runq/internal/genfile"
 	"github.com/gliese129/runq/internal/rfs"
 )
 
@@ -68,9 +71,43 @@ func (s *Server) handleListTargets(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// ifMatchHeader extracts the If-Match generation from the request, tolerant
+// of ETag-style quoting (`"abc"` and `W/"abc"` both mean abc). Empty means
+// the client didn't ask for CAS — the write is unconditional (CLI-era
+// clients, curl users).
+func ifMatchHeader(r *http.Request) string {
+	v := strings.TrimSpace(r.Header.Get("If-Match"))
+	v = strings.TrimPrefix(v, "W/")
+	return strings.Trim(v, `"`)
+}
+
+// saveGlobalConfigCAS writes cfg through the If-Match CAS path (RQ-75).
+// On generation conflict it answers 409 + current_generation and returns
+// false; on success it fires the lane reconciler and returns true. Any
+// other save error is reported and returns false.
+func (s *Server) saveGlobalConfigCAS(w http.ResponseWriter, r *http.Request, cfg *config.GlobalConfig) bool {
+	err := config.SaveGlobalIfMatch(cfg, ifMatchHeader(r))
+	var conflict *genfile.ConflictError
+	if errors.As(err, &conflict) {
+		writeJSON(w, http.StatusConflict, backend.ErrorResponse{
+			Error:             "config.yaml changed since you loaded it — reload and re-apply your edit",
+			Code:              backend.CodeGenerationConflict,
+			CurrentGeneration: conflict.Current,
+		})
+		return false
+	}
+	if err != nil {
+		writeError(w, err)
+		return false
+	}
+	s.notifyConfigChanged() // RQ-75: converge lanes now, not next tick
+	return true
+}
+
 // handlePutTarget — PUT /targets/{name}: upsert one targets[] entry in
 // config.yaml. The path name wins over any name in the body (D11:
-// addressing is explicit).
+// addressing is explicit). Honors If-Match (RQ-75): send the
+// config_generation you read, get 409 + current_generation if stale.
 func (s *Server) handlePutTarget(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	var tc config.TargetConfig
@@ -96,11 +133,9 @@ func (s *Server) handlePutTarget(w http.ResponseWriter, r *http.Request) {
 	if !replaced {
 		cfg.Targets = append(cfg.Targets, tc)
 	}
-	if err := config.SaveGlobal(cfg); err != nil {
-		writeError(w, err)
+	if !s.saveGlobalConfigCAS(w, r, cfg) {
 		return
 	}
-	s.notifyConfigChanged() // RQ-75: converge lanes now, not next tick
 	writeJSON(w, http.StatusOK, backend.ActionResponse{OK: true})
 }
 
@@ -126,11 +161,9 @@ func (s *Server) handleDeleteTarget(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg.Targets = kept
-	if err := config.SaveGlobal(cfg); err != nil {
-		writeError(w, err)
+	if !s.saveGlobalConfigCAS(w, r, cfg) {
 		return
 	}
-	s.notifyConfigChanged() // RQ-75: converge lanes now, not next tick
 	writeJSON(w, http.StatusOK, backend.ActionResponse{OK: true})
 }
 
@@ -228,27 +261,30 @@ type globalConfigPayload struct {
 	DefaultTarget string `json:"default_target"`
 }
 
-// handlePutGlobalConfig — PUT /config (D5: mode is gone). Writes global
-// keys via the same SetKey path the CLI uses. Takes effect on next start
-// — the GUI says so explicitly.
+// handlePutGlobalConfig — PUT /config (D5: mode is gone). Single
+// load-modify-save under one If-Match check (RQ-75) — the old SetKey×2
+// path could half-apply and each write raced separately.
+// default_target is hot (reconciler switches it); data_path stays
+// restart-bound (logged).
 func (s *Server) handlePutGlobalConfig(w http.ResponseWriter, r *http.Request) {
 	var p globalConfigPayload
 	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
 		writeErr(w, http.StatusBadRequest, backend.CodeBadRequest, err.Error())
 		return
 	}
+	cfg, err := config.Load()
+	if err != nil {
+		writeError(w, err)
+		return
+	}
 	if p.DataPath != "" {
-		if err := config.SetKey("data_path", p.DataPath); err != nil {
-			writeError(w, err)
-			return
-		}
+		cfg.DataPath = p.DataPath
 	}
 	if p.DefaultTarget != "" {
-		if err := config.SetKey("default_target", p.DefaultTarget); err != nil {
-			writeError(w, err)
-			return
-		}
+		cfg.DefaultTarget = p.DefaultTarget
 	}
-	s.notifyConfigChanged() // RQ-75: default_target is hot; data_path stays restart-bound (logged)
+	if !s.saveGlobalConfigCAS(w, r, cfg) {
+		return
+	}
 	writeJSON(w, http.StatusOK, backend.ActionResponse{OK: true})
 }
