@@ -25,6 +25,12 @@ export interface TargetsListResponse {
   /** field → allowed {{placeholders}} — schema ships from the backend */
   placeholders: Record<string, string[]>
   path: string
+  /**
+   * config.yaml's semantic content hash at read time (RQ-75). Store it and
+   * send it back as If-Match on writes; a 409 generation_conflict means the
+   * file changed underneath the form.
+   */
+  config_generation?: string
 }
 
 export interface TargetPresetsResponse {
@@ -43,22 +49,27 @@ export const configApi = {
   /** Bootstrap summary: paths, default target, per-target capabilities. */
   get: () => api.get<ConfigResponse>('/config'),
 
-  /** PUT /config — global keys (D5: mode is gone). Takes effect on next start. */
-  putGlobal: (dataPath: string, defaultTarget = '') =>
-    api.put<ActionResponse>('/config', { data_path: dataPath, default_target: defaultTarget }),
+  /**
+   * PUT /config — global keys (D5: mode is gone). default_target applies
+   * hot (lane reconciler); data_path needs a restart. ifMatch (RQ-75):
+   * the config_generation the form was loaded from.
+   */
+  putGlobal: (dataPath: string, defaultTarget = '', ifMatch = '') =>
+    api.put<ActionResponse>('/config', { data_path: dataPath, default_target: defaultTarget }, { ifMatch }),
 
   health: (opts?: RequestOptions) => api.get<HealthResponse>('/health', { silent: true, ...opts }),
 
   // ── Targets management (spec §5.2, D10 — /hpc-config* is retired) ──
 
-  listTargets: () => api.get<TargetsListResponse>('/targets'),
+  listTargets: (opts?: RequestOptions) => api.get<TargetsListResponse>('/targets', opts),
 
   targetPresets: () => api.get<TargetPresetsResponse>('/targets/presets'),
 
-  putTarget: (name: string, cfg: TargetConfig) =>
-    api.put<ActionResponse>(`/targets/${encodeURIComponent(name)}`, cfg),
+  putTarget: (name: string, cfg: TargetConfig, ifMatch = '') =>
+    api.put<ActionResponse>(`/targets/${encodeURIComponent(name)}`, cfg, { ifMatch }),
 
-  deleteTarget: (name: string) => api.del<ActionResponse>(`/targets/${encodeURIComponent(name)}`),
+  deleteTarget: (name: string, ifMatch = '') =>
+    api.del<ActionResponse>(`/targets/${encodeURIComponent(name)}`, { ifMatch }),
 
   checkTarget: (name: string, cfg: TargetConfig) =>
     api.post<{ results: HPCCheckResult[] }>(`/targets/${encodeURIComponent(name)}/check`, cfg),

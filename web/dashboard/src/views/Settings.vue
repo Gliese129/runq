@@ -240,6 +240,15 @@
       </v-expansion-panels>
     </v-card>
 
+    <!-- RQ-75: config.yaml changed on disk mid-edit — human arbitrates -->
+    <ConfigConflictDialog
+      v-model="conflictOpen"
+      :fields="conflictFields"
+      :saving="savingGlobal || savingHPC"
+      @use-disk="conflictUseDisk"
+      @use-mine="conflictUseMine"
+    />
+
     <!-- RQ-74: runq self-logs — deaths the UI can't push still land in
          daemon.log; read it here instead of grepping files. -->
     <DaemonLogPanel />
@@ -247,14 +256,17 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch, onMounted, computed } from 'vue'
+import { ref, watch, onMounted, onUnmounted, computed } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { onBeforeRouteLeave } from 'vue-router'
 import { useTheme } from 'vuetify'
 import { useConfigStore } from '@/stores/config'
 import { useSettingsStore } from '@/stores/settings'
 import { useSnackbar } from '@/composables/useSnackbar'
+import { isGenerationConflict } from '@/apis/client'
 import { configApi, type TargetConfig, type HPCCheckResult } from '@/apis/config'
 import ShellTemplateEditor from '@/components/ShellTemplateEditor.vue'
+import ConfigConflictDialog, { type ConflictField } from '@/components/ConfigConflictDialog.vue'
 import DaemonLogPanel from '@/components/DaemonLogPanel.vue'
 
 const { t, locale } = useI18n()
@@ -274,11 +286,16 @@ const globalDirty = computed(() =>
 async function saveGlobal() {
   savingGlobal.value = true
   try {
-    await configApi.putGlobal(globalDataPath.value, globalDefaultTarget.value)
+    await configApi.putGlobal(globalDataPath.value, globalDefaultTarget.value, configGeneration.value)
     snack.success(t('settings.global_saved'))
     await config.fetchConfig()
     syncGlobal()
+    await reloadTargets() // refresh config_generation after our own write
   } catch (e: any) {
+    if (isGenerationConflict(e)) {
+      await openConflict('global')
+      return
+    }
     snack.error(e?.message || t('common.error'))
   } finally {
     savingGlobal.value = false
@@ -297,9 +314,11 @@ type HPCFieldKey = 'submit_template' | 'submit_id_regex' | 'status_template' | '
 const targetItems = ref<TargetConfig[]>([])
 const targetNames = computed(() => targetItems.value.map(x => x.name))
 const selectedTarget = ref('')
+/** config.yaml semantic hash the form was loaded from (RQ-75 If-Match). */
+const configGeneration = ref('')
 
 /** Populate the form from the selected target's stored config. */
-watch(selectedTarget, (name) => {
+function populateForm(name: string) {
   const item = targetItems.value.find(x => x.name === name)
   hpcResults.value = []
   hpcForm.value = {
@@ -309,7 +328,8 @@ watch(selectedTarget, (name) => {
     kill_template: (item?.kill_template as string) || '',
   }
   hpcParser.value = [...((item?.status_parser as string[]) || [])]
-})
+}
+watch(selectedTarget, populateForm)
 const hpcFields: { key: HPCFieldKey; labelKey: string; hintKey: string; placeholder: string }[] = [
   { key: 'submit_template', labelKey: 'settings.hpc_f_submit', hintKey: 'settings.hpc_f_submit_hint', placeholder: 'sbatch --gpus={{gpus}} {{run_sh}}' },
   { key: 'submit_id_regex', labelKey: 'settings.hpc_f_regex', hintKey: 'settings.hpc_regex_hint', placeholder: 'Submitted batch job ([0-9]+)' },
@@ -408,11 +428,16 @@ async function saveHPC() {
   if (!selectedTarget.value) return
   savingHPC.value = true
   try {
-    await configApi.putTarget(selectedTarget.value, collectTarget())
+    await configApi.putTarget(selectedTarget.value, collectTarget(), configGeneration.value)
     await reloadTargets()
+    populateForm(selectedTarget.value)
     await checkHPC()
     snack.success(t('settings.hpc_saved'))
   } catch (e: any) {
+    if (isGenerationConflict(e)) {
+      await openConflict('hpc')
+      return
+    }
     snack.error(e?.message || t('common.error'))
   } finally {
     savingHPC.value = false
@@ -423,7 +448,113 @@ async function reloadTargets() {
   const res = await configApi.listTargets()
   targetItems.value = res.items ?? []
   hpcPlaceholders.value = res.placeholders ?? {}
+  configGeneration.value = res.config_generation ?? ''
 }
+
+// ── Dirty state (RQ-75): the form diverges from what was loaded ──
+const HPC_KEYS: HPCFieldKey[] = ['submit_template', 'submit_id_regex', 'status_template', 'kill_template']
+const hpcDirty = computed(() => {
+  if (!selectedTarget.value) return false
+  const item = targetItems.value.find(x => x.name === selectedTarget.value)
+  const fieldChanged = HPC_KEYS.some(k => hpcForm.value[k] !== (((item?.[k] as string) ?? '') || ''))
+  const parserChanged =
+    JSON.stringify(hpcParser.value) !== JSON.stringify((item?.status_parser as string[]) ?? [])
+  return fieldChanged || parserChanged
+})
+const anyDirty = computed(() => globalDirty.value || hpcDirty.value)
+
+// ── Generation conflict resolution (RQ-75): human arbitrates ──
+const conflictOpen = ref(false)
+const conflictFields = ref<ConflictField[]>([])
+let conflictKind: 'global' | 'hpc' = 'hpc'
+
+/**
+ * Build the conflict dialog from FRESH disk state. targetItems /
+ * configGeneration are refreshed here (safe: the form fields are separate
+ * refs), so "keep mine" retries against the current generation and merges
+ * unknown fields over the disk version — the other writer's untouched
+ * edits survive.
+ */
+async function openConflict(kind: 'global' | 'hpc') {
+  conflictKind = kind
+  try {
+    if (kind === 'global') await config.fetchConfig()
+    await reloadTargets()
+  } catch {
+    snack.error(t('common.error'))
+    return
+  }
+  if (kind === 'global') {
+    conflictFields.value = (
+      [
+        { key: 'default_target', disk: config.defaultTarget, mine: globalDefaultTarget.value },
+        { key: 'data_path', disk: config.dataPath, mine: globalDataPath.value },
+      ] as ConflictField[]
+    ).filter(f => f.disk !== f.mine)
+  } else {
+    const item = targetItems.value.find(x => x.name === selectedTarget.value)
+    const rows: ConflictField[] = HPC_KEYS.map(k => ({
+      key: k,
+      disk: ((item?.[k] as string) ?? '') || '',
+      mine: hpcForm.value[k],
+    }))
+    rows.push({
+      key: 'status_parser',
+      disk: ((item?.status_parser as string[]) ?? []).join('\n'),
+      mine: hpcParser.value.filter(s => s.trim()).join('\n'),
+    })
+    conflictFields.value = rows.filter(f => f.disk !== f.mine)
+  }
+  conflictOpen.value = true
+}
+
+/** Adopt the disk version: drop my edits, reload the form. */
+function conflictUseDisk() {
+  conflictOpen.value = false
+  if (conflictKind === 'global') syncGlobal()
+  else populateForm(selectedTarget.value)
+}
+
+/** Keep my edits: retry the save against the fresh generation. */
+async function conflictUseMine() {
+  conflictOpen.value = false
+  if (conflictKind === 'global') await saveGlobal()
+  else await saveHPC()
+}
+
+// ── Disk watch on window focus (RQ-75): clean form follows the file;
+// a dirty form is only WARNED — never clobbered. ──
+async function onWindowFocus() {
+  try {
+    const res = await configApi.listTargets({ silent: true })
+    const gen = res.config_generation ?? ''
+    if (!gen || gen === configGeneration.value) return
+    if (anyDirty.value) {
+      snack.info(t('settings.config_changed_on_disk'))
+      return
+    }
+    targetItems.value = res.items ?? []
+    hpcPlaceholders.value = res.placeholders ?? {}
+    configGeneration.value = gen
+    await config.fetchConfig()
+    syncGlobal()
+    populateForm(selectedTarget.value)
+  } catch {
+    /* unreachable — the health banner owns connectivity reporting */
+  }
+}
+
+// ── Unsaved-changes guards ──
+function onBeforeUnload(e: BeforeUnloadEvent) {
+  if (!anyDirty.value) return
+  e.preventDefault()
+  e.returnValue = '' // legacy engines require a set returnValue
+}
+
+onBeforeRouteLeave(() => {
+  if (!anyDirty.value) return true
+  return window.confirm(t('settings.unsaved_leave_confirm'))
+})
 
 const webhookUrl = ref('')
 const webhookEvents = ref<string[]>([])
@@ -494,6 +625,9 @@ function copyToClipboard(text: string) {
 }
 
 onMounted(async () => {
+  window.addEventListener('focus', onWindowFocus)
+  window.addEventListener('beforeunload', onBeforeUnload)
+
   // Every load is independently fault-tolerant: one failing endpoint
   // (daemon down, version mismatch) must not take the whole page down.
   try {
@@ -522,6 +656,11 @@ onMounted(async () => {
         : (targetNames.value[0] ?? '')
     }
   } catch { /* endpoint unavailable — leave schema-rendered empty fields */ }
+})
+
+onUnmounted(() => {
+  window.removeEventListener('focus', onWindowFocus)
+  window.removeEventListener('beforeunload', onBeforeUnload)
 })
 </script>
 

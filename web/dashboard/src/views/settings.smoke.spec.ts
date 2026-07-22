@@ -29,6 +29,8 @@ vi.mock('@/apis/client', () => {
       getList: vi.fn(async () => []),
       getEnvelope: vi.fn(async () => ({ items: [] })),
     },
+    // Settings imports this for the RQ-75 conflict dialog branch.
+    isGenerationConflict: (e: unknown) => (e as any)?.code === 'generation_conflict',
   }
 })
 

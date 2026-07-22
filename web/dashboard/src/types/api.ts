@@ -218,6 +218,8 @@ export interface ConfigResponse {
   config_path: string
   default_target: string
   targets: TargetSummary[]
+  /** config.yaml semantic content hash (RQ-75) — send back as If-Match on writes */
+  config_generation?: string
 }
 
 /** POST /targets|jobs/{id}/refresh — D22: caller always learns the outcome. */
