@@ -1,11 +1,14 @@
 package app
 
 import (
+	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
 	"testing"
+	"time"
 
 	"github.com/gliese129/runq/internal/backend"
 	"github.com/gliese129/runq/internal/config"
@@ -13,14 +16,29 @@ import (
 )
 
 // fakeLane embeds the Backend interface (nil — methods panic if called,
-// which no reconciler path does) and records lifecycle calls.
+// which no reconciler path does) and records lifecycle calls. When events
+// is wired it appends "verb:id" markers so tests can assert ORDER (the
+// review-#4 fence sequence), not just end state.
 type fakeLane struct {
 	backend.Backend
-	name   string
-	closed bool
+	name     string
+	id       string
+	closed   bool
+	quiesced bool
+	started  bool
+	events   *[]string
 }
 
-func (f *fakeLane) Close() error { f.closed = true; return nil }
+func (f *fakeLane) rec(verb string) {
+	if f.events != nil {
+		*f.events = append(*f.events, verb+":"+f.id)
+	}
+}
+
+func (f *fakeLane) Close() error                          { f.closed = true; f.rec("close"); return nil }
+func (f *fakeLane) Start(context.Context)                 { f.started = true; f.rec("start") }
+func (f *fakeLane) Quiesce()                              { f.quiesced = true; f.rec("quiesce") }
+func (f *fakeLane) DrainSubmissions(context.Context) bool { f.rec("drain"); return true }
 
 func writeCfg(t *testing.T, dir, content string) {
 	t.Helper()
@@ -49,13 +67,18 @@ func newReconcilerHarness(t *testing.T, dir string) (*Daemon, *[]string, map[str
 		t.Fatal(err)
 	}
 	var built []string
+	var events []string
 	failing := map[string]bool{}
+	seq := 0
 	buildLane := func(tc config.TargetConfig, _ *config.GlobalConfig) (backend.Backend, error) {
 		built = append(built, tc.Name)
 		if failing[tc.Name] || tc.Scheduler == "explode" {
 			return nil, os.ErrInvalid
 		}
-		return &fakeLane{name: tc.Name}, nil
+		seq++
+		id := fmt.Sprintf("%s#%d", tc.Name, seq)
+		events = append(events, "build:"+id)
+		return &fakeLane{name: tc.Name, id: id, events: &events}, nil
 	}
 
 	lanes := map[string]backend.Backend{}
@@ -79,8 +102,21 @@ func newReconcilerHarness(t *testing.T, dir string) (*Daemon, *[]string, map[str
 		lastTargets:  targetsByName(cfg),
 		lastDefault:  cfg.ResolveDefaultTarget(),
 		bootDataPath: cfg.DataPath,
+		// Drain waits enabled (fakes drain instantly); grace 0 = sync close
+		// so tests assert deterministically.
+		laneDrainTimeout: time.Second,
 	}
 	return d, &built, failing
+}
+
+// harnessEvents digs the shared event log out of any live fakeLane.
+func harnessEvents(d *Daemon) []string {
+	for _, be := range d.lanes {
+		if f, ok := be.(*fakeLane); ok && f.events != nil {
+			return *f.events
+		}
+	}
+	return nil
 }
 
 const baseCfg = `default_target: a
@@ -262,6 +298,59 @@ func TestReconcileAddFailureRetriesUntilRecovered(t *testing.T) {
 	}
 	if _, ok := d.lanes["b"]; !ok {
 		t.Fatal("recovered target missing from lane map")
+	}
+}
+
+// Review #4: same-name change must follow the fence sequence — cold-build
+// the replacement, THEN quiesce+drain the old lane, THEN start the new one
+// (restoreLane reads the settled DB), and close the old lane last.
+func TestReconcileChangeFenceOrder(t *testing.T) {
+	dir := t.TempDir()
+	writeCfg(t, dir, baseCfg)
+	d, _, _ := newReconcilerHarness(t, dir)
+	oldA := d.lanes["a"].(*fakeLane)
+
+	writeCfg(t, dir, `default_target: a
+targets:
+  - name: a
+    scheduler: slurm
+    submit_template: s2
+`)
+	if err := d.ReconcileConfig("test"); err != nil {
+		t.Fatal(err)
+	}
+
+	newA := d.lanes["a"].(*fakeLane)
+	if newA == oldA {
+		t.Fatal("routing did not swap to the replacement lane")
+	}
+	if !oldA.quiesced {
+		t.Error("old lane was not fenced")
+	}
+	if !oldA.closed {
+		t.Error("old lane not closed (grace 0 = synchronous)")
+	}
+	if !newA.started {
+		t.Error("replacement lane not started")
+	}
+
+	ev := harnessEvents(d)
+	idx := func(e string) int {
+		for i, v := range ev {
+			if v == e {
+				return i
+			}
+		}
+		t.Fatalf("event %s missing in %v", e, ev)
+		return -1
+	}
+	build := idx("build:" + newA.id)
+	quiesce := idx("quiesce:" + oldA.id)
+	drain := idx("drain:" + oldA.id)
+	start := idx("start:" + newA.id)
+	closed := idx("close:" + oldA.id)
+	if !(build < quiesce && quiesce < drain && drain < start && start < closed) {
+		t.Fatalf("fence order wrong:\n%v\nwant build(new) < quiesce(old) < drain(old) < start(new) < close(old)", ev)
 	}
 }
 

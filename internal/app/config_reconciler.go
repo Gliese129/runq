@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"time"
 
 	"github.com/gliese129/runq/internal/backend"
 	"github.com/gliese129/runq/internal/config"
@@ -105,13 +106,16 @@ func (d *Daemon) ReconcileConfig(reason string) error {
 	}
 
 	for _, name := range removed {
+		// Unroute FIRST (no new requests can reach the lane), then fence
+		// and drain, then close after grace (review #4).
 		_ = d.StopRemoteForward(name)
 		d.multiBe.RemoveTarget(name)
 		d.laneMu.Lock()
 		be := d.lanes[name]
 		delete(d.lanes, name)
 		d.laneMu.Unlock()
-		closeLane(d, name, be)
+		d.quiesceLane(name, be)
+		d.closeLaneDeferred(name, be)
 		d.Logger.Info("lane removed", "target", name)
 	}
 
@@ -139,26 +143,44 @@ func (d *Daemon) ReconcileConfig(reason string) error {
 		}
 	}
 
+	// Same-name change = generation swap behind a continuous name (review
+	// #4): the nginx-reload / K8s-termination shape, with StatefulSet-style
+	// fencing for the stateful launch path.
 	for _, name := range changed {
 		tc := newTargets[name]
+		// 1. COLD-build the replacement (dial + validate, NOT started): a
+		//    broken edit must not disturb the working lane, and the fence
+		//    below must not engage for a doomed swap.
 		newBe, berr := d.buildLane(tc, cfg)
 		if berr != nil {
-			// A broken edit must not take down a working lane: keep the old
-			// one serving. The record keeps the OLD config so the next pass
-			// still sees a diff and retries the rebuild.
+			// Keep the old lane serving. The record keeps the OLD config so
+			// the next pass still sees a diff and retries the rebuild.
 			record[name] = d.lastTargets[name]
 			d.noteLaneBuildErr(name, berr)
 			continue
 		}
 		d.clearLaneBuildErr(name)
-		startLane(newBe)
-		_ = d.StopRemoteForward(name)
-		d.multiBe.SetTarget(name, newBe) // swap routing first: no gap
 		d.laneMu.Lock()
 		old := d.lanes[name]
+		d.laneMu.Unlock()
+		// 2. FENCE the old lane: no new dispatches, and in-flight
+		//    submissions settle into the DB — so step 3's restoreLane reads
+		//    settled rows. This closes the double-submit window (old lane
+		//    launching a task the new lane also restored as pending).
+		d.quiesceLane(name, old)
+		// 3. Start the replacement (restoreLane reads the settled DB) and
+		//    swap routing atomically — the target NAME never stops serving.
+		startLane(newBe)
+		_ = d.StopRemoteForward(name)
+		d.multiBe.SetTarget(name, newBe)
+		d.laneMu.Lock()
 		d.lanes[name] = newBe
 		d.laneMu.Unlock()
-		closeLane(d, name, old)
+		// 4. The superseded lane closes after a grace period: reads/streams
+		//    that grabbed the old pointer before the swap finish naturally;
+		//    stragglers cut at the deadline get clean errors and their
+		//    retries land on the new lane.
+		d.closeLaneDeferred(name, old)
 		d.Logger.Info("lane rebuilt from changed config", "target", name)
 		if tc.RemoteCLI && tc.SSH != nil {
 			if ferr := d.startForwardFor(tc); ferr != nil {
@@ -213,6 +235,47 @@ func startLane(be backend.Backend) {
 	if s, ok := be.(interface{ Start(context.Context) }); ok {
 		s.Start(context.Background())
 	}
+}
+
+// quiesceLane fences a lane that is about to be superseded or removed
+// (review #4): stop NEW dispatches, then wait (bounded) for in-flight
+// submissions to settle into the DB. Lanes without the lifecycle (test
+// fakes) are skipped. Drain timeout 0 means "fence but don't wait".
+func (d *Daemon) quiesceLane(name string, be backend.Backend) {
+	q, ok := be.(interface {
+		Quiesce()
+		DrainSubmissions(context.Context) bool
+	})
+	if !ok {
+		return
+	}
+	q.Quiesce()
+	if d.laneDrainTimeout <= 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), d.laneDrainTimeout)
+	defer cancel()
+	if !q.DrainSubmissions(ctx) {
+		d.Logger.Warn("lane drain timed out — in-flight submissions will be interrupted and settle as unknown (reconcile heals)",
+			"target", name, "timeout", d.laneDrainTimeout)
+	}
+}
+
+// closeLaneDeferred closes a superseded/removed lane after laneCloseGrace,
+// so reads and log streams that picked up the old pointer before the
+// routing swap can finish. Zero grace closes synchronously (tests).
+func (d *Daemon) closeLaneDeferred(name string, be backend.Backend) {
+	if be == nil {
+		return
+	}
+	if d.laneCloseGrace <= 0 {
+		closeLane(d, name, be)
+		return
+	}
+	time.AfterFunc(d.laneCloseGrace, func() {
+		d.Logger.Info("closing superseded lane after grace period", "target", name)
+		closeLane(d, name, be)
+	})
 }
 
 // closeLane closes a lane if it supports the lifecycle.

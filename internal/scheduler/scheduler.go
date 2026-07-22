@@ -19,6 +19,7 @@ import (
 	"context"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gliese129/runq/internal/resource"
@@ -75,6 +76,14 @@ type Scheduler struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
+
+	// RQ-75 lane rotation: quiesced turns tick into a no-op (no NEW
+	// dispatches) without cancelling in-flight work; inflight counts the
+	// dispatch goroutines (launchAsync/runTask) so DrainLaunches can wait
+	// for their outcomes to settle into the DB before a replacement lane
+	// restores its queue from that DB.
+	quiesced atomic.Bool
+	inflight sync.WaitGroup
 }
 
 // New creates a Scheduler with all its dependencies.
@@ -160,6 +169,35 @@ func (s *Scheduler) Shutdown() {
 	s.cancel()
 	s.wg.Wait()
 	s.logger.Info("scheduler stopped")
+}
+
+// Quiesce stops the scheduler from dispatching NEW tasks (tick becomes a
+// no-op) while leaving in-flight launches and running tasks untouched —
+// the K8s-termination / nginx-reload "stop accepting, finish what you
+// have" phase of a lane swap (RQ-75). There is deliberately no resume:
+// a quiesced scheduler's lane is on its way out.
+func (s *Scheduler) Quiesce() {
+	if !s.quiesced.Swap(true) {
+		s.logger.Info("scheduler quiesced — no new dispatches")
+	}
+}
+
+// DrainLaunches waits until every in-flight dispatch goroutine has settled
+// its outcome (external id, transient requeue, unknown, or rejection — all
+// DB-visible states), or ctx expires. Returns true when fully drained.
+// Call after Quiesce; without it new dispatches keep the count busy.
+func (s *Scheduler) DrainLaunches(ctx context.Context) bool {
+	done := make(chan struct{})
+	go func() {
+		s.inflight.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 // loop runs the scheduling tick on a fixed interval until ctx is cancelled.

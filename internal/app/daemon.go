@@ -79,6 +79,14 @@ type Daemon struct {
 	// laneBuildErrs dedupes build-failure logging across retry passes
 	// (target → last error string). Guarded by reconcileMu.
 	laneBuildErrs map[string]string
+	// Lane-rotation lifecycle bounds (RQ-75 review #4). laneDrainTimeout
+	// bounds the wait for in-flight submissions to settle before a
+	// replacement lane restores its queue (0 = don't wait; tests).
+	// laneCloseGrace delays closing a superseded lane so reads/streams that
+	// grabbed the old pointer before the routing swap finish naturally
+	// (0 = close synchronously; tests).
+	laneDrainTimeout time.Duration
+	laneCloseGrace   time.Duration
 
 	// cfgWatchCancel stops the config.yaml watcher goroutine on shutdown.
 	cfgWatchCancel context.CancelFunc

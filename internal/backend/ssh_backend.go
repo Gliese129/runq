@@ -442,6 +442,24 @@ func (b *SSHBackend) DetectOrphansNow(ctx context.Context) error {
 	return b.backend.DetectOrphans(ctx, true)
 }
 
+// Quiesce stops this lane from starting NEW work (RQ-75 lane rotation):
+// the scheduler stops dispatching; in-flight submissions, the sensor loop
+// and read traffic continue. First phase of the graceful swap — the
+// "removed from Endpoints, not yet SIGTERMed" state.
+func (b *SSHBackend) Quiesce() {
+	b.sched.Quiesce()
+}
+
+// DrainSubmissions waits (bounded by ctx) for in-flight submissions to
+// settle their outcome into the DB. Once true, a replacement lane's
+// restoreLane sees settled rows — no task can be double-submitted by old
+// and new lanes disagreeing about what is pending. On false (timeout) the
+// stragglers will be interrupted by Close and become `unknown` (RQ-74),
+// which reconcile heals — the at-least-once + reconcile backstop.
+func (b *SSHBackend) DrainSubmissions(ctx context.Context) bool {
+	return b.sched.DrainLaunches(ctx)
+}
+
 // Close stops the sensor loops and the scheduler, then releases the SSH
 // connection (if any — the localhost lane has none). Must be called on
 // daemon shutdown.

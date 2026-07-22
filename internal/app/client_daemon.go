@@ -104,6 +104,11 @@ func newClientDaemon(dataDir string, paths utils.DataDirPaths, logger *slog.Logg
 		bootDataPath: storageCfg.DataPath,
 		pidPath:      paths.PIDPath,
 		socketPath:   paths.SocketPath,
+		// Lane rotation bounds (RQ-75 #4): submissions get 30s to settle
+		// before the replacement restores its queue; superseded lanes keep
+		// serving already-started reads/streams for 60s before closing.
+		laneDrainTimeout: 30 * time.Second,
+		laneCloseGrace:   60 * time.Second,
 	}
 
 	// The dashboard mux is the client's ONLY server surface: always built

@@ -18,6 +18,9 @@ import (
 //  5. Head doesn't fit + backfill enabled → dispatch the first smaller task
 //     that fits AND passes the same blocked filters.
 func (s *Scheduler) tick() {
+	if s.quiesced.Load() {
+		return // lane rotation in progress (RQ-75): no NEW dispatches
+	}
 	pending := s.queue.ListPending()
 	if len(pending) == 0 {
 		return
@@ -144,8 +147,10 @@ func (s *Scheduler) dispatch(task *Task) {
 		}
 		s.logger.Info("task handed to remote scheduler", "task", task.ID, "job", task.JobID)
 		s.wg.Add(1)
+		s.inflight.Add(1)
 		go func() {
 			defer s.wg.Done()
+			defer s.inflight.Done()
 			s.launchAsync(task)
 		}()
 		return
@@ -183,8 +188,10 @@ func (s *Scheduler) dispatch(task *Task) {
 
 	s.logger.Info("task dispatched", "task", task.ID, "job", task.JobID, "gpus", gpus)
 	s.wg.Add(1)
+	s.inflight.Add(1)
 	go func() {
 		defer s.wg.Done()
+		defer s.inflight.Done()
 		s.runTask(task)
 	}()
 }
