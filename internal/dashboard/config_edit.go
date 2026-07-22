@@ -257,8 +257,11 @@ func (s *Server) handleRefreshTarget(w http.ResponseWriter, r *http.Request) {
 }
 
 type globalConfigPayload struct {
-	DataPath      string `json:"data_path"`
-	DefaultTarget string `json:"default_target"`
+	// Pointers (review fix #3): absent field = leave unchanged, present
+	// empty string = CLEAR the key. The old non-empty gate made clearing
+	// data_path impossible — 200 OK while the disk value silently stayed.
+	DataPath      *string `json:"data_path"`
+	DefaultTarget *string `json:"default_target"`
 }
 
 // handlePutGlobalConfig — PUT /config (D5: mode is gone). Single
@@ -277,11 +280,11 @@ func (s *Server) handlePutGlobalConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	if p.DataPath != "" {
-		cfg.DataPath = p.DataPath
+	if p.DataPath != nil {
+		cfg.DataPath = *p.DataPath
 	}
-	if p.DefaultTarget != "" {
-		cfg.DefaultTarget = p.DefaultTarget
+	if p.DefaultTarget != nil {
+		cfg.DefaultTarget = *p.DefaultTarget
 	}
 	if !s.saveGlobalConfigCAS(w, r, cfg) {
 		return

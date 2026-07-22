@@ -275,11 +275,18 @@ func renderGlobalYAML(cfg *GlobalConfig) ([]byte, error) {
 		return nil, err
 	}
 	root := doc.Content[0]
+	// Scalars are authoritative like targets (review fix #3): callers
+	// always start from Load(), so an empty value means absent-or-cleared
+	// — remove the key instead of silently keeping the disk value.
 	if cfg.DefaultTarget != "" {
 		setMappingScalar(root, "default_target", cfg.DefaultTarget)
+	} else {
+		removeMappingValue(root, "default_target")
 	}
 	if cfg.DataPath != "" {
 		setMappingScalar(root, "data_path", cfg.DataPath)
+	} else {
+		removeMappingValue(root, "data_path")
 	}
 	if cfg.Dashboard != nil {
 		n, nerr := encodeNode(cfg.Dashboard)

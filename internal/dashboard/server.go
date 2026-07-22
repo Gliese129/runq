@@ -326,27 +326,32 @@ func (s *Server) registerRoutes() {
 // self-description (philosophy #2: declared facts, not inferences) — mode
 // is gone from the wire (D5/D9).
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
-	resp := backend.ConfigResponse{
-		DataPath:      s.cfg.DataPath,
-		ConfigPath:    config.ConfigPath(),
-		DefaultTarget: s.cfg.ResolveDefaultTarget(),
-		Targets:       []backend.TargetSummary{},
-	}
-	// Generation is read FRESH (RQ-75): s.cfg is the boot snapshot, but the
-	// generation must describe the file as it is now — it is what If-Match
-	// writes will be compared against.
+	// RQ-75 review fix (#1): the WHOLE response reads config.yaml fresh —
+	// s.cfg is the boot snapshot and drifts as soon as the file is edited
+	// at runtime. The WebUI conflict dialog treats GET /config as "the
+	// disk version", so snapshot values here surfaced stale
+	// data_path/default_target/targets. All config-identity fields report
+	// the FILE (desired state); live routing/lane state belongs to
+	// /health. The snapshot is only the fallback while the file is
+	// momentarily unreadable.
+	cfg := s.cfg
 	if fresh, err := config.Load(); err == nil {
-		resp.ConfigGeneration = fresh.Generation
+		cfg = fresh
+	}
+	resp := backend.ConfigResponse{
+		DataPath:         cfg.DataPath,
+		ConfigPath:       config.ConfigPath(),
+		DefaultTarget:    cfg.ResolveDefaultTarget(),
+		Targets:          []backend.TargetSummary{},
+		ConfigGeneration: cfg.Generation,
 	}
 	caps := map[string]backend.Capabilities{}
 	if mt, ok := s.backend.(interface {
 		PerTargetCapabilities() map[string]backend.Capabilities
-		DefaultTargetName() string
 	}); ok {
 		caps = mt.PerTargetCapabilities()
-		resp.DefaultTarget = mt.DefaultTargetName()
 	}
-	for _, t := range s.cfg.ResolveTargets() {
+	for _, t := range cfg.ResolveTargets() {
 		ts := backend.TargetSummary{
 			Name:      t.Name,
 			Type:      t.Type(),

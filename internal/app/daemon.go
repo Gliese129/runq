@@ -76,6 +76,9 @@ type Daemon struct {
 	// bootDataPath detects restart-bound key changes (data_path is a
 	// storage root — hot-swapping it would strand task dirs mid-flight).
 	bootDataPath string
+	// laneBuildErrs dedupes build-failure logging across retry passes
+	// (target → last error string). Guarded by reconcileMu.
+	laneBuildErrs map[string]string
 
 	// cfgWatchCancel stops the config.yaml watcher goroutine on shutdown.
 	cfgWatchCancel context.CancelFunc

@@ -156,3 +156,82 @@ func TestPutGlobalConfigIfMatch(t *testing.T) {
 		t.Fatalf("stale: status %d, body %s", rec.Code, rec.Body.String())
 	}
 }
+
+func TestPutGlobalConfigClearAndOmit(t *testing.T) {
+	server, _ := newConfigEditHarness(t, "data_path: /old\n"+targetsCfg)
+
+	// Omitted field: unchanged (review fix #3 — pointer payload).
+	rec := doJSON(server, http.MethodPut, "/api/v1/config", currentGeneration(t), `{"default_target":"a"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("omit: status %d, body %s", rec.Code, rec.Body.String())
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DataPath != "/old" {
+		t.Fatalf("omitted data_path was changed: %q", cfg.DataPath)
+	}
+
+	// Present-but-empty: CLEARS the key on disk (was a silent 200 no-op).
+	rec = doJSON(server, http.MethodPut, "/api/v1/config", currentGeneration(t), `{"data_path":""}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("clear: status %d, body %s", rec.Code, rec.Body.String())
+	}
+	cfg, err = config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DataPath != "" {
+		t.Fatalf("data_path not cleared: %q", cfg.DataPath)
+	}
+}
+
+// Review fix #1: GET /config must describe the FILE as it is NOW, not the
+// boot snapshot — the WebUI conflict dialog uses it as "the disk version".
+func TestHandleConfigReadsDiskNotSnapshot(t *testing.T) {
+	server, _ := newConfigEditHarness(t, "data_path: /disk-v2\n"+targetsCfg)
+	// The harness constructs NewServer with an EMPTY snapshot cfg — if the
+	// handler served the snapshot, data_path would come back "".
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/config", nil)
+	rec := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d, body %s", rec.Code, rec.Body.String())
+	}
+	var resp backend.ConfigResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.DataPath != "/disk-v2" {
+		t.Fatalf("data_path = %q, want /disk-v2 (served boot snapshot?)", resp.DataPath)
+	}
+	if resp.DefaultTarget != "a" {
+		t.Fatalf("default_target = %q, want a", resp.DefaultTarget)
+	}
+	if len(resp.Targets) != 1 || resp.Targets[0].Name != "a" {
+		t.Fatalf("targets = %+v, want [a]", resp.Targets)
+	}
+	if resp.ConfigGeneration == "" {
+		t.Fatal("config_generation missing")
+	}
+
+	// Edit the file; the next GET must follow it with no restart.
+	dir := os.Getenv("RUNQ_DATA_DIR")
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("data_path: /disk-v3\n"+targetsCfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rec = httptest.NewRecorder()
+	server.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/config", nil))
+	var resp2 backend.ConfigResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp2); err != nil {
+		t.Fatal(err)
+	}
+	if resp2.DataPath != "/disk-v3" {
+		t.Fatalf("after edit: data_path = %q, want /disk-v3", resp2.DataPath)
+	}
+	if resp2.ConfigGeneration == resp.ConfigGeneration {
+		t.Fatal("generation did not follow the file edit")
+	}
+}

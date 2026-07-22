@@ -98,6 +98,41 @@ func TestSaveGlobalPreservesCommentsAndHPC(t *testing.T) {
 	}
 }
 
+func TestSaveGlobalClearsScalarKeys(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("RUNQ_DATA_DIR", dir)
+	writeGlobalCfg(t, dir, "data_path: /old\n"+saveTestCfg)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DataPath != "/old" {
+		t.Fatalf("precondition: data_path = %q", cfg.DataPath)
+	}
+	// Review fix #3: empty scalar = clear the key (callers start from
+	// Load(), so empty can only mean absent-or-cleared).
+	cfg.DataPath = ""
+	if err := SaveGlobal(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	after, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.DataPath != "" {
+		t.Fatalf("data_path not cleared: %q", after.DataPath)
+	}
+	buf, _ := os.ReadFile(filepath.Join(dir, "config.yaml"))
+	if strings.Contains(string(buf), "data_path:") {
+		t.Fatalf("data_path key still on disk:\n%s", buf)
+	}
+	if !strings.Contains(string(buf), "default_target: a") {
+		t.Fatalf("untouched scalar lost:\n%s", buf)
+	}
+}
+
 func TestSaveGlobalDeleteLastTarget(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("RUNQ_DATA_DIR", dir)

@@ -92,6 +92,18 @@ func (d *Daemon) ReconcileConfig(reason string) error {
 	d.Logger.Info("config reconcile", "reason", reason,
 		"added", added, "changed", changed, "removed", removed)
 
+	// record is what this pass ACTUALLY applied (review fix #2): a failed
+	// build must not be recorded as if it succeeded, or the level-triggered
+	// retry dies — the next pass would see no diff and never rebuild, and a
+	// transient failure (cluster briefly unreachable) would strand the
+	// target laneless until the user edits YAML again. Failed adds are
+	// dropped from the record; failed changes keep the OLD config, so every
+	// subsequent pass retries. laneBuildErrs dedupes the retry logging.
+	record := make(map[string]config.TargetConfig, len(newTargets))
+	for k, v := range newTargets {
+		record[k] = v
+	}
+
 	for _, name := range removed {
 		_ = d.StopRemoteForward(name)
 		d.multiBe.RemoveTarget(name)
@@ -107,13 +119,13 @@ func (d *Daemon) ReconcileConfig(reason string) error {
 		tc := newTargets[name]
 		be, berr := d.buildLane(tc, cfg)
 		if berr != nil {
-			// The lane stays absent but VISIBLE: the error is logged here
-			// and surfaces on connect ("lane build failed"). Recorded in
-			// lastTargets so we do not thrash; the next config edit
-			// triggers another attempt.
-			d.Logger.Error("lane build failed — target not routed", "target", name, "error", berr)
+			// The lane stays absent but VISIBLE: logged (deduped) and
+			// surfacing on connect. NOT recorded — the next pass retries.
+			delete(record, name)
+			d.noteLaneBuildErr(name, berr)
 			continue
 		}
+		d.clearLaneBuildErr(name)
 		startLane(be)
 		d.laneMu.Lock()
 		d.lanes[name] = be
@@ -132,11 +144,13 @@ func (d *Daemon) ReconcileConfig(reason string) error {
 		newBe, berr := d.buildLane(tc, cfg)
 		if berr != nil {
 			// A broken edit must not take down a working lane: keep the old
-			// one serving (built from the previous config) and say so.
-			d.Logger.Error("lane rebuild failed — keeping the previous lane",
-				"target", name, "error", berr)
+			// one serving. The record keeps the OLD config so the next pass
+			// still sees a diff and retries the rebuild.
+			record[name] = d.lastTargets[name]
+			d.noteLaneBuildErr(name, berr)
 			continue
 		}
+		d.clearLaneBuildErr(name)
 		startLane(newBe)
 		_ = d.StopRemoteForward(name)
 		d.multiBe.SetTarget(name, newBe) // swap routing first: no gap
@@ -162,8 +176,35 @@ func (d *Daemon) ReconcileConfig(reason string) error {
 		}
 	}
 
-	d.lastTargets = newTargets
+	d.lastTargets = record
 	return nil
+}
+
+// noteLaneBuildErr logs a lane build failure ONCE per distinct error —
+// the reconciler retries every pass (level-triggered), and an unreachable
+// cluster must not turn the log into a 15s-interval siren. Called under
+// reconcileMu.
+func (d *Daemon) noteLaneBuildErr(name string, err error) {
+	if d.laneBuildErrs == nil {
+		d.laneBuildErrs = map[string]string{}
+	}
+	msg := err.Error()
+	if d.laneBuildErrs[name] == msg {
+		d.Logger.Debug("lane build retry failed (same error)", "target", name)
+		return
+	}
+	d.laneBuildErrs[name] = msg
+	d.Logger.Error("lane build failed — target not routed; retrying every reconcile pass",
+		"target", name, "error", err)
+}
+
+// clearLaneBuildErr marks a previously failing lane as recovered. Called
+// under reconcileMu.
+func (d *Daemon) clearLaneBuildErr(name string) {
+	if _, ok := d.laneBuildErrs[name]; ok {
+		delete(d.laneBuildErrs, name)
+		d.Logger.Info("lane build recovered", "target", name)
+	}
 }
 
 // startLane starts a lane if it supports the lifecycle (SSHBackend does;
