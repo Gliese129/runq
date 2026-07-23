@@ -300,7 +300,7 @@ func (b *Backend) Prepare(ctx context.Context, jobCfg job.JobConfig, proj *proje
 		// external_id yet). A sbatch that succeeds but whose id we then fail to
 		// parse/persist must NOT become an invisible orphan — the row already
 		// exists and status/kill/collect can see it.
-		row := planToTaskRow(t, plan, now, "", b.Cfg.Name)
+		row := planToTaskRow(t, plan, now, "", b.Cfg.Name, b.Cfg.SemanticGeneration())
 		if err := b.Store.InsertTask(ctx, &row); err != nil {
 			return plan.JobID, rows, fmt.Errorf("persist task %s: %w", t.TaskID, err)
 		}
@@ -469,7 +469,7 @@ func (b *Backend) buildRunScript(t submitplan.PlannedTask, plan submitplan.Plan)
 // planToTaskRow maps a PlannedTask to a store.TaskRow for the HPC store. Status
 // starts "pending"; refresh advances it. EnvJSON holds the user/project env
 // (not RUNQ_*, which live in run.sh) to mirror the daemon's persisted shape.
-func planToTaskRow(t submitplan.PlannedTask, plan submitplan.Plan, now time.Time, extID, target string) store.TaskRow {
+func planToTaskRow(t submitplan.PlannedTask, plan submitplan.Plan, now time.Time, extID, target, generation string) store.TaskRow {
 	paramsJSON, _ := json.Marshal(t.Params)
 	envJSON, _ := json.Marshal(t.Env)
 	return store.TaskRow{
@@ -480,5 +480,8 @@ func planToTaskRow(t submitplan.PlannedTask, plan submitplan.Plan, now time.Time
 		Resumable: t.Resumable, ExtraArgs: t.ExtraArgs,
 		UID: t.UID, Timeout: t.Timeout, EnqueuedAt: now,
 		TaskDir: t.TaskDir, ExternalID: extID, Target: target,
+		// RQ-75: stamp lane-generation ownership at creation — the row is
+		// born owned by the generation that will submit it.
+		TargetGeneration: generation,
 	}
 }

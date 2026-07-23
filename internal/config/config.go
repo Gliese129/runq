@@ -177,6 +177,25 @@ func (t *TargetConfig) IsRemote() bool {
 	return t.SSH != nil
 }
 
+// SemanticGeneration is this target config's identity hash (RQ-75 lane
+// generations): the yaml-marshalled config run through the same semantic
+// hash as config.yaml itself, so reformatting/comments can never move it.
+// Tasks are stamped with the generation of the lane that owns them;
+// kill/log/refresh route by it. Empty on marshal failure — such rows fall
+// back to active-lane adoption, which is also how legacy (”) rows and
+// hash shifts across runq upgrades stay harmless.
+func (t *TargetConfig) SemanticGeneration() string {
+	buf, err := yaml.Marshal(t)
+	if err != nil {
+		return ""
+	}
+	gen, err := genfile.SemanticHash(buf)
+	if err != nil {
+		return ""
+	}
+	return gen
+}
+
 // ResolveTargets returns the configured targets. An empty targets[] means
 // "just this machine": a single default local target. (mode is dead, D9 —
 // a stale `mode:` key in old config files parses as an ignored unknown.)

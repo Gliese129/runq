@@ -103,6 +103,7 @@ type SSHBackend struct {
 	backend      *remote.Backend
 	sshFS        *rfs.SSHFS // held for Close()
 	targetName   string     // this lane's target name (tasks.target scope)
+	generation   string     // RQ-75: semantic hash of the target config this lane was built from
 
 	// Per-target scheduler lane (RQ-46): queue + submission-slot pool +
 	// scheduler instance + remote launcher. Same lifecycle code as the local
@@ -256,6 +257,7 @@ func NewSSHBackend(cfg SSHBackendConfig) (*SSHBackend, error) {
 		launcher:   launcher,
 		logger:     logger,
 		targetName: t.Name,
+		generation: t.SemanticGeneration(),
 		syncDone:   make(chan struct{}),
 		nudgeCh:    make(chan struct{}, 1),
 	}
@@ -441,6 +443,10 @@ func (b *SSHBackend) ingestRunningMetrics(ctx context.Context) {
 func (b *SSHBackend) DetectOrphansNow(ctx context.Context) error {
 	return b.backend.DetectOrphans(ctx, true)
 }
+
+// Generation is the semantic hash of the target config this lane was
+// built from (RQ-75) — the ownership stamp on its tasks.
+func (b *SSHBackend) Generation() string { return b.generation }
 
 // Quiesce stops this lane from starting NEW work (RQ-75 lane rotation):
 // the scheduler stops dispatching; in-flight submissions, the sensor loop

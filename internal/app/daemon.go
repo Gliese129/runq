@@ -215,7 +215,7 @@ func NewDaemonWith(opts DaemonOptions) (*Daemon, error) {
 	defaultTarget := storageCfg.ResolveDefaultTarget()
 
 	resolvedTargets := storageCfg.ResolveTargets()
-	makeLocalBackend := func(targetName string) *backend.LocalBackend {
+	makeLocalBackend := func(targetName, generation string) *backend.LocalBackend {
 		return backend.NewLocalBackend(backend.LocalBackendDeps{
 			Store:      st,
 			Reg:        reg,
@@ -225,6 +225,7 @@ func NewDaemonWith(opts DaemonOptions) (*Daemon, error) {
 			Pool:       pool,
 			StorageCfg: storageCfg,
 			TargetName: targetName,
+			Generation: generation,
 		})
 	}
 
@@ -253,7 +254,7 @@ func NewDaemonWith(opts DaemonOptions) (*Daemon, error) {
 		} else {
 			// Local-type targets share daemon runtime components but keep separate
 			// routing keys so DB target filters remain correct.
-			be := makeLocalBackend(tc.Name)
+			be := makeLocalBackend(tc.Name, tc.SemanticGeneration())
 			targets[tc.Name] = be
 			localTargetNames = append(localTargetNames, tc.Name)
 			if localBe == nil {
@@ -265,7 +266,7 @@ func NewDaemonWith(opts DaemonOptions) (*Daemon, error) {
 		// HPC-only configs still need a LocalBackend for store/registry helpers
 		// used by API endpoints such as note resolution. It is not registered
 		// as a routable target.
-		localBe = makeLocalBackend("local")
+		localBe = makeLocalBackend("local", "") // helper-only, not routable: no generation
 	}
 
 	multiBe, err := backend.NewMultiBackend(targets, st, defaultTarget)

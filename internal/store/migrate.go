@@ -74,6 +74,11 @@ func (s *Store) addMissingColumns(ctx context.Context) error {
 	if err := addColumnIfMissing(ctx, s.db, "tasks", "task_dir", "TEXT"); err != nil {
 		return fmt.Errorf("add tasks.task_dir: %w", err)
 	}
+	// RQ-75: lane-generation ownership. '' (pre-upgrade rows) is adopted by
+	// the target's ACTIVE lane.
+	if err := addColumnIfMissing(ctx, s.db, "tasks", "target_generation", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return fmt.Errorf("add tasks.target_generation: %w", err)
+	}
 	// L2-E: external_id holds the HPC scheduler job id (sbatch/qsub) so refresh
 	// can map a task back to its cluster job. Empty for daemon-managed tasks.
 	if err := addColumnIfMissing(ctx, s.db, "tasks", "external_id", "TEXT"); err != nil {

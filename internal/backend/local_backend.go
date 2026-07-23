@@ -38,6 +38,7 @@ type LocalBackend struct {
 	pool         resource.Allocator
 	storageCfg   *config.GlobalConfig // nil-safe: nil = project_path mode
 	targetName   string               // routing key written to DB; defaults to "local"
+	generation   string               // RQ-75: lane-generation stamp for new tasks ('' = adopt-by-active)
 }
 
 // LocalBackendDeps groups the daemon components that LocalBackend wraps.
@@ -50,6 +51,7 @@ type LocalBackendDeps struct {
 	Pool       resource.Allocator
 	StorageCfg *config.GlobalConfig
 	TargetName string // routing key written to DB; empty defaults to "local"
+	Generation string // RQ-75: semantic generation of the target config ('' ok)
 }
 
 // NewLocalBackend creates a Backend that wraps the daemon's internal
@@ -68,6 +70,7 @@ func NewLocalBackend(deps LocalBackendDeps) *LocalBackend {
 		pool:         deps.Pool,
 		storageCfg:   deps.StorageCfg,
 		targetName:   name,
+		generation:   deps.Generation,
 	}
 }
 
@@ -144,7 +147,7 @@ func (b *LocalBackend) Enqueue(ctx context.Context, spec TaskSpec) (string, erro
 		Command:    "sh " + utils.ShellQuote(spec.RunSH),
 		GPUsNeeded: spec.GPUs, Status: "pending",
 		LogPath: logPath, WorkingDir: spec.TaskDir,
-		TaskDir: spec.TaskDir, Target: b.targetName,
+		TaskDir: spec.TaskDir, Target: b.targetName, TargetGeneration: b.generation,
 		EnqueuedAt: now,
 	}
 	if err := b.store.InsertTask(ctx, &row); err != nil {
@@ -784,7 +787,7 @@ func (b *LocalBackend) submitJob(ctx context.Context, jobCfg job.JobConfig, skip
 			WorkingDir: t.WorkingDir, EnvJSON: string(envJSON),
 			Resumable: t.Resumable, ExtraArgs: t.ExtraArgs,
 			UID: t.UID, Timeout: t.Timeout, EnqueuedAt: now,
-			TaskDir: t.TaskDir, Target: b.targetName,
+			TaskDir: t.TaskDir, Target: b.targetName, TargetGeneration: b.generation,
 		})
 	}
 
