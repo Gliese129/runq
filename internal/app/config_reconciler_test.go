@@ -23,10 +23,12 @@ type fakeLane struct {
 	backend.Backend
 	name      string
 	id        string
+	gen       string // SemanticGeneration of the config this lane was built from
 	closed    bool
 	quiesced  bool
 	resumed   bool
 	started   bool
+	retiring  bool
 	drainFail bool // simulate a straggler submission that won't settle
 	events    *[]string
 }
@@ -41,6 +43,8 @@ func (f *fakeLane) Close() error          { f.closed = true; f.rec("close"); ret
 func (f *fakeLane) Start(context.Context) { f.started = true; f.rec("start") }
 func (f *fakeLane) Quiesce()              { f.quiesced = true; f.rec("quiesce") }
 func (f *fakeLane) Resume()               { f.resumed = true; f.rec("resume") }
+func (f *fakeLane) Generation() string    { return f.gen }
+func (f *fakeLane) MarkRetiring()         { f.retiring = true; f.rec("retire") }
 func (f *fakeLane) DrainSubmissions(context.Context) bool {
 	f.rec("drain")
 	return !f.drainFail
@@ -84,7 +88,7 @@ func newReconcilerHarness(t *testing.T, dir string) (*Daemon, *[]string, map[str
 		seq++
 		id := fmt.Sprintf("%s#%d", tc.Name, seq)
 		events = append(events, "build:"+id)
-		return &fakeLane{name: tc.Name, id: id, events: &events}, nil
+		return &fakeLane{name: tc.Name, id: id, gen: tc.SemanticGeneration(), events: &events}, nil
 	}
 
 	lanes := map[string]backend.Backend{}
@@ -102,6 +106,7 @@ func newReconcilerHarness(t *testing.T, dir string) (*Daemon, *[]string, map[str
 	}
 	d := &Daemon{
 		Logger:       slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+		Store:        st,
 		lanes:        lanes,
 		multiBe:      multiBe,
 		buildLane:    buildLane,
@@ -421,6 +426,130 @@ targets:
 	}
 	if !oldA.closed {
 		t.Error("retry pass left the superseded lane open")
+	}
+}
+
+// seedLaneTask inserts a task row owned by (target, generation).
+func seedLaneTask(t *testing.T, st *store.Store, id, target, gen, status, extID string) {
+	t.Helper()
+	jobID := "j-" + id
+	_ = st.InsertJob(context.Background(), &store.JobRow{
+		ID: jobID, ProjectName: "p", Status: "pending", TotalTasks: 1,
+		CreatedAt: time.Now(), Target: target,
+	})
+	if err := st.InsertTask(context.Background(), &store.TaskRow{
+		ID: id, JobID: jobID, ProjectName: "p", Command: "true",
+		ParamsJSON: "{}", GPUsNeeded: 1, Status: status,
+		EnqueuedAt: time.Now(), Target: target,
+		TargetGeneration: gen, ExternalID: extID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// User-decided model: a superseded generation with in-flight tasks RETIRES
+// (keeps tracking them) instead of closing; pending rows migrate to the
+// new generation; the sweep closes the lane when its count hits zero.
+func TestReconcileChangeRetiresLaneWithInflight(t *testing.T) {
+	dir := t.TempDir()
+	writeCfg(t, dir, baseCfg)
+	d, _, _ := newReconcilerHarness(t, dir)
+	oldA := d.lanes["a"].(*fakeLane)
+	seedLaneTask(t, d.Store, "t-run", "a", oldA.gen, "running", "ext-1")
+	seedLaneTask(t, d.Store, "t-pend", "a", oldA.gen, "pending", "")
+
+	writeCfg(t, dir, `default_target: a
+targets:
+  - name: a
+    scheduler: slurm
+    submit_template: s2
+`)
+	if err := d.ReconcileConfig("test"); err != nil {
+		t.Fatal(err)
+	}
+	newA := d.lanes["a"].(*fakeLane)
+
+	// Old lane retired, NOT closed — it still owns t-run.
+	if oldA.closed {
+		t.Fatal("lane with in-flight tasks was closed instead of retired")
+	}
+	if !oldA.retiring {
+		t.Error("old lane not marked retiring")
+	}
+	if _, ok := d.retiringLanes["a@"+oldA.gen]; !ok {
+		t.Error("old lane not registered as retiring")
+	}
+	gens, _ := d.Store.ListRetiringGenerations(context.Background())
+	if len(gens) != 1 || gens[0].Generation != oldA.gen || gens[0].Reason != "changed" {
+		t.Fatalf("retirement not persisted: %+v", gens)
+	}
+
+	// Pending row migrated to the NEW generation.
+	row, _ := d.Store.GetTask(context.Background(), "t-pend")
+	if row.TargetGeneration != newA.gen {
+		t.Fatalf("pending row generation = %q, want new %q", row.TargetGeneration, newA.gen)
+	}
+	// In-flight row still owned by the old generation.
+	row, _ = d.Store.GetTask(context.Background(), "t-run")
+	if row.TargetGeneration != oldA.gen {
+		t.Fatalf("in-flight row was restamped: %q", row.TargetGeneration)
+	}
+
+	// Sweep with the task still running: lane stays.
+	d.SweepRetiringLanes()
+	if oldA.closed {
+		t.Fatal("sweep closed a lane that still owns an unfinished task")
+	}
+
+	// Task reaches terminal → sweep retires the lane for good.
+	if err := d.Store.UpdateTaskStatus(context.Background(), "t-run", "success", nil); err != nil {
+		t.Fatal(err)
+	}
+	d.SweepRetiringLanes()
+	if !oldA.closed {
+		t.Fatal("sweep did not close an emptied retiring lane")
+	}
+	if _, ok := d.retiringLanes["a@"+oldA.gen]; ok {
+		t.Error("emptied lane still registered")
+	}
+	gens, _ = d.Store.ListRetiringGenerations(context.Background())
+	if len(gens) != 0 {
+		t.Fatalf("generation not marked done: %+v", gens)
+	}
+}
+
+// Removed target: pending rows stop with a visible reason; the lane
+// retires for its in-flight rows (reason 'removed').
+func TestReconcileRemoveStopsPendingAndRetires(t *testing.T) {
+	dir := t.TempDir()
+	writeCfg(t, dir, baseCfg+`  - name: b
+    scheduler: pbs
+    submit_template: s
+`)
+	d, _, _ := newReconcilerHarness(t, dir)
+	oldB := d.lanes["b"].(*fakeLane)
+	seedLaneTask(t, d.Store, "t-brun", "b", oldB.gen, "running", "ext-9")
+	seedLaneTask(t, d.Store, "t-bpend", "b", oldB.gen, "pending", "")
+
+	writeCfg(t, dir, baseCfg) // b removed
+	if err := d.ReconcileConfig("test"); err != nil {
+		t.Fatal(err)
+	}
+
+	row, _ := d.Store.GetTask(context.Background(), "t-bpend")
+	if row.Status != "killed" || row.FailureDetail == "" {
+		t.Fatalf("pending row of removed target: status %q detail %q", row.Status, row.FailureDetail)
+	}
+	row, _ = d.Store.GetTask(context.Background(), "t-brun")
+	if row.Status != "running" {
+		t.Fatalf("in-flight row of removed target was touched: %q", row.Status)
+	}
+	if oldB.closed {
+		t.Fatal("removed lane with in-flight tasks was closed instead of retired")
+	}
+	gens, _ := d.Store.ListRetiringGenerations(context.Background())
+	if len(gens) != 1 || gens[0].Reason != "removed" {
+		t.Fatalf("removed-target retirement not persisted: %+v", gens)
 	}
 }
 

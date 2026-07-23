@@ -104,6 +104,7 @@ type SSHBackend struct {
 	sshFS        *rfs.SSHFS // held for Close()
 	targetName   string     // this lane's target name (tasks.target scope)
 	generation   string     // RQ-75: semantic hash of the target config this lane was built from
+	retiring     bool       // RQ-75: superseded generation tracking its remaining tasks (set before Start)
 
 	// Per-target scheduler lane (RQ-46): queue + submission-slot pool +
 	// scheduler instance + remote launcher. Same lifecycle code as the local
@@ -288,11 +289,47 @@ func (b *SSHBackend) restoreLane(ctx context.Context) {
 		b.logger.Warn("restore: list tasks failed", "error", err)
 		return
 	}
+	// Generation ownership filter (RQ-75). A retiring lane confines itself
+	// to rows stamped with ITS generation; the active lane takes its own
+	// generation, legacy ('') rows, and ADOPTS orphan generations — ones
+	// with no live retirement record (hash shifts across upgrades, crashes
+	// between swap and persist). Live-retiring generations are skipped:
+	// their lane restores them itself.
+	retiringGen := map[string]bool{}
+	owns := func(gen string) bool {
+		if b.retiring {
+			return gen == b.generation
+		}
+		if gen == b.generation || gen == "" {
+			return true
+		}
+		live, seen := retiringGen[gen]
+		if !seen {
+			var lerr error
+			live, lerr = b.store.IsRetiringGeneration(ctx, b.targetName, gen)
+			if lerr != nil {
+				live = true // can't prove orphan — do not steal
+			}
+			retiringGen[gen] = live
+		}
+		if !live {
+			b.logger.Info("adopting task row from an unrecorded generation", "generation", gen)
+		}
+		return !live
+	}
 	restored, queued := 0, 0
 	for i := range rows {
 		row := rows[i]
 		switch row.Status {
 		case "success", "failed", "killed":
+			continue
+		}
+		if !owns(row.TargetGeneration) {
+			continue
+		}
+		// A retiring lane never queues pending work — unsubmitted rows
+		// belong to the active generation (restamped on rotation).
+		if b.retiring && row.ExternalID == "" && row.Status != "unknown" {
 			continue
 		}
 		t := TaskRowToSchedulerTask(&row)
@@ -447,6 +484,16 @@ func (b *SSHBackend) DetectOrphansNow(ctx context.Context) error {
 // Generation is the semantic hash of the target config this lane was
 // built from (RQ-75) — the ownership stamp on its tasks.
 func (b *SSHBackend) Generation() string { return b.generation }
+
+// MarkRetiring flips this lane into retiring mode (RQ-75): the launch
+// path is permanently quiesced, and restoreLane confines itself to the
+// lane's own generation (never queueing pending work — that belongs to
+// the active generation). Must be called BEFORE Start when rebuilding a
+// retiring lane after a restart.
+func (b *SSHBackend) MarkRetiring() {
+	b.retiring = true
+	b.sched.Quiesce()
+}
 
 // Quiesce stops this lane from starting NEW work (RQ-75 lane rotation):
 // the scheduler stops dispatching; in-flight submissions, the sensor loop

@@ -87,6 +87,10 @@ type Daemon struct {
 	// (0 = close synchronously; tests).
 	laneDrainTimeout time.Duration
 	laneCloseGrace   time.Duration
+	// retiringLanes holds superseded lane generations still tracking their
+	// in-flight tasks (RQ-75), keyed "name@generation". Guarded by laneMu;
+	// registered in lockstep with multiBe's retiring registry.
+	retiringLanes map[string]backend.Backend
 
 	// cfgWatchCancel stops the config.yaml watcher goroutine on shutdown.
 	cfgWatchCancel context.CancelFunc
@@ -353,6 +357,10 @@ func (d *Daemon) Run() error {
 		}
 	}
 	d.laneMu.Unlock()
+	// RQ-75: retiring lane generations survive restarts — rebuild them
+	// from their config snapshots so long-running old-generation tasks
+	// keep being tracked on their original endpoints.
+	d.rebuildRetiringLanes()
 	// RQ-75: watch config.yaml for semantic changes — the lane reconciler
 	// converges running lanes onto the file without a restart. API writes
 	// notify the same reconciler directly (SetConfigChanged).
@@ -363,6 +371,22 @@ func (d *Daemon) Run() error {
 			d.Logger.Warn("config reconcile failed", "error", err)
 		}
 	})
+	// Retirement sweep: close retiring lanes whose unfinished count hit
+	// zero. Terminal transitions land via lane sensors at their own pace,
+	// so a periodic sweep (plus one after every reconcile pass) is the
+	// level-triggered way to notice.
+	go func() {
+		t := time.NewTicker(time.Minute)
+		defer t.Stop()
+		for {
+			select {
+			case <-watchCtx.Done():
+				return
+			case <-t.C:
+				d.SweepRetiringLanes()
+			}
+		}
+	}()
 	// Remote CLI forwards (targets with remote_cli): each supervises its
 	// own reconnect loop; failures never block the daemon.
 	d.fwdMu.Lock()
@@ -641,6 +665,13 @@ func (d *Daemon) Shutdown(_ context.Context) {
 		if c, ok := be.(interface{ Close() error }); ok {
 			if err := c.Close(); err != nil {
 				d.Logger.Warn("lane close failed", "target", name, "error", err)
+			}
+		}
+	}
+	for key, be := range d.retiringLanes {
+		if c, ok := be.(interface{ Close() error }); ok {
+			if err := c.Close(); err != nil {
+				d.Logger.Warn("retiring lane close failed", "lane", key, "error", err)
 			}
 		}
 	}

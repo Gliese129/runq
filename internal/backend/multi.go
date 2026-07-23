@@ -27,6 +27,12 @@ type MultiBackend struct {
 	mu            sync.RWMutex
 	targets       map[string]Backend
 	defaultTarget string
+	// retiring holds superseded lane generations still tracking their
+	// in-flight tasks (RQ-75): target name → generation → lane. Task-scoped
+	// ops (kill/logs/refresh) route here when the task's stamped generation
+	// has a live retiring lane — the OLD endpoint/templates are the only
+	// ones that can correctly act on those tasks.
+	retiring map[string]map[string]Backend
 
 	store *store.Store
 	// registry is the ONE routed project registry shared by every lane
@@ -60,6 +66,50 @@ func (m *MultiBackend) defaultName() string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.defaultTarget
+}
+
+// SetRetiringLane registers a superseded lane generation (RQ-75).
+func (m *MultiBackend) SetRetiringLane(name, generation string, be Backend) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.retiring == nil {
+		m.retiring = map[string]map[string]Backend{}
+	}
+	if m.retiring[name] == nil {
+		m.retiring[name] = map[string]Backend{}
+	}
+	m.retiring[name][generation] = be
+}
+
+// RemoveRetiringLane unregisters a retired lane (its count hit zero).
+func (m *MultiBackend) RemoveRetiringLane(name, generation string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if g := m.retiring[name]; g != nil {
+		delete(g, generation)
+		if len(g) == 0 {
+			delete(m.retiring, name)
+		}
+	}
+}
+
+// retiringLane looks up a retiring lane for (target, generation).
+func (m *MultiBackend) retiringLane(name, generation string) (Backend, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	be, ok := m.retiring[name][generation]
+	return be, ok
+}
+
+// retiringLanesOf snapshots the retiring lanes of one target.
+func (m *MultiBackend) retiringLanesOf(name string) []Backend {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]Backend, 0, len(m.retiring[name]))
+	for _, be := range m.retiring[name] {
+		out = append(out, be)
+	}
+	return out
 }
 
 // SetTarget adds or replaces a lane at runtime (RQ-75), wiring the shared
@@ -157,7 +207,11 @@ func (m *MultiBackend) resolveJob(ctx context.Context, jobID string) (Backend, e
 	return m.resolve(j.Target)
 }
 
-// resolveTask looks up the task's target column and returns the owning backend.
+// resolveTask looks up the task's target column and returns the OWNING
+// backend (RQ-75): a task stamped with a generation that has a live
+// retiring lane routes there — only the old endpoint/templates can
+// correctly kill/probe/read it. Everything else (active generation,
+// legacy ” rows, settled generations) routes to the active lane.
 func (m *MultiBackend) resolveTask(ctx context.Context, taskID string) (Backend, error) {
 	t, err := m.store.GetTask(ctx, taskID)
 	if err != nil {
@@ -165,6 +219,11 @@ func (m *MultiBackend) resolveTask(ctx context.Context, taskID string) (Backend,
 	}
 	if t == nil {
 		return nil, fmt.Errorf("task %q: %w", taskID, ErrNotFound)
+	}
+	if t.TargetGeneration != "" {
+		if be, ok := m.retiringLane(t.Target, t.TargetGeneration); ok {
+			return be, nil
+		}
 	}
 	return m.resolve(t.Target)
 }
@@ -514,6 +573,18 @@ func (m *MultiBackend) KillJob(ctx context.Context, jobID string) error {
 	be, err := m.resolveJob(ctx, jobID)
 	if err != nil {
 		return err
+	}
+	// A job may span lane generations after a config change (in-flight
+	// tasks stay with the retiring lane, pending migrated to the active
+	// one) — fan the kill to the target's retiring lanes too, best-effort,
+	// so old-generation tasks get killed with the templates that own them.
+	j, jerr := m.store.GetJob(ctx, jobID)
+	if jerr == nil && j != nil {
+		for _, rbe := range m.retiringLanesOf(j.Target) {
+			if rbe != be {
+				_ = rbe.KillJob(ctx, jobID)
+			}
+		}
 	}
 	return be.KillJob(ctx, jobID)
 }

@@ -2,12 +2,15 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"reflect"
+	"strings"
 	"time"
 
 	"github.com/gliese129/runq/internal/backend"
 	"github.com/gliese129/runq/internal/config"
+	"github.com/gliese129/runq/internal/store"
 )
 
 // ── RQ-75: config → lanes reconciler ────────────────────────────────────────
@@ -115,13 +118,29 @@ func (d *Daemon) ReconcileConfig(reason string) error {
 		delete(d.lanes, name)
 		d.laneMu.Unlock()
 		// A removal has NO successor restoring pending rows from the DB, so
-		// a drain timeout cannot double-submit — proceeding to the grace
-		// close is safe (stragglers settle as unknown; reconcile heals).
+		// a drain timeout cannot double-submit — proceeding is safe
+		// (stragglers settle as unknown; reconcile heals).
 		if !d.quiesceLane(name, be) {
-			d.Logger.Warn("removed lane drain timed out — closing after grace anyway",
+			d.Logger.Warn("removed lane drain timed out — proceeding to retirement anyway",
 				"target", name, "timeout", d.laneDrainTimeout)
 		}
-		d.closeLaneDeferred(name, be)
+		// Pending (unsubmitted) tasks have no lane to ever run on — stop
+		// them with a visible reason (user decision: removed name ≠
+		// migration). In-flight tasks are NOT touched: the lane retires
+		// and tracks them to their real outcome.
+		if d.Store != nil {
+			sctx, scancel := context.WithTimeout(context.Background(), 10*time.Second)
+			ids, serr := d.Store.StopPendingTasks(sctx, name,
+				"target "+name+" was removed from config.yaml — pending task stopped before submission")
+			scancel()
+			if serr != nil {
+				d.Logger.Warn("stop pending tasks failed", "target", name, "error", serr)
+			} else if len(ids) > 0 {
+				d.Logger.Warn("pending tasks stopped: their target was removed from config.yaml",
+					"target", name, "count", len(ids))
+			}
+		}
+		d.retireOrClose(name, d.lastTargets[name], be, "removed")
 		d.Logger.Info("lane removed", "target", name)
 	}
 
@@ -188,6 +207,18 @@ func (d *Daemon) ReconcileConfig(reason string) error {
 				d.laneDrainTimeout))
 			continue
 		}
+		// Same-name change: pending (unsubmitted) work auto-migrates to
+		// the new generation (user decision) — restamp BEFORE the
+		// replacement restores, so it queues them as its own.
+		if d.Store != nil {
+			sctx, scancel := context.WithTimeout(context.Background(), 10*time.Second)
+			if n, rerr := d.Store.RestampPendingTasks(sctx, name, tc.SemanticGeneration()); rerr != nil {
+				d.Logger.Warn("pending-task migration failed", "target", name, "error", rerr)
+			} else if n > 0 {
+				d.Logger.Info("pending tasks migrated to the new generation", "target", name, "count", n)
+			}
+			scancel()
+		}
 		// 3. Start the replacement (restoreLane reads the settled DB) and
 		//    swap routing atomically — the target NAME never stops serving.
 		startLane(newBe)
@@ -196,11 +227,12 @@ func (d *Daemon) ReconcileConfig(reason string) error {
 		d.laneMu.Lock()
 		d.lanes[name] = newBe
 		d.laneMu.Unlock()
-		// 4. The superseded lane closes after a grace period: reads/streams
-		//    that grabbed the old pointer before the swap finish naturally;
-		//    stragglers cut at the deadline get clean errors and their
-		//    retries land on the new lane.
-		d.closeLaneDeferred(name, old)
+		// 4. The superseded generation RETIRES (user decision, replacing
+		//    the old grace-close): if it still owns unfinished tasks it
+		//    keeps running quiesced — sensing them on ITS endpoint with
+		//    ITS templates — until the count reaches zero; with nothing
+		//    left it closes after the short grace.
+		d.retireOrClose(name, d.lastTargets[name], old, "changed")
 		// Cleared only after the FULL rotation succeeded — clearing at
 		// build success would make an abort retry flip-flop the log.
 		d.clearLaneBuildErr(name)
@@ -222,6 +254,8 @@ func (d *Daemon) ReconcileConfig(reason string) error {
 	}
 
 	d.lastTargets = record
+	// Terminal transitions may already have emptied a retiring generation.
+	d.SweepRetiringLanes()
 	return nil
 }
 
@@ -293,6 +327,166 @@ func resumeLane(be backend.Backend) {
 	if q, ok := be.(rotatableLane); ok {
 		q.Resume()
 	}
+}
+
+// retireOrClose decides a superseded/removed lane's fate (RQ-75, the
+// K8s-old-ReplicaSet shape): with unfinished tasks stamped to its
+// generation it RETIRES — kept running quiesced, registered for
+// generation-routed task ops, persisted so a restart rebuilds it — and
+// only a generation with nothing left to track closes now.
+func (d *Daemon) retireOrClose(name string, oldTC config.TargetConfig, be backend.Backend, reason string) {
+	gen := laneGeneration(be)
+	if gen == "" || d.Store == nil || d.multiBe == nil {
+		d.closeLaneDeferred(name, be)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	n, err := d.Store.CountUnfinishedGenerationTasks(ctx, name, gen)
+	if err != nil {
+		// Can't prove it's empty — retiring a possibly-empty lane is safe
+		// (the sweep closes it), closing a non-empty one loses tasks.
+		d.Logger.Warn("unfinished-count query failed — retiring to be safe", "target", name, "error", err)
+		n = -1
+	}
+	if n == 0 {
+		d.closeLaneDeferred(name, be)
+		return
+	}
+	snap, merr := json.Marshal(oldTC)
+	if merr != nil {
+		d.Logger.Warn("target config snapshot failed", "target", name, "error", merr)
+	}
+	if uerr := d.Store.UpsertRetiredGeneration(ctx, &store.TargetGenerationRow{
+		Target: name, Generation: gen, ConfigJSON: string(snap),
+		Reason: reason, RetiredAt: time.Now().Unix(),
+	}); uerr != nil {
+		d.Logger.Warn("persist retiring generation failed — retirement won't survive a restart",
+			"target", name, "generation", gen, "error", uerr)
+	}
+	markRetiring(be)
+	d.multiBe.SetRetiringLane(name, gen, be)
+	d.laneMu.Lock()
+	if d.retiringLanes == nil {
+		d.retiringLanes = map[string]backend.Backend{}
+	}
+	d.retiringLanes[name+"@"+gen] = be
+	d.laneMu.Unlock()
+	d.Logger.Info("lane retiring — tracking its remaining tasks to completion",
+		"target", name, "generation", shortGen(gen), "unfinished", n, "reason", reason)
+}
+
+// SweepRetiringLanes closes every retiring lane whose unfinished-task
+// count reached zero and marks its generation done. Level-triggered:
+// called after each reconcile pass and on a periodic tick.
+func (d *Daemon) SweepRetiringLanes() {
+	if d.Store == nil {
+		return
+	}
+	d.laneMu.Lock()
+	snapshot := make(map[string]backend.Backend, len(d.retiringLanes))
+	for k, v := range d.retiringLanes {
+		snapshot[k] = v
+	}
+	d.laneMu.Unlock()
+	for key, be := range snapshot {
+		name, gen, ok := strings.Cut(key, "@")
+		if !ok {
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		n, err := d.Store.CountUnfinishedGenerationTasks(ctx, name, gen)
+		if err != nil || n > 0 {
+			cancel()
+			continue
+		}
+		d.multiBe.RemoveRetiringLane(name, gen)
+		d.laneMu.Lock()
+		delete(d.retiringLanes, key)
+		d.laneMu.Unlock()
+		closeLane(d, name, be)
+		if merr := d.Store.MarkGenerationDone(ctx, name, gen); merr != nil {
+			d.Logger.Warn("mark generation done failed", "target", name, "error", merr)
+		}
+		cancel()
+		d.Logger.Info("retired generation done — all its tasks reached terminal state",
+			"target", name, "generation", shortGen(gen))
+	}
+}
+
+// rebuildRetiringLanes restores retiring lanes after a daemon restart from
+// their persisted config snapshots — long-running old-generation tasks
+// keep being tracked on their original endpoints.
+func (d *Daemon) rebuildRetiringLanes() {
+	if d.Store == nil || d.buildLane == nil || d.multiBe == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	gens, err := d.Store.ListRetiringGenerations(ctx)
+	if err != nil {
+		d.Logger.Warn("list retiring generations failed", "error", err)
+		return
+	}
+	cfg, cerr := config.Load()
+	if cerr != nil {
+		d.Logger.Warn("config load for retiring rebuild failed", "error", cerr)
+		return
+	}
+	for _, g := range gens {
+		if n, nerr := d.Store.CountUnfinishedGenerationTasks(ctx, g.Target, g.Generation); nerr == nil && n == 0 {
+			_ = d.Store.MarkGenerationDone(ctx, g.Target, g.Generation)
+			continue
+		}
+		var tc config.TargetConfig
+		if uerr := json.Unmarshal([]byte(g.ConfigJSON), &tc); uerr != nil {
+			d.Logger.Error("retiring generation snapshot unreadable — its tasks stay visible but untracked",
+				"target", g.Target, "generation", shortGen(g.Generation), "error", uerr)
+			continue
+		}
+		be, berr := d.buildLane(tc, cfg)
+		if berr != nil {
+			d.Logger.Error("retiring lane rebuild failed — its tasks stay visible but untracked until the endpoint returns",
+				"target", g.Target, "generation", shortGen(g.Generation), "error", berr)
+			continue
+		}
+		markRetiring(be) // BEFORE Start: restore must use the retiring filter
+		startLane(be)
+		d.multiBe.SetRetiringLane(g.Target, g.Generation, be)
+		d.laneMu.Lock()
+		if d.retiringLanes == nil {
+			d.retiringLanes = map[string]backend.Backend{}
+		}
+		d.retiringLanes[g.Target+"@"+g.Generation] = be
+		d.laneMu.Unlock()
+		d.Logger.Info("retiring lane rebuilt after restart",
+			"target", g.Target, "generation", shortGen(g.Generation), "reason", g.Reason)
+	}
+}
+
+// laneGeneration reads a lane's generation stamp (SSHBackend has one;
+// fakes may).
+func laneGeneration(be backend.Backend) string {
+	if g, ok := be.(interface{ Generation() string }); ok {
+		return g.Generation()
+	}
+	return ""
+}
+
+// markRetiring flips a lane into retiring mode (quiesced + restore
+// filters to its own generation).
+func markRetiring(be backend.Backend) {
+	if m, ok := be.(interface{ MarkRetiring() }); ok {
+		m.MarkRetiring()
+	}
+}
+
+// shortGen abbreviates a generation hash for logs.
+func shortGen(gen string) string {
+	if len(gen) > 12 {
+		return gen[:12]
+	}
+	return gen
 }
 
 // closeLaneDeferred closes a superseded/removed lane after laneCloseGrace,

@@ -80,6 +80,16 @@ func (s *Store) listGenerations(ctx context.Context, where string, args ...any) 
 	return out, rows.Err()
 }
 
+// IsRetiringGeneration reports whether (target, generation) has a LIVE
+// retirement record (done_at IS NULL) — i.e. another lane owns its rows.
+func (s *Store) IsRetiringGeneration(ctx context.Context, target, generation string) (bool, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM target_generations WHERE target = ? AND generation = ? AND done_at IS NULL`,
+		target, generation).Scan(&n)
+	return n > 0, err
+}
+
 // CountUnfinishedGenerationTasks counts the tasks a retiring generation is
 // still responsible for. Zero means the lane may close and the generation
 // be marked done.
