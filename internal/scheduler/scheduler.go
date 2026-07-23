@@ -19,7 +19,6 @@ import (
 	"context"
 	"log/slog"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/gliese129/runq/internal/resource"
@@ -77,13 +76,22 @@ type Scheduler struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 
-	// RQ-75 lane rotation: quiesced turns tick into a no-op (no NEW
+	// RQ-75 lane rotation. quiesced turns tick into a no-op (no NEW
 	// dispatches) without cancelling in-flight work; inflight counts the
 	// dispatch goroutines (launchAsync/runTask) so DrainLaunches can wait
 	// for their outcomes to settle into the DB before a replacement lane
 	// restores its queue from that DB.
-	quiesced atomic.Bool
-	inflight sync.WaitGroup
+	//
+	// quiesceMu is the SYNCHRONIZATION BARRIER between tick and Quiesce
+	// (review #4 follow-up): tick holds the read lock for its whole body,
+	// so a tick that passed the quiesced check has finished — including
+	// its synchronous inflight.Add calls — before Quiesce's write lock is
+	// granted. Without it, tick could pass the check, lose the CPU while
+	// Quiesce+Drain observe a zero count, then dispatch afterwards:
+	// exactly the double-submit window the fence exists to close.
+	quiesceMu sync.RWMutex
+	quiesced  bool // guarded by quiesceMu
+	inflight  sync.WaitGroup
 }
 
 // New creates a Scheduler with all its dependencies.
@@ -174,11 +182,30 @@ func (s *Scheduler) Shutdown() {
 // Quiesce stops the scheduler from dispatching NEW tasks (tick becomes a
 // no-op) while leaving in-flight launches and running tasks untouched —
 // the K8s-termination / nginx-reload "stop accepting, finish what you
-// have" phase of a lane swap (RQ-75). There is deliberately no resume:
-// a quiesced scheduler's lane is on its way out.
+// have" phase of a lane swap (RQ-75). Acquiring the write lock waits out
+// any tick already past its quiesced check, so when Quiesce returns,
+// every dispatch this scheduler will ever make is already registered in
+// inflight — DrainLaunches after Quiesce is therefore a true fence.
 func (s *Scheduler) Quiesce() {
-	if !s.quiesced.Swap(true) {
+	s.quiesceMu.Lock()
+	already := s.quiesced
+	s.quiesced = true
+	s.quiesceMu.Unlock()
+	if !already {
 		s.logger.Info("scheduler quiesced — no new dispatches")
+	}
+}
+
+// Resume lifts a quiesce — used ONLY by the rotation-abort path (drain
+// timed out, the replacement lane was discarded, the old lane must keep
+// serving as if nothing happened).
+func (s *Scheduler) Resume() {
+	s.quiesceMu.Lock()
+	was := s.quiesced
+	s.quiesced = false
+	s.quiesceMu.Unlock()
+	if was {
+		s.logger.Info("scheduler resumed — lane rotation aborted")
 	}
 }
 

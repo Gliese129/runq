@@ -21,12 +21,14 @@ import (
 // review-#4 fence sequence), not just end state.
 type fakeLane struct {
 	backend.Backend
-	name     string
-	id       string
-	closed   bool
-	quiesced bool
-	started  bool
-	events   *[]string
+	name      string
+	id        string
+	closed    bool
+	quiesced  bool
+	resumed   bool
+	started   bool
+	drainFail bool // simulate a straggler submission that won't settle
+	events    *[]string
 }
 
 func (f *fakeLane) rec(verb string) {
@@ -35,10 +37,14 @@ func (f *fakeLane) rec(verb string) {
 	}
 }
 
-func (f *fakeLane) Close() error                          { f.closed = true; f.rec("close"); return nil }
-func (f *fakeLane) Start(context.Context)                 { f.started = true; f.rec("start") }
-func (f *fakeLane) Quiesce()                              { f.quiesced = true; f.rec("quiesce") }
-func (f *fakeLane) DrainSubmissions(context.Context) bool { f.rec("drain"); return true }
+func (f *fakeLane) Close() error          { f.closed = true; f.rec("close"); return nil }
+func (f *fakeLane) Start(context.Context) { f.started = true; f.rec("start") }
+func (f *fakeLane) Quiesce()              { f.quiesced = true; f.rec("quiesce") }
+func (f *fakeLane) Resume()               { f.resumed = true; f.rec("resume") }
+func (f *fakeLane) DrainSubmissions(context.Context) bool {
+	f.rec("drain")
+	return !f.drainFail
+}
 
 func writeCfg(t *testing.T, dir, content string) {
 	t.Helper()
@@ -351,6 +357,70 @@ targets:
 	closed := idx("close:" + oldA.id)
 	if !(build < quiesce && quiesce < drain && drain < start && start < closed) {
 		t.Fatalf("fence order wrong:\n%v\nwant build(new) < quiesce(old) < drain(old) < start(new) < close(old)", ev)
+	}
+}
+
+// Review #4 follow-up: a drain timeout must ABORT the rotation — the old
+// lane resumes serving, the never-started replacement is discarded, and
+// the next pass (straggler settled) completes the swap.
+func TestReconcileDrainTimeoutAbortsRotation(t *testing.T) {
+	dir := t.TempDir()
+	writeCfg(t, dir, baseCfg)
+	d, _, _ := newReconcilerHarness(t, dir)
+	oldA := d.lanes["a"].(*fakeLane)
+	oldA.drainFail = true // straggler submission won't settle in time
+
+	writeCfg(t, dir, `default_target: a
+targets:
+  - name: a
+    scheduler: slurm
+    submit_template: s2
+`)
+	if err := d.ReconcileConfig("test"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Aborted: old lane still routed and serving, fence lifted.
+	if d.lanes["a"].(*fakeLane) != oldA {
+		t.Fatal("aborted rotation swapped routing anyway")
+	}
+	if oldA.closed {
+		t.Error("aborted rotation closed the serving lane")
+	}
+	if !oldA.resumed {
+		t.Error("aborted rotation did not lift the fence (Resume)")
+	}
+	// The replacement was discarded without ever starting.
+	ev := harnessEvents(d)
+	for _, e := range ev {
+		if e == "start:a#2" {
+			t.Fatalf("aborted rotation STARTED the replacement (double-submit risk): %v", ev)
+		}
+	}
+	found := false
+	for _, e := range ev {
+		if e == "close:a#2" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("discarded replacement was not closed: %v", ev)
+	}
+
+	// Straggler settles → next pass completes the rotation, same file.
+	oldA.drainFail = false
+	if err := d.ReconcileConfig("test"); err != nil {
+		t.Fatal(err)
+	}
+	newA := d.lanes["a"].(*fakeLane)
+	if newA == oldA {
+		t.Fatal("retry pass did not swap to the replacement")
+	}
+	if !newA.started {
+		t.Error("retry pass replacement not started")
+	}
+	if !oldA.closed {
+		t.Error("retry pass left the superseded lane open")
 	}
 }
 

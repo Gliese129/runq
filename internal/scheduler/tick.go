@@ -18,7 +18,12 @@ import (
 //  5. Head doesn't fit + backfill enabled → dispatch the first smaller task
 //     that fits AND passes the same blocked filters.
 func (s *Scheduler) tick() {
-	if s.quiesced.Load() {
+	// The read lock spans the WHOLE tick (review #4 follow-up): dispatch
+	// registers inflight.Add synchronously inside tick, so Quiesce (write
+	// lock) returning guarantees no un-registered dispatch can follow.
+	s.quiesceMu.RLock()
+	defer s.quiesceMu.RUnlock()
+	if s.quiesced {
 		return // lane rotation in progress (RQ-75): no NEW dispatches
 	}
 	pending := s.queue.ListPending()

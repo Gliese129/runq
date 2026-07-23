@@ -454,10 +454,16 @@ func (b *SSHBackend) Quiesce() {
 // settle their outcome into the DB. Once true, a replacement lane's
 // restoreLane sees settled rows — no task can be double-submitted by old
 // and new lanes disagreeing about what is pending. On false (timeout) the
-// stragglers will be interrupted by Close and become `unknown` (RQ-74),
-// which reconcile heals — the at-least-once + reconcile backstop.
+// caller must NOT bring up a replacement that restores from the DB — the
+// rotation is aborted and retried (Resume) instead.
 func (b *SSHBackend) DrainSubmissions(ctx context.Context) bool {
 	return b.sched.DrainLaunches(ctx)
+}
+
+// Resume lifts a Quiesce after an aborted rotation — the lane keeps
+// serving as before.
+func (b *SSHBackend) Resume() {
+	b.sched.Resume()
 }
 
 // Close stops the sensor loops and the scheduler, then releases the SSH

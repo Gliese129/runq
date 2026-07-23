@@ -114,7 +114,13 @@ func (d *Daemon) ReconcileConfig(reason string) error {
 		be := d.lanes[name]
 		delete(d.lanes, name)
 		d.laneMu.Unlock()
-		d.quiesceLane(name, be)
+		// A removal has NO successor restoring pending rows from the DB, so
+		// a drain timeout cannot double-submit — proceeding to the grace
+		// close is safe (stragglers settle as unknown; reconcile heals).
+		if !d.quiesceLane(name, be) {
+			d.Logger.Warn("removed lane drain timed out — closing after grace anyway",
+				"target", name, "timeout", d.laneDrainTimeout)
+		}
 		d.closeLaneDeferred(name, be)
 		d.Logger.Info("lane removed", "target", name)
 	}
@@ -159,7 +165,6 @@ func (d *Daemon) ReconcileConfig(reason string) error {
 			d.noteLaneBuildErr(name, berr)
 			continue
 		}
-		d.clearLaneBuildErr(name)
 		d.laneMu.Lock()
 		old := d.lanes[name]
 		d.laneMu.Unlock()
@@ -167,7 +172,22 @@ func (d *Daemon) ReconcileConfig(reason string) error {
 		//    submissions settle into the DB — so step 3's restoreLane reads
 		//    settled rows. This closes the double-submit window (old lane
 		//    launching a task the new lane also restored as pending).
-		d.quiesceLane(name, old)
+		if !d.quiesceLane(name, old) {
+			// Drain timed out: a straggler submission may still land an
+			// external id for a row the replacement would restore as
+			// pending — starting it now WOULD double-submit (review #4
+			// follow-up). ABORT the rotation: the old lane resumes serving
+			// untouched, the never-started replacement is discarded, and
+			// the record keeps the old config so the next pass retries the
+			// whole rotation (by then the straggler has settled).
+			resumeLane(old)
+			closeLane(d, name, newBe)
+			record[name] = d.lastTargets[name]
+			d.noteLaneBuildErr(name, fmt.Errorf(
+				"lane rotation aborted: in-flight submissions did not settle within %s — old lane kept serving, retrying next pass",
+				d.laneDrainTimeout))
+			continue
+		}
 		// 3. Start the replacement (restoreLane reads the settled DB) and
 		//    swap routing atomically — the target NAME never stops serving.
 		startLane(newBe)
@@ -181,6 +201,9 @@ func (d *Daemon) ReconcileConfig(reason string) error {
 		//    stragglers cut at the deadline get clean errors and their
 		//    retries land on the new lane.
 		d.closeLaneDeferred(name, old)
+		// Cleared only after the FULL rotation succeeded — clearing at
+		// build success would make an abort retry flip-flop the log.
+		d.clearLaneBuildErr(name)
 		d.Logger.Info("lane rebuilt from changed config", "target", name)
 		if tc.RemoteCLI && tc.SSH != nil {
 			if ferr := d.startForwardFor(tc); ferr != nil {
@@ -237,27 +260,38 @@ func startLane(be backend.Backend) {
 	}
 }
 
+// rotatableLane is the graceful-rotation lifecycle (SSHBackend implements
+// it; test fakes may).
+type rotatableLane interface {
+	Quiesce()
+	Resume()
+	DrainSubmissions(context.Context) bool
+}
+
 // quiesceLane fences a lane that is about to be superseded or removed
 // (review #4): stop NEW dispatches, then wait (bounded) for in-flight
-// submissions to settle into the DB. Lanes without the lifecycle (test
-// fakes) are skipped. Drain timeout 0 means "fence but don't wait".
-func (d *Daemon) quiesceLane(name string, be backend.Backend) {
-	q, ok := be.(interface {
-		Quiesce()
-		DrainSubmissions(context.Context) bool
-	})
+// submissions to settle into the DB. Returns false when the drain timed
+// out — the caller decides (a supersede ABORTS; a removal proceeds).
+// Lanes without the lifecycle (test fakes) report drained. Drain timeout
+// 0 means "fence but don't wait".
+func (d *Daemon) quiesceLane(name string, be backend.Backend) bool {
+	q, ok := be.(rotatableLane)
 	if !ok {
-		return
+		return true
 	}
 	q.Quiesce()
 	if d.laneDrainTimeout <= 0 {
-		return
+		return true
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), d.laneDrainTimeout)
 	defer cancel()
-	if !q.DrainSubmissions(ctx) {
-		d.Logger.Warn("lane drain timed out — in-flight submissions will be interrupted and settle as unknown (reconcile heals)",
-			"target", name, "timeout", d.laneDrainTimeout)
+	return q.DrainSubmissions(ctx)
+}
+
+// resumeLane lifts the fence after an aborted rotation.
+func resumeLane(be backend.Backend) {
+	if q, ok := be.(rotatableLane); ok {
+		q.Resume()
 	}
 }
 
