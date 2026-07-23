@@ -146,14 +146,22 @@ func (d *Daemon) ReconcileConfig(reason string) error {
 			promoteActive(promoted)
 			if d.Store != nil {
 				mctx, mcancel := context.WithTimeout(context.Background(), 10*time.Second)
-				_ = d.Store.MarkGenerationDone(mctx, name, tc.SemanticGeneration())
+				if merr := d.Store.MarkGenerationDone(mctx, name, tc.SemanticGeneration()); merr != nil {
+					d.Logger.Warn("mark promoted generation done failed", "target", name, "error", merr)
+				}
 				mcancel()
 			}
 			d.laneMu.Lock()
 			d.lanes[name] = promoted
 			d.laneMu.Unlock()
-			d.multiBe.SetTarget(name, promoted)
+			d.multiBe.PromoteLane(name, tc.SemanticGeneration(), promoted) // atomic (round 8 #2)
 			d.clearLaneBuildErr(name)
+			// Round 8 #4: a re-added remote_cli target gets its forward back.
+			if tc.RemoteCLI && tc.SSH != nil {
+				if ferr := d.startForwardFor(tc); ferr != nil {
+					d.Logger.Warn("forward start failed", "target", name, "error", ferr)
+				}
+			}
 			d.Logger.Info("retiring lane promoted back to active — target re-added unchanged", "target", name)
 			continue
 		}
@@ -221,23 +229,35 @@ func (d *Daemon) ReconcileConfig(reason string) error {
 			promoteActive(promoted)
 			if d.Store != nil {
 				mctx, mcancel := context.WithTimeout(context.Background(), 10*time.Second)
-				_ = d.Store.MarkGenerationDone(mctx, name, newGen)
+				if merr := d.Store.MarkGenerationDone(mctx, name, newGen); merr != nil {
+					// Record stays open; the rebuild guard closes it out as
+					// an active-generation stale record — log, don't block.
+					d.Logger.Warn("mark promoted generation done failed", "target", name, "error", merr)
+				}
 				mcancel()
 			}
-			d.multiBe.SetTarget(name, promoted)
+			d.multiBe.PromoteLane(name, newGen, promoted) // atomic (round 8 #2)
 			d.laneMu.Lock()
 			d.lanes[name] = promoted
 			d.laneMu.Unlock()
 			d.Logger.Info("retiring lane promoted back to active — config returned to its generation",
 				"target", name, "generation", shortGen(newGen))
 		} else {
-			// 5. Start the replacement and swap routing atomically.
+			// 5. Start the replacement, then swap active+retiring in ONE
+			//    registry transaction (round 8 #2).
 			startLane(newBe)
 			_ = d.StopRemoteForward(name)
-			d.multiBe.SetTarget(name, newBe)
+			d.multiBe.RotateLane(name, newBe, oldGen, old)
 			d.laneMu.Lock()
 			d.lanes[name] = newBe
 			d.laneMu.Unlock()
+		}
+		// Forward follows the ACTIVE lane, whichever object that now is
+		// (round 8 #4 applies to the promotion path too).
+		if tc.RemoteCLI && tc.SSH != nil {
+			if ferr := d.startForwardFor(tc); ferr != nil {
+				d.Logger.Warn("forward start failed", "target", name, "error", ferr)
+			}
 		}
 		// 6. Register the superseded generation (ALWAYS when generated —
 		//    round 6 #3: the sweep owns closing, after its two-zero
@@ -343,9 +363,11 @@ func (d *Daemon) takeRetiringLane(name, gen string) (backend.Backend, bool) {
 		delete(d.retiringLanes, name+"@"+gen)
 	}
 	d.laneMu.Unlock()
-	if ok {
-		d.multiBe.RemoveRetiringLane(name, gen)
-	}
+	// Round 8 #3: a stale zero-confirmation must not carry into this
+	// lane's NEXT retirement (it would close on the first sweep).
+	delete(d.retireZeroSeen, name+"@"+gen)
+	// multiBe's registry entry moves atomically in PromoteLane — never
+	// here, so a concurrent reader cannot observe a gap.
 	return be, ok
 }
 
@@ -360,6 +382,8 @@ func promoteActive(be backend.Backend) {
 // generation-routed ops and the sweep. Persistence happened earlier
 // (prepareRetirement) — this half cannot fail.
 func (d *Daemon) registerRetiring(name, gen string, be backend.Backend) {
+	// Idempotent after RotateLane (rotation path already registered the
+	// pair atomically in multiBe); the removal path relies on this call.
 	d.multiBe.SetRetiringLane(name, gen, be)
 	d.laneMu.Lock()
 	if d.retiringLanes == nil {
@@ -409,8 +433,25 @@ func (d *Daemon) sweepRetiringLocked() {
 			cancel()
 			continue
 		}
+		// Round 8 #1: an in-flight SubmitJob on this lane's pointer is a
+		// HARD barrier — its rows may not have landed yet (the counter is
+		// incremented before the retired gate, so no submit is invisible).
+		if sub, ok2 := be.(interface{ HasInFlightSubmits() bool }); ok2 && sub.HasInFlightSubmits() {
+			d.retireZeroSeen[key] = false
+			cancel()
+			continue
+		}
 		if !d.retireZeroSeen[key] {
 			d.retireZeroSeen[key] = true // first zero: confirm next sweep
+			cancel()
+			continue
+		}
+		// Round 8 #5: the DB record closes FIRST — on failure the lane
+		// stays registered and running; DB and runtime never split.
+		if merr := d.Store.MarkGenerationDone(ctx, name, gen); merr != nil {
+			d.Logger.Warn("mark generation done failed — lane kept, retrying next sweep",
+				"target", name, "error", merr)
+			d.retireZeroSeen[key] = false
 			cancel()
 			continue
 		}
@@ -420,9 +461,6 @@ func (d *Daemon) sweepRetiringLocked() {
 		delete(d.retiringLanes, key)
 		d.laneMu.Unlock()
 		closeLane(d, name, be)
-		if merr := d.Store.MarkGenerationDone(ctx, name, gen); merr != nil {
-			d.Logger.Warn("mark generation done failed", "target", name, "error", merr)
-		}
 		cancel()
 		d.Logger.Info("retired generation done — all its tasks reached terminal state",
 			"target", name, "generation", shortGen(gen))
@@ -468,6 +506,12 @@ func (d *Daemon) rebuildRetiringLanes() {
 	}
 	cur := targetsByName(cfg)
 	for _, g := range gens {
+		d.laneMu.Lock()
+		_, registered := d.retiringLanes[g.Target+"@"+g.Generation]
+		d.laneMu.Unlock()
+		if registered {
+			continue
+		}
 		// A record matching the target's CURRENT generation is a stale
 		// leftover from an aborted rotation (persist succeeded, a later
 		// step failed, the lane stayed active) — close it out instead of

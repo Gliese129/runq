@@ -81,6 +81,43 @@ func (m *MultiBackend) SetRetiringLane(name, generation string, be Backend) {
 	m.retiring[name][generation] = be
 }
 
+// RotateLane atomically installs the replacement as active AND registers
+// the superseded lane as retiring (round 8 #2): a concurrent resolveTask
+// can never observe a state where the old generation is neither active
+// nor retiring.
+func (m *MultiBackend) RotateLane(name string, newBe Backend, oldGen string, oldBe Backend) {
+	if sq, ok := newBe.(interface{ setProjectRegistry(*project.Registry) }); ok {
+		sq.setProjectRegistry(m.registry)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.targets[name] = newBe
+	if oldGen != "" && oldBe != nil {
+		if m.retiring == nil {
+			m.retiring = map[string]map[string]Backend{}
+		}
+		if m.retiring[name] == nil {
+			m.retiring[name] = map[string]Backend{}
+		}
+		m.retiring[name][oldGen] = oldBe
+	}
+}
+
+// PromoteLane atomically moves a retiring lane back to active (round 8
+// #2): remove-from-retiring and set-active happen under one lock, so a
+// concurrent reader never sees the lane in both registries or neither.
+func (m *MultiBackend) PromoteLane(name, gen string, be Backend) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if g := m.retiring[name]; g != nil {
+		delete(g, gen)
+		if len(g) == 0 {
+			delete(m.retiring, name)
+		}
+	}
+	m.targets[name] = be
+}
+
 // RemoveRetiringLane unregisters a retired lane (its count hit zero).
 func (m *MultiBackend) RemoveRetiringLane(name, generation string) {
 	m.mu.Lock()

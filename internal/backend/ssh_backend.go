@@ -144,7 +144,18 @@ type SSHBackend struct {
 	// nudgeCh wakes the sensor loop for one forced full pass. Capacity 1 +
 	// non-blocking send = concurrent nudges coalesce by construction.
 	nudgeCh chan struct{}
+
+	// submitsInFlight counts SubmitJob calls between entry and return
+	// (round 8 #1): incremented BEFORE the retired-gate check, so the
+	// sweep can never observe "zero unfinished + idle" while a Prepare is
+	// still in flight on this lane's pointer — the true lifecycle barrier
+	// the two-zero confirmation alone could not be.
+	submitsInFlight atomic.Int64
 }
+
+// HasInFlightSubmits reports whether a SubmitJob is currently executing
+// against this lane (round 8 #1) — the sweep refuses to close while true.
+func (b *SSHBackend) HasInFlightSubmits() bool { return b.submitsInFlight.Load() > 0 }
 
 // touchActivity records a user-driven interaction (wakes a hibernated sensor
 // on its next tick).
@@ -1141,11 +1152,14 @@ func (b *SSHBackend) ResumeJob(_ context.Context, _ string) error {
 // max_inflight slots. The returned count is tasks ACCEPTED (queued).
 func (b *SSHBackend) SubmitJob(ctx context.Context, cfg job.JobConfig, opts SubmitOptions) (string, int, error) {
 	b.touchActivity()
+	// Increment BEFORE the gate (round 8 #1): once past this line the
+	// sweep sees the submit and will not close the lane under it.
+	b.submitsInFlight.Add(1)
+	defer b.submitsInFlight.Add(-1)
 	// Retired = no NEW tasks (round 7, user design: the retired flag is a
-	// capability switch). Best-effort, deliberately fence-free: a request
-	// that passes this check before the flag flips still lands in this
-	// lane's queue and runs correctly under its config snapshot — the
-	// gate improves routing, correctness never depends on it.
+	// capability switch). A request that passes this check before the flag
+	// flips still lands in this lane's queue, runs correctly under its
+	// config snapshot, and is covered by the in-flight counter above.
 	if b.scope.IsRetiring() {
 		return "", 0, fmt.Errorf("target %s: %w — retry to reach the active configuration", b.targetName, ErrLaneRetired)
 	}
