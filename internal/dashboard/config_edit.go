@@ -31,6 +31,10 @@ type targetsListResponse struct {
 	// (RQ-75). The edit form stores it and sends it back as If-Match; a
 	// mismatch on save means someone else changed the file in between.
 	ConfigGeneration string `json:"config_generation"`
+	// Generations lists retired/retiring lane generations (RQ-75): same-name
+	// entries render as sub-rows of their active target, removed-target
+	// entries go to the collapsed archived section.
+	Generations []backend.TargetGenerationView `json:"generations,omitempty"`
 }
 
 type targetCheckResponse struct {
@@ -63,12 +67,20 @@ func (s *Server) handleListTargets(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, targetsListResponse{
+	resp := targetsListResponse{
 		Items:            cfg.ResolveTargets(),
 		Placeholders:     config.HPCPlaceholders,
 		Path:             config.ConfigPath(),
 		ConfigGeneration: cfg.Generation,
-	})
+	}
+	if tg, ok := s.backend.(interface {
+		TargetGenerations(context.Context) ([]backend.TargetGenerationView, error)
+	}); ok {
+		if gens, gerr := tg.TargetGenerations(r.Context()); gerr == nil {
+			resp.Generations = gens
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // ifMatchHeader extracts the If-Match generation from the request, tolerant

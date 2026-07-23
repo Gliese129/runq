@@ -347,6 +347,19 @@ const (
 	CodeGenerationChanged = "generation_changed"
 )
 
+// TargetGenerationView is one retired/retiring target generation for the
+// CLI/WebUI archive display (RQ-75): same-name generations render as
+// sub-rows of their active target; generations of REMOVED targets go to
+// the collapsed archived section.
+type TargetGenerationView struct {
+	Target     string `json:"target"`
+	Generation string `json:"generation"`
+	Reason     string `json:"reason"` // changed | removed
+	RetiredAt  int64  `json:"retired_at"`
+	DoneAt     *int64 `json:"done_at,omitempty"` // nil = still retiring
+	Unfinished int    `json:"unfinished"`        // tasks it still tracks
+}
+
 // GenerationChangedError refuses an UNCONFIRMED rerun of a task whose
 // target config changed since it was submitted (RQ-75): the rerun will use
 // the NEW config, and the human should know before it does. Confirmed

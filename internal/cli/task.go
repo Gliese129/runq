@@ -1,8 +1,12 @@
 package cli
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"strings"
 
+	"github.com/gliese129/runq/internal/api"
 	"github.com/gliese129/runq/internal/backend"
 	"github.com/spf13/cobra"
 )
@@ -37,10 +41,35 @@ var taskRetryCmd = &cobra.Command{
 	RunE:  runTaskRetry,
 }
 
+var taskRetryYes bool
+
 func runTaskRetry(cmd *cobra.Command, args []string) error {
 	id := args[0]
 	return withBackend(cmd, func(b backend.Backend) error {
-		if err := b.RetryTask(cmd.Context(), id); err != nil {
+		err := b.RetryTask(cmd.Context(), id)
+		// RQ-75: the target's config changed since this task was submitted
+		// — the rerun will use the NEW config. Ask (y/N) unless -y.
+		var apiErr *api.APIError
+		if errors.As(err, &apiErr) && apiErr.Code == backend.CodeGenerationChanged {
+			if !taskRetryYes {
+				fmt.Fprintf(cmd.ErrOrStderr(),
+					"W: target config CHANGED since task %s was submitted (%s).\n   The rerun will use the NEW config.\n", id, apiErr.Details)
+				fmt.Fprint(cmd.ErrOrStderr(), "Rerun anyway? [y/N]: ")
+				var answer string
+				_, _ = fmt.Fscanln(cmd.InOrStdin(), &answer)
+				if a := strings.ToLower(strings.TrimSpace(answer)); a != "y" && a != "yes" {
+					return fmt.Errorf("aborted")
+				}
+			}
+			cr, ok := b.(interface {
+				RetryTaskConfirm(context.Context, string) error
+			})
+			if !ok {
+				return err
+			}
+			err = cr.RetryTaskConfirm(cmd.Context(), id)
+		}
+		if err != nil {
 			return err
 		}
 		fmt.Printf("task %s re-enqueued\n", id)
@@ -49,6 +78,8 @@ func runTaskRetry(cmd *cobra.Command, args []string) error {
 }
 
 func init() {
+	taskRetryCmd.Flags().BoolVarP(&taskRetryYes, "yes", "y", false,
+		"skip the confirmation when the target config changed since submission")
 	taskCmd.AddCommand(taskShowCmd)
 	taskCmd.AddCommand(taskRetryCmd)
 	taskCmd.GroupID = groupManagement

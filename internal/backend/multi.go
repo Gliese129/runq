@@ -101,6 +101,29 @@ func (m *MultiBackend) retiringLane(name, generation string) (Backend, bool) {
 	return be, ok
 }
 
+// TargetGenerations returns the recorded generations (retiring first,
+// then recently done) with live unfinished counts — the archive view.
+func (m *MultiBackend) TargetGenerations(ctx context.Context) ([]TargetGenerationView, error) {
+	rows, err := m.store.ListAllGenerations(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]TargetGenerationView, 0, len(rows))
+	for _, g := range rows {
+		v := TargetGenerationView{
+			Target: g.Target, Generation: g.Generation, Reason: g.Reason,
+			RetiredAt: g.RetiredAt, DoneAt: g.DoneAt,
+		}
+		if g.DoneAt == nil {
+			if n, cerr := m.store.CountUnfinishedGenerationTasks(ctx, g.Target, g.Generation); cerr == nil {
+				v.Unfinished = n
+			}
+		}
+		out = append(out, v)
+	}
+	return out, nil
+}
+
 // retiringLanesOf snapshots the retiring lanes of one target.
 func (m *MultiBackend) retiringLanesOf(name string) []Backend {
 	m.mu.RLock()

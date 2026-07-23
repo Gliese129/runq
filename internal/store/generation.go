@@ -52,6 +52,12 @@ func (s *Store) ListRetiringGenerations(ctx context.Context) ([]TargetGeneration
 	return s.listGenerations(ctx, `WHERE done_at IS NULL`)
 }
 
+// ListAllGenerations returns every recorded generation, still-retiring
+// first, newest first within each group — the archive view's data.
+func (s *Store) ListAllGenerations(ctx context.Context) ([]TargetGenerationRow, error) {
+	return s.listGenerations(ctx, `ORDER BY (done_at IS NULL) DESC, retired_at DESC`)
+}
+
 // ListArchivedGenerations returns ALL recorded generations for a target
 // (retiring and done), newest first — the CLI/WebUI archive view.
 func (s *Store) ListArchivedGenerations(ctx context.Context, target string) ([]TargetGenerationRow, error) {
