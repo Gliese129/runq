@@ -3,6 +3,7 @@ package backend
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/gliese129/runq/internal/job"
@@ -342,6 +343,12 @@ const (
 	// 409: If-Match generation mismatch — the config file changed since the
 	// client read it (RQ-75). Response carries current_generation.
 	CodeGenerationConflict = "generation_conflict"
+	// 409: submit reached a RETIRED lane generation (best-effort gate —
+	// routing already sends new work to the active lane; this catches a
+	// straggler holding the old pointer). Retry immediately: it lands on
+	// the active lane. A request that slips past the gate still runs
+	// correctly under the retired lane's config snapshot.
+	CodeLaneRetired = "lane_retired"
 	// 409: rerun of a task whose target config CHANGED since submission
 	// (RQ-75) — needs explicit confirmation (WebUI dialog / CLI y/N or -y).
 	CodeGenerationChanged = "generation_changed"
@@ -359,6 +366,11 @@ type TargetGenerationView struct {
 	DoneAt     *int64 `json:"done_at,omitempty"` // nil = still retiring
 	Unfinished int    `json:"unfinished"`        // tasks it still tracks
 }
+
+// ErrLaneRetired is the intake gate of a retired lane generation (round
+// 7): routing already sends new work to the active lane, so hitting this
+// means the caller held a stale pointer — an immediate retry succeeds.
+var ErrLaneRetired = errors.New("lane generation retired")
 
 // GenerationChangedError refuses an UNCONFIRMED rerun of a task whose
 // target config changed since it was submitted (RQ-75): the rerun will use

@@ -1305,6 +1305,12 @@ func writeError(w http.ResponseWriter, err error) {
 		})
 		return
 	}
+	if errors.Is(err, backend.ErrLaneRetired) {
+		writeJSON(w, http.StatusConflict, backend.ErrorResponse{
+			Error: err.Error(), Code: backend.CodeLaneRetired, RetryAfterSeconds: 1,
+		})
+		return
+	}
 	status, code := http.StatusInternalServerError, backend.CodeInternal
 	msg := strings.ToLower(err.Error())
 	switch {

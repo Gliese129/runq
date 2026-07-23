@@ -1141,9 +1141,14 @@ func (b *SSHBackend) ResumeJob(_ context.Context, _ string) error {
 // max_inflight slots. The returned count is tasks ACCEPTED (queued).
 func (b *SSHBackend) SubmitJob(ctx context.Context, cfg job.JobConfig, opts SubmitOptions) (string, int, error) {
 	b.touchActivity()
-	// No intake fence (round 5, user design): a submit accepted through a
-	// retiring lane's pointer lands in ITS queue and runs under the config
-	// it was submitted against — the snapshot is the contract.
+	// Retired = no NEW tasks (round 7, user design: the retired flag is a
+	// capability switch). Best-effort, deliberately fence-free: a request
+	// that passes this check before the flag flips still lands in this
+	// lane's queue and runs correctly under its config snapshot — the
+	// gate improves routing, correctness never depends on it.
+	if b.scope.IsRetiring() {
+		return "", 0, fmt.Errorf("target %s: %w — retry to reach the active configuration", b.targetName, ErrLaneRetired)
+	}
 	proj, err := b.reg.Get(ctx, cfg.Project)
 	if err != nil {
 		return "", 0, fmt.Errorf("project %q: %w", cfg.Project, err)
