@@ -475,16 +475,16 @@ func (b *SSHBackend) Generation() string { return b.scope.Generation }
 // lane's own generation (never queueing pending work — that belongs to
 // the active generation). Must be called BEFORE Start when rebuilding a
 // retiring lane after a restart.
-func (b *SSHBackend) MarkRetiring() {
-	b.scope.MarkRetiring()
-	b.sched.Quiesce()
-}
+func (b *SSHBackend) MarkRetiring() { b.Quiesce() }
 
-// Quiesce stops this lane from starting NEW work (RQ-75 lane rotation):
-// the scheduler stops dispatching; in-flight submissions, the sensor loop
-// and read traffic continue. First phase of the graceful swap — the
-// "removed from Endpoints, not yet SIGTERMed" state.
+// Quiesce is the FULL fence for a lane rotation (RQ-75, review round 3):
+// the scheduler stops dispatching, SubmitJob refuses intake, and the
+// ownership scope narrows to exactly this generation — so between the
+// fence and the routing swap no new task can be written under the old
+// generation and the sensors cannot touch foreign generations. In-flight
+// submissions, sensing of OWN tasks and read traffic continue.
 func (b *SSHBackend) Quiesce() {
+	b.scope.MarkRetiring()
 	b.sched.Quiesce()
 }
 
@@ -498,9 +498,10 @@ func (b *SSHBackend) DrainSubmissions(ctx context.Context) bool {
 	return b.sched.DrainLaunches(ctx)
 }
 
-// Resume lifts a Quiesce after an aborted rotation — the lane keeps
-// serving as before.
+// Resume lifts the fence after an aborted rotation — scope widens back
+// to active, intake reopens, dispatch restarts.
 func (b *SSHBackend) Resume() {
+	b.scope.ResumeActive()
 	b.sched.Resume()
 }
 
@@ -611,7 +612,9 @@ func (b *SSHBackend) GetJob(ctx context.Context, jobID string) (*JobDetail, erro
 	if j == nil {
 		return nil, fmt.Errorf("job %q: %w", jobID, ErrNotFound)
 	}
-	tasks, err := b.store.ListTasks(ctx, store.TaskFilter{JobID: jobID, Scope: b.scope})
+	// UNscoped: GetJob is a USER VIEW — it must show the whole job,
+	// including tasks a retiring generation still tracks (review round 3).
+	tasks, err := b.store.ListTasks(ctx, store.TaskFilter{JobID: jobID})
 	if err != nil {
 		return nil, err
 	}
@@ -1156,6 +1159,13 @@ func (b *SSHBackend) ResumeJob(_ context.Context, _ string) error {
 // max_inflight slots. The returned count is tasks ACCEPTED (queued).
 func (b *SSHBackend) SubmitJob(ctx context.Context, cfg job.JobConfig, opts SubmitOptions) (string, int, error) {
 	b.touchActivity()
+	// Fence gate (review round 3): a submit accepted between the fence
+	// and the routing swap would be stamped with the OLD generation and
+	// then sit in a permanently-quiesced queue forever. Refuse honestly;
+	// the retry lands on the replacement lane after the swap.
+	if b.scope.IsRetiring() {
+		return "", 0, fmt.Errorf("target %s is rotating to a new configuration — retry in a moment", b.targetName)
+	}
 	proj, err := b.reg.Get(ctx, cfg.Project)
 	if err != nil {
 		return "", 0, fmt.Errorf("project %q: %w", cfg.Project, err)

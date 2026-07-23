@@ -52,6 +52,13 @@ func (b *Backend) ScanDoneMarkers(ctx context.Context) error {
 		if gerr != nil || tk == nil || tk.Target != b.Cfg.Name {
 			continue // not ours — leave the marker alone
 		}
+		// Generation ownership (review round 3): with a shared workspace,
+		// active and retiring lanes see the SAME done dir — only the
+		// owning lane may read, settle and delete a task's marker.
+		// (Adoption restamps rows at restore, so exact match suffices.)
+		if b.Scope != nil && tk.TargetGeneration != b.Scope.Generation {
+			continue
+		}
 		if isTerminal(tk.Status) {
 			// Already settled (probe beat the marker, or a rescan): the
 			// marker is stale bookkeeping, safe to clear.

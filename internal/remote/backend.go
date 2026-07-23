@@ -309,7 +309,10 @@ func sortedKeys(m map[string]string) []string {
 // the daemon's service.refreshJobStatus so daemon and HPC report jobs the same
 // way.
 func (b *Backend) refreshJobStatus(ctx context.Context, jobID string) error {
-	tasks, err := b.Store.ListTasks(ctx, store.TaskFilter{JobID: jobID, Scope: b.Scope})
+	// Deliberately UNscoped (review round 3): the job aggregate must see
+	// ALL generations' tasks — a lane judging terminality from only its
+	// own subset would close a job whose other-generation tasks still run.
+	tasks, err := b.Store.ListTasks(ctx, store.TaskFilter{JobID: jobID})
 	if err != nil {
 		return err
 	}

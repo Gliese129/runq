@@ -39,6 +39,9 @@ func NewLaneScope(target, generation string) *LaneScope {
 // MarkRetiring narrows the scope to exactly this generation.
 func (s *LaneScope) MarkRetiring() { s.retiring.Store(true) }
 
+// ResumeActive widens the scope back (aborted rotation only).
+func (s *LaneScope) ResumeActive() { s.retiring.Store(false) }
+
 // IsRetiring reports the current scope mode.
 func (s *LaneScope) IsRetiring() bool { return s.retiring.Load() }
 
@@ -141,10 +144,14 @@ func (s *Store) IsRetiringGeneration(ctx context.Context, target, generation str
 // be marked done.
 func (s *Store) CountUnfinishedGenerationTasks(ctx context.Context, target, generation string) (int, error) {
 	var n int
+	// Unsubmitted pending rows are excluded: on rotation they migrate to
+	// the new generation, on removal they are stopped — either way they
+	// are never a reason to keep the old lane alive (review round 3).
 	err := s.db.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM tasks
 		WHERE target = ? AND target_generation = ?
-		  AND status NOT IN ('success', 'failed', 'killed')`,
+		  AND status NOT IN ('success', 'failed', 'killed')
+		  AND NOT (status = 'pending' AND (external_id IS NULL OR external_id = ''))`,
 		target, generation).Scan(&n)
 	return n, err
 }

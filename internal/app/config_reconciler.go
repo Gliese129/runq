@@ -112,19 +112,32 @@ func (d *Daemon) ReconcileConfig(reason string) error {
 		d.laneMu.Lock()
 		be := d.lanes[name]
 		d.laneMu.Unlock()
-		// PERSISTENCE FIRST, while the lane is still routed (review #4):
-		// stop pending rows (user decision: removed name ≠ migration —
-		// they have no lane to ever run on; the reason is recorded
-		// verbatim) and record the retirement. Any failure keeps the
-		// target in the record so the next pass retries the whole removal.
+		// FENCE FIRST (review round 3 #2): stop dispatch + refuse submits
+		// + drain in-flight — otherwise the scheduler can launch a row we
+		// are about to mark killed, and the API can add fresh pending rows
+		// after the stop. A drain timeout is safe to proceed past (no
+		// successor restores pending rows).
+		if !d.quiesceLane(name, be) {
+			d.Logger.Warn("removed lane drain timed out — proceeding anyway",
+				"target", name, "timeout", d.laneDrainTimeout)
+		}
+		abortRemoval := func(aerr error) {
+			resumeLane(be)
+			record[name] = d.lastTargets[name]
+			d.noteLaneBuildErr(name, fmt.Errorf("removal aborted: %w — retrying next pass", aerr))
+		}
+		// Persist while still routed: stop pending rows (user decision:
+		// removed name ≠ migration; reason recorded verbatim) and record
+		// the retirement. Any failure lifts the fence and retries next
+		// pass. The lane's in-memory queue may still hold the DB-killed
+		// entries — it is quiesced for good, so they can never launch.
 		if d.Store != nil {
 			sctx, scancel := context.WithTimeout(context.Background(), 10*time.Second)
 			ids, serr := d.Store.StopPendingTasks(sctx, name,
 				"target "+name+" was removed from config.yaml — pending task stopped before submission")
 			scancel()
 			if serr != nil {
-				record[name] = d.lastTargets[name]
-				d.noteLaneBuildErr(name, fmt.Errorf("removal aborted: stop pending tasks failed: %w — retrying next pass", serr))
+				abortRemoval(fmt.Errorf("stop pending tasks failed: %w", serr))
 				continue
 			}
 			if len(ids) > 0 {
@@ -134,22 +147,14 @@ func (d *Daemon) ReconcileConfig(reason string) error {
 		}
 		retire, perr := d.prepareRetirement(name, d.lastTargets[name], be, "removed")
 		if perr != nil {
-			record[name] = d.lastTargets[name]
-			d.noteLaneBuildErr(name, fmt.Errorf("removal aborted: %w — retrying next pass", perr))
+			abortRemoval(perr)
 			continue
 		}
-		// Unroute, fence, drain. A removal has NO successor restoring
-		// pending rows, so a drain timeout cannot double-submit —
-		// proceeding is safe (stragglers settle as unknown).
 		_ = d.StopRemoteForward(name)
 		d.multiBe.RemoveTarget(name)
 		d.laneMu.Lock()
 		delete(d.lanes, name)
 		d.laneMu.Unlock()
-		if !d.quiesceLane(name, be) {
-			d.Logger.Warn("removed lane drain timed out — proceeding to retirement anyway",
-				"target", name, "timeout", d.laneDrainTimeout)
-		}
 		if retire {
 			d.registerRetiring(name, laneGeneration(be), be)
 		} else {
@@ -235,9 +240,21 @@ func (d *Daemon) ReconcileConfig(reason string) error {
 			record[name] = d.lastTargets[name]
 			d.noteLaneBuildErr(name, fmt.Errorf("rotation aborted: %w — old lane kept serving, retrying next pass", aerr))
 		}
-		// Pending rows migrate to the new generation BEFORE the count, so
-		// unfinished(oldGen) means in-flight work only (user decision:
-		// same-name pending auto-follows the new config).
+		// Count+persist BEFORE the pending migration (review round 3 #3):
+		// the restamp is the LAST persistence step, so an abort at any
+		// earlier point leaves the pending rows untouched — the resumed
+		// old lane never launches rows stamped with a foreign generation.
+		// (The count excludes unsubmitted pending rows, so ordering does
+		// not change the retirement decision.)
+		retire, perr := d.prepareRetirement(name, d.lastTargets[name], old, "changed")
+		if perr != nil {
+			abort(perr)
+			continue
+		}
+		// Pending rows migrate to the new generation (user decision:
+		// same-name pending auto-follows the new config). Single atomic
+		// UPDATE: failure = nothing migrated = clean abort; success has
+		// no failable step left before the replacement starts.
 		if d.Store != nil {
 			mctx, mcancel := context.WithTimeout(context.Background(), 10*time.Second)
 			nMig, rerr := d.Store.RestampPendingTasks(mctx, name, tc.SemanticGeneration())
@@ -249,11 +266,6 @@ func (d *Daemon) ReconcileConfig(reason string) error {
 			if nMig > 0 {
 				d.Logger.Info("pending tasks migrated to the new generation", "target", name, "count", nMig)
 			}
-		}
-		retire, perr := d.prepareRetirement(name, d.lastTargets[name], old, "changed")
-		if perr != nil {
-			abort(perr)
-			continue
 		}
 		// 4. Start the replacement (restore sees the retirement record and
 		//    the restamped pending rows) and swap routing atomically — the
