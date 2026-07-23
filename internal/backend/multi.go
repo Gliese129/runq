@@ -103,10 +103,11 @@ func (m *MultiBackend) RotateLane(name string, newBe Backend, oldGen string, old
 	}
 }
 
-// PromoteLane atomically moves a retiring lane back to active (round 8
-// #2): remove-from-retiring and set-active happen under one lock, so a
-// concurrent reader never sees the lane in both registries or neither.
-func (m *MultiBackend) PromoteLane(name, gen string, be Backend) {
+// PromoteLane atomically moves a retiring lane back to active AND, when a
+// lane is being superseded by the promotion (A→B→A: B steps down as A
+// steps up), registers it as retiring in the SAME transaction (round 9
+// #2) — a concurrent reader never sees either generation unrouted.
+func (m *MultiBackend) PromoteLane(name, gen string, be Backend, supersededGen string, supersededBe Backend) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if g := m.retiring[name]; g != nil {
@@ -116,6 +117,33 @@ func (m *MultiBackend) PromoteLane(name, gen string, be Backend) {
 		}
 	}
 	m.targets[name] = be
+	if supersededGen != "" && supersededBe != nil {
+		if m.retiring == nil {
+			m.retiring = map[string]map[string]Backend{}
+		}
+		if m.retiring[name] == nil {
+			m.retiring[name] = map[string]Backend{}
+		}
+		m.retiring[name][supersededGen] = supersededBe
+	}
+}
+
+// RetireTarget atomically unroutes a REMOVED target's active lane and
+// registers it as retiring (round 9 #1) — task routing by generation
+// keeps working through the whole transition, no not-found window.
+func (m *MultiBackend) RetireTarget(name, gen string, be Backend) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.targets, name)
+	if gen != "" && be != nil {
+		if m.retiring == nil {
+			m.retiring = map[string]map[string]Backend{}
+		}
+		if m.retiring[name] == nil {
+			m.retiring[name] = map[string]Backend{}
+		}
+		m.retiring[name][gen] = be
+	}
 }
 
 // RemoveRetiringLane unregisters a retired lane (its count hit zero).

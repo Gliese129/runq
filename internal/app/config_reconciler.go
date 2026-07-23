@@ -125,13 +125,19 @@ func (d *Daemon) ReconcileConfig(reason string) error {
 		}
 		markRetiring(be)
 		_ = d.StopRemoteForward(name)
-		d.multiBe.RemoveTarget(name)
-		d.laneMu.Lock()
-		delete(d.lanes, name)
-		d.laneMu.Unlock()
 		if retire {
+			// Unroute + register-retiring in ONE registry transaction
+			// (round 9 #1): no not-found window for concurrent task routing.
+			d.multiBe.RetireTarget(name, laneGeneration(be), be)
+			d.laneMu.Lock()
+			delete(d.lanes, name)
+			d.laneMu.Unlock()
 			d.registerRetiring(name, laneGeneration(be), be)
 		} else {
+			d.multiBe.RemoveTarget(name)
+			d.laneMu.Lock()
+			delete(d.lanes, name)
+			d.laneMu.Unlock()
 			d.closeLaneDeferred(name, be)
 		}
 		d.clearLaneBuildErr(name)
@@ -154,7 +160,7 @@ func (d *Daemon) ReconcileConfig(reason string) error {
 			d.laneMu.Lock()
 			d.lanes[name] = promoted
 			d.laneMu.Unlock()
-			d.multiBe.PromoteLane(name, tc.SemanticGeneration(), promoted) // atomic (round 8 #2)
+			d.multiBe.PromoteLane(name, tc.SemanticGeneration(), promoted, "", nil) // atomic (round 8 #2)
 			d.clearLaneBuildErr(name)
 			// Round 8 #4: a re-added remote_cli target gets its forward back.
 			if tc.RemoteCLI && tc.SSH != nil {
@@ -236,7 +242,9 @@ func (d *Daemon) ReconcileConfig(reason string) error {
 				}
 				mcancel()
 			}
-			d.multiBe.PromoteLane(name, newGen, promoted) // atomic (round 8 #2)
+			// One transaction (round 9 #2): A up, B down — no window
+			// where B's tasks route to A.
+			d.multiBe.PromoteLane(name, newGen, promoted, oldGen, old)
 			d.laneMu.Lock()
 			d.lanes[name] = promoted
 			d.laneMu.Unlock()
@@ -271,11 +279,6 @@ func (d *Daemon) ReconcileConfig(reason string) error {
 		// build success would make an abort retry flip-flop the log.
 		d.clearLaneBuildErr(name)
 		d.Logger.Info("lane rebuilt from changed config", "target", name)
-		if tc.RemoteCLI && tc.SSH != nil {
-			if ferr := d.startForwardFor(tc); ferr != nil {
-				d.Logger.Warn("forward start failed", "target", name, "error", ferr)
-			}
-		}
 	}
 
 	if nd := cfg.ResolveDefaultTarget(); nd != d.lastDefault {
@@ -382,9 +385,10 @@ func promoteActive(be backend.Backend) {
 // generation-routed ops and the sweep. Persistence happened earlier
 // (prepareRetirement) — this half cannot fail.
 func (d *Daemon) registerRetiring(name, gen string, be backend.Backend) {
-	// Idempotent after RotateLane (rotation path already registered the
-	// pair atomically in multiBe); the removal path relies on this call.
-	d.multiBe.SetRetiringLane(name, gen, be)
+	// Daemon-side tracking ONLY (round 9): every multiBe registry move is
+	// done atomically by the caller (RotateLane / RetireTarget /
+	// PromoteLane) — doing it here again would reopen the window those
+	// transactions close.
 	d.laneMu.Lock()
 	if d.retiringLanes == nil {
 		d.retiringLanes = map[string]backend.Backend{}
@@ -412,6 +416,35 @@ func (d *Daemon) sweepRetiringLocked() {
 	if d.Store == nil {
 		return
 	}
+	// Round 9 #3: a promotion whose MarkGenerationDone failed leaves an
+	// open record for a generation that is ACTIVE again. Heal it every
+	// sweep (level-triggered) instead of waiting for a restart.
+	activeGens := map[string]string{} // target -> active generation
+	d.laneMu.Lock()
+	for name, be := range d.lanes {
+		if g := laneGeneration(be); g != "" {
+			activeGens[name] = g
+		}
+	}
+	d.laneMu.Unlock()
+	hctx, hcancel := context.WithTimeout(context.Background(), 10*time.Second)
+	if open, oerr := d.Store.ListRetiringGenerations(hctx); oerr == nil {
+		for _, g := range open {
+			d.laneMu.Lock()
+			_, registered := d.retiringLanes[g.Target+"@"+g.Generation]
+			d.laneMu.Unlock()
+			if !registered && activeGens[g.Target] == g.Generation {
+				if merr := d.Store.MarkGenerationDone(hctx, g.Target, g.Generation); merr != nil {
+					d.Logger.Warn("stale active-generation record heal failed — retrying next sweep",
+						"target", g.Target, "error", merr)
+				} else {
+					d.Logger.Info("stale active-generation record closed",
+						"target", g.Target, "generation", shortGen(g.Generation))
+				}
+			}
+		}
+	}
+	hcancel()
 	if d.retireZeroSeen == nil {
 		d.retireZeroSeen = map[string]bool{}
 	}
