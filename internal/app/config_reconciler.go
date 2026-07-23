@@ -463,6 +463,14 @@ func (d *Daemon) rebuildRetiringLanes() {
 		}
 		markRetiring(be) // BEFORE Start: restore must use the retiring filter
 		startLane(be)
+		// Forwarding responsibility survives restarts (round 4): a rebuilt
+		// retiring lane keeps handing pending strays to the current active
+		// lane, or settling them if its target was removed.
+		reason := ""
+		if g.Reason == "removed" {
+			reason = "target " + g.Target + " was removed from config.yaml — pending task stopped before submission"
+		}
+		d.beginLaneRetirement(g.Target, be, reason)
 		d.multiBe.SetRetiringLane(g.Target, g.Generation, be)
 		d.laneMu.Lock()
 		if d.retiringLanes == nil {
