@@ -18,25 +18,6 @@ import (
 //  5. Head doesn't fit + backfill enabled → dispatch the first smaller task
 //     that fits AND passes the same blocked filters.
 func (s *Scheduler) tick() {
-	// The read lock spans the WHOLE tick (review #4 follow-up): dispatch
-	// registers inflight.Add synchronously inside tick, so Quiesce (write
-	// lock) returning guarantees no un-registered dispatch can follow.
-	s.quiesceMu.RLock()
-	defer s.quiesceMu.RUnlock()
-	if s.quiesced {
-		// Retiring lane (RQ-75): pending work is not frozen — it is
-		// handed to the successor (or settled, for a removed target).
-		// Late-arriving submits land here too and get forwarded next
-		// tick, which is what makes an intake fence unnecessary.
-		if fn := s.retireAction; fn != nil {
-			for _, t := range s.queue.ListPending() {
-				if !fn(t) {
-					break // no destination yet — retry the whole set next tick
-				}
-			}
-		}
-		return
-	}
 	pending := s.queue.ListPending()
 	if len(pending) == 0 {
 		return
@@ -163,10 +144,8 @@ func (s *Scheduler) dispatch(task *Task) {
 		}
 		s.logger.Info("task handed to remote scheduler", "task", task.ID, "job", task.JobID)
 		s.wg.Add(1)
-		s.inflight.Add(1)
 		go func() {
 			defer s.wg.Done()
-			defer s.inflight.Done()
 			s.launchAsync(task)
 		}()
 		return
@@ -204,10 +183,8 @@ func (s *Scheduler) dispatch(task *Task) {
 
 	s.logger.Info("task dispatched", "task", task.ID, "job", task.JobID, "gpus", gpus)
 	s.wg.Add(1)
-	s.inflight.Add(1)
 	go func() {
 		defer s.wg.Done()
-		defer s.inflight.Done()
 		s.runTask(task)
 	}()
 }

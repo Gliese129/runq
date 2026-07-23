@@ -21,18 +21,13 @@ import (
 // review-#4 fence sequence), not just end state.
 type fakeLane struct {
 	backend.Backend
-	name          string
-	id            string
-	gen           string // SemanticGeneration of the config this lane was built from
-	closed        bool
-	quiesced      bool
-	resumed       bool
-	started       bool
-	retiring      bool
-	drainFail     bool // simulate a straggler submission that won't settle
-	forwardWired  bool
-	removalReason string
-	events        *[]string
+	name     string
+	id       string
+	gen      string // SemanticGeneration of the config this lane was built from
+	closed   bool
+	started  bool
+	retiring bool
+	events   *[]string
 }
 
 func (f *fakeLane) rec(verb string) {
@@ -43,24 +38,8 @@ func (f *fakeLane) rec(verb string) {
 
 func (f *fakeLane) Close() error          { f.closed = true; f.rec("close"); return nil }
 func (f *fakeLane) Start(context.Context) { f.started = true; f.rec("start") }
-func (f *fakeLane) Quiesce()              { f.quiesced = true; f.rec("quiesce") }
-func (f *fakeLane) Resume()               { f.resumed = true; f.rec("resume") }
 func (f *fakeLane) Generation() string    { return f.gen }
 func (f *fakeLane) MarkRetiring()         { f.retiring = true; f.rec("retire") }
-func (f *fakeLane) DrainSubmissions(context.Context) bool {
-	f.rec("drain")
-	return !f.drainFail
-}
-
-// BeginRetirement records the forwarding wiring (RQ-75 round 4): resolve
-// != nil = rotation (successor lookup), removalReason != "" = removal.
-func (f *fakeLane) BeginRetirement(resolve func() (backend.Backend, bool), removalReason string) {
-	f.quiesced = true
-	f.retiring = true
-	f.forwardWired = resolve != nil
-	f.removalReason = removalReason
-	f.rec("beginRetire")
-}
 
 func writeCfg(t *testing.T, dir, content string) {
 	t.Helper()
@@ -125,9 +104,6 @@ func newReconcilerHarness(t *testing.T, dir string) (*Daemon, *[]string, map[str
 		lastTargets:  targetsByName(cfg),
 		lastDefault:  cfg.ResolveDefaultTarget(),
 		bootDataPath: cfg.DataPath,
-		// Drain waits enabled (fakes drain instantly); grace 0 = sync close
-		// so tests assert deterministically.
-		laneDrainTimeout: time.Second,
 	}
 	return d, &built, failing
 }
@@ -347,8 +323,8 @@ targets:
 	if newA == oldA || !newA.started {
 		t.Fatal("routing did not swap to a started replacement")
 	}
-	if !oldA.retiring || !oldA.forwardWired || oldA.removalReason != "" {
-		t.Fatalf("old lane not wired for forwarding: %+v", oldA)
+	if !oldA.retiring {
+		t.Fatalf("old lane not marked retiring: %+v", oldA)
 	}
 	ev := harnessEvents(d)
 	idx := func(e string) int {
@@ -360,8 +336,8 @@ targets:
 		t.Fatalf("event %s missing in %v", e, ev)
 		return -1
 	}
-	if !(idx("build:"+newA.id) < idx("start:"+newA.id) && idx("start:"+newA.id) < idx("beginRetire:"+oldA.id)) {
-		t.Fatalf("forward order wrong: %v", ev)
+	if !(idx("build:"+newA.id) < idx("start:"+newA.id) && idx("start:"+newA.id) < idx("retire:"+oldA.id)) {
+		t.Fatalf("rotation order wrong: %v", ev)
 	}
 }
 
@@ -442,14 +418,13 @@ targets:
 		t.Fatalf("retirement not persisted: %+v", gens)
 	}
 
-	// Round 4: pending rows are NOT bulk-restamped by the reconciler —
-	// they move via the forwarding action (wired below), which restamps
-	// per handoff on the receiving lane. Both rows keep the old stamp
-	// here; the fake records that forwarding was wired.
-	if !oldA.forwardWired {
-		t.Fatal("rotation did not wire pending forwarding")
+	// Round 5 (snapshot isolation): NOTHING is restamped or migrated —
+	// both rows stay with the old generation, which keeps running them.
+	row, _ := d.Store.GetTask(context.Background(), "t-pend")
+	if row.TargetGeneration != oldA.gen {
+		t.Fatalf("pending row left its generation: %q", row.TargetGeneration)
 	}
-	row, _ := d.Store.GetTask(context.Background(), "t-run")
+	row, _ = d.Store.GetTask(context.Background(), "t-run")
 	if row.TargetGeneration != oldA.gen {
 		t.Fatalf("in-flight row was restamped: %q", row.TargetGeneration)
 	}
@@ -460,19 +435,23 @@ targets:
 		t.Fatal("sweep closed a lane that still owns an unfinished task")
 	}
 
-	// Task reaches terminal; the pending row gets forwarded (simulated —
-	// the fake lane has no scheduler; real lanes restamp on handoff) →
-	// sweep retires the lane for good.
+	// Both tasks reach terminal under the old lane → the sweep closes it
+	// after TWO consecutive zero readings (round 5 #4 confirmation).
 	if err := d.Store.UpdateTaskStatus(context.Background(), "t-run", "success", nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := d.Store.RestampTask(context.Background(), "t-pend", newA.gen); err != nil {
+	if err := d.Store.UpdateTaskStatus(context.Background(), "t-pend", "success", nil); err != nil {
 		t.Fatal(err)
 	}
-	d.SweepRetiringLanes()
+	d.SweepRetiringLanes() // first zero: confirmation only
+	if oldA.closed {
+		t.Fatal("sweep closed on the FIRST zero reading (no confirmation window)")
+	}
+	d.SweepRetiringLanes() // second zero: close
 	if !oldA.closed {
 		t.Fatal("sweep did not close an emptied retiring lane")
 	}
+	_ = newA
 	if _, ok := d.retiringLanes["a@"+oldA.gen]; ok {
 		t.Error("emptied lane still registered")
 	}
@@ -500,13 +479,13 @@ func TestReconcileRemoveStopsPendingAndRetires(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Round 4: pending settlement runs through the LANE's FinishTask
-	// funnel (queue/DB/slots consistent), not a reconciler SQL sweep —
-	// the fake records the wiring (no resolver, reason set).
-	if oldB.removalReason == "" || oldB.forwardWired {
-		t.Fatalf("removal retire action miswired: %+v", oldB)
+	// Round 5: NOTHING is killed — the removed target's lane keeps its
+	// pending row and runs it under the submission-time snapshot.
+	row, _ := d.Store.GetTask(context.Background(), "t-bpend")
+	if row.Status != "pending" || row.TargetGeneration != oldB.gen {
+		t.Fatalf("pending row of removed target was touched: %+v", row)
 	}
-	row, _ := d.Store.GetTask(context.Background(), "t-brun")
+	row, _ = d.Store.GetTask(context.Background(), "t-brun")
 	if row.Status != "running" {
 		t.Fatalf("in-flight row of removed target was touched: %q", row.Status)
 	}

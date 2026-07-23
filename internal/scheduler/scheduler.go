@@ -75,30 +75,6 @@ type Scheduler struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
-
-	// RQ-75 lane rotation. quiesced turns tick into a no-op (no NEW
-	// dispatches) without cancelling in-flight work; inflight counts the
-	// dispatch goroutines (launchAsync/runTask) so DrainLaunches can wait
-	// for their outcomes to settle into the DB before a replacement lane
-	// restores its queue from that DB.
-	//
-	// quiesceMu is the SYNCHRONIZATION BARRIER between tick and Quiesce
-	// (review #4 follow-up): tick holds the read lock for its whole body,
-	// so a tick that passed the quiesced check has finished — including
-	// its synchronous inflight.Add calls — before Quiesce's write lock is
-	// granted. Without it, tick could pass the check, lose the CPU while
-	// Quiesce+Drain observe a zero count, then dispatch afterwards:
-	// exactly the double-submit window the fence exists to close.
-	quiesceMu sync.RWMutex
-	quiesced  bool // guarded by quiesceMu
-	inflight  sync.WaitGroup
-
-	// retireAction, when set on a quiesced (retiring) scheduler, is run
-	// over every pending task each tick (RQ-75 forwarding): it either
-	// hands the task to the successor lane or settles it (removed
-	// target). Returning false = no destination yet, retry next tick —
-	// races collapse into convergence instead of needing a fence.
-	retireAction func(*Task) bool // guarded by quiesceMu
 }
 
 // New creates a Scheduler with all its dependencies.
@@ -184,62 +160,6 @@ func (s *Scheduler) Shutdown() {
 	s.cancel()
 	s.wg.Wait()
 	s.logger.Info("scheduler stopped")
-}
-
-// Quiesce stops the scheduler from dispatching NEW tasks (tick becomes a
-// no-op) while leaving in-flight launches and running tasks untouched —
-// the K8s-termination / nginx-reload "stop accepting, finish what you
-// have" phase of a lane swap (RQ-75). Acquiring the write lock waits out
-// any tick already past its quiesced check, so when Quiesce returns,
-// every dispatch this scheduler will ever make is already registered in
-// inflight — DrainLaunches after Quiesce is therefore a true fence.
-func (s *Scheduler) Quiesce() {
-	s.quiesceMu.Lock()
-	already := s.quiesced
-	s.quiesced = true
-	s.quiesceMu.Unlock()
-	if !already {
-		s.logger.Info("scheduler quiesced — no new dispatches")
-	}
-}
-
-// SetRetireAction installs the retiring lane's pending disposition
-// (forward-or-settle). Runs under the tick's read lock.
-func (s *Scheduler) SetRetireAction(fn func(*Task) bool) {
-	s.quiesceMu.Lock()
-	s.retireAction = fn
-	s.quiesceMu.Unlock()
-}
-
-// Resume lifts a quiesce — used ONLY by the rotation-abort path (drain
-// timed out, the replacement lane was discarded, the old lane must keep
-// serving as if nothing happened).
-func (s *Scheduler) Resume() {
-	s.quiesceMu.Lock()
-	was := s.quiesced
-	s.quiesced = false
-	s.quiesceMu.Unlock()
-	if was {
-		s.logger.Info("scheduler resumed — lane rotation aborted")
-	}
-}
-
-// DrainLaunches waits until every in-flight dispatch goroutine has settled
-// its outcome (external id, transient requeue, unknown, or rejection — all
-// DB-visible states), or ctx expires. Returns true when fully drained.
-// Call after Quiesce; without it new dispatches keep the count busy.
-func (s *Scheduler) DrainLaunches(ctx context.Context) bool {
-	done := make(chan struct{})
-	go func() {
-		s.inflight.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-		return true
-	case <-ctx.Done():
-		return false
-	}
 }
 
 // loop runs the scheduling tick on a fixed interval until ctx is cancelled.

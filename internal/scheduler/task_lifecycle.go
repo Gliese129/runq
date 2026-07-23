@@ -433,7 +433,14 @@ func (s *Scheduler) completeTask(task *Task, status TaskStatus, extra map[string
 	}
 	s.transientNote.Delete(task.ID)
 	if err := s.store.UpdateTaskStatus(dbCtx, task.ID, string(status), fields); err != nil {
-		s.logger.Error("persist task completion failed", "task", task.ID, "status", status, "error", err)
+		// DB is the truth, the queue a view — the view must never run
+		// ahead (review round 5 #2): a memory-terminal/DB-non-terminal
+		// split would strand the task with no mechanism left to retry it.
+		// Leaving the queue untouched keeps the verdict retryable (marker
+		// rescan / probe / next sweep delivers it again).
+		s.logger.Error("persist task completion failed — queue left unchanged, verdict will be redelivered",
+			"task", task.ID, "status", status, "error", err)
+		return
 	}
 	if err := s.queue.Complete(task.ID, status); err != nil {
 		s.logger.Error("complete in queue failed", "task", task.ID, "error", err)
