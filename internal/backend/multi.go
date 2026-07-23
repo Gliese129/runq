@@ -124,6 +124,13 @@ func (m *MultiBackend) TargetGenerations(ctx context.Context) ([]TargetGeneratio
 	return out, nil
 }
 
+// ActiveLane exposes the CURRENT active lane of a target (RQ-75
+// forwarding): retiring lanes resolve their successor per handoff, so
+// chained rotations always reach the newest generation.
+func (m *MultiBackend) ActiveLane(name string) (Backend, bool) {
+	return m.get(name)
+}
+
 // retiringLanesOf snapshots the retiring lanes of one target.
 func (m *MultiBackend) retiringLanesOf(name string) []Backend {
 	m.mu.RLock()

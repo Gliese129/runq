@@ -144,14 +144,13 @@ func (s *Store) IsRetiringGeneration(ctx context.Context, target, generation str
 // be marked done.
 func (s *Store) CountUnfinishedGenerationTasks(ctx context.Context, target, generation string) (int, error) {
 	var n int
-	// Unsubmitted pending rows are excluded: on rotation they migrate to
-	// the new generation, on removal they are stopped — either way they
-	// are never a reason to keep the old lane alive (review round 3).
+	// ALL non-terminal rows count (review round 4): pending rows leave
+	// the generation via forwarding (rotation) or funnel-settle (removal),
+	// and the sweep must not close the lane until that has happened.
 	err := s.db.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM tasks
 		WHERE target = ? AND target_generation = ?
-		  AND status NOT IN ('success', 'failed', 'killed')
-		  AND NOT (status = 'pending' AND (external_id IS NULL OR external_id = ''))`,
+		  AND status NOT IN ('success', 'failed', 'killed')`,
 		target, generation).Scan(&n)
 	return n, err
 }

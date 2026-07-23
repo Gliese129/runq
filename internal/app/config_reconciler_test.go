@@ -21,16 +21,18 @@ import (
 // review-#4 fence sequence), not just end state.
 type fakeLane struct {
 	backend.Backend
-	name      string
-	id        string
-	gen       string // SemanticGeneration of the config this lane was built from
-	closed    bool
-	quiesced  bool
-	resumed   bool
-	started   bool
-	retiring  bool
-	drainFail bool // simulate a straggler submission that won't settle
-	events    *[]string
+	name          string
+	id            string
+	gen           string // SemanticGeneration of the config this lane was built from
+	closed        bool
+	quiesced      bool
+	resumed       bool
+	started       bool
+	retiring      bool
+	drainFail     bool // simulate a straggler submission that won't settle
+	forwardWired  bool
+	removalReason string
+	events        *[]string
 }
 
 func (f *fakeLane) rec(verb string) {
@@ -48,6 +50,16 @@ func (f *fakeLane) MarkRetiring()         { f.retiring = true; f.rec("retire") }
 func (f *fakeLane) DrainSubmissions(context.Context) bool {
 	f.rec("drain")
 	return !f.drainFail
+}
+
+// BeginRetirement records the forwarding wiring (RQ-75 round 4): resolve
+// != nil = rotation (successor lookup), removalReason != "" = removal.
+func (f *fakeLane) BeginRetirement(resolve func() (backend.Backend, bool), removalReason string) {
+	f.quiesced = true
+	f.retiring = true
+	f.forwardWired = resolve != nil
+	f.removalReason = removalReason
+	f.rec("beginRetire")
 }
 
 func writeCfg(t *testing.T, dir, content string) {
@@ -312,14 +324,15 @@ func TestReconcileAddFailureRetriesUntilRecovered(t *testing.T) {
 	}
 }
 
-// Review #4: same-name change must follow the fence sequence — cold-build
-// the replacement, THEN quiesce+drain the old lane, THEN start the new one
-// (restoreLane reads the settled DB), and close the old lane last.
-func TestReconcileChangeFenceOrder(t *testing.T) {
+// Round 4 (forwarding model): the rotation persists the retirement
+// BEFORE the replacement starts, swaps, then wires forwarding — no
+// fence, no drain. Order pinned via the event log.
+func TestReconcileChangeForwardOrder(t *testing.T) {
 	dir := t.TempDir()
 	writeCfg(t, dir, baseCfg)
 	d, _, _ := newReconcilerHarness(t, dir)
 	oldA := d.lanes["a"].(*fakeLane)
+	seedLaneTask(t, d.Store, "t-x", "a", oldA.gen, "running", "e1") // forces retire
 
 	writeCfg(t, dir, `default_target: a
 targets:
@@ -330,21 +343,13 @@ targets:
 	if err := d.ReconcileConfig("test"); err != nil {
 		t.Fatal(err)
 	}
-
 	newA := d.lanes["a"].(*fakeLane)
-	if newA == oldA {
-		t.Fatal("routing did not swap to the replacement lane")
+	if newA == oldA || !newA.started {
+		t.Fatal("routing did not swap to a started replacement")
 	}
-	if !oldA.quiesced {
-		t.Error("old lane was not fenced")
+	if !oldA.retiring || !oldA.forwardWired || oldA.removalReason != "" {
+		t.Fatalf("old lane not wired for forwarding: %+v", oldA)
 	}
-	if !oldA.closed {
-		t.Error("old lane not closed (grace 0 = synchronous)")
-	}
-	if !newA.started {
-		t.Error("replacement lane not started")
-	}
-
 	ev := harnessEvents(d)
 	idx := func(e string) int {
 		for i, v := range ev {
@@ -355,25 +360,20 @@ targets:
 		t.Fatalf("event %s missing in %v", e, ev)
 		return -1
 	}
-	build := idx("build:" + newA.id)
-	quiesce := idx("quiesce:" + oldA.id)
-	drain := idx("drain:" + oldA.id)
-	start := idx("start:" + newA.id)
-	closed := idx("close:" + oldA.id)
-	if !(build < quiesce && quiesce < drain && drain < start && start < closed) {
-		t.Fatalf("fence order wrong:\n%v\nwant build(new) < quiesce(old) < drain(old) < start(new) < close(old)", ev)
+	if !(idx("build:"+newA.id) < idx("start:"+newA.id) && idx("start:"+newA.id) < idx("beginRetire:"+oldA.id)) {
+		t.Fatalf("forward order wrong: %v", ev)
 	}
 }
 
-// Review #4 follow-up: a drain timeout must ABORT the rotation — the old
-// lane resumes serving, the never-started replacement is discarded, and
-// the next pass (straggler settled) completes the swap.
-func TestReconcileDrainTimeoutAbortsRotation(t *testing.T) {
+// Round 4: a retirement-persist failure DEFERS the rotation (old lane
+// untouched, no fence to lift) and the next pass completes it.
+func TestReconcilePersistFailureDefersRotation(t *testing.T) {
 	dir := t.TempDir()
 	writeCfg(t, dir, baseCfg)
 	d, _, _ := newReconcilerHarness(t, dir)
 	oldA := d.lanes["a"].(*fakeLane)
-	oldA.drainFail = true // straggler submission won't settle in time
+	seedLaneTask(t, d.Store, "t-p", "a", oldA.gen, "running", "e9")
+	d.Store.Close() // every persistence call now fails
 
 	writeCfg(t, dir, `default_target: a
 targets:
@@ -384,52 +384,10 @@ targets:
 	if err := d.ReconcileConfig("test"); err != nil {
 		t.Fatal(err)
 	}
-
-	// Aborted: old lane still routed and serving, fence lifted.
-	if d.lanes["a"].(*fakeLane) != oldA {
-		t.Fatal("aborted rotation swapped routing anyway")
-	}
-	if oldA.closed {
-		t.Error("aborted rotation closed the serving lane")
-	}
-	if !oldA.resumed {
-		t.Error("aborted rotation did not lift the fence (Resume)")
-	}
-	// The replacement was discarded without ever starting.
-	ev := harnessEvents(d)
-	for _, e := range ev {
-		if e == "start:a#2" {
-			t.Fatalf("aborted rotation STARTED the replacement (double-submit risk): %v", ev)
-		}
-	}
-	found := false
-	for _, e := range ev {
-		if e == "close:a#2" {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("discarded replacement was not closed: %v", ev)
-	}
-
-	// Straggler settles → next pass completes the rotation, same file.
-	oldA.drainFail = false
-	if err := d.ReconcileConfig("test"); err != nil {
-		t.Fatal(err)
-	}
-	newA := d.lanes["a"].(*fakeLane)
-	if newA == oldA {
-		t.Fatal("retry pass did not swap to the replacement")
-	}
-	if !newA.started {
-		t.Error("retry pass replacement not started")
-	}
-	if !oldA.closed {
-		t.Error("retry pass left the superseded lane open")
+	if d.lanes["a"].(*fakeLane) != oldA || oldA.closed || oldA.retiring {
+		t.Fatal("persist failure disturbed the serving lane")
 	}
 }
-
-// seedLaneTask inserts a task row owned by (target, generation).
 func seedLaneTask(t *testing.T, st *store.Store, id, target, gen, status, extID string) {
 	t.Helper()
 	jobID := "j-" + id
@@ -484,13 +442,14 @@ targets:
 		t.Fatalf("retirement not persisted: %+v", gens)
 	}
 
-	// Pending row migrated to the NEW generation.
-	row, _ := d.Store.GetTask(context.Background(), "t-pend")
-	if row.TargetGeneration != newA.gen {
-		t.Fatalf("pending row generation = %q, want new %q", row.TargetGeneration, newA.gen)
+	// Round 4: pending rows are NOT bulk-restamped by the reconciler —
+	// they move via the forwarding action (wired below), which restamps
+	// per handoff on the receiving lane. Both rows keep the old stamp
+	// here; the fake records that forwarding was wired.
+	if !oldA.forwardWired {
+		t.Fatal("rotation did not wire pending forwarding")
 	}
-	// In-flight row still owned by the old generation.
-	row, _ = d.Store.GetTask(context.Background(), "t-run")
+	row, _ := d.Store.GetTask(context.Background(), "t-run")
 	if row.TargetGeneration != oldA.gen {
 		t.Fatalf("in-flight row was restamped: %q", row.TargetGeneration)
 	}
@@ -501,8 +460,13 @@ targets:
 		t.Fatal("sweep closed a lane that still owns an unfinished task")
 	}
 
-	// Task reaches terminal → sweep retires the lane for good.
+	// Task reaches terminal; the pending row gets forwarded (simulated —
+	// the fake lane has no scheduler; real lanes restamp on handoff) →
+	// sweep retires the lane for good.
 	if err := d.Store.UpdateTaskStatus(context.Background(), "t-run", "success", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Store.RestampTask(context.Background(), "t-pend", newA.gen); err != nil {
 		t.Fatal(err)
 	}
 	d.SweepRetiringLanes()
@@ -536,11 +500,13 @@ func TestReconcileRemoveStopsPendingAndRetires(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	row, _ := d.Store.GetTask(context.Background(), "t-bpend")
-	if row.Status != "killed" || row.FailureDetail == "" {
-		t.Fatalf("pending row of removed target: status %q detail %q", row.Status, row.FailureDetail)
+	// Round 4: pending settlement runs through the LANE's FinishTask
+	// funnel (queue/DB/slots consistent), not a reconciler SQL sweep —
+	// the fake records the wiring (no resolver, reason set).
+	if oldB.removalReason == "" || oldB.forwardWired {
+		t.Fatalf("removal retire action miswired: %+v", oldB)
 	}
-	row, _ = d.Store.GetTask(context.Background(), "t-brun")
+	row, _ := d.Store.GetTask(context.Background(), "t-brun")
 	if row.Status != "running" {
 		t.Fatalf("in-flight row of removed target was touched: %q", row.Status)
 	}

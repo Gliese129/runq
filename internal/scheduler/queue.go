@@ -222,6 +222,24 @@ func (q *Queue) Complete(taskID string, status TaskStatus) error {
 	return nil
 }
 
+// Drop removes a PENDING task from the queue entirely — the lane-handoff
+// path (RQ-75 forwarding): the task is not finishing, it is moving to the
+// successor lane's queue. Refuses non-pending entries.
+func (q *Queue) Drop(taskID string) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for i, t := range q.tasks {
+		if t.ID == taskID {
+			if t.Status != StatusPending {
+				return fmt.Errorf("task %q is %s, only pending tasks can be dropped", taskID, t.Status)
+			}
+			q.tasks = append(q.tasks[:i], q.tasks[i+1:]...)
+			return nil
+		}
+	}
+	return fmt.Errorf("task %q not found in queue", taskID)
+}
+
 // Requeue moves a failed task back to pending for retry. Increments RetryCount.
 func (q *Queue) Requeue(taskID string) error {
 	q.mu.Lock()

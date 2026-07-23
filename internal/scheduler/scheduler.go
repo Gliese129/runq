@@ -92,6 +92,13 @@ type Scheduler struct {
 	quiesceMu sync.RWMutex
 	quiesced  bool // guarded by quiesceMu
 	inflight  sync.WaitGroup
+
+	// retireAction, when set on a quiesced (retiring) scheduler, is run
+	// over every pending task each tick (RQ-75 forwarding): it either
+	// hands the task to the successor lane or settles it (removed
+	// target). Returning false = no destination yet, retry next tick —
+	// races collapse into convergence instead of needing a fence.
+	retireAction func(*Task) bool // guarded by quiesceMu
 }
 
 // New creates a Scheduler with all its dependencies.
@@ -194,6 +201,14 @@ func (s *Scheduler) Quiesce() {
 	if !already {
 		s.logger.Info("scheduler quiesced — no new dispatches")
 	}
+}
+
+// SetRetireAction installs the retiring lane's pending disposition
+// (forward-or-settle). Runs under the tick's read lock.
+func (s *Scheduler) SetRetireAction(fn func(*Task) bool) {
+	s.quiesceMu.Lock()
+	s.retireAction = fn
+	s.quiesceMu.Unlock()
 }
 
 // Resume lifts a quiesce — used ONLY by the rotation-abort path (drain

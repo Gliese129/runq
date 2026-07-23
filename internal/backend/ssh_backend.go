@@ -477,6 +477,71 @@ func (b *SSHBackend) Generation() string { return b.scope.Generation }
 // retiring lane after a restart.
 func (b *SSHBackend) MarkRetiring() { b.Quiesce() }
 
+// BeginRetirement installs the pending-task disposition of a retiring
+// lane (RQ-75 forwarding, review round 4): resolveActive is consulted ON
+// EVERY handoff, so chained rotations (gen1→gen2→gen3 in quick
+// succession) always deliver to the NEWEST lane — the chain collapses
+// into one name lookup. A nil/failed resolution with removalReason set
+// settles the task killed through the FinishTask funnel (queue+DB+slot
+// consistent by construction); without a reason the task simply waits
+// for the next tick (transient no-destination).
+func (b *SSHBackend) BeginRetirement(resolveActive func() (Backend, bool), removalReason string) {
+	b.Quiesce()
+	b.sched.SetRetireAction(func(t *scheduler.Task) bool {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if resolveActive != nil {
+			nb, ok := resolveActive()
+			if ok && nb != Backend(b) {
+				fwd, ok2 := nb.(*SSHBackend)
+				if !ok2 {
+					return false // successor exists but cannot accept yet
+				}
+				if err := fwd.AcceptForwarded(ctx, t.ID); err != nil {
+					b.logger.Warn("pending handoff failed — retrying next tick", "task", t.ID, "error", err)
+					return false
+				}
+				if derr := b.queue.Drop(t.ID); derr != nil {
+					b.logger.Warn("handoff drop failed", "task", t.ID, "error", derr)
+				}
+				b.logger.Info("pending task forwarded to the active generation", "task", t.ID)
+				return true
+			}
+			if removalReason == "" {
+				return false // rotation window: successor not routed yet
+			}
+		}
+		// Removed target: settle through the funnel — queue, DB and slots
+		// stay consistent even under partial failure (unfinished tasks
+		// remain honestly pending and are retried next tick).
+		b.sched.FinishTaskNoRetry(t, map[string]any{
+			"status_source":  "runq",
+			"failure_detail": removalReason,
+		})
+		b.logger.Warn("pending task stopped: target removed", "task", t.ID)
+		return true
+	})
+}
+
+// AcceptForwarded takes ownership of a pending task handed over by a
+// retiring predecessor: restamp to THIS generation, then queue it. Order
+// matters — the stamp is persisted before the task can launch here.
+func (b *SSHBackend) AcceptForwarded(ctx context.Context, taskID string) error {
+	if err := b.store.RestampTask(ctx, taskID, b.scope.Generation); err != nil {
+		return fmt.Errorf("restamp: %w", err)
+	}
+	row, err := b.store.GetTask(ctx, taskID)
+	if err != nil || row == nil {
+		return fmt.Errorf("load forwarded task: %w", err)
+	}
+	t := TaskRowToSchedulerTask(row)
+	t.GPUsNeeded = 1
+	if !b.queue.RetryExisting(t) {
+		b.queue.Push(t)
+	}
+	return nil
+}
+
 // Quiesce is the FULL fence for a lane rotation (RQ-75, review round 3):
 // the scheduler stops dispatching, SubmitJob refuses intake, and the
 // ownership scope narrows to exactly this generation — so between the
@@ -1159,13 +1224,9 @@ func (b *SSHBackend) ResumeJob(_ context.Context, _ string) error {
 // max_inflight slots. The returned count is tasks ACCEPTED (queued).
 func (b *SSHBackend) SubmitJob(ctx context.Context, cfg job.JobConfig, opts SubmitOptions) (string, int, error) {
 	b.touchActivity()
-	// Fence gate (review round 3): a submit accepted between the fence
-	// and the routing swap would be stamped with the OLD generation and
-	// then sit in a permanently-quiesced queue forever. Refuse honestly;
-	// the retry lands on the replacement lane after the swap.
-	if b.scope.IsRetiring() {
-		return "", 0, fmt.Errorf("target %s is rotating to a new configuration — retry in a moment", b.targetName)
-	}
+	// No intake fence (review round 4, user design): a submit accepted by
+	// a retiring lane lands in its queue and is FORWARDED to the current
+	// active lane by the retire action — any race resolves by convergence.
 	proj, err := b.reg.Get(ctx, cfg.Project)
 	if err != nil {
 		return "", 0, fmt.Errorf("project %q: %w", cfg.Project, err)

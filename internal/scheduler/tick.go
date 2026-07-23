@@ -24,7 +24,18 @@ func (s *Scheduler) tick() {
 	s.quiesceMu.RLock()
 	defer s.quiesceMu.RUnlock()
 	if s.quiesced {
-		return // lane rotation in progress (RQ-75): no NEW dispatches
+		// Retiring lane (RQ-75): pending work is not frozen — it is
+		// handed to the successor (or settled, for a removed target).
+		// Late-arriving submits land here too and get forwarded next
+		// tick, which is what makes an intake fence unnecessary.
+		if fn := s.retireAction; fn != nil {
+			for _, t := range s.queue.ListPending() {
+				if !fn(t) {
+					break // no destination yet — retry the whole set next tick
+				}
+			}
+		}
+		return
 	}
 	pending := s.queue.ListPending()
 	if len(pending) == 0 {

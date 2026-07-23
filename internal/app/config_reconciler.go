@@ -112,42 +112,14 @@ func (d *Daemon) ReconcileConfig(reason string) error {
 		d.laneMu.Lock()
 		be := d.lanes[name]
 		d.laneMu.Unlock()
-		// FENCE FIRST (review round 3 #2): stop dispatch + refuse submits
-		// + drain in-flight — otherwise the scheduler can launch a row we
-		// are about to mark killed, and the API can add fresh pending rows
-		// after the stop. A drain timeout is safe to proceed past (no
-		// successor restores pending rows).
-		if !d.quiesceLane(name, be) {
-			d.Logger.Warn("removed lane drain timed out — proceeding anyway",
-				"target", name, "timeout", d.laneDrainTimeout)
-		}
-		abortRemoval := func(aerr error) {
-			resumeLane(be)
-			record[name] = d.lastTargets[name]
-			d.noteLaneBuildErr(name, fmt.Errorf("removal aborted: %w — retrying next pass", aerr))
-		}
-		// Persist while still routed: stop pending rows (user decision:
-		// removed name ≠ migration; reason recorded verbatim) and record
-		// the retirement. Any failure lifts the fence and retries next
-		// pass. The lane's in-memory queue may still hold the DB-killed
-		// entries — it is quiesced for good, so they can never launch.
-		if d.Store != nil {
-			sctx, scancel := context.WithTimeout(context.Background(), 10*time.Second)
-			ids, serr := d.Store.StopPendingTasks(sctx, name,
-				"target "+name+" was removed from config.yaml — pending task stopped before submission")
-			scancel()
-			if serr != nil {
-				abortRemoval(fmt.Errorf("stop pending tasks failed: %w", serr))
-				continue
-			}
-			if len(ids) > 0 {
-				d.Logger.Warn("pending tasks stopped: their target was removed from config.yaml",
-					"target", name, "count", len(ids))
-			}
-		}
+		// Persist first (failure = retry next pass, lane untouched). No
+		// fence (review round 4): pending rows — including any that race
+		// in — are settled killed through the FinishTask funnel by the
+		// retire action, keeping queue/DB/slots consistent by construction.
 		retire, perr := d.prepareRetirement(name, d.lastTargets[name], be, "removed")
 		if perr != nil {
-			abortRemoval(perr)
+			record[name] = d.lastTargets[name]
+			d.noteLaneBuildErr(name, fmt.Errorf("removal deferred: %w — retrying next pass", perr))
 			continue
 		}
 		_ = d.StopRemoteForward(name)
@@ -155,6 +127,8 @@ func (d *Daemon) ReconcileConfig(reason string) error {
 		d.laneMu.Lock()
 		delete(d.lanes, name)
 		d.laneMu.Unlock()
+		d.beginLaneRetirement(name, be,
+			"target "+name+" was removed from config.yaml — pending task stopped before submission")
 		if retire {
 			d.registerRetiring(name, laneGeneration(be), be)
 		} else {
@@ -207,68 +181,20 @@ func (d *Daemon) ReconcileConfig(reason string) error {
 		d.laneMu.Lock()
 		old := d.lanes[name]
 		d.laneMu.Unlock()
-		// 2. FENCE the old lane: no new dispatches, and in-flight
-		//    submissions settle into the DB — so step 3's restoreLane reads
-		//    settled rows. This closes the double-submit window (old lane
-		//    launching a task the new lane also restored as pending).
-		if !d.quiesceLane(name, old) {
-			// Drain timed out: a straggler submission may still land an
-			// external id for a row the replacement would restore as
-			// pending — starting it now WOULD double-submit (review #4
-			// follow-up). ABORT the rotation: the old lane resumes serving
-			// untouched, the never-started replacement is discarded, and
-			// the record keeps the old config so the next pass retries the
-			// whole rotation (by then the straggler has settled).
-			resumeLane(old)
-			closeLane(d, name, newBe)
-			record[name] = d.lastTargets[name]
-			d.noteLaneBuildErr(name, fmt.Errorf(
-				"lane rotation aborted: in-flight submissions did not settle within %s — old lane kept serving, retrying next pass",
-				d.laneDrainTimeout))
-			continue
-		}
-		// 3. Persist ownership BEFORE the replacement restores (review:
-		//    startLane before the retirement record existed let the new
-		//    lane adopt the old generation — double ownership). ANY
-		//    persistence failure aborts the rotation (review: log-and-
-		//    proceed left pending rows orphaned / retirements unrebuildable)
-		//    with the same semantics as a drain timeout: old lane resumes,
-		//    replacement discarded, next pass retries.
-		abort := func(aerr error) {
-			resumeLane(old)
-			closeLane(d, name, newBe)
-			record[name] = d.lastTargets[name]
-			d.noteLaneBuildErr(name, fmt.Errorf("rotation aborted: %w — old lane kept serving, retrying next pass", aerr))
-		}
-		// Count+persist BEFORE the pending migration (review round 3 #3):
-		// the restamp is the LAST persistence step, so an abort at any
-		// earlier point leaves the pending rows untouched — the resumed
-		// old lane never launches rows stamped with a foreign generation.
-		// (The count excludes unsubmitted pending rows, so ordering does
-		// not change the retirement decision.)
+		// 2. Persist the retirement record BEFORE the replacement starts
+		//    (its restore must SEE it, or it adopts the old generation).
+		//    Failure = retry next pass; nothing observable changed. No
+		//    fence, no drain (review round 4, user design): pending work
+		//    is FORWARDED after the swap, so any racing submit or
+		//    mid-flight dispatch converges instead of needing prevention.
 		retire, perr := d.prepareRetirement(name, d.lastTargets[name], old, "changed")
 		if perr != nil {
-			abort(perr)
+			closeLane(d, name, newBe)
+			record[name] = d.lastTargets[name]
+			d.noteLaneBuildErr(name, fmt.Errorf("rotation deferred: %w — retrying next pass", perr))
 			continue
 		}
-		// Pending rows migrate to the new generation (user decision:
-		// same-name pending auto-follows the new config). Single atomic
-		// UPDATE: failure = nothing migrated = clean abort; success has
-		// no failable step left before the replacement starts.
-		if d.Store != nil {
-			mctx, mcancel := context.WithTimeout(context.Background(), 10*time.Second)
-			nMig, rerr := d.Store.RestampPendingTasks(mctx, name, tc.SemanticGeneration())
-			mcancel()
-			if rerr != nil {
-				abort(fmt.Errorf("pending-task migration failed: %w", rerr))
-				continue
-			}
-			if nMig > 0 {
-				d.Logger.Info("pending tasks migrated to the new generation", "target", name, "count", nMig)
-			}
-		}
-		// 4. Start the replacement (restore sees the retirement record and
-		//    the restamped pending rows) and swap routing atomically — the
+		// 3. Start the replacement and swap routing atomically — the
 		//    target NAME never stops serving.
 		startLane(newBe)
 		_ = d.StopRemoteForward(name)
@@ -276,9 +202,11 @@ func (d *Daemon) ReconcileConfig(reason string) error {
 		d.laneMu.Lock()
 		d.lanes[name] = newBe
 		d.laneMu.Unlock()
-		// 5. The superseded generation RETIRES (kept running quiesced,
-		//    sensing ITS tasks on ITS endpoint until the count hits zero)
-		//    or, with nothing left to track, closes after the short grace.
+		// 4. The superseded generation retires: scope narrows, dispatch
+		//    stops, and every pending task (queued before OR straggling in
+		//    after) is handed to the CURRENT active lane — resolved per
+		//    handoff, so chained rotations always reach the newest one.
+		d.beginLaneRetirement(name, old, "")
 		if retire {
 			d.registerRetiring(name, laneGeneration(old), old)
 		} else {
@@ -413,6 +341,25 @@ func (d *Daemon) prepareRetirement(name string, oldTC config.TargetConfig, be ba
 	d.Logger.Info("lane retiring — tracking its remaining tasks to completion",
 		"target", name, "generation", shortGen(gen), "unfinished", n, "reason", reason)
 	return true, nil
+}
+
+// beginLaneRetirement wires a lane's retire action (RQ-75 forwarding):
+// resolve the CURRENT active lane per handoff (chained rotations reach
+// the newest generation); removalReason set = settle instead of forward.
+// No-op for lanes without the capability (test fakes fall back to their
+// recorded Quiesce via markRetiring later).
+func (d *Daemon) beginLaneRetirement(name string, be backend.Backend, removalReason string) {
+	br, ok := be.(interface {
+		BeginRetirement(func() (backend.Backend, bool), string)
+	})
+	if !ok {
+		return
+	}
+	var resolve func() (backend.Backend, bool)
+	if removalReason == "" {
+		resolve = func() (backend.Backend, bool) { return d.multiBe.ActiveLane(name) }
+	}
+	br.BeginRetirement(resolve, removalReason)
 }
 
 // registerRetiring flips the lane into retiring mode and registers it for
