@@ -1197,8 +1197,18 @@ func (s *Server) handleKillTask(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleRetryTask — POST /tasks/{id}/retry[?confirm_generation=true].
+// A rerun of a task whose target config changed since submission needs
+// explicit confirmation (RQ-75): unconfirmed → 409 generation_changed,
+// the WebUI shows a dialog and the CLI prompts y/N (-y skips).
 func (s *Server) handleRetryTask(w http.ResponseWriter, r *http.Request) {
+	confirm := r.URL.Query().Get("confirm_generation") == "true"
 	s.handleAction(w, r, func() error {
+		if gr, ok := s.backend.(interface {
+			RetryTaskGen(context.Context, string, bool) error
+		}); ok {
+			return gr.RetryTaskGen(r.Context(), r.PathValue("id"), confirm)
+		}
 		return s.backend.RetryTask(r.Context(), r.PathValue("id"))
 	})
 }
@@ -1285,6 +1295,16 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 // writeError classifies an error into the v1 (status, code) pair (spec §2).
 // Handlers that already know the code should call writeErr directly.
 func writeError(w http.ResponseWriter, err error) {
+	// Typed 409s carry structured payloads — handle before the string zoo.
+	var genChanged *backend.GenerationChangedError
+	if errors.As(err, &genChanged) {
+		writeJSON(w, http.StatusConflict, backend.ErrorResponse{
+			Error:   err.Error(),
+			Code:    backend.CodeGenerationChanged,
+			Details: "task generation " + genChanged.TaskGeneration + "; active generation " + genChanged.ActiveGeneration,
+		})
+		return
+	}
 	status, code := http.StatusInternalServerError, backend.CodeInternal
 	msg := strings.ToLower(err.Error())
 	switch {

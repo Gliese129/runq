@@ -103,6 +103,14 @@ func (s *Store) CountUnfinishedGenerationTasks(ctx context.Context, target, gene
 	return n, err
 }
 
+// RestampTask reassigns one task to a generation (confirmed cross-
+// generation rerun: the new attempt belongs to the active lane).
+func (s *Store) RestampTask(ctx context.Context, taskID, generation string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE tasks SET target_generation = ? WHERE id = ?`, generation, taskID)
+	return err
+}
+
 // RestampPendingTasks migrates a target's not-yet-submitted tasks to the new
 // generation (same-name config change: pending work auto-follows the new
 // config). Returns the number of migrated rows.

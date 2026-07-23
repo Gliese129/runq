@@ -342,7 +342,23 @@ const (
 	// 409: If-Match generation mismatch — the config file changed since the
 	// client read it (RQ-75). Response carries current_generation.
 	CodeGenerationConflict = "generation_conflict"
+	// 409: rerun of a task whose target config CHANGED since submission
+	// (RQ-75) — needs explicit confirmation (WebUI dialog / CLI y/N or -y).
+	CodeGenerationChanged = "generation_changed"
 )
+
+// GenerationChangedError refuses an UNCONFIRMED rerun of a task whose
+// target config changed since it was submitted (RQ-75): the rerun will use
+// the NEW config, and the human should know before it does. Confirmed
+// retries restamp the task to the active generation and proceed.
+type GenerationChangedError struct {
+	TaskGeneration   string
+	ActiveGeneration string
+}
+
+func (e *GenerationChangedError) Error() string {
+	return "target config changed since this task was submitted — rerun will use the NEW config (confirm to proceed)"
+}
 
 // Project summary for sidebar.
 

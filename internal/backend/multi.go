@@ -561,10 +561,40 @@ func (m *MultiBackend) KillTask(ctx context.Context, taskID string) error {
 	return be.KillTask(ctx, taskID)
 }
 
+// RetryTask reruns a terminal task on the target's ACTIVE lane (RQ-75):
+// a rerun is a NEW submission, so it belongs to the new generation — never
+// to the (permanently quiesced) retiring lane that owned the original run.
+// An unconfirmed cross-generation rerun is refused with
+// *GenerationChangedError so CLI/WebUI ask the human first.
 func (m *MultiBackend) RetryTask(ctx context.Context, taskID string) error {
-	be, err := m.resolveTask(ctx, taskID)
+	return m.RetryTaskGen(ctx, taskID, false)
+}
+
+// RetryTaskGen is RetryTask with the cross-generation confirmation knob.
+func (m *MultiBackend) RetryTaskGen(ctx context.Context, taskID string, confirmGeneration bool) error {
+	t, err := m.store.GetTask(ctx, taskID)
 	if err != nil {
 		return err
+	}
+	if t == nil {
+		return fmt.Errorf("task %q: %w", taskID, ErrNotFound)
+	}
+	be, err := m.resolve(t.Target)
+	if err != nil {
+		return err
+	}
+	activeGen := ""
+	if g, ok := be.(interface{ Generation() string }); ok {
+		activeGen = g.Generation()
+	}
+	if t.TargetGeneration != "" && activeGen != "" && t.TargetGeneration != activeGen {
+		if !confirmGeneration {
+			return &GenerationChangedError{TaskGeneration: t.TargetGeneration, ActiveGeneration: activeGen}
+		}
+		// Confirmed: the rerun becomes the active generation's task.
+		if err := m.store.RestampTask(ctx, taskID, activeGen); err != nil {
+			return err
+		}
 	}
 	return be.RetryTask(ctx, taskID)
 }
