@@ -184,6 +184,22 @@ func (t *TargetConfig) IsRemote() bool {
 // kill/log/refresh route by it. Empty on marshal failure — such rows fall
 // back to active-lane adoption, which is also how legacy (”) rows and
 // hash shifts across runq upgrades stay harmless.
+// SemanticEquals reports whether two target configs are the SAME under
+// generation rules (review round 10): diffTargets must use the identical
+// equivalence the generation hash uses — reflect.DeepEqual distinguishes
+// nil map from {} while the hash does not, and that mismatch let a
+// "changed" target rebuild under an UNCHANGED generation, leaving active
+// and retiring lanes co-owning one (target, generation). Marshal errors
+// compare unequal ("can't prove equal" = changed = safe rebuild path).
+func (t *TargetConfig) SemanticEquals(o *TargetConfig) bool {
+	ta, ea := yaml.Marshal(t)
+	tb, eb := yaml.Marshal(o)
+	if ea != nil || eb != nil {
+		return false
+	}
+	return genfile.SemanticEqual(ta, tb)
+}
+
 func (t *TargetConfig) SemanticGeneration() string {
 	buf, err := yaml.Marshal(t)
 	if err != nil {

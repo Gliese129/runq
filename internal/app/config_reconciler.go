@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"reflect"
 	"strings"
 	"time"
 
@@ -38,10 +37,15 @@ import (
 func diffTargets(old, new map[string]config.TargetConfig) (added, changed, removed []string) {
 	for name, ntc := range new {
 		otc, ok := old[name]
+		ntc := ntc
 		switch {
 		case !ok:
 			added = append(added, name)
-		case !reflect.DeepEqual(otc, ntc):
+		case !otc.SemanticEquals(&ntc):
+			// SEMANTIC comparison (round 10): the diff must use the same
+			// equivalence as the generation hash, or a representation-only
+			// edit (nil map vs {}) rebuilds a lane under an unchanged
+			// generation — active and retiring co-owning every row.
 			changed = append(changed, name)
 		}
 	}
@@ -198,6 +202,18 @@ func (d *Daemon) ReconcileConfig(reason string) error {
 	// fencing for the stateful launch path.
 	for _, name := range changed {
 		tc := newTargets[name]
+		// Belt-and-suspenders (round 10): if the semantic diff and the
+		// generation hash ever disagree, an equal-generation "change" must
+		// be a no-op — rebuilding would make two lanes co-own one
+		// (target, generation).
+		d.laneMu.Lock()
+		curGen := laneGeneration(d.lanes[name])
+		d.laneMu.Unlock()
+		if g := tc.SemanticGeneration(); g != "" && g == curGen {
+			d.Logger.Warn("changed target has an UNCHANGED generation — treating as no-op",
+				"target", name, "generation", shortGen(g))
+			continue
+		}
 		// 1. COLD-build the replacement (dial + validate, NOT started): a
 		//    broken edit must not disturb the working lane, and the fence
 		//    below must not engage for a doomed swap.

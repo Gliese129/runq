@@ -119,3 +119,28 @@ func TestSaveAgainstMissingFileWithIfMatchConflicts(t *testing.T) {
 		t.Errorf("missing file current generation = %q, want empty", conflict.Current)
 	}
 }
+
+// Round 10: the diff layer must use the SAME equivalence as the
+// generation hash — representation-only differences never count.
+func TestSemanticEqual(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want bool
+	}{
+		{"a: 1\nb: 2\n", "a: 1\nb: 2\n", true}, // byte-equal fast path
+		{"a: 1\nb: 2\n", "b: 2\na: 1\n", true}, // key order
+		// At the RAW document layer an extra `m: {}` key IS a difference;
+		// nil-vs-{} unification happens at the TYPED marshal layer
+		// (omitempty) — see config.TestTargetSemanticEquals.
+		{"a: 1\n", "a: 1\nm: {}\n", false},
+		{"a: 1\n", "a: 1\ns: []\n", false},
+		{"a: 1\n", "# c\na: 1\n", true}, // comments
+		{"a: 1\n", "a: 2\n", false},     // real change
+		{"a: 1\n", ": : :\n", false},    // unparseable = not provably equal
+	}
+	for i, c := range cases {
+		if got := SemanticEqual([]byte(c.a), []byte(c.b)); got != c.want {
+			t.Errorf("case %d: SemanticEqual(%q, %q) = %v, want %v", i, c.a, c.b, got, c.want)
+		}
+	}
+}

@@ -169,12 +169,14 @@ func TestReconcileAddChangeRemove(t *testing.T) {
 		t.Error("emptied retiring lane not closed after two sweeps")
 	}
 
-	// Reformat/comment only: NO rebuild (semantic no-op reaches the
-	// reconciler only via API notify; it must diff to nothing).
+	// Reformat/comment/representation-only (round 10: `signal_map: {}`
+	// vs omitted must not count — same generation): NO rebuild.
 	*built = nil
 	writeCfg(t, dir, "# comment\n"+baseCfg+`  - name: b
     scheduler: pbs
     submit_template: CHANGED
+    signal_map: {}
+    status_parser: []
 `)
 	if err := d.ReconcileConfig("test"); err != nil {
 		t.Fatal(err)

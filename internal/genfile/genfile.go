@@ -25,6 +25,7 @@
 package genfile
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -232,6 +233,23 @@ func lock(lockPath string) (func(), error) {
 		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 		_ = f.Close()
 	}, nil
+}
+
+// SemanticEqual reports whether two yaml documents are SEMANTICALLY
+// identical, in the same two layers as the generation mechanism: layer 1
+// is a cheap byte comparison (the common case — nothing changed), layer 2
+// parses and compares semantic hashes, so representation differences that
+// cannot move a generation (key order, comments, formatting) can never count as a
+// difference; nil-vs-empty container unification happens one layer up, at
+// the TYPED marshal (omitempty) — see config.TargetConfig.SemanticEquals. Unparseable input compares
+// unequal — callers treat "can't prove equal" as changed.
+func SemanticEqual(a, b []byte) bool {
+	if bytes.Equal(a, b) {
+		return true
+	}
+	ha, ea := SemanticHash(a)
+	hb, eb := SemanticHash(b)
+	return ea == nil && eb == nil && ha == hb
 }
 
 // SortedKeys is a small helper for consumers that render diffs of generic

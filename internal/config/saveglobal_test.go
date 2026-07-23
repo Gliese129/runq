@@ -158,3 +158,23 @@ func TestSaveGlobalDeleteLastTarget(t *testing.T) {
 		t.Fatalf("targets key still present after removing all targets:\n%s", buf)
 	}
 }
+
+// Round 10: nil vs empty containers are the SAME target (identical
+// generation) — the reconciler diff must agree.
+func TestTargetSemanticEquals(t *testing.T) {
+	a := TargetConfig{Name: "x", Scheduler: "slurm", SubmitTemplate: "s"}
+	b := a
+	b.SignalMap = map[string]string{}
+	b.StatusParser = []string{}
+	if !a.SemanticEquals(&b) {
+		t.Fatal("nil vs empty map/slice judged as different targets")
+	}
+	if a.SemanticGeneration() != b.SemanticGeneration() {
+		t.Fatal("generation moved on a representation-only difference")
+	}
+	c := a
+	c.SubmitTemplate = "s2"
+	if a.SemanticEquals(&c) {
+		t.Fatal("real change judged equal")
+	}
+}
