@@ -62,6 +62,20 @@
         {{ t('settings.hpc_rewrite_note') }}
       </div>
 
+      <!-- RQ-75: previous generations of THIS target still tracking tasks -->
+      <div
+        v-for="g in retiringOfSelected" :key="g.generation"
+        class="d-flex align-center ga-2 rounded pa-2 mb-3"
+        style="background: rgb(var(--v-theme-surface-variant), 0.25)"
+      >
+        <v-icon size="14" color="warning">mdi-history</v-icon>
+        <span class="text-caption">
+          {{ t('settings.gen_retiring_row', { n: g.unfinished }) }}
+        </span>
+        <code class="text-caption text-on-surface-variant">{{ g.generation.slice(0, 8) }}</code>
+        <span class="text-caption text-on-surface-variant ml-auto">{{ genDate(g.retired_at) }}</span>
+      </div>
+
       <!-- Presets: same starter templates as `hpc init --scheduler` -->
       <div v-if="presetNames.length > 0" class="d-flex align-center flex-wrap ga-1 mb-4">
         <span class="text-caption text-on-surface-variant mr-1">{{ t('settings.hpc_preset_label') }}</span>
@@ -140,6 +154,32 @@
         </div>
       </div>
     </v-card>
+
+    <!-- RQ-75: archived targets — removed from config.yaml, shown collapsed.
+         Still-retiring entries keep tracking their in-flight tasks. -->
+    <v-expansion-panels v-if="archivedGenerations.length > 0" variant="accordion" class="mb-4">
+      <v-expansion-panel>
+        <v-expansion-panel-title class="text-caption text-on-surface-variant">
+          <v-icon size="14" start>mdi-archive-outline</v-icon>
+          {{ t('settings.gen_archived_title', { n: archivedGenerations.length }) }}
+        </v-expansion-panel-title>
+        <v-expansion-panel-text>
+          <div
+            v-for="g in archivedGenerations" :key="g.target + g.generation"
+            class="d-flex align-center ga-2 py-1" style="font-size: 12px"
+          >
+            <v-icon size="14" :color="g.done_at ? 'grey' : 'warning'">
+              {{ g.done_at ? 'mdi-check' : 'mdi-progress-clock' }}
+            </v-icon>
+            <code>{{ genLabel(g) }}</code>
+            <span class="text-on-surface-variant">
+              {{ g.done_at ? t('settings.gen_done') : t('settings.gen_tracking', { n: g.unfinished }) }}
+            </span>
+            <span class="text-on-surface-variant ml-auto">{{ genDate(g.retired_at) }}</span>
+          </div>
+        </v-expansion-panel-text>
+      </v-expansion-panel>
+    </v-expansion-panels>
 
     <!-- Webhook -->
     <v-card class="mb-4 pa-5">
@@ -264,7 +304,7 @@ import { useConfigStore } from '@/stores/config'
 import { useSettingsStore } from '@/stores/settings'
 import { useSnackbar } from '@/composables/useSnackbar'
 import { isGenerationConflict } from '@/apis/client'
-import { configApi, type TargetConfig, type HPCCheckResult } from '@/apis/config'
+import { configApi, type TargetConfig, type TargetGenerationView, type HPCCheckResult } from '@/apis/config'
 import ShellTemplateEditor from '@/components/ShellTemplateEditor.vue'
 import ConfigConflictDialog, { type ConflictField } from '@/components/ConfigConflictDialog.vue'
 import DaemonLogPanel from '@/components/DaemonLogPanel.vue'
@@ -449,6 +489,26 @@ async function reloadTargets() {
   targetItems.value = res.items ?? []
   hpcPlaceholders.value = res.placeholders ?? {}
   configGeneration.value = res.config_generation ?? ''
+  targetGenerations.value = res.generations ?? []
+}
+
+// ── RQ-75: retired/retiring lane generations ──
+const targetGenerations = ref<TargetGenerationView[]>([])
+/** Same-name retiring generations: sub-rows of the SELECTED active target. */
+const retiringOfSelected = computed(() =>
+  targetGenerations.value.filter(
+    g => !g.done_at && g.target === selectedTarget.value && targetNames.value.includes(g.target),
+  ),
+)
+/** Generations of REMOVED targets: the collapsed archived section. */
+const archivedGenerations = computed(() =>
+  targetGenerations.value.filter(g => !targetNames.value.includes(g.target)),
+)
+function genLabel(g: TargetGenerationView): string {
+  return `${g.target}-${g.generation.slice(0, 8)}`
+}
+function genDate(unix: number): string {
+  return new Date(unix * 1000).toLocaleString()
 }
 
 // ── Dirty state (RQ-75): the form diverges from what was loaded ──

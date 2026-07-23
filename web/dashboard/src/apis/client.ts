@@ -65,8 +65,15 @@ async function request<T>(method: string, path: string, body?: unknown, opts?: R
       onApiError(msg)
       // Daemon-down has its own persistent banner + sidebar state; a raw
       // socket snackbar on top of that just makes the three surfaces fight.
-      // generation_conflict gets a dedicated dialog — no snackbar on top.
-      if (!opts?.silent && status !== 404 && code !== 'generation_conflict' && !isDaemonDownError(msg)) {
+      // generation_conflict / generation_changed get dedicated dialogs —
+      // no snackbar on top.
+      if (
+        !opts?.silent &&
+        status !== 404 &&
+        code !== 'generation_conflict' &&
+        code !== 'generation_changed' &&
+        !isDaemonDownError(msg)
+      ) {
         snack.error(msg)
       }
       throw new ApiError(msg, status, path, code, currentGen)

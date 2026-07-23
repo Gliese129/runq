@@ -52,6 +52,13 @@ export const tasksApi = {
   kill: (taskId: string) =>
     api.post<ActionResponse>(`/tasks/${encodeURIComponent(taskId)}/kill`),
 
-  retry: (taskId: string) =>
-    api.post<ActionResponse>(`/tasks/${encodeURIComponent(taskId)}/retry`),
+  /**
+   * confirm=true acknowledges a cross-generation rerun (RQ-75): the target
+   * config changed since submission and the rerun will use the NEW config.
+   * Without it the server answers 409 generation_changed.
+   */
+  retry: (taskId: string, confirm = false) =>
+    api.post<ActionResponse>(
+      `/tasks/${encodeURIComponent(taskId)}/retry${confirm ? '?confirm_generation=true' : ''}`,
+    ),
 }

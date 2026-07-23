@@ -251,6 +251,9 @@
   <div v-else class="d-flex justify-center pa-12">
     <v-progress-circular indeterminate color="primary" />
   </div>
+
+  <!-- RQ-75: cross-generation rerun confirmation -->
+  <GenerationRerunDialog v-model="genRerun.open.value" @confirm="genRerun.confirmRerun" />
 </template>
 
 <script setup lang="ts">
@@ -263,6 +266,8 @@ import { useSnackbar } from '@/composables/useSnackbar'
 import { useConfirm } from '@/composables/useConfirm'
 import { useCancelling } from '@/composables/useCancelling'
 import { useTaskQuery, useTaskMetricsQuery, useTaskActions } from '@/queries/useTaskQueries'
+import { useGenerationRerun } from '@/composables/useGenerationRerun'
+import GenerationRerunDialog from '@/components/GenerationRerunDialog.vue'
 import { useConfigStore } from '@/stores/config'
 import { useLogViewerStore } from '@/stores/logViewer'
 import MetricsChart from '@/components/MetricsChart.vue'
@@ -738,14 +743,18 @@ async function killTask() {
   }
 }
 
+// RQ-75: a rerun of a task whose target config changed since submission
+// goes through the confirmation dialog (or straight through, if the user
+// checked "don't ask again").
+const genRerun = useGenerationRerun(
+  (p) => taskActions.retry.mutateAsync(p),
+  () => snack.success(t('task.retried')),
+  (e: any) => snack.error(e?.message || t('common.error')),
+)
+
 async function retryTask() {
   if (retrying.value) return
-  try {
-    await taskActions.retry.mutateAsync(props.taskId)
-    snack.success(t('task.retried'))
-  } catch (e: any) {
-    snack.error(e?.message || t('common.error'))
-  }
+  await genRerun.run(props.taskId)
 }
 
 // RQ-74: the submit-evidence card's tone follows the task status — red only

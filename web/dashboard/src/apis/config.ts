@@ -31,6 +31,19 @@ export interface TargetsListResponse {
    * file changed underneath the form.
    */
   config_generation?: string
+  /** Retired/retiring lane generations (RQ-75 archive view). */
+  generations?: TargetGenerationView[]
+}
+
+/** One retired/retiring target generation (RQ-75). */
+export interface TargetGenerationView {
+  target: string
+  generation: string
+  reason: string // 'changed' | 'removed'
+  retired_at: number
+  done_at?: number
+  /** tasks this generation still tracks (0 once done) */
+  unfinished: number
 }
 
 export interface TargetPresetsResponse {
