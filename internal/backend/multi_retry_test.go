@@ -10,16 +10,20 @@ import (
 )
 
 // genLane is an active lane with a generation stamp; records retries.
+// Its RetryTask honors the LANE CONTRACT (review P2): ownership is
+// stamped by the lane itself, inside its reset write, only on success —
+// exactly what SSHBackend/LocalBackend do.
 type genLane struct {
 	*UnavailableBackend
+	st      *store.Store
 	gen     string
 	retried []string
 }
 
 func (g *genLane) Generation() string { return g.gen }
-func (g *genLane) RetryTask(_ context.Context, id string) error {
+func (g *genLane) RetryTask(ctx context.Context, id string) error {
 	g.retried = append(g.retried, id)
-	return nil
+	return g.st.RestampTask(ctx, id, g.gen)
 }
 
 // RQ-75: rerunning a task whose target config changed needs confirmation;
@@ -41,8 +45,8 @@ func TestRetryTaskCrossGeneration(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	active := &genLane{UnavailableBackend: NewUnavailableBackend(errors.New("unused")), gen: "gen-NEW"}
-	retiring := &genLane{UnavailableBackend: NewUnavailableBackend(errors.New("unused")), gen: "gen-OLD"}
+	active := &genLane{UnavailableBackend: NewUnavailableBackend(errors.New("unused")), st: st, gen: "gen-NEW"}
+	retiring := &genLane{UnavailableBackend: NewUnavailableBackend(errors.New("unused")), st: st, gen: "gen-OLD"}
 	m, err := NewMultiBackend(map[string]Backend{"hpc": active}, st, "hpc")
 	if err != nil {
 		t.Fatal(err)

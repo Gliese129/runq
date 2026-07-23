@@ -45,7 +45,7 @@ func (b *Backend) DetectOrphans(ctx context.Context, immediate bool) error {
 		}
 	}
 
-	rows, err := b.Store.ListTasks(ctx, store.TaskFilter{Target: b.Cfg.Name})
+	rows, err := b.Store.ListTasks(ctx, store.TaskFilter{Target: b.Cfg.Name, Scope: b.Scope})
 	if err != nil {
 		return err
 	}

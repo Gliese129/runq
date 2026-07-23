@@ -139,7 +139,7 @@ func (b *Backend) SchedulerProbe(ctx context.Context, floor time.Duration) error
 // decides whether that suspicion is worth a SchedulerProbe. Cost model:
 // N running tasks = ≤3N stats over the existing connection.
 func (b *Backend) HeartbeatProbe(ctx context.Context, silenceAfter time.Duration) (silent []string, err error) {
-	rows, err := b.Store.ListTasks(ctx, store.TaskFilter{Status: "running", Target: b.Cfg.Name})
+	rows, err := b.Store.ListTasks(ctx, store.TaskFilter{Status: "running", Target: b.Cfg.Name, Scope: b.Scope})
 	if err != nil {
 		return nil, err
 	}
@@ -294,7 +294,7 @@ func (b *Backend) reconcile(ctx context.Context, jobID string, probe bool) error
 // shares one across all jobs so listing-style commands (bare `qstat`) hit
 // the scheduler once; single-job callers pass memoRunner(b.shellRunClassified).
 func (b *Backend) reconcileWith(ctx context.Context, jobID string, probe bool, probeRun runner) error {
-	tasks, err := b.Store.ListTasks(ctx, store.TaskFilter{JobID: jobID})
+	tasks, err := b.Store.ListTasks(ctx, store.TaskFilter{JobID: jobID, Scope: b.Scope})
 	if err != nil {
 		return err
 	}
@@ -396,7 +396,7 @@ func (b *Backend) reconcileWith(ctx context.Context, jobID string, probe bool, p
 // batch probe results instead of per-task scheduler queries. ext_ids absent
 // from the batch map are treated as SchedGone (job left the scheduler queue).
 func (b *Backend) reconcileWithBatch(ctx context.Context, jobID string, signals map[string]ProbeResult) error {
-	tasks, err := b.Store.ListTasks(ctx, store.TaskFilter{JobID: jobID})
+	tasks, err := b.Store.ListTasks(ctx, store.TaskFilter{JobID: jobID, Scope: b.Scope})
 	if err != nil {
 		return err
 	}

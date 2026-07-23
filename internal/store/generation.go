@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"sync/atomic"
 	"time"
 )
 
@@ -13,6 +14,45 @@ import (
 // keeps running ("retiring") until its unfinished-task count reaches zero —
 // the Kubernetes old-ReplicaSet shape. These rows survive daemon restarts
 // (config snapshot = rebuild source) and feed the archived view in CLI/WebUI.
+
+// LaneScope is a lane's OWNERSHIP predicate (RQ-75 review follow-up): the
+// isolatable object every lane-side task query filters by, so active and
+// retiring lanes can never probe, read or settle each other's tasks.
+//
+//	retiring lane: rows stamped with exactly its generation
+//	active lane:   its generation, legacy '' rows, and ORPHAN generations
+//	               (no live retirement record) — which the lane then adopts
+//	               by restamping (ownership is written, never re-inferred)
+//
+// Retiring flips at rotation time while sensors are running — atomic.
+type LaneScope struct {
+	Target     string
+	Generation string
+	retiring   atomic.Bool
+}
+
+// NewLaneScope builds a scope; retiring lanes call MarkRetiring.
+func NewLaneScope(target, generation string) *LaneScope {
+	return &LaneScope{Target: target, Generation: generation}
+}
+
+// MarkRetiring narrows the scope to exactly this generation.
+func (s *LaneScope) MarkRetiring() { s.retiring.Store(true) }
+
+// IsRetiring reports the current scope mode.
+func (s *LaneScope) IsRetiring() bool { return s.retiring.Load() }
+
+// whereClause renders the ownership predicate (target column is handled by
+// the caller's filter; this covers generation ownership only).
+func (s *LaneScope) whereClause() (string, []any) {
+	if s.IsRetiring() {
+		return "COALESCE(target_generation,'') = ?", []any{s.Generation}
+	}
+	return `(COALESCE(target_generation,'') = ? OR COALESCE(target_generation,'') = ''
+		OR target_generation NOT IN (
+			SELECT generation FROM target_generations WHERE target = ? AND done_at IS NULL))`,
+		[]any{s.Generation, s.Target}
+}
 
 // TargetGenerationRow is one retired (possibly still-retiring) generation.
 type TargetGenerationRow struct {

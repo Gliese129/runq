@@ -487,10 +487,11 @@ func (b *LocalBackend) RetryTask(ctx context.Context, taskID string) error {
 	}
 
 	if err := b.store.UpdateTaskStatus(ctx, taskID, "pending", map[string]any{
-		"gpus":        nil,
-		"pid":         nil,
-		"started_at":  nil,
-		"finished_at": nil,
+		"target_generation": b.generation, // RQ-75: retry = my new attempt
+		"gpus":              nil,
+		"pid":               nil,
+		"started_at":        nil,
+		"finished_at":       nil,
 	}); err != nil {
 		return err
 	}

@@ -75,7 +75,12 @@ type TaskFinisher interface {
 // operation, SSHFS for remote clusters. Commands go through shellRun which
 // wraps FS.Exec("sh", "-c", ...).
 type Backend struct {
-	Cfg        *config.TargetConfig
+	Cfg *config.TargetConfig
+	// Scope is this lane's generation-ownership predicate (RQ-75): EVERY
+	// lifecycle query (probe candidates, marker reconcile, heartbeat,
+	// orphan detection) filters by it, so active and retiring lanes never
+	// touch each other's tasks. nil = unscoped (legacy/runqd paths).
+	Scope      *store.LaneScope
 	Store      *store.Store
 	FS         rfs.FS
 	StorageCfg *config.GlobalConfig // nil-safe: nil = project_path mode
@@ -304,7 +309,7 @@ func sortedKeys(m map[string]string) []string {
 // the daemon's service.refreshJobStatus so daemon and HPC report jobs the same
 // way.
 func (b *Backend) refreshJobStatus(ctx context.Context, jobID string) error {
-	tasks, err := b.Store.ListTasks(ctx, store.TaskFilter{JobID: jobID})
+	tasks, err := b.Store.ListTasks(ctx, store.TaskFilter{JobID: jobID, Scope: b.Scope})
 	if err != nil {
 		return err
 	}

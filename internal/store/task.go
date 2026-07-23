@@ -84,6 +84,10 @@ type TaskFilter struct {
 	Target string // filter by target; empty = no filter
 	Limit  int    // page size; 0 = no limit (D20: SQL-level pagination)
 	Offset int    // page start; only applied when Limit > 0
+	// Scope confines the result to rows the querying LANE owns (RQ-75
+	// generation isolation). nil = no ownership filter (user-facing list
+	// views see everything).
+	Scope *LaneScope
 }
 
 // allTaskColumns lists every column in the tasks table.
@@ -229,21 +233,22 @@ func (s *Store) InsertTaskTx(ctx context.Context, tx *sql.Tx, t *TaskRow) error 
 // accepts. Any key not in this set is rejected to prevent accidental SQL
 // injection from future callers.
 var allowedStatusFields = map[string]bool{
-	"pid":            true,
-	"gpus":           true,
-	"start_time":     true,
-	"started_at":     true,
-	"finished_at":    true,
-	"retry_count":    true,
-	"log_path":       true,
-	"working_dir":    true,
-	"env_json":       true,
-	"external_id":    true,
-	"status_source":  true,
-	"extra_args":     true,
-	"native_state":   true,
-	"queue":          true,
-	"failure_detail": true,
+	"pid":               true,
+	"gpus":              true,
+	"start_time":        true,
+	"started_at":        true,
+	"finished_at":       true,
+	"retry_count":       true,
+	"log_path":          true,
+	"working_dir":       true,
+	"env_json":          true,
+	"external_id":       true,
+	"status_source":     true,
+	"extra_args":        true,
+	"native_state":      true,
+	"target_generation": true,
+	"queue":             true,
+	"failure_detail":    true,
 }
 
 // UpdateTaskStatus updates a task's status and any extra fields.
@@ -361,6 +366,11 @@ func (s *Store) ListTasks(ctx context.Context, filter TaskFilter) ([]TaskRow, er
 	if filter.Target != "" {
 		where = append(where, "target = ?")
 		args = append(args, filter.Target)
+	}
+	if filter.Scope != nil {
+		cl, sargs := filter.Scope.whereClause()
+		where = append(where, cl)
+		args = append(args, sargs...)
 	}
 
 	query := fmt.Sprintf("SELECT %s FROM tasks", allTaskColumns)

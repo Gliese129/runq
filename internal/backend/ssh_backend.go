@@ -101,10 +101,9 @@ const (
 type SSHBackend struct {
 	storeQueries // embeds store, reg, and shared project/clean/thaw/dryrun methods
 	backend      *remote.Backend
-	sshFS        *rfs.SSHFS // held for Close()
-	targetName   string     // this lane's target name (tasks.target scope)
-	generation   string     // RQ-75: semantic hash of the target config this lane was built from
-	retiring     bool       // RQ-75: superseded generation tracking its remaining tasks (set before Start)
+	sshFS        *rfs.SSHFS       // held for Close()
+	targetName   string           // this lane's target name (tasks.target scope)
+	scope        *store.LaneScope // RQ-75: generation-ownership predicate, SHARED with remote.Backend
 
 	// Per-target scheduler lane (RQ-46): queue + submission-slot pool +
 	// scheduler instance + remote launcher. Same lifecycle code as the local
@@ -258,10 +257,13 @@ func NewSSHBackend(cfg SSHBackendConfig) (*SSHBackend, error) {
 		launcher:   launcher,
 		logger:     logger,
 		targetName: t.Name,
-		generation: t.SemanticGeneration(),
+		scope:      store.NewLaneScope(t.Name, t.SemanticGeneration()),
 		syncDone:   make(chan struct{}),
 		nudgeCh:    make(chan struct{}, 1),
 	}
+	// One scope, every query surface (RQ-75): the remote backend's probe/
+	// marker/heartbeat/orphan reads filter by the same ownership predicate.
+	hpcBe.Scope = be.scope
 	// Boot counts as activity: after a daemon restart the sensor gets one
 	// active window to re-align restored in-flight state before it may
 	// hibernate (zero value would mean "hibernated since 1970").
@@ -284,39 +286,16 @@ func (b *SSHBackend) Start(ctx context.Context) {
 // tasks with an external id are in flight on the cluster (occupy a slot,
 // restored as running); tasks without one are waiting to be (re)launched.
 func (b *SSHBackend) restoreLane(ctx context.Context) {
-	rows, err := b.store.ListTasks(ctx, store.TaskFilter{Target: b.backend.Cfg.Name})
+	rows, err := b.store.ListTasks(ctx, store.TaskFilter{Target: b.backend.Cfg.Name, Scope: b.scope})
 	if err != nil {
 		b.logger.Warn("restore: list tasks failed", "error", err)
 		return
 	}
-	// Generation ownership filter (RQ-75). A retiring lane confines itself
-	// to rows stamped with ITS generation; the active lane takes its own
-	// generation, legacy ('') rows, and ADOPTS orphan generations — ones
-	// with no live retirement record (hash shifts across upgrades, crashes
-	// between swap and persist). Live-retiring generations are skipped:
-	// their lane restores them itself.
-	retiringGen := map[string]bool{}
-	owns := func(gen string) bool {
-		if b.retiring {
-			return gen == b.generation
-		}
-		if gen == b.generation || gen == "" {
-			return true
-		}
-		live, seen := retiringGen[gen]
-		if !seen {
-			var lerr error
-			live, lerr = b.store.IsRetiringGeneration(ctx, b.targetName, gen)
-			if lerr != nil {
-				live = true // can't prove orphan — do not steal
-			}
-			retiringGen[gen] = live
-		}
-		if !live {
-			b.logger.Info("adopting task row from an unrecorded generation", "generation", gen)
-		}
-		return !live
-	}
+	// Ownership filtering happens in SQL via the lane scope (RQ-75); what
+	// arrives here is OURS. The active lane additionally ADOPTS what it
+	// received from foreign orphan generations ('' legacy rows, hash
+	// shifts, crash windows) by RESTAMPING them — ownership is written,
+	// never re-inferred, so unfinished counts always add up.
 	restored, queued := 0, 0
 	for i := range rows {
 		row := rows[i]
@@ -324,12 +303,18 @@ func (b *SSHBackend) restoreLane(ctx context.Context) {
 		case "success", "failed", "killed":
 			continue
 		}
-		if !owns(row.TargetGeneration) {
-			continue
+		if !b.scope.IsRetiring() && row.TargetGeneration != b.scope.Generation {
+			if rerr := b.store.RestampTask(ctx, row.ID, b.scope.Generation); rerr != nil {
+				b.logger.Warn("adopting task: restamp failed — will retry next restore",
+					"task", row.ID, "error", rerr)
+				continue // do not restore what we could not take ownership of
+			}
+			b.logger.Info("adopted task from an unrecorded generation",
+				"task", row.ID, "was", row.TargetGeneration)
 		}
 		// A retiring lane never queues pending work — unsubmitted rows
 		// belong to the active generation (restamped on rotation).
-		if b.retiring && row.ExternalID == "" && row.Status != "unknown" {
+		if b.scope.IsRetiring() && row.ExternalID == "" && row.Status != "unknown" {
 			continue
 		}
 		t := TaskRowToSchedulerTask(&row)
@@ -459,7 +444,7 @@ func (b *SSHBackend) sensorLoop(ctx context.Context) {
 // running tasks. Each task costs one stat when idle, delta-only reads when
 // growing — the spread-out替代 of a read-time parse storm.
 func (b *SSHBackend) ingestRunningMetrics(ctx context.Context) {
-	rows, err := b.store.ListTasks(ctx, store.TaskFilter{Status: "running", Target: b.targetName})
+	rows, err := b.store.ListTasks(ctx, store.TaskFilter{Status: "running", Target: b.targetName, Scope: b.scope})
 	if err != nil {
 		return
 	}
@@ -483,7 +468,7 @@ func (b *SSHBackend) DetectOrphansNow(ctx context.Context) error {
 
 // Generation is the semantic hash of the target config this lane was
 // built from (RQ-75) — the ownership stamp on its tasks.
-func (b *SSHBackend) Generation() string { return b.generation }
+func (b *SSHBackend) Generation() string { return b.scope.Generation }
 
 // MarkRetiring flips this lane into retiring mode (RQ-75): the launch
 // path is permanently quiesced, and restoreLane confines itself to the
@@ -491,7 +476,7 @@ func (b *SSHBackend) Generation() string { return b.generation }
 // the active generation). Must be called BEFORE Start when rebuilding a
 // retiring lane after a restart.
 func (b *SSHBackend) MarkRetiring() {
-	b.retiring = true
+	b.scope.MarkRetiring()
 	b.sched.Quiesce()
 }
 
@@ -626,7 +611,7 @@ func (b *SSHBackend) GetJob(ctx context.Context, jobID string) (*JobDetail, erro
 	if j == nil {
 		return nil, fmt.Errorf("job %q: %w", jobID, ErrNotFound)
 	}
-	tasks, err := b.store.ListTasks(ctx, store.TaskFilter{JobID: jobID})
+	tasks, err := b.store.ListTasks(ctx, store.TaskFilter{JobID: jobID, Scope: b.scope})
 	if err != nil {
 		return nil, err
 	}
@@ -1110,6 +1095,10 @@ func (b *SSHBackend) RetryTask(ctx context.Context, taskID string) error {
 			"started_at":  nil,
 			"finished_at": nil,
 			"external_id": nil,
+			// RQ-75: a retry is MY new attempt — ownership is stamped in
+			// the same reset write, after the wrapper reset succeeded, so
+			// a failed reset changes nothing and routing never lies.
+			"target_generation": b.scope.Generation,
 		}); err != nil {
 			return err
 		}

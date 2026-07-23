@@ -109,38 +109,53 @@ func (d *Daemon) ReconcileConfig(reason string) error {
 	}
 
 	for _, name := range removed {
-		// Unroute FIRST (no new requests can reach the lane), then fence
-		// and drain, then close after grace (review #4).
-		_ = d.StopRemoteForward(name)
-		d.multiBe.RemoveTarget(name)
 		d.laneMu.Lock()
 		be := d.lanes[name]
-		delete(d.lanes, name)
 		d.laneMu.Unlock()
-		// A removal has NO successor restoring pending rows from the DB, so
-		// a drain timeout cannot double-submit — proceeding is safe
-		// (stragglers settle as unknown; reconcile heals).
-		if !d.quiesceLane(name, be) {
-			d.Logger.Warn("removed lane drain timed out — proceeding to retirement anyway",
-				"target", name, "timeout", d.laneDrainTimeout)
-		}
-		// Pending (unsubmitted) tasks have no lane to ever run on — stop
-		// them with a visible reason (user decision: removed name ≠
-		// migration). In-flight tasks are NOT touched: the lane retires
-		// and tracks them to their real outcome.
+		// PERSISTENCE FIRST, while the lane is still routed (review #4):
+		// stop pending rows (user decision: removed name ≠ migration —
+		// they have no lane to ever run on; the reason is recorded
+		// verbatim) and record the retirement. Any failure keeps the
+		// target in the record so the next pass retries the whole removal.
 		if d.Store != nil {
 			sctx, scancel := context.WithTimeout(context.Background(), 10*time.Second)
 			ids, serr := d.Store.StopPendingTasks(sctx, name,
 				"target "+name+" was removed from config.yaml — pending task stopped before submission")
 			scancel()
 			if serr != nil {
-				d.Logger.Warn("stop pending tasks failed", "target", name, "error", serr)
-			} else if len(ids) > 0 {
+				record[name] = d.lastTargets[name]
+				d.noteLaneBuildErr(name, fmt.Errorf("removal aborted: stop pending tasks failed: %w — retrying next pass", serr))
+				continue
+			}
+			if len(ids) > 0 {
 				d.Logger.Warn("pending tasks stopped: their target was removed from config.yaml",
 					"target", name, "count", len(ids))
 			}
 		}
-		d.retireOrClose(name, d.lastTargets[name], be, "removed")
+		retire, perr := d.prepareRetirement(name, d.lastTargets[name], be, "removed")
+		if perr != nil {
+			record[name] = d.lastTargets[name]
+			d.noteLaneBuildErr(name, fmt.Errorf("removal aborted: %w — retrying next pass", perr))
+			continue
+		}
+		// Unroute, fence, drain. A removal has NO successor restoring
+		// pending rows, so a drain timeout cannot double-submit —
+		// proceeding is safe (stragglers settle as unknown).
+		_ = d.StopRemoteForward(name)
+		d.multiBe.RemoveTarget(name)
+		d.laneMu.Lock()
+		delete(d.lanes, name)
+		d.laneMu.Unlock()
+		if !d.quiesceLane(name, be) {
+			d.Logger.Warn("removed lane drain timed out — proceeding to retirement anyway",
+				"target", name, "timeout", d.laneDrainTimeout)
+		}
+		if retire {
+			d.registerRetiring(name, laneGeneration(be), be)
+		} else {
+			d.closeLaneDeferred(name, be)
+		}
+		d.clearLaneBuildErr(name)
 		d.Logger.Info("lane removed", "target", name)
 	}
 
@@ -207,32 +222,56 @@ func (d *Daemon) ReconcileConfig(reason string) error {
 				d.laneDrainTimeout))
 			continue
 		}
-		// Same-name change: pending (unsubmitted) work auto-migrates to
-		// the new generation (user decision) — restamp BEFORE the
-		// replacement restores, so it queues them as its own.
-		if d.Store != nil {
-			sctx, scancel := context.WithTimeout(context.Background(), 10*time.Second)
-			if n, rerr := d.Store.RestampPendingTasks(sctx, name, tc.SemanticGeneration()); rerr != nil {
-				d.Logger.Warn("pending-task migration failed", "target", name, "error", rerr)
-			} else if n > 0 {
-				d.Logger.Info("pending tasks migrated to the new generation", "target", name, "count", n)
-			}
-			scancel()
+		// 3. Persist ownership BEFORE the replacement restores (review:
+		//    startLane before the retirement record existed let the new
+		//    lane adopt the old generation — double ownership). ANY
+		//    persistence failure aborts the rotation (review: log-and-
+		//    proceed left pending rows orphaned / retirements unrebuildable)
+		//    with the same semantics as a drain timeout: old lane resumes,
+		//    replacement discarded, next pass retries.
+		abort := func(aerr error) {
+			resumeLane(old)
+			closeLane(d, name, newBe)
+			record[name] = d.lastTargets[name]
+			d.noteLaneBuildErr(name, fmt.Errorf("rotation aborted: %w — old lane kept serving, retrying next pass", aerr))
 		}
-		// 3. Start the replacement (restoreLane reads the settled DB) and
-		//    swap routing atomically — the target NAME never stops serving.
+		// Pending rows migrate to the new generation BEFORE the count, so
+		// unfinished(oldGen) means in-flight work only (user decision:
+		// same-name pending auto-follows the new config).
+		if d.Store != nil {
+			mctx, mcancel := context.WithTimeout(context.Background(), 10*time.Second)
+			nMig, rerr := d.Store.RestampPendingTasks(mctx, name, tc.SemanticGeneration())
+			mcancel()
+			if rerr != nil {
+				abort(fmt.Errorf("pending-task migration failed: %w", rerr))
+				continue
+			}
+			if nMig > 0 {
+				d.Logger.Info("pending tasks migrated to the new generation", "target", name, "count", nMig)
+			}
+		}
+		retire, perr := d.prepareRetirement(name, d.lastTargets[name], old, "changed")
+		if perr != nil {
+			abort(perr)
+			continue
+		}
+		// 4. Start the replacement (restore sees the retirement record and
+		//    the restamped pending rows) and swap routing atomically — the
+		//    target NAME never stops serving.
 		startLane(newBe)
 		_ = d.StopRemoteForward(name)
 		d.multiBe.SetTarget(name, newBe)
 		d.laneMu.Lock()
 		d.lanes[name] = newBe
 		d.laneMu.Unlock()
-		// 4. The superseded generation RETIRES (user decision, replacing
-		//    the old grace-close): if it still owns unfinished tasks it
-		//    keeps running quiesced — sensing them on ITS endpoint with
-		//    ITS templates — until the count reaches zero; with nothing
-		//    left it closes after the short grace.
-		d.retireOrClose(name, d.lastTargets[name], old, "changed")
+		// 5. The superseded generation RETIRES (kept running quiesced,
+		//    sensing ITS tasks on ITS endpoint until the count hits zero)
+		//    or, with nothing left to track, closes after the short grace.
+		if retire {
+			d.registerRetiring(name, laneGeneration(old), old)
+		} else {
+			d.closeLaneDeferred(name, old)
+		}
 		// Cleared only after the FULL rotation succeeded — clearing at
 		// build success would make an abort retry flip-flop the log.
 		d.clearLaneBuildErr(name)
@@ -329,41 +368,45 @@ func resumeLane(be backend.Backend) {
 	}
 }
 
-// retireOrClose decides a superseded/removed lane's fate (RQ-75, the
-// K8s-old-ReplicaSet shape): with unfinished tasks stamped to its
-// generation it RETIRES — kept running quiesced, registered for
-// generation-routed task ops, persisted so a restart rebuilds it — and
-// only a generation with nothing left to track closes now.
-func (d *Daemon) retireOrClose(name string, oldTC config.TargetConfig, be backend.Backend, reason string) {
+// prepareRetirement runs the PERSISTENCE half of a rotation, BEFORE the
+// replacement starts (review #2/#4): count the old generation's unfinished
+// tasks, persist the retirement record when needed, and migrate pending
+// rows to the new generation. Every failure is returned — the caller
+// aborts the rotation (nothing observable has changed yet: writes are
+// idempotent and re-run next pass). Returns whether the lane must retire.
+func (d *Daemon) prepareRetirement(name string, oldTC config.TargetConfig, be backend.Backend, reason string) (bool, error) {
 	gen := laneGeneration(be)
 	if gen == "" || d.Store == nil || d.multiBe == nil {
-		d.closeLaneDeferred(name, be)
-		return
+		return false, nil // ungenerated lane (test fake without gen): plain close
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	n, err := d.Store.CountUnfinishedGenerationTasks(ctx, name, gen)
 	if err != nil {
-		// Can't prove it's empty — retiring a possibly-empty lane is safe
-		// (the sweep closes it), closing a non-empty one loses tasks.
-		d.Logger.Warn("unfinished-count query failed — retiring to be safe", "target", name, "error", err)
-		n = -1
+		return false, fmt.Errorf("unfinished-count query failed: %w", err)
 	}
 	if n == 0 {
-		d.closeLaneDeferred(name, be)
-		return
+		return false, nil
 	}
 	snap, merr := json.Marshal(oldTC)
 	if merr != nil {
-		d.Logger.Warn("target config snapshot failed", "target", name, "error", merr)
+		return false, fmt.Errorf("target config snapshot failed: %w", merr)
 	}
 	if uerr := d.Store.UpsertRetiredGeneration(ctx, &store.TargetGenerationRow{
 		Target: name, Generation: gen, ConfigJSON: string(snap),
 		Reason: reason, RetiredAt: time.Now().Unix(),
 	}); uerr != nil {
-		d.Logger.Warn("persist retiring generation failed — retirement won't survive a restart",
-			"target", name, "generation", gen, "error", uerr)
+		return false, fmt.Errorf("persist retiring generation failed: %w", uerr)
 	}
+	d.Logger.Info("lane retiring — tracking its remaining tasks to completion",
+		"target", name, "generation", shortGen(gen), "unfinished", n, "reason", reason)
+	return true, nil
+}
+
+// registerRetiring flips the lane into retiring mode and registers it for
+// generation-routed ops and the sweep. Persistence happened earlier
+// (prepareRetirement) — this half cannot fail.
+func (d *Daemon) registerRetiring(name, gen string, be backend.Backend) {
 	markRetiring(be)
 	d.multiBe.SetRetiringLane(name, gen, be)
 	d.laneMu.Lock()
@@ -372,8 +415,6 @@ func (d *Daemon) retireOrClose(name string, oldTC config.TargetConfig, be backen
 	}
 	d.retiringLanes[name+"@"+gen] = be
 	d.laneMu.Unlock()
-	d.Logger.Info("lane retiring — tracking its remaining tasks to completion",
-		"target", name, "generation", shortGen(gen), "unfinished", n, "reason", reason)
 }
 
 // SweepRetiringLanes closes every retiring lane whose unfinished-task
@@ -433,7 +474,18 @@ func (d *Daemon) rebuildRetiringLanes() {
 		d.Logger.Warn("config load for retiring rebuild failed", "error", cerr)
 		return
 	}
+	cur := targetsByName(cfg)
 	for _, g := range gens {
+		// A record matching the target's CURRENT generation is a stale
+		// leftover from an aborted rotation (persist succeeded, a later
+		// step failed, the lane stayed active) — close it out instead of
+		// rebuilding a duplicate lane for the ACTIVE generation.
+		if tc, ok := cur[g.Target]; ok && tc.SemanticGeneration() == g.Generation {
+			_ = d.Store.MarkGenerationDone(ctx, g.Target, g.Generation)
+			d.Logger.Info("stale retirement record for the active generation closed",
+				"target", g.Target, "generation", shortGen(g.Generation))
+			continue
+		}
 		if n, nerr := d.Store.CountUnfinishedGenerationTasks(ctx, g.Target, g.Generation); nerr == nil && n == 0 {
 			_ = d.Store.MarkGenerationDone(ctx, g.Target, g.Generation)
 			continue

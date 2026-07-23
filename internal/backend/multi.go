@@ -610,15 +610,12 @@ func (m *MultiBackend) RetryTaskGen(ctx context.Context, taskID string, confirmG
 	if g, ok := be.(interface{ Generation() string }); ok {
 		activeGen = g.Generation()
 	}
-	if t.TargetGeneration != "" && activeGen != "" && t.TargetGeneration != activeGen {
-		if !confirmGeneration {
-			return &GenerationChangedError{TaskGeneration: t.TargetGeneration, ActiveGeneration: activeGen}
-		}
-		// Confirmed: the rerun becomes the active generation's task.
-		if err := m.store.RestampTask(ctx, taskID, activeGen); err != nil {
-			return err
-		}
+	if t.TargetGeneration != "" && activeGen != "" && t.TargetGeneration != activeGen && !confirmGeneration {
+		return &GenerationChangedError{TaskGeneration: t.TargetGeneration, ActiveGeneration: activeGen}
 	}
+	// Ownership is stamped by the lane itself, inside its reset write and
+	// only after the wrapper reset succeeded (review P2: a pre-retry
+	// restamp would leave routing lying when the reset fails).
 	return be.RetryTask(ctx, taskID)
 }
 
