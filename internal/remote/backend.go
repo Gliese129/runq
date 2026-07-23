@@ -75,7 +75,12 @@ type TaskFinisher interface {
 // operation, SSHFS for remote clusters. Commands go through shellRun which
 // wraps FS.Exec("sh", "-c", ...).
 type Backend struct {
-	Cfg        *config.TargetConfig
+	Cfg *config.TargetConfig
+	// Scope is this lane's generation-ownership predicate (RQ-75): EVERY
+	// lifecycle query (probe candidates, marker reconcile, heartbeat,
+	// orphan detection) filters by it, so active and retiring lanes never
+	// touch each other's tasks. nil = unscoped (legacy/runqd paths).
+	Scope      *store.LaneScope
 	Store      *store.Store
 	FS         rfs.FS
 	StorageCfg *config.GlobalConfig // nil-safe: nil = project_path mode
@@ -182,6 +187,13 @@ func (b *Backend) recordContact(transportErr error) {
 		_ = b.Store.RecordSyncOutcome(context.Background(), b.Cfg.Name, "contact", transportErr)
 	}
 }
+
+// RecordContactOK records a daemon-observed successful contact with this
+// target from OUTSIDE the normal exec paths (RQ-74): the remote CLI forward
+// session coming up after `runq connect`, or any other transport-level proof
+// of reachability. Doctor's "no contact yet" clears the moment the daemon
+// has such proof, instead of waiting for the next scheduled sensor pass.
+func (b *Backend) RecordContactOK() { b.recordContact(nil) }
 
 // LastContact returns the passive reachability snapshot for /health:
 // zero time = no contact since boot.
@@ -297,17 +309,24 @@ func sortedKeys(m map[string]string) []string {
 // the daemon's service.refreshJobStatus so daemon and HPC report jobs the same
 // way.
 func (b *Backend) refreshJobStatus(ctx context.Context, jobID string) error {
+	// Deliberately UNscoped (review round 3): the job aggregate must see
+	// ALL generations' tasks — a lane judging terminality from only its
+	// own subset would close a job whose other-generation tasks still run.
 	tasks, err := b.Store.ListTasks(ctx, store.TaskFilter{JobID: jobID})
 	if err != nil {
 		return err
 	}
-	var running, pending, success, failed, killed int
+	var running, pending, unknown, success, failed, killed int
 	for _, t := range tasks {
 		switch t.Status {
 		case "running":
 			running++
 		case "pending":
 			pending++
+		case "unknown":
+			// RQ-74: live work — blocks the terminal split until reconcile
+			// settles it.
+			unknown++
 		case "success":
 			success++
 		case "failed":
@@ -316,8 +335,8 @@ func (b *Backend) refreshJobStatus(ctx context.Context, jobID string) error {
 			killed++
 		}
 	}
-	started := running+success+failed+killed > 0
-	ended := pending+running == 0
+	started := running+unknown+success+failed+killed > 0
+	ended := pending+running+unknown == 0
 
 	status := "pending"
 	switch {

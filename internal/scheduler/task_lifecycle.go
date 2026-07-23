@@ -79,7 +79,9 @@ func (s *Scheduler) runTask(task *Task) {
 	})
 	if err != nil {
 		s.logger.Error("task start failed", "task", task.ID, "error", err)
-		s.FinishTask(task, StatusFailed, nil)
+		// RQ-74: the process never ran, so no log file explains this death —
+		// persist the spawn error as the task's own failure evidence.
+		s.FinishTask(task, StatusFailed, map[string]any{"failure_detail": failureDetail(err)})
 		return
 	}
 
@@ -143,6 +145,10 @@ func (s *Scheduler) launchAsync(task *Task) {
 	switch {
 	case err == nil:
 		s.logger.Info("task submitted to remote scheduler", "task", task.ID, "job", task.JobID)
+		// The handoff succeeded — the launcher cleared the DB-side transient
+		// note together with the external-id write; drop the dedup entry so
+		// a LATER transient failure (next attempt) is persisted again.
+		s.transientNote.Delete(task.ID)
 		if s.killPending(task.ID) {
 			// Kill raced the submit: the external id exists only now.
 			// Cancel is fallible — only a CONFIRMED cancel may settle
@@ -162,16 +168,100 @@ func (s *Scheduler) launchAsync(task *Task) {
 		s.logger.Warn("scheduler unreachable, task returned to queue",
 			"task", task.ID, "error", err)
 		s.requeueTransient(task)
+		// RQ-74: the retry loop must not be silent — persist the transport
+		// error on the (still pending) row so ps/dashboard can show WHY the
+		// task keeps waiting. Deduplicated: SSH being down repeats the same
+		// message every tick.
+		s.noteTransientFailure(task, err)
 	case errors.Is(err, ErrLaunchUntracked):
-		// A cluster job may exist without a handle. If a kill is pending we
-		// keep the flag (no lying); the verdict path settles it.
-		s.logger.Error("task submitted but untracked", "task", task.ID, "error", err)
+		// RQ-74: the submission started but its outcome was lost (mid-flight
+		// disconnect, id parse/persist failure). A cluster job MAY exist, so
+		// neither retry (double submit) nor fail (may be running) is honest —
+		// the task becomes `unknown`, carrying the error verbatim, and waits
+		// for reconcile to settle it from facts (status.json marker / probe).
+		// If a kill is pending we keep the flag (no lying); the verdict path
+		// settles it.
+		s.logger.Error("task outcome unknown after launch", "task", task.ID, "error", err)
+		s.markUnknown(task, err)
 	default:
 		if s.settleKilled(task, "rejected submission — no remote job") {
 			return
 		}
 		s.logger.Error("submission rejected", "task", task.ID, "error", err)
-		s.FinishTaskNoRetry(task, map[string]any{"status_source": "submit"})
+		// RQ-74: the scheduler's own words (stderr + exit code + rendered
+		// command, composed by the launcher) become the task's permanent
+		// failure evidence — visible in task show / ps / dashboard, not
+		// only in the daemon log.
+		s.FinishTaskNoRetry(task, map[string]any{
+			"status_source":  "submit",
+			"failure_detail": failureDetail(err),
+		})
+	}
+}
+
+// markUnknown persists the `unknown` status (queue + DB) with the launch
+// error as visible evidence. The submission slot stays held — a cluster job
+// may exist. Reconcile is the only path out (verdict → FinishTask), plus
+// user kill.
+func (s *Scheduler) markUnknown(task *Task, cause error) {
+	// The unknown evidence replaces any earlier transient note — drop the
+	// dedup entry so a FUTURE transient failure with the same text (after a
+	// manual retry) is not silently swallowed against a stale memory.
+	s.transientNote.Delete(task.ID)
+	if err := s.queue.MarkUnknown(task.ID); err != nil {
+		s.logger.Error("mark unknown in queue failed", "task", task.ID, "error", err)
+	}
+	dbCtx, cancel := context.WithTimeout(s.ctx, 5*time.Second)
+	defer cancel()
+	if err := s.store.UpdateTaskStatus(dbCtx, task.ID, string(StatusUnknown), map[string]any{
+		"status_source":  "submit",
+		"failure_detail": failureDetail(cause),
+	}); err != nil {
+		s.logger.Error("persist unknown status failed", "task", task.ID, "error", err)
+	}
+}
+
+// noteTransientFailure writes the transport error onto the still-pending row
+// (failure_detail) so the wait is self-explaining, deduplicating identical
+// messages across ticks. The note is cleared on a successful handoff
+// (remote launcher persists failure_detail=nil with the external id) and on
+// every terminal transition (completeTask defaults failure_detail to nil).
+func (s *Scheduler) noteTransientFailure(task *Task, cause error) {
+	detail := "submit not reaching the scheduler yet — will retry automatically:\n" + failureDetail(cause)
+	if prev, ok := s.transientNote.Load(task.ID); ok && prev.(string) == detail {
+		return
+	}
+	// Under finishMu, gated on the queue's CURRENT view: a user kill can
+	// settle the task in the window between requeueTransient and this
+	// write, and an unconditional UPDATE (status=pending) would resurrect
+	// a killed row. The queue is the authority — only a still-pending
+	// entry takes the note.
+	s.finishMu.Lock()
+	defer s.finishMu.Unlock()
+	if qt := s.queue.Get(task.ID); qt == nil || qt.Status != StatusPending {
+		return
+	}
+	dbCtx, cancel := context.WithTimeout(s.ctx, 5*time.Second)
+	defer cancel()
+	if err := s.store.UpdateTaskStatus(dbCtx, task.ID, string(StatusPending), map[string]any{
+		"failure_detail": detail,
+	}); err != nil {
+		s.logger.Warn("persist transient note failed", "task", task.ID, "error", err)
+		return
+	}
+	s.transientNote.Store(task.ID, detail)
+}
+
+// ResumeUnknown flips an unknown queue entry back to running: reconcile
+// confirmed (wrapper facts) that a live cluster job exists behind an
+// outcome-lost submission (RQ-74). Under finishMu so it cannot interleave
+// with a concurrent verdict delivery; the DB write is the caller's
+// (reconcile is the DB's writer on this lane — this only syncs the queue).
+func (s *Scheduler) ResumeUnknown(taskID string) {
+	s.finishMu.Lock()
+	defer s.finishMu.Unlock()
+	if err := s.queue.ResumeUnknown(taskID); err != nil {
+		s.logger.Warn("resume unknown: queue sync failed", "task", taskID, "error", err)
 	}
 }
 
@@ -276,6 +366,10 @@ func (s *Scheduler) finishTaskInner(task *Task, status TaskStatus, extra map[str
 			// happens inside a verdict delivery — so no verdict can ever be
 			// computed before a requeue and delivered after it. This gate
 			// remains as a cheap backstop for queue-state mismatches only.
+		case qt.Status == StatusUnknown:
+			// RQ-74: reconcile settling an unknown-outcome submission (or a
+			// user kill of one) — this is exactly the healing path unknown
+			// exists for. Accept.
 		case qt.Status == StatusPending && status == StatusKilled:
 			// Never handed off, user cancelled — accept.
 		default:
@@ -328,12 +422,25 @@ func (s *Scheduler) completeTask(task *Task, status TaskStatus, extra map[string
 		// ("Killed" + native_state "running" is a lie). A verdict that DOES
 		// know the final native state passes it via extra and overrides.
 		"native_state": nil,
+		// Same honesty rule for pre-run failure evidence (RQ-74): a task
+		// that reached a terminal through the run phase must not keep a
+		// stale submit-era note ("retrying…" on a succeeded task). Verdicts
+		// that carry real evidence (submit rejection) override via extra.
+		"failure_detail": nil,
 	}
 	for k, v := range extra {
 		fields[k] = v
 	}
+	s.transientNote.Delete(task.ID)
 	if err := s.store.UpdateTaskStatus(dbCtx, task.ID, string(status), fields); err != nil {
-		s.logger.Error("persist task completion failed", "task", task.ID, "status", status, "error", err)
+		// DB is the truth, the queue a view — the view must never run
+		// ahead (review round 5 #2): a memory-terminal/DB-non-terminal
+		// split would strand the task with no mechanism left to retry it.
+		// Leaving the queue untouched keeps the verdict retryable (marker
+		// rescan / probe / next sweep delivers it again).
+		s.logger.Error("persist task completion failed — queue left unchanged, verdict will be redelivered",
+			"task", task.ID, "status", status, "error", err)
+		return
 	}
 	if err := s.queue.Complete(task.ID, status); err != nil {
 		s.logger.Error("complete in queue failed", "task", task.ID, "error", err)
@@ -431,6 +538,9 @@ func (s *Scheduler) handleFailure(task *Task, extra map[string]any) {
 			// means a NEW submission — probing the old id would track a dead
 			// cluster job. Harmless no-op for local tasks (column unused).
 			"external_id": nil,
+			// A new attempt starts with a clean slate — stale failure
+			// evidence from the previous attempt must not survive into it.
+			"failure_detail": nil,
 		}); err != nil {
 			s.logger.Error("persist requeue failed", "task", task.ID, "error", err)
 		}
@@ -445,6 +555,21 @@ func (s *Scheduler) handleFailure(task *Task, extra map[string]any) {
 	s.completeTask(task, StatusFailed, extra)
 	s.RefreshJobStatus(task.JobID)
 	s.logger.Warn("task failed permanently", "task", task.ID, "retry", task.RetryCount, "max_retry", task.MaxRetry)
+}
+
+// maxFailureDetailLen caps the persisted failure evidence. Scheduler stderr is
+// normally a few lines; the cap only guards against a pathological submit
+// command spewing megabytes into the DB row.
+const maxFailureDetailLen = 8 << 10
+
+// failureDetail renders an error as the task's persisted failure evidence
+// (tasks.failure_detail, RQ-74), truncated to maxFailureDetailLen.
+func failureDetail(err error) string {
+	msg := err.Error()
+	if len(msg) > maxFailureDetailLen {
+		msg = msg[:maxFailureDetailLen] + "\n… (truncated)"
+	}
+	return msg
 }
 
 // persistFields updates arbitrary columns on a running task in DB. Non-critical — logs on error.

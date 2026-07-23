@@ -29,6 +29,8 @@ vi.mock('@/apis/client', () => {
       getList: vi.fn(async () => []),
       getEnvelope: vi.fn(async () => ({ items: [] })),
     },
+    // Settings imports this for the RQ-75 conflict dialog branch.
+    isGenerationConflict: (e: unknown) => (e as any)?.code === 'generation_conflict',
   }
 })
 
@@ -50,6 +52,24 @@ describe('Settings smoke', () => {
     })
     await new Promise(r => setTimeout(r, 50))
     expect(wrapper.html().toLowerCase()).toContain('settings')
+  })
+
+  // RQ-74 review finding 3: the generic mock answers `{}` for the
+  // daemon-logs endpoints — exactly the malformed/older-daemon shape. The
+  // panel must degrade to its empty state instead of crashing the render.
+  it('daemon-logs endpoint answering {} degrades to empty panel, not a crash', async () => {
+    const wrapper = mount(Settings, {
+      global: {
+        plugins: [
+          createVuetify({ components: vComponents, directives: vDirectives }),
+          createPinia(),
+          createI18n({ legacy: false, locale: 'en', messages: { en } as any }),
+        ],
+      },
+    })
+    await new Promise(r => setTimeout(r, 50))
+    expect(wrapper.html().toLowerCase()).toContain('runq logs')
+    expect(wrapper.html()).toContain((en as any)['settings.no_daemon_logs'])
   })
 
   it('survives every endpoint failing (version mismatch / daemon down)', async () => {

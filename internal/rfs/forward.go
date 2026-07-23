@@ -50,16 +50,50 @@ type RemoteForwardConfig struct {
 	// triggers a reconnect cycle.
 	Serve func(net.Listener) error
 
+	// OnEstablished, when set, is called once per established forward
+	// session, right before Serve — the moment the remote socket is bound
+	// and listening. The daemon uses it to record target reachability
+	// (RQ-74): a forward coming up is transport-level proof of contact, so
+	// doctor's "no contact yet" clears without waiting for the next
+	// scheduled sensor pass. Must be fast and non-blocking.
+	OnEstablished func()
+
 	Logger *slog.Logger
 }
 
-// Forward reconnect/keepalive tuning.
+// Forward reconnect/keepalive tuning. Backoff max and keepalive interval
+// were tightened from 60s/30s (RQ-74): after a laptop wakes from sleep the
+// forward should be back within seconds, not "keepalive lag + a minute of
+// backoff". Worst case is now ~25s (one keepalive round to notice + one
+// max-backoff wait); the extra traffic is one tiny SSH request per 15s.
 const (
 	forwardBackoffMin   = 2 * time.Second
-	forwardBackoffMax   = time.Minute
+	forwardBackoffMax   = 10 * time.Second
 	forwardHealthyAfter = 2 * time.Minute // session older than this resets backoff
-	forwardKeepalive    = 30 * time.Second
+	forwardKeepalive    = 15 * time.Second
 )
+
+// Forward state labels (ForwardStatus.State).
+const (
+	ForwardUp           = "up"           // session established, socket bound
+	ForwardReconnecting = "reconnecting" // between sessions (includes pre-first-dial)
+	ForwardClosed       = "closed"       // Close() called — no further attempts
+)
+
+// ForwardStatus is one forward's observable state (RQ-74): what /health
+// exposes and doctor renders ("↻ reconnecting · attempt 3 · last online
+// 12m ago"). All timestamps unix seconds.
+type ForwardStatus struct {
+	State string `json:"state"` // up | reconnecting | closed
+	Since int64  `json:"since"` // when the current state was entered
+	// LastOnline is the last moment the forward was known to be serving:
+	// set on establish and refreshed when a live session drops. 0 = never
+	// online ("no contact yet" ≠ "went down" — doctor renders them apart).
+	LastOnline int64 `json:"last_online,omitempty"`
+	// Attempts counts consecutive failed sessions since the last up.
+	Attempts  int    `json:"attempts,omitempty"`
+	LastError string `json:"last_error,omitempty"`
+}
 
 // RemoteForward supervises one remote socket forward. Create with
 // NewRemoteForward, drive with Run (blocking; run it in a goroutine),
@@ -71,8 +105,60 @@ type RemoteForward struct {
 	mu     sync.Mutex
 	client *ssh.Client // current connection; nil between sessions
 
+	// stMu guards st — the observable status snapshot (RQ-74).
+	stMu sync.Mutex
+	st   ForwardStatus
+
 	closeOnce sync.Once
 	done      chan struct{}
+}
+
+// Status returns a snapshot of the forward's observable state.
+func (f *RemoteForward) Status() ForwardStatus {
+	f.stMu.Lock()
+	defer f.stMu.Unlock()
+	return f.st
+}
+
+// markUp records an established session: attempts reset, error cleared.
+func (f *RemoteForward) markUp() {
+	f.stMu.Lock()
+	defer f.stMu.Unlock()
+	if f.st.State == ForwardClosed {
+		return
+	}
+	now := time.Now().Unix()
+	f.st = ForwardStatus{State: ForwardUp, Since: now, LastOnline: now}
+}
+
+// markDown records a session ending. err may be nil (orderly serve exit);
+// the attempt counter still advances — the forward is not serving either
+// way, and the next successful session resets it.
+func (f *RemoteForward) markDown(err error) {
+	f.stMu.Lock()
+	defer f.stMu.Unlock()
+	if f.st.State == ForwardClosed {
+		return
+	}
+	if f.st.State == ForwardUp {
+		// It WAS online until this very moment — that fact is the honest
+		// "last online" reference for doctor.
+		f.st.LastOnline = time.Now().Unix()
+	}
+	f.st.State = ForwardReconnecting
+	f.st.Since = time.Now().Unix()
+	f.st.Attempts++
+	if err != nil {
+		f.st.LastError = err.Error()
+	}
+}
+
+// markClosed pins the terminal state (Close called).
+func (f *RemoteForward) markClosed() {
+	f.stMu.Lock()
+	defer f.stMu.Unlock()
+	f.st.State = ForwardClosed
+	f.st.Since = time.Now().Unix()
 }
 
 // NewRemoteForward creates a RemoteForward. No network traffic until Run.
@@ -102,9 +188,11 @@ func (f *RemoteForward) Run(ctx context.Context) {
 		}
 
 		started := time.Now()
-		if err := f.session(ctx); err != nil {
+		err := f.session(ctx)
+		if err != nil {
 			f.logger.Warn("remote socket forward down", "error", err)
 		}
+		f.markDown(err)
 		if time.Since(started) > forwardHealthyAfter {
 			backoff = forwardBackoffMin // it worked for a while; fail fast next time
 		}
@@ -126,7 +214,7 @@ func (f *RemoteForward) session(ctx context.Context) error {
 	hostKeys := f.cfg.SSH.HostKeyCallback
 	if hostKeys == nil {
 		var err error
-		if hostKeys, err = StrictHostKeyCallback(); err != nil {
+		if hostKeys, err = policyHostKeyCallback(f.cfg.SSH.HostKeyPolicy); err != nil {
 			return err
 		}
 	}
@@ -199,6 +287,10 @@ func (f *RemoteForward) session(ctx context.Context) error {
 	}()
 
 	f.logger.Info("remote socket forward up", "host", f.cfg.SSH.Host, "socket", sockPath)
+	f.markUp()
+	if f.cfg.OnEstablished != nil {
+		f.cfg.OnEstablished()
+	}
 	if err := f.cfg.Serve(ln); err != nil {
 		return fmt.Errorf("serve: %w", err)
 	}
@@ -250,6 +342,7 @@ func (f *RemoteForward) Close() error {
 			f.client = nil
 		}
 		f.mu.Unlock()
+		f.markClosed()
 	})
 	return nil
 }

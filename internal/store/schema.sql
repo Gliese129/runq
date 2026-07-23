@@ -54,7 +54,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     finished_at  INTEGER,            -- Unix timestamp, nullable
     task_dir     TEXT,                -- L2-C: <root>/<job_id>/<task_id>, holds params.json / metrics.jsonl / checkpoints/
     external_id  TEXT,                -- L2-E: HPC scheduler job id (sbatch/qsub). Empty for daemon-managed tasks.
-    status_source TEXT                -- L2-E: provenance of status: "" | wrapper | scheduler | inferred | runq | submit
+    status_source TEXT,               -- L2-E: provenance of status: "" | wrapper | scheduler | inferred | runq | submit
+    failure_detail TEXT,              -- RQ-74: verbatim failure evidence (scheduler stderr, exit code, rendered command) for pre-run failures
+    target_generation TEXT NOT NULL DEFAULT ''  -- RQ-75: semantic hash of the target config that owns this task (lane-generation routing)
 );
 
 CREATE INDEX IF NOT EXISTS idx_tasks_job_id      ON tasks(job_id);
@@ -133,6 +135,24 @@ CREATE INDEX IF NOT EXISTS idx_checkpoints_job ON checkpoints(job_id);
 -- restarts. Process state (in-flight flags, throttle timers) stays in
 -- memory. resource: 'contact' (passive reachability, D6) | 'tasks'
 -- (scheduler sync). last_success only advances on error-free passes.
+-- ── RQ-75: retired target generations ─────────────────────────────────────
+-- A target whose config changed (or that was removed) may still have
+-- in-flight tasks on the OLD endpoint/templates. The old lane generation
+-- keeps running ("retiring") until its unfinished-task count reaches zero;
+-- this table is (a) the restart-survival record that lets the daemon
+-- rebuild retiring lanes from the config snapshot, and (b) the data source
+-- for the archived-generations view in CLI/WebUI.
+CREATE TABLE IF NOT EXISTS target_generations (
+    target      TEXT NOT NULL,
+    generation  TEXT NOT NULL,               -- semantic hash of the target config
+    config_json TEXT NOT NULL,               -- TargetConfig snapshot (rebuild source)
+    reason      TEXT NOT NULL DEFAULT '',    -- 'changed' | 'removed'
+    retired_at  INTEGER NOT NULL,            -- unix: when superseded/removed
+    done_at     INTEGER,                     -- unix: unfinished count hit zero; NULL = still retiring
+    PRIMARY KEY (target, generation)
+);
+CREATE INDEX IF NOT EXISTS idx_target_generations_open ON target_generations(done_at);
+
 CREATE TABLE IF NOT EXISTS sync_state (
     target       TEXT NOT NULL,
     resource     TEXT NOT NULL,

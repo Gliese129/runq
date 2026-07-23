@@ -5,7 +5,10 @@ import { useConfigStore } from '@/stores/config'
 import { useCancelling } from '@/composables/useCancelling'
 import { qk } from './keys'
 
-const ACTIVE_TASK = new Set(['running', 'pending'])
+// `unknown` is active on purpose (RQ-74): the backend treats it as live
+// work awaiting reconcile — the UI must keep polling so the page notices
+// when reconcile settles it (running / terminal) without a manual refresh.
+const ACTIVE_TASK = new Set(['running', 'pending', 'unknown'])
 
 export function useTaskQuery(taskId: MaybeRefOrGetter<string>) {
   const config = useConfigStore()
@@ -52,8 +55,8 @@ export function useTaskActions(jobId?: MaybeRefOrGetter<string>) {
   })
 
   const retry = useMutation({
-    mutationFn: (taskId: string) => tasksApi.retry(taskId),
-    onSuccess: (_d, taskId) => invalidateTask(taskId),
+    mutationFn: (p: { taskId: string; confirm?: boolean }) => tasksApi.retry(p.taskId, p.confirm),
+    onSuccess: (_d, p) => invalidateTask(p.taskId),
   })
 
   return { kill, retry }

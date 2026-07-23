@@ -33,6 +33,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/gliese129/runq/internal/genfile"
 )
 
 // GlobalConfig is the top-level section of ~/.runq/config.yaml.
@@ -52,6 +54,12 @@ type GlobalConfig struct {
 	// Target type is inferred from fields: gpus → local, scheduler → HPC.
 	// SSH section determines filesystem: present → SSHFS, absent → LocalFS.
 	Targets []TargetConfig `yaml:"targets,omitempty"`
+
+	// Generation is the SEMANTIC content hash of config.yaml at Load time
+	// (RQ-75, computed by genfile — reformatting and comments do not move
+	// it). Never serialized: it describes the file, it does not live in it.
+	// Empty for a missing config file.
+	Generation string `yaml:"-" json:"-"`
 }
 
 // ── Target configuration ───────────────────────────────────────────────────
@@ -169,6 +177,41 @@ func (t *TargetConfig) IsRemote() bool {
 	return t.SSH != nil
 }
 
+// SemanticGeneration is this target config's identity hash (RQ-75 lane
+// generations): the yaml-marshalled config run through the same semantic
+// hash as config.yaml itself, so reformatting/comments can never move it.
+// Tasks are stamped with the generation of the lane that owns them;
+// kill/log/refresh route by it. Empty on marshal failure — such rows fall
+// back to active-lane adoption, which is also how legacy (”) rows and
+// hash shifts across runq upgrades stay harmless.
+// SemanticEquals reports whether two target configs are the SAME under
+// generation rules (review round 10): diffTargets must use the identical
+// equivalence the generation hash uses — reflect.DeepEqual distinguishes
+// nil map from {} while the hash does not, and that mismatch let a
+// "changed" target rebuild under an UNCHANGED generation, leaving active
+// and retiring lanes co-owning one (target, generation). Marshal errors
+// compare unequal ("can't prove equal" = changed = safe rebuild path).
+func (t *TargetConfig) SemanticEquals(o *TargetConfig) bool {
+	ta, ea := yaml.Marshal(t)
+	tb, eb := yaml.Marshal(o)
+	if ea != nil || eb != nil {
+		return false
+	}
+	return genfile.SemanticEqual(ta, tb)
+}
+
+func (t *TargetConfig) SemanticGeneration() string {
+	buf, err := yaml.Marshal(t)
+	if err != nil {
+		return ""
+	}
+	gen, err := genfile.SemanticHash(buf)
+	if err != nil {
+		return ""
+	}
+	return gen
+}
+
 // ResolveTargets returns the configured targets. An empty targets[] means
 // "just this machine": a single default local target. (mode is dead, D9 —
 // a stale `mode:` key in old config files parses as an ignored unknown.)
@@ -232,33 +275,103 @@ func CheckConfigPermissions() (warning string, err error) {
 }
 
 func SaveGlobal(cfg *GlobalConfig) error {
-	path := ConfigPath()
-	// Preserve unmanaged YAML sections (e.g. hpc:) by reading the existing
-	// file as a generic map, then overlaying our fields.
-	doc := map[string]any{}
-	if buf, err := os.ReadFile(path); err == nil {
-		_ = yaml.Unmarshal(buf, &doc)
-	}
-	if cfg.DefaultTarget != "" {
-		doc["default_target"] = cfg.DefaultTarget
-	}
-	if cfg.DataPath != "" {
-		doc["data_path"] = cfg.DataPath
-	}
-	if cfg.Dashboard != nil {
-		doc["dashboard"] = cfg.Dashboard
-	}
-	if len(cfg.Targets) > 0 {
-		doc["targets"] = cfg.Targets
-	}
-	out, err := yaml.Marshal(doc)
+	return saveGlobalWith(cfg, "")
+}
+
+// SaveGlobalIfMatch persists cfg with optimistic concurrency (RQ-75): the
+// file's current SEMANTIC generation must equal ifMatch or the save fails
+// with *genfile.ConflictError carrying the current generation. Empty
+// ifMatch degrades to the unconditional SaveGlobal (legacy CLI writers).
+func SaveGlobalIfMatch(cfg *GlobalConfig, ifMatch string) error {
+	return saveGlobalWith(cfg, ifMatch)
+}
+
+func saveGlobalWith(cfg *GlobalConfig, ifMatch string) error {
+	out, err := renderGlobalYAML(cfg)
 	if err != nil {
-		return fmt.Errorf("marshal config: %w", err)
+		return err
 	}
 	if err := os.MkdirAll(ConfigDir(), 0o755); err != nil {
 		return fmt.Errorf("create config dir: %w", err)
 	}
-	return os.WriteFile(path, out, 0o644)
+	// genfile.Save: flock + generation compare + tmp/rename atomic replace.
+	// Even the unconditional path gains atomicity over the old WriteFile.
+	return genfile.Save(ConfigPath(), out, ifMatch, 0o644)
+}
+
+// renderGlobalYAML builds config.yaml's new bytes by SURGICALLY updating
+// the current file's node tree (SetKey's technique, extended to the whole
+// managed set): comments and unmanaged sections (hpc:) outside the replaced
+// keys survive an API write. Comments INSIDE a replaced section (targets)
+// are necessarily lost when that section changes — a form edit rewrites it.
+func renderGlobalYAML(cfg *GlobalConfig) ([]byte, error) {
+	doc, err := readConfigNode()
+	if err != nil {
+		return nil, err
+	}
+	root := doc.Content[0]
+	// Scalars are authoritative like targets (review fix #3): callers
+	// always start from Load(), so an empty value means absent-or-cleared
+	// — remove the key instead of silently keeping the disk value.
+	if cfg.DefaultTarget != "" {
+		setMappingScalar(root, "default_target", cfg.DefaultTarget)
+	} else {
+		removeMappingValue(root, "default_target")
+	}
+	if cfg.DataPath != "" {
+		setMappingScalar(root, "data_path", cfg.DataPath)
+	} else {
+		removeMappingValue(root, "data_path")
+	}
+	if cfg.Dashboard != nil {
+		n, nerr := encodeNode(cfg.Dashboard)
+		if nerr != nil {
+			return nil, nerr
+		}
+		setMappingNode(root, "dashboard", n)
+	}
+	// Targets are authoritative on every save: callers always start from
+	// Load(), so an empty list MEANS "no targets" — remove the key. (The
+	// old map-overlay skipped empty lists, which made deleting the last
+	// target a silent no-op.)
+	if len(cfg.Targets) > 0 {
+		n, nerr := encodeNode(cfg.Targets)
+		if nerr != nil {
+			return nil, nerr
+		}
+		setMappingNode(root, "targets", n)
+	} else {
+		removeMappingValue(root, "targets")
+	}
+	out, err := yaml.Marshal(doc)
+	if err != nil {
+		return nil, fmt.Errorf("marshal config: %w", err)
+	}
+	return out, nil
+}
+
+// encodeNode marshals v into a yaml node for surgical insertion.
+func encodeNode(v any) (*yaml.Node, error) {
+	n := &yaml.Node{}
+	if err := n.Encode(v); err != nil {
+		return nil, fmt.Errorf("encode config section: %w", err)
+	}
+	return n, nil
+}
+
+// setMappingNode sets key to an arbitrary node value (setMappingScalar's
+// sibling for non-scalar sections).
+func setMappingNode(root *yaml.Node, key string, val *yaml.Node) {
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		if root.Content[i].Value == key {
+			root.Content[i+1] = val
+			return
+		}
+	}
+	root.Content = append(root.Content,
+		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key},
+		val,
+	)
 }
 
 // ConfigDir resolves the directory that holds config.yaml (and, for HPC, the
@@ -280,6 +393,7 @@ func DBPath() string { return filepath.Join(ConfigDir(), "runq.db") }
 
 // Load reads the global section of config.yaml. A missing file is not an error
 // — it returns a zero GlobalConfig (data_path empty = project_path mode).
+// The returned config carries its semantic Generation (RQ-75).
 func Load() (*GlobalConfig, error) {
 	buf, err := os.ReadFile(ConfigPath())
 	if os.IsNotExist(err) {
@@ -291,6 +405,11 @@ func Load() (*GlobalConfig, error) {
 	var f configFile
 	if err := yaml.Unmarshal(buf, &f); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", ConfigPath(), err)
+	}
+	// Same bytes we just parsed — the generation cannot disagree with the
+	// content this config was built from.
+	if gen, gerr := genfile.SemanticHash(buf); gerr == nil {
+		f.GlobalConfig.Generation = gen
 	}
 	return &f.GlobalConfig, nil
 }

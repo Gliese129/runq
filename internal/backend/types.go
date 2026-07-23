@@ -3,6 +3,7 @@ package backend
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/gliese129/runq/internal/job"
@@ -35,6 +36,9 @@ type TaskCountGroup struct {
 	Running   int `json:"running"`
 	Completed int `json:"completed"`
 	Failed    int `json:"failed"`
+	// RQ-74: outcome-unknown submissions awaiting reconcile. Rendered as its
+	// own segment so a job with unknown tasks never looks silently done.
+	Unknown int `json:"unknown,omitempty"`
 }
 
 type WandbInfo struct {
@@ -69,6 +73,10 @@ type TaskView struct {
 	// Capabilities.StateModel == "poll" before rendering.
 	ExternalID   string `json:"external_id,omitempty"`
 	StatusSource string `json:"status_source,omitempty"`
+	// RQ-74: verbatim failure evidence for pre-run failures (submit
+	// rejection stderr + exit code + rendered command; local spawn errors).
+	// Present on both lanes; empty once a task reached the run phase.
+	FailureDetail string `json:"failure_detail,omitempty"`
 	// Phase 2D: scheduler-native state token (e.g. "CONFIGURING") and
 	// queue/partition name. Only populated in poll-model backends.
 	NativeState string `json:"native_state,omitempty"`
@@ -121,6 +129,9 @@ type ConfigResponse struct {
 	ConfigPath    string          `json:"config_path"`
 	DefaultTarget string          `json:"default_target"`
 	Targets       []TargetSummary `json:"targets"`
+	// ConfigGeneration: config.yaml's semantic content hash (RQ-75) at the
+	// time of this response — freshly computed, not the boot snapshot's.
+	ConfigGeneration string `json:"config_generation,omitempty"`
 }
 
 // TargetSummary is one target's bootstrap entry (spec §4): identity +
@@ -311,6 +322,10 @@ type ErrorResponse struct {
 	Code              string `json:"code"`
 	Details           string `json:"details,omitempty"`
 	RetryAfterSeconds int    `json:"retry_after_seconds,omitempty"`
+	// CurrentGeneration accompanies CodeGenerationConflict (RQ-75): the
+	// file's generation as it exists NOW, so the client can re-read, show a
+	// diff against the user's pending edit, and retry with a fresh If-Match.
+	CurrentGeneration string `json:"current_generation,omitempty"`
 }
 
 // v1 error codes (spec §2) × HTTP status. Keep in sync with the protocol
@@ -325,7 +340,50 @@ const (
 	CodeTargetUnreachable = "target_unreachable" // 502
 	CodeMinInterval       = "min_interval"       // 429: refresh blocked by the 5min floor
 	CodeInternal          = "internal"           // 500
+	// 409: If-Match generation mismatch — the config file changed since the
+	// client read it (RQ-75). Response carries current_generation.
+	CodeGenerationConflict = "generation_conflict"
+	// 409: submit reached a RETIRED lane generation (best-effort gate —
+	// routing already sends new work to the active lane; this catches a
+	// straggler holding the old pointer). Retry immediately: it lands on
+	// the active lane. A request that slips past the gate still runs
+	// correctly under the retired lane's config snapshot.
+	CodeLaneRetired = "lane_retired"
+	// 409: rerun of a task whose target config CHANGED since submission
+	// (RQ-75) — needs explicit confirmation (WebUI dialog / CLI y/N or -y).
+	CodeGenerationChanged = "generation_changed"
 )
+
+// TargetGenerationView is one retired/retiring target generation for the
+// CLI/WebUI archive display (RQ-75): same-name generations render as
+// sub-rows of their active target; generations of REMOVED targets go to
+// the collapsed archived section.
+type TargetGenerationView struct {
+	Target     string `json:"target"`
+	Generation string `json:"generation"`
+	Reason     string `json:"reason"` // changed | removed
+	RetiredAt  int64  `json:"retired_at"`
+	DoneAt     *int64 `json:"done_at,omitempty"` // nil = still retiring
+	Unfinished int    `json:"unfinished"`        // tasks it still tracks
+}
+
+// ErrLaneRetired is the intake gate of a retired lane generation (round
+// 7): routing already sends new work to the active lane, so hitting this
+// means the caller held a stale pointer — an immediate retry succeeds.
+var ErrLaneRetired = errors.New("lane generation retired")
+
+// GenerationChangedError refuses an UNCONFIRMED rerun of a task whose
+// target config changed since it was submitted (RQ-75): the rerun will use
+// the NEW config, and the human should know before it does. Confirmed
+// retries restamp the task to the active generation and proceed.
+type GenerationChangedError struct {
+	TaskGeneration   string
+	ActiveGeneration string
+}
+
+func (e *GenerationChangedError) Error() string {
+	return "target config changed since this task was submitted — rerun will use the NEW config (confirm to proceed)"
+}
 
 // Project summary for sidebar.
 

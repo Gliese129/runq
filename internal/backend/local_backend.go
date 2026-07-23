@@ -38,6 +38,7 @@ type LocalBackend struct {
 	pool         resource.Allocator
 	storageCfg   *config.GlobalConfig // nil-safe: nil = project_path mode
 	targetName   string               // routing key written to DB; defaults to "local"
+	generation   string               // RQ-75: lane-generation stamp for new tasks ('' = adopt-by-active)
 }
 
 // LocalBackendDeps groups the daemon components that LocalBackend wraps.
@@ -50,6 +51,7 @@ type LocalBackendDeps struct {
 	Pool       resource.Allocator
 	StorageCfg *config.GlobalConfig
 	TargetName string // routing key written to DB; empty defaults to "local"
+	Generation string // RQ-75: semantic generation of the target config ('' ok)
 }
 
 // NewLocalBackend creates a Backend that wraps the daemon's internal
@@ -68,6 +70,7 @@ func NewLocalBackend(deps LocalBackendDeps) *LocalBackend {
 		pool:         deps.Pool,
 		storageCfg:   deps.StorageCfg,
 		targetName:   name,
+		generation:   deps.Generation,
 	}
 }
 
@@ -144,7 +147,7 @@ func (b *LocalBackend) Enqueue(ctx context.Context, spec TaskSpec) (string, erro
 		Command:    "sh " + utils.ShellQuote(spec.RunSH),
 		GPUsNeeded: spec.GPUs, Status: "pending",
 		LogPath: logPath, WorkingDir: spec.TaskDir,
-		TaskDir: spec.TaskDir, Target: b.targetName,
+		TaskDir: spec.TaskDir, Target: b.targetName, TargetGeneration: b.generation,
 		EnqueuedAt: now,
 	}
 	if err := b.store.InsertTask(ctx, &row); err != nil {
@@ -484,10 +487,11 @@ func (b *LocalBackend) RetryTask(ctx context.Context, taskID string) error {
 	}
 
 	if err := b.store.UpdateTaskStatus(ctx, taskID, "pending", map[string]any{
-		"gpus":        nil,
-		"pid":         nil,
-		"started_at":  nil,
-		"finished_at": nil,
+		"target_generation": b.generation, // RQ-75: retry = my new attempt
+		"gpus":              nil,
+		"pid":               nil,
+		"started_at":        nil,
+		"finished_at":       nil,
 	}); err != nil {
 		return err
 	}
@@ -784,7 +788,7 @@ func (b *LocalBackend) submitJob(ctx context.Context, jobCfg job.JobConfig, skip
 			WorkingDir: t.WorkingDir, EnvJSON: string(envJSON),
 			Resumable: t.Resumable, ExtraArgs: t.ExtraArgs,
 			UID: t.UID, Timeout: t.Timeout, EnqueuedAt: now,
-			TaskDir: t.TaskDir, Target: b.targetName,
+			TaskDir: t.TaskDir, Target: b.targetName, TargetGeneration: b.generation,
 		})
 	}
 
@@ -835,13 +839,18 @@ func (b *LocalBackend) refreshJobStatus(ctx context.Context, jobID string) error
 		return err
 	}
 
-	var running, pending, success, failed, killed int
+	var running, pending, unknown, success, failed, killed int
 	for _, t := range tasks {
 		switch t.Status {
 		case "running":
 			running++
 		case "pending":
 			pending++
+		case "unknown":
+			// RQ-74: outcome-unknown submission (remote lane only, but this
+			// rollup mirrors the others) — live work, blocks the terminal
+			// split.
+			unknown++
 		case "success":
 			success++
 		case "failed":
@@ -851,8 +860,8 @@ func (b *LocalBackend) refreshJobStatus(ctx context.Context, jobID string) error
 		}
 	}
 
-	isStarted := (running + success + failed + killed) > 0
-	isEnded := (pending + running) == 0
+	isStarted := (running + unknown + success + failed + killed) > 0
+	isEnded := (pending + running + unknown) == 0
 
 	// Unconditional pause guard — mirrors scheduler.RefreshJobStatus: paused
 	// is a human control state that outlives task terminality; resume/kill

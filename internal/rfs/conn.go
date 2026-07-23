@@ -23,10 +23,17 @@ type SSHConfig struct {
 	// (the daemon never touches key plaintext), key file second. Build
 	// with ResolveAuthMethods.
 	AuthMethods []ssh.AuthMethod
-	// HostKeyCallback: nil = STRICT known_hosts verification (the daemon
-	// default). `runq connect` passes a TOFU callback with a human on the
-	// other end. InsecureIgnoreHostKey never appears in this codebase.
+	// HostKeyCallback: nil = known_hosts verification per HostKeyPolicy
+	// (the daemon default). `runq connect` passes a TOFU callback with a
+	// human on the other end. InsecureIgnoreHostKey never appears in this
+	// codebase.
 	HostKeyCallback ssh.HostKeyCallback
+
+	// HostKeyPolicy applies when HostKeyCallback is nil: HostKeyStrict
+	// (zero value) or HostKeyAcceptNew — the ssh_config
+	// `StrictHostKeyChecking accept-new` passthrough (RQ-74). Resolve with
+	// ResolveHostKeyPolicy against the target's ssh alias.
+	HostKeyPolicy string
 
 	// IdleTimeout controls how long a connection survives with no in-flight
 	// operations before sshConn tears it down. Zero means never idle-close.
@@ -167,7 +174,7 @@ func (c *sshConn) getConn() (*ssh.Client, error) {
 		hostKeys := c.cfg.HostKeyCallback
 		if hostKeys == nil {
 			var err error
-			if hostKeys, err = StrictHostKeyCallback(); err != nil {
+			if hostKeys, err = policyHostKeyCallback(c.cfg.HostKeyPolicy); err != nil {
 				return nil, err
 			}
 		}

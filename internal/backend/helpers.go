@@ -35,6 +35,8 @@ func BuildJobSummary(job store.JobRow, tasks []store.TaskRow) JobSummary {
 			counts.Pending++
 		case "running":
 			counts.Running++
+		case "unknown":
+			counts.Unknown++
 		case "success":
 			counts.Completed++
 		case "failed", "killed":
@@ -318,21 +320,22 @@ func BuildTaskView(task store.TaskRow) TaskView {
 	params := decodeParams(task.ParamsJSON)
 	artifacts := readTaskArtifacts(task.TaskDir)
 	view := TaskView{
-		ID:           task.ID,
-		Status:       task.Status,
-		Params:       params,
-		Metrics:      artifacts.Metrics,
-		CurrentStep:  artifacts.CurrentStep,
-		ExitCode:     artifacts.ExitCode,
-		RetryCount:   task.RetryCount,
-		MaxRetry:     task.MaxRetry,
-		GPUs:         task.GPUs,
-		WandbRunID:   artifacts.WandbRunID,
-		ExternalID:   task.ExternalID,
-		StatusSource: task.StatusSource,
-		NativeState:  task.NativeState,
-		Queue:        task.Queue,
-		LogPath:      task.LogPath,
+		ID:            task.ID,
+		Status:        task.Status,
+		Params:        params,
+		Metrics:       artifacts.Metrics,
+		CurrentStep:   artifacts.CurrentStep,
+		ExitCode:      artifacts.ExitCode,
+		RetryCount:    task.RetryCount,
+		MaxRetry:      task.MaxRetry,
+		GPUs:          task.GPUs,
+		WandbRunID:    artifacts.WandbRunID,
+		ExternalID:    task.ExternalID,
+		StatusSource:  task.StatusSource,
+		FailureDetail: task.FailureDetail,
+		NativeState:   task.NativeState,
+		Queue:         task.Queue,
+		LogPath:       task.LogPath,
 	}
 	if task.StartedAt != nil {
 		sec := task.StartedAt.Unix()

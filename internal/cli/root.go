@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"os"
+	"strings"
 	"text/template"
 
 	"github.com/gliese129/runq/internal/utils"
@@ -88,7 +89,53 @@ func init() {
 // Execute is the entry point called from main.
 func Execute() error {
 	rootCmd.SetOut(os.Stdout)
-	return rootCmd.Execute()
+	printRemoteContextBanner()
+	err := rootCmd.Execute()
+	if err != nil && os.Getenv("RUNQ_SOCKET") != "" && isSocketDialError(err) {
+		// Remote-CLI perspective (RQ-74): a dead forwarded socket means the
+		// OWNING machine is gone, not this login node — every command says
+		// so, not just doctor, and says what (not) to do about it.
+		return fmt.Errorf("%w\n\nremote CLI: the runq daemon on your own machine is not reachable through the forward (asleep / offline / stopped). It reconnects automatically once that machine is back — nothing to fix on this login node. Details: runq doctor", err)
+	}
+	return err
+}
+
+// isSocketDialError matches the failure shapes of a unix-socket dial against
+// a forward whose owning daemon is gone (refused / file missing / EOF).
+func isSocketDialError(err error) bool {
+	msg := strings.ToLower(err.Error())
+	for _, sig := range []string{"dial unix", "connection refused", "no such file or directory", "broken pipe"} {
+		if strings.Contains(msg, sig) {
+			return true
+		}
+	}
+	return false
+}
+
+// printRemoteContextBanner prints ONE stderr line before every command when
+// runq is running as a remote CLI (RUNQ_SOCKET set by the login-node env
+// file): which target this shell is bound to, i.e. whose daemon the command
+// will reach. With several machines forwarding to one cluster account this
+// is the cheapest guard against submitting through the wrong context
+// (RQ-74). stderr on purpose — `runq ps --json | jq` must stay parseable.
+func printRemoteContextBanner() {
+	if os.Getenv("RUNQ_SOCKET") == "" {
+		return
+	}
+	// Never during shell-completion callbacks: cobra's __complete protocol
+	// runs `runq __complete ...` on every TAB, and some shells surface
+	// stderr — a banner there would garble completion for remote users.
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case cobra.ShellCompRequestCmd, cobra.ShellCompNoDescRequestCmd, "completion":
+			return
+		}
+	}
+	target := os.Getenv("RUNQ_TARGET")
+	if target == "" {
+		target = "(RUNQ_TARGET unset)"
+	}
+	fmt.Fprintf(os.Stderr, "%s\n", utils.Dimf("runq target: %s (remote CLI)", target))
 }
 
 // usageTemplate is a customized Cobra usage template with grouped commands

@@ -101,8 +101,9 @@ const (
 type SSHBackend struct {
 	storeQueries // embeds store, reg, and shared project/clean/thaw/dryrun methods
 	backend      *remote.Backend
-	sshFS        *rfs.SSHFS // held for Close()
-	targetName   string     // this lane's target name (tasks.target scope)
+	sshFS        *rfs.SSHFS       // held for Close()
+	targetName   string           // this lane's target name (tasks.target scope)
+	scope        *store.LaneScope // RQ-75: generation-ownership predicate, SHARED with remote.Backend
 
 	// Per-target scheduler lane (RQ-46): queue + submission-slot pool +
 	// scheduler instance + remote launcher. Same lifecycle code as the local
@@ -143,7 +144,18 @@ type SSHBackend struct {
 	// nudgeCh wakes the sensor loop for one forced full pass. Capacity 1 +
 	// non-blocking send = concurrent nudges coalesce by construction.
 	nudgeCh chan struct{}
+
+	// submitsInFlight counts SubmitJob calls between entry and return
+	// (round 8 #1): incremented BEFORE the retired-gate check, so the
+	// sweep can never observe "zero unfinished + idle" while a Prepare is
+	// still in flight on this lane's pointer — the true lifecycle barrier
+	// the two-zero confirmation alone could not be.
+	submitsInFlight atomic.Int64
 }
+
+// HasInFlightSubmits reports whether a SubmitJob is currently executing
+// against this lane (round 8 #1) — the sweep refuses to close while true.
+func (b *SSHBackend) HasInFlightSubmits() bool { return b.submitsInFlight.Load() > 0 }
 
 // touchActivity records a user-driven interaction (wakes a hibernated sensor
 // on its next tick).
@@ -208,6 +220,10 @@ func NewSSHBackend(cfg SSHBackendConfig) (*SSHBackend, error) {
 			Host:        host,
 			User:        sshUser,
 			AuthMethods: auth,
+			// RQ-74: honor the user's own `StrictHostKeyChecking
+			// accept-new` for this alias — runq is never more ceremonious
+			// than their ssh. Mismatch still hard-fails.
+			HostKeyPolicy: rfs.ResolveHostKeyPolicy(t.SSH.Host),
 			// Idle disconnect: with the sensor loops running every ~2min
 			// while tasks are in flight, the connection stays warm during
 			// activity and closes ~10min after the queue drains — a normal
@@ -252,9 +268,13 @@ func NewSSHBackend(cfg SSHBackendConfig) (*SSHBackend, error) {
 		launcher:   launcher,
 		logger:     logger,
 		targetName: t.Name,
+		scope:      store.NewLaneScope(t.Name, t.SemanticGeneration()),
 		syncDone:   make(chan struct{}),
 		nudgeCh:    make(chan struct{}, 1),
 	}
+	// One scope, every query surface (RQ-75): the remote backend's probe/
+	// marker/heartbeat/orphan reads filter by the same ownership predicate.
+	hpcBe.Scope = be.scope
 	// Boot counts as activity: after a daemon restart the sensor gets one
 	// active window to re-align restored in-flight state before it may
 	// hibernate (zero value would mean "hibernated since 1970").
@@ -277,11 +297,16 @@ func (b *SSHBackend) Start(ctx context.Context) {
 // tasks with an external id are in flight on the cluster (occupy a slot,
 // restored as running); tasks without one are waiting to be (re)launched.
 func (b *SSHBackend) restoreLane(ctx context.Context) {
-	rows, err := b.store.ListTasks(ctx, store.TaskFilter{Target: b.backend.Cfg.Name})
+	rows, err := b.store.ListTasks(ctx, store.TaskFilter{Target: b.backend.Cfg.Name, Scope: b.scope})
 	if err != nil {
 		b.logger.Warn("restore: list tasks failed", "error", err)
 		return
 	}
+	// Ownership filtering happens in SQL via the lane scope (RQ-75); what
+	// arrives here is OURS. The active lane additionally ADOPTS what it
+	// received from foreign orphan generations ('' legacy rows, hash
+	// shifts, crash windows) by RESTAMPING them — ownership is written,
+	// never re-inferred, so unfinished counts always add up.
 	restored, queued := 0, 0
 	for i := range rows {
 		row := rows[i]
@@ -289,14 +314,34 @@ func (b *SSHBackend) restoreLane(ctx context.Context) {
 		case "success", "failed", "killed":
 			continue
 		}
+		if !b.scope.IsRetiring() && row.TargetGeneration != b.scope.Generation {
+			if rerr := b.store.RestampTask(ctx, row.ID, b.scope.Generation); rerr != nil {
+				b.logger.Warn("adopting task: restamp failed — will retry next restore",
+					"task", row.ID, "error", rerr)
+				continue // do not restore what we could not take ownership of
+			}
+			b.logger.Info("adopted task from an unrecorded generation",
+				"task", row.ID, "was", row.TargetGeneration)
+		}
+
 		t := TaskRowToSchedulerTask(&row)
 		t.GPUsNeeded = 1 // one submission slot per remote task
-		if row.ExternalID != "" {
+		switch {
+		case row.Status == "unknown":
+			// RQ-74: outcome-unknown submission survives the restart AS
+			// unknown — a cluster job may exist, so it must NOT be pushed
+			// for relaunch (double submit). It holds a slot and waits for
+			// reconcile, exactly as before the restart.
+			_ = b.pool.Reserve(nil, row.ID) // never fails for slots
+			t.Status = scheduler.StatusUnknown
+			b.queue.Restore(t)
+			restored++
+		case row.ExternalID != "":
 			_ = b.pool.Reserve(nil, row.ID) // never fails for slots
 			t.Status = scheduler.StatusRunning
 			b.queue.Restore(t)
 			restored++
-		} else {
+		default:
 			b.queue.Push(t)
 			queued++
 		}
@@ -406,7 +451,7 @@ func (b *SSHBackend) sensorLoop(ctx context.Context) {
 // running tasks. Each task costs one stat when idle, delta-only reads when
 // growing — the spread-out替代 of a read-time parse storm.
 func (b *SSHBackend) ingestRunningMetrics(ctx context.Context) {
-	rows, err := b.store.ListTasks(ctx, store.TaskFilter{Status: "running", Target: b.targetName})
+	rows, err := b.store.ListTasks(ctx, store.TaskFilter{Status: "running", Target: b.targetName, Scope: b.scope})
 	if err != nil {
 		return
 	}
@@ -427,6 +472,31 @@ func (b *SSHBackend) ingestRunningMetrics(ctx context.Context) {
 func (b *SSHBackend) DetectOrphansNow(ctx context.Context) error {
 	return b.backend.DetectOrphans(ctx, true)
 }
+
+// Generation is the semantic hash of the target config this lane was
+// built from (RQ-75) — the ownership stamp on its tasks.
+func (b *SSHBackend) Generation() string { return b.scope.Generation }
+
+// MarkRetiring flips this lane into retiring mode (RQ-75): the launch
+// path is permanently quiesced, and restoreLane confines itself to the
+// lane's own generation (never queueing pending work — that belongs to
+// the active generation). Must be called BEFORE Start when rebuilding a
+// retiring lane after a restart.
+// MarkRetiring narrows this lane's ownership scope to its own generation
+// (RQ-75 round 5, user design: snapshot isolation — NO forwarding, NO
+// kill). A retiring lane keeps its FULL scheduling loop: pending tasks
+// submitted under this config run under this config; runq does not
+// second-guess the user. The lane closes once its non-terminal count
+// stays at zero. Only rerun resolves to the newest generation
+// (explicit, confirmed cross-generation retry).
+func (b *SSHBackend) MarkRetiring() { b.scope.MarkRetiring() }
+
+// PromoteActive reverses MarkRetiring (round 6 #4): the config changed
+// BACK to this lane's generation (A→B→A, or a removed target re-added
+// unchanged), so instead of building a twin lane with the SAME content
+// hash — two lanes would co-own every row — the retiring lane is
+// promoted back to active. Same object, same queue, scope widened.
+func (b *SSHBackend) PromoteActive() { b.scope.ResumeActive() }
 
 // Close stops the sensor loops and the scheduler, then releases the SSH
 // connection (if any — the localhost lane has none). Must be called on
@@ -535,6 +605,8 @@ func (b *SSHBackend) GetJob(ctx context.Context, jobID string) (*JobDetail, erro
 	if j == nil {
 		return nil, fmt.Errorf("job %q: %w", jobID, ErrNotFound)
 	}
+	// UNscoped: GetJob is a USER VIEW — it must show the whole job,
+	// including tasks a retiring generation still tracks (review round 3).
 	tasks, err := b.store.ListTasks(ctx, store.TaskFilter{JobID: jobID})
 	if err != nil {
 		return nil, err
@@ -626,6 +698,11 @@ func (b *SSHBackend) GetTask(ctx context.Context, taskID string) (*TaskView, err
 // FS exposes this lane's filesystem (LocalFS or SSHFS — the lane doesn't
 // know the difference, and neither should callers).
 func (b *SSHBackend) FS() rfs.FS { return b.backend.FS }
+
+// RecordContactOK forwards a daemon-observed reachability proof to the
+// lane's passive contact record (RQ-74) — e.g. the remote CLI forward
+// session coming up after `runq connect`.
+func (b *SSHBackend) RecordContactOK() { b.backend.RecordContactOK() }
 
 // TargetHealth is this lane's passive reachability row for /health (D6):
 // a snapshot of the most recent transport outcome — never a probe.
@@ -833,12 +910,13 @@ func (b *SSHBackend) KillTask(ctx context.Context, taskID string) error {
 			b.sched.FinishTask(qt, scheduler.StatusKilled, map[string]any{"status_source": "runq"})
 			return nil
 		}
-		// Running in the queue (submit in flight or on the cluster): plant
-		// the kill flag FIRST (RQ-69 ownership protocol). If backend.Kill
-		// below is refused for a missing external id, the flag survives and
-		// the next lifecycle event (submit completion, failure verdict)
-		// settles the task killed instead of resubmitting it.
-		if qt.Status == scheduler.StatusRunning {
+		// Running or unknown in the queue (submit in flight, on the cluster,
+		// or outcome lost): plant the kill flag FIRST (RQ-69 ownership
+		// protocol). If backend.Kill below is refused for a missing external
+		// id, the flag survives and the next lifecycle event (submit
+		// completion, failure verdict) settles the task killed instead of
+		// resubmitting it.
+		if qt.Status == scheduler.StatusRunning || qt.Status == scheduler.StatusUnknown {
 			b.sched.RequestKill(taskID)
 		}
 	}
@@ -851,6 +929,19 @@ func (b *SSHBackend) KillTask(ctx context.Context, taskID string) error {
 	}
 	if task == nil || task.Status == "success" || task.Status == "failed" || task.Status == "killed" {
 		return nil
+	}
+	// RQ-74: an `unknown` task with no external id has nothing to cancel and
+	// no verdict on the horizon if the submission truly never landed — the
+	// user's explicit kill is the escape hatch. Settling killed here is a
+	// DELIBERATE deviation from "killed only when no unmanaged job can
+	// exist": the user is taking responsibility for the (reconcile-checked,
+	// still-unresolved) residual risk. If a phantom cluster job does run,
+	// its marker is later swept as stale bookkeeping.
+	if task.Status == "unknown" && task.ExternalID == "" {
+		if qt := b.queue.Get(taskID); qt != nil && qt.Status == scheduler.StatusUnknown {
+			b.sched.FinishTask(qt, scheduler.StatusKilled, map[string]any{"status_source": "runq"})
+			return nil
+		}
 	}
 	_, err = b.backend.Kill(ctx, taskID)
 	return err
@@ -1000,6 +1091,10 @@ func (b *SSHBackend) RetryTask(ctx context.Context, taskID string) error {
 			"started_at":  nil,
 			"finished_at": nil,
 			"external_id": nil,
+			// RQ-75: a retry is MY new attempt — ownership is stamped in
+			// the same reset write, after the wrapper reset succeeded, so
+			// a failed reset changes nothing and routing never lies.
+			"target_generation": b.scope.Generation,
 		}); err != nil {
 			return err
 		}
@@ -1057,6 +1152,17 @@ func (b *SSHBackend) ResumeJob(_ context.Context, _ string) error {
 // max_inflight slots. The returned count is tasks ACCEPTED (queued).
 func (b *SSHBackend) SubmitJob(ctx context.Context, cfg job.JobConfig, opts SubmitOptions) (string, int, error) {
 	b.touchActivity()
+	// Increment BEFORE the gate (round 8 #1): once past this line the
+	// sweep sees the submit and will not close the lane under it.
+	b.submitsInFlight.Add(1)
+	defer b.submitsInFlight.Add(-1)
+	// Retired = no NEW tasks (round 7, user design: the retired flag is a
+	// capability switch). A request that passes this check before the flag
+	// flips still lands in this lane's queue, runs correctly under its
+	// config snapshot, and is covered by the in-flight counter above.
+	if b.scope.IsRetiring() {
+		return "", 0, fmt.Errorf("target %s: %w — retry to reach the active configuration", b.targetName, ErrLaneRetired)
+	}
 	proj, err := b.reg.Get(ctx, cfg.Project)
 	if err != nil {
 		return "", 0, fmt.Errorf("project %q: %w", cfg.Project, err)

@@ -3,6 +3,8 @@ package rfs
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -11,6 +13,14 @@ import (
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
 )
+
+// ErrExecInterrupted marks an Exec whose command STARTED on the remote side
+// but whose verdict was lost (connection dropped mid-flight, session torn
+// down). This is neither a clean transport failure (the command may have run
+// to completion) nor a scheduler verdict (there is no exit code). Callers
+// with side-effecting commands (job submission) must treat it as "outcome
+// unknown" — never as retry-safe (RQ-74).
+var ErrExecInterrupted = errors.New("remote command interrupted: outcome unknown")
 
 // SSHFS implements FS over an SSH connection. File operations go through sftp;
 // command execution opens SSH sessions. The underlying *sshConn is lazy — no
@@ -205,9 +215,10 @@ func (s *SSHFS) Exec(ctx context.Context, cmd string, args ...string) (stdout, s
 	sess.Stdout = &sob
 	sess.Stderr = &seb
 
-	// ctx watcher with a guaranteed exit path: `finished` is closed when Run
-	// returns, so this goroutine never outlives the call (a bare <-ctx.Done()
-	// wait would leak one goroutine per call under a long-lived ctx).
+	// ctx watcher with a guaranteed exit path: `finished` is closed when the
+	// command settles, so this goroutine never outlives the call (a bare
+	// <-ctx.Done() wait would leak one goroutine per call under a long-lived
+	// ctx).
 	finished := make(chan struct{})
 	go func() {
 		select {
@@ -217,15 +228,25 @@ func (s *SSHFS) Exec(ctx context.Context, cmd string, args ...string) (stdout, s
 		}
 	}()
 
-	runErr := sess.Run(buildCmdLine(cmd, args))
+	// Start and Wait are split ON PURPOSE (RQ-74): a Start failure means the
+	// command never began on the remote side — a plain transport error, safe
+	// to retry. A Wait failure that is not an ExitError means the command DID
+	// start but its verdict was lost (connection dropped mid-flight, session
+	// closed by ctx): callers that submit work must NOT retry on that — the
+	// remote side effect may exist. ErrExecInterrupted marks this class.
+	if serr := sess.Start(buildCmdLine(cmd, args)); serr != nil {
+		close(finished)
+		return sob.Bytes(), seb.Bytes(), -1, serr
+	}
+	waitErr := sess.Wait()
 	close(finished)
 
 	so, se := sob.Bytes(), seb.Bytes()
-	if runErr != nil {
-		if ee, ok := runErr.(*ssh.ExitError); ok {
+	if waitErr != nil {
+		if ee, ok := waitErr.(*ssh.ExitError); ok {
 			return so, se, ee.ExitStatus(), nil
 		}
-		return so, se, -1, runErr
+		return so, se, -1, fmt.Errorf("%w: %v", ErrExecInterrupted, waitErr)
 	}
 	return so, se, 0, nil
 }

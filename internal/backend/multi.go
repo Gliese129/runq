@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/gliese129/runq/internal/job"
@@ -17,10 +18,225 @@ import (
 // MultiBackend routes operations to per-target backends. ListJobs aggregates
 // across all targets; Submit/Kill/Get look up the target from the DB and
 // delegate. Project operations are global (routed to the default target).
+//
+// The target map is MUTABLE at runtime (RQ-75 hot reload): the config
+// reconciler adds/replaces/removes lanes as config.yaml changes. mu guards
+// targets and defaultTarget; every reader goes through get/snapshot/
+// defaultName so a rebuild never races an in-flight request.
 type MultiBackend struct {
+	mu            sync.RWMutex
 	targets       map[string]Backend
-	store         *store.Store
 	defaultTarget string
+	// retiring holds superseded lane generations still tracking their
+	// in-flight tasks (RQ-75): target name → generation → lane. Task-scoped
+	// ops (kill/logs/refresh) route here when the task's stamped generation
+	// has a live retiring lane — the OLD endpoint/templates are the only
+	// ones that can correctly act on those tasks.
+	retiring map[string]map[string]Backend
+
+	store *store.Store
+	// registry is the ONE routed project registry shared by every lane
+	// (RQ-65); kept here so lanes added at runtime get the same wiring
+	// assembly-time lanes got.
+	registry *project.Registry
+}
+
+// get returns the named backend under the read lock.
+func (m *MultiBackend) get(name string) (Backend, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	be, ok := m.targets[name]
+	return be, ok
+}
+
+// snapshot copies the current target map — iteration must never hold the
+// lock across backend calls (a slow SSH lane would serialize the world).
+func (m *MultiBackend) snapshot() map[string]Backend {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make(map[string]Backend, len(m.targets))
+	for k, v := range m.targets {
+		out[k] = v
+	}
+	return out
+}
+
+// defaultName returns the routing default under the read lock.
+func (m *MultiBackend) defaultName() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.defaultTarget
+}
+
+// SetRetiringLane registers a superseded lane generation (RQ-75).
+func (m *MultiBackend) SetRetiringLane(name, generation string, be Backend) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.retiring == nil {
+		m.retiring = map[string]map[string]Backend{}
+	}
+	if m.retiring[name] == nil {
+		m.retiring[name] = map[string]Backend{}
+	}
+	m.retiring[name][generation] = be
+}
+
+// RotateLane atomically installs the replacement as active AND registers
+// the superseded lane as retiring (round 8 #2): a concurrent resolveTask
+// can never observe a state where the old generation is neither active
+// nor retiring.
+func (m *MultiBackend) RotateLane(name string, newBe Backend, oldGen string, oldBe Backend) {
+	if sq, ok := newBe.(interface{ setProjectRegistry(*project.Registry) }); ok {
+		sq.setProjectRegistry(m.registry)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.targets[name] = newBe
+	if oldGen != "" && oldBe != nil {
+		if m.retiring == nil {
+			m.retiring = map[string]map[string]Backend{}
+		}
+		if m.retiring[name] == nil {
+			m.retiring[name] = map[string]Backend{}
+		}
+		m.retiring[name][oldGen] = oldBe
+	}
+}
+
+// PromoteLane atomically moves a retiring lane back to active AND, when a
+// lane is being superseded by the promotion (A→B→A: B steps down as A
+// steps up), registers it as retiring in the SAME transaction (round 9
+// #2) — a concurrent reader never sees either generation unrouted.
+func (m *MultiBackend) PromoteLane(name, gen string, be Backend, supersededGen string, supersededBe Backend) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if g := m.retiring[name]; g != nil {
+		delete(g, gen)
+		if len(g) == 0 {
+			delete(m.retiring, name)
+		}
+	}
+	m.targets[name] = be
+	if supersededGen != "" && supersededBe != nil {
+		if m.retiring == nil {
+			m.retiring = map[string]map[string]Backend{}
+		}
+		if m.retiring[name] == nil {
+			m.retiring[name] = map[string]Backend{}
+		}
+		m.retiring[name][supersededGen] = supersededBe
+	}
+}
+
+// RetireTarget atomically unroutes a REMOVED target's active lane and
+// registers it as retiring (round 9 #1) — task routing by generation
+// keeps working through the whole transition, no not-found window.
+func (m *MultiBackend) RetireTarget(name, gen string, be Backend) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.targets, name)
+	if gen != "" && be != nil {
+		if m.retiring == nil {
+			m.retiring = map[string]map[string]Backend{}
+		}
+		if m.retiring[name] == nil {
+			m.retiring[name] = map[string]Backend{}
+		}
+		m.retiring[name][gen] = be
+	}
+}
+
+// RemoveRetiringLane unregisters a retired lane (its count hit zero).
+func (m *MultiBackend) RemoveRetiringLane(name, generation string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if g := m.retiring[name]; g != nil {
+		delete(g, generation)
+		if len(g) == 0 {
+			delete(m.retiring, name)
+		}
+	}
+}
+
+// retiringLane looks up a retiring lane for (target, generation).
+func (m *MultiBackend) retiringLane(name, generation string) (Backend, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	be, ok := m.retiring[name][generation]
+	return be, ok
+}
+
+// TargetGenerations returns the recorded generations (retiring first,
+// then recently done) with live unfinished counts — the archive view.
+func (m *MultiBackend) TargetGenerations(ctx context.Context) ([]TargetGenerationView, error) {
+	rows, err := m.store.ListAllGenerations(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]TargetGenerationView, 0, len(rows))
+	for _, g := range rows {
+		v := TargetGenerationView{
+			Target: g.Target, Generation: g.Generation, Reason: g.Reason,
+			RetiredAt: g.RetiredAt, DoneAt: g.DoneAt,
+		}
+		if g.DoneAt == nil {
+			if n, cerr := m.store.CountUnfinishedGenerationTasks(ctx, g.Target, g.Generation); cerr == nil {
+				v.Unfinished = n
+			}
+		}
+		out = append(out, v)
+	}
+	return out, nil
+}
+
+// ActiveLane exposes the CURRENT active lane of a target (RQ-75
+// forwarding): retiring lanes resolve their successor per handoff, so
+// chained rotations always reach the newest generation.
+func (m *MultiBackend) ActiveLane(name string) (Backend, bool) {
+	return m.get(name)
+}
+
+// retiringLanesOf snapshots the retiring lanes of one target.
+func (m *MultiBackend) retiringLanesOf(name string) []Backend {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]Backend, 0, len(m.retiring[name]))
+	for _, be := range m.retiring[name] {
+		out = append(out, be)
+	}
+	return out
+}
+
+// SetTarget adds or replaces a lane at runtime (RQ-75), wiring the shared
+// project registry exactly as assembly does. The caller owns the OLD
+// backend's shutdown (replace first, then close — no routing gap).
+func (m *MultiBackend) SetTarget(name string, be Backend) {
+	if sq, ok := be.(interface{ setProjectRegistry(*project.Registry) }); ok {
+		sq.setProjectRegistry(m.registry)
+	}
+	m.mu.Lock()
+	m.targets[name] = be
+	m.mu.Unlock()
+}
+
+// RemoveTarget drops a lane from routing. The caller closes the backend
+// AFTER removal so no new request can reach a closing lane.
+func (m *MultiBackend) RemoveTarget(name string) {
+	m.mu.Lock()
+	delete(m.targets, name)
+	m.mu.Unlock()
+}
+
+// SetDefaultTarget changes the routing default at runtime. Unknown names
+// are rejected — a default that routes nowhere is worse than a stale one.
+func (m *MultiBackend) SetDefaultTarget(name string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.targets[name]; !ok {
+		return fmt.Errorf("default target %q not in targets map", name)
+	}
+	m.defaultTarget = name
+	return nil
 }
 
 // NewMultiBackend creates a routing backend. targets must contain at least
@@ -49,6 +265,7 @@ func NewMultiBackend(targets map[string]Backend, st *store.Store, defaultTarget 
 		}
 		return fsys
 	})
+	m.registry = reg
 	for _, be := range m.targets {
 		if sq, ok := be.(interface{ setProjectRegistry(*project.Registry) }); ok {
 			sq.setProjectRegistry(reg)
@@ -61,10 +278,12 @@ func NewMultiBackend(targets map[string]Backend, st *store.Store, defaultTarget 
 
 // resolve returns the backend for the named target. Empty falls back to default.
 func (m *MultiBackend) resolve(target string) (Backend, error) {
+	m.mu.RLock()
 	if target == "" {
 		target = m.defaultTarget
 	}
 	be, ok := m.targets[target]
+	m.mu.RUnlock()
 	if !ok {
 		return nil, fmt.Errorf("unknown target %q", target)
 	}
@@ -83,7 +302,11 @@ func (m *MultiBackend) resolveJob(ctx context.Context, jobID string) (Backend, e
 	return m.resolve(j.Target)
 }
 
-// resolveTask looks up the task's target column and returns the owning backend.
+// resolveTask looks up the task's target column and returns the OWNING
+// backend (RQ-75): a task stamped with a generation that has a live
+// retiring lane routes there — only the old endpoint/templates can
+// correctly kill/probe/read it. Everything else (active generation,
+// legacy ” rows, settled generations) routes to the active lane.
 func (m *MultiBackend) resolveTask(ctx context.Context, taskID string) (Backend, error) {
 	t, err := m.store.GetTask(ctx, taskID)
 	if err != nil {
@@ -92,11 +315,18 @@ func (m *MultiBackend) resolveTask(ctx context.Context, taskID string) (Backend,
 	if t == nil {
 		return nil, fmt.Errorf("task %q: %w", taskID, ErrNotFound)
 	}
+	if t.TargetGeneration != "" {
+		if be, ok := m.retiringLane(t.Target, t.TargetGeneration); ok {
+			return be, nil
+		}
+	}
 	return m.resolve(t.Target)
 }
 
 // defaultBackend returns the default target's backend.
 func (m *MultiBackend) defaultBackend() Backend {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	return m.targets[m.defaultTarget]
 }
 
@@ -112,15 +342,16 @@ func (m *MultiBackend) Capabilities() Capabilities {
 // dashboard gates per-job UI (retry, live log, poll cadence) by the job's
 // target through this map.
 func (m *MultiBackend) PerTargetCapabilities() map[string]Capabilities {
-	out := make(map[string]Capabilities, len(m.targets))
-	for name, be := range m.targets {
+	targets := m.snapshot()
+	out := make(map[string]Capabilities, len(targets))
+	for name, be := range targets {
 		out[name] = be.Capabilities()
 	}
 	return out
 }
 
 // DefaultTargetName exposes the routing default for config responses.
-func (m *MultiBackend) DefaultTargetName() string { return m.defaultTarget }
+func (m *MultiBackend) DefaultTargetName() string { return m.defaultName() }
 
 // ReconcileAll fans the dashboard's activity-gated background reconcile out
 // to every target that supports it (remote lanes). Local targets are push
@@ -128,7 +359,7 @@ func (m *MultiBackend) DefaultTargetName() string { return m.defaultTarget }
 // fresher (30s cadence) than the lanes' own 25min alignment loops.
 func (m *MultiBackend) ReconcileAll(ctx context.Context) error {
 	var firstErr error
-	for _, be := range m.targets {
+	for _, be := range m.snapshot() {
 		if r, ok := be.(interface{ ReconcileAll(context.Context) error }); ok {
 			if err := r.ReconcileAll(ctx); err != nil && firstErr == nil {
 				firstErr = err
@@ -152,7 +383,7 @@ func (m *MultiBackend) RefreshJob(ctx context.Context, jobID string) error {
 func (m *MultiBackend) ListJobs(ctx context.Context, projectScope string) ([]JobSummary, error) {
 	var all []JobSummary
 	var firstErr error
-	for _, be := range m.targets {
+	for _, be := range m.snapshot() {
 		jobs, err := be.ListJobs(ctx, projectScope)
 		if err != nil {
 			if firstErr == nil {
@@ -208,7 +439,7 @@ func (m *MultiBackend) CompareMetrics(ctx context.Context, jobID, key string, de
 // stamped with their target name for panel grouping.
 func (m *MultiBackend) GPUStatus(ctx context.Context) ([]GPUSlot, error) {
 	var all []GPUSlot
-	for name, be := range m.targets {
+	for name, be := range m.snapshot() {
 		slots, err := be.GPUStatus(ctx)
 		if err != nil {
 			continue
@@ -269,7 +500,7 @@ func (m *MultiBackend) TaskLogRead(ctx context.Context, taskID string, offset in
 // #44): the fs browser and python-envs operate on the TARGET's disk, not
 // the daemon's. Lanes without an FS concept fall back to LocalFS.
 func (m *MultiBackend) TargetFS(name string) (rfs.FS, error) {
-	be, ok := m.targets[name]
+	be, ok := m.get(name)
 	if !ok {
 		return nil, fmt.Errorf("target %q: %w", name, ErrNotFound)
 	}
@@ -282,9 +513,21 @@ func (m *MultiBackend) TargetFS(name string) (rfs.FS, error) {
 // PerTargetHealth collects each lane's passive reachability row (/health,
 // D6). Lanes without the concept (e.g. a pure-push local backend, always
 // reachable by construction) report reachable with LastChecked = now.
+// RecordTargetContact records a daemon-observed reachability proof for one
+// target's lane (RQ-74). No-op for unknown targets and lanes without a
+// contact record (local).
+func (m *MultiBackend) RecordTargetContact(name string) {
+	if be, ok := m.get(name); ok {
+		if rc, ok := be.(interface{ RecordContactOK() }); ok {
+			rc.RecordContactOK()
+		}
+	}
+}
+
 func (m *MultiBackend) PerTargetHealth() []TargetHealth {
-	out := make([]TargetHealth, 0, len(m.targets))
-	for name, be := range m.targets {
+	targets := m.snapshot()
+	out := make([]TargetHealth, 0, len(targets))
+	for name, be := range targets {
 		if h, ok := be.(interface{ TargetHealth() TargetHealth }); ok {
 			out = append(out, h.TargetHealth())
 			continue
@@ -337,7 +580,7 @@ func (m *MultiBackend) SyncInfo(ctx context.Context, target string) (refreshedAt
 		return 0, false, false
 	}
 	first := true
-	for _, be := range m.targets {
+	for _, be := range m.snapshot() {
 		sy, ok := be.(syncer)
 		if !ok {
 			continue
@@ -413,11 +656,38 @@ func (m *MultiBackend) KillTask(ctx context.Context, taskID string) error {
 	return be.KillTask(ctx, taskID)
 }
 
+// RetryTask reruns a terminal task on the target's ACTIVE lane (RQ-75):
+// a rerun is a NEW submission, so it belongs to the new generation — never
+// to the (permanently quiesced) retiring lane that owned the original run.
+// An unconfirmed cross-generation rerun is refused with
+// *GenerationChangedError so CLI/WebUI ask the human first.
 func (m *MultiBackend) RetryTask(ctx context.Context, taskID string) error {
-	be, err := m.resolveTask(ctx, taskID)
+	return m.RetryTaskGen(ctx, taskID, false)
+}
+
+// RetryTaskGen is RetryTask with the cross-generation confirmation knob.
+func (m *MultiBackend) RetryTaskGen(ctx context.Context, taskID string, confirmGeneration bool) error {
+	t, err := m.store.GetTask(ctx, taskID)
 	if err != nil {
 		return err
 	}
+	if t == nil {
+		return fmt.Errorf("task %q: %w", taskID, ErrNotFound)
+	}
+	be, err := m.resolve(t.Target)
+	if err != nil {
+		return err
+	}
+	activeGen := ""
+	if g, ok := be.(interface{ Generation() string }); ok {
+		activeGen = g.Generation()
+	}
+	if t.TargetGeneration != "" && activeGen != "" && t.TargetGeneration != activeGen && !confirmGeneration {
+		return &GenerationChangedError{TaskGeneration: t.TargetGeneration, ActiveGeneration: activeGen}
+	}
+	// Ownership is stamped by the lane itself, inside its reset write and
+	// only after the wrapper reset succeeded (review P2: a pre-retry
+	// restamp would leave routing lying when the reset fails).
 	return be.RetryTask(ctx, taskID)
 }
 
@@ -425,6 +695,18 @@ func (m *MultiBackend) KillJob(ctx context.Context, jobID string) error {
 	be, err := m.resolveJob(ctx, jobID)
 	if err != nil {
 		return err
+	}
+	// A job may span lane generations after a config change (in-flight
+	// tasks stay with the retiring lane, pending migrated to the active
+	// one) — fan the kill to the target's retiring lanes too, best-effort,
+	// so old-generation tasks get killed with the templates that own them.
+	j, jerr := m.store.GetJob(ctx, jobID)
+	if jerr == nil && j != nil {
+		for _, rbe := range m.retiringLanesOf(j.Target) {
+			if rbe != be {
+				_ = rbe.KillJob(ctx, jobID)
+			}
+		}
 	}
 	return be.KillJob(ctx, jobID)
 }
@@ -485,7 +767,7 @@ func (m *MultiBackend) DryRunForTarget(ctx context.Context, target string, cfg j
 
 func (m *MultiBackend) ListArchivedJobs(ctx context.Context) ([]JobSummary, error) {
 	var all []JobSummary
-	for _, be := range m.targets {
+	for _, be := range m.snapshot() {
 		jobs, err := be.ListArchivedJobs(ctx)
 		if err != nil {
 			continue
@@ -536,7 +818,7 @@ func (m *MultiBackend) Clean(ctx context.Context, opts CleanOptions) (*CleanResu
 	// simply contributes no NEW marks (its guardrails also prevent false
 	// ones), and must not block cleaning the others.
 	if opts.Orphan {
-		for name, be := range m.targets {
+		for name, be := range m.snapshot() {
 			if opts.Target != "" && name != opts.Target {
 				continue
 			}
@@ -581,7 +863,7 @@ func (m *MultiBackend) CreateProject(ctx context.Context, cfg project.Config) er
 	// is aimed by default). A project registered "against tsubame" must
 	// SAY tsubame — implicit defaults rot when default_target changes.
 	if cfg.Target == "" {
-		cfg.Target = m.defaultTarget
+		cfg.Target = m.defaultName()
 	}
 	return m.defaultBackend().CreateProject(ctx, cfg)
 }

@@ -5,17 +5,17 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gliese129/runq/internal/backend"
 	"github.com/gliese129/runq/internal/config"
+	"github.com/gliese129/runq/internal/genfile"
+	"github.com/gliese129/runq/internal/rfs"
 )
 
-// ErrForwardRestartRequired is returned (wrapped) by the forward starter
-// when the target has no lane in the running daemon — the one case where
-// only a restart helps. Declared here so the hook's provider (app) and
-// consumer (this handler) agree without an import cycle.
-var ErrForwardRestartRequired = errors.New("restart required")
+// (ErrForwardRestartRequired is gone — RQ-75's lane reconciler builds a
+// missing lane on the spot, so "restart to build a lane" no longer exists.)
 
 // Targets management endpoints (spec §5.2, D10): /hpc-config* is retired,
 // scheduler templates belong to targets. GET /targets is the management
@@ -27,6 +27,14 @@ type targetsListResponse struct {
 	Items        []config.TargetConfig `json:"items"`
 	Placeholders map[string][]string   `json:"placeholders"`
 	Path         string                `json:"path"`
+	// ConfigGeneration is config.yaml's semantic content hash at read time
+	// (RQ-75). The edit form stores it and sends it back as If-Match; a
+	// mismatch on save means someone else changed the file in between.
+	ConfigGeneration string `json:"config_generation"`
+	// Generations lists retired/retiring lane generations (RQ-75): same-name
+	// entries render as sub-rows of their active target, removed-target
+	// entries go to the collapsed archived section.
+	Generations []backend.TargetGenerationView `json:"generations,omitempty"`
 }
 
 type targetCheckResponse struct {
@@ -59,16 +67,59 @@ func (s *Server) handleListTargets(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, targetsListResponse{
-		Items:        cfg.ResolveTargets(),
-		Placeholders: config.HPCPlaceholders,
-		Path:         config.ConfigPath(),
-	})
+	resp := targetsListResponse{
+		Items:            cfg.ResolveTargets(),
+		Placeholders:     config.HPCPlaceholders,
+		Path:             config.ConfigPath(),
+		ConfigGeneration: cfg.Generation,
+	}
+	if tg, ok := s.backend.(interface {
+		TargetGenerations(context.Context) ([]backend.TargetGenerationView, error)
+	}); ok {
+		if gens, gerr := tg.TargetGenerations(r.Context()); gerr == nil {
+			resp.Generations = gens
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// ifMatchHeader extracts the If-Match generation from the request, tolerant
+// of ETag-style quoting (`"abc"` and `W/"abc"` both mean abc). Empty means
+// the client didn't ask for CAS — the write is unconditional (CLI-era
+// clients, curl users).
+func ifMatchHeader(r *http.Request) string {
+	v := strings.TrimSpace(r.Header.Get("If-Match"))
+	v = strings.TrimPrefix(v, "W/")
+	return strings.Trim(v, `"`)
+}
+
+// saveGlobalConfigCAS writes cfg through the If-Match CAS path (RQ-75).
+// On generation conflict it answers 409 + current_generation and returns
+// false; on success it fires the lane reconciler and returns true. Any
+// other save error is reported and returns false.
+func (s *Server) saveGlobalConfigCAS(w http.ResponseWriter, r *http.Request, cfg *config.GlobalConfig) bool {
+	err := config.SaveGlobalIfMatch(cfg, ifMatchHeader(r))
+	var conflict *genfile.ConflictError
+	if errors.As(err, &conflict) {
+		writeJSON(w, http.StatusConflict, backend.ErrorResponse{
+			Error:             "config.yaml changed since you loaded it — reload and re-apply your edit",
+			Code:              backend.CodeGenerationConflict,
+			CurrentGeneration: conflict.Current,
+		})
+		return false
+	}
+	if err != nil {
+		writeError(w, err)
+		return false
+	}
+	s.notifyConfigChanged() // RQ-75: converge lanes now, not next tick
+	return true
 }
 
 // handlePutTarget — PUT /targets/{name}: upsert one targets[] entry in
 // config.yaml. The path name wins over any name in the body (D11:
-// addressing is explicit).
+// addressing is explicit). Honors If-Match (RQ-75): send the
+// config_generation you read, get 409 + current_generation if stale.
 func (s *Server) handlePutTarget(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	var tc config.TargetConfig
@@ -94,8 +145,7 @@ func (s *Server) handlePutTarget(w http.ResponseWriter, r *http.Request) {
 	if !replaced {
 		cfg.Targets = append(cfg.Targets, tc)
 	}
-	if err := config.SaveGlobal(cfg); err != nil {
-		writeError(w, err)
+	if !s.saveGlobalConfigCAS(w, r, cfg) {
 		return
 	}
 	writeJSON(w, http.StatusOK, backend.ActionResponse{OK: true})
@@ -123,8 +173,7 @@ func (s *Server) handleDeleteTarget(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg.Targets = kept
-	if err := config.SaveGlobal(cfg); err != nil {
-		writeError(w, err)
+	if !s.saveGlobalConfigCAS(w, r, cfg) {
 		return
 	}
 	writeJSON(w, http.StatusOK, backend.ActionResponse{OK: true})
@@ -144,6 +193,22 @@ func (s *Server) handleCheckTarget(w http.ResponseWriter, r *http.Request) {
 
 // SetForwardStarter installs the runtime forward hook (client daemon only).
 func (s *Server) SetForwardStarter(fn func(name string) error) { s.forwardStarter = fn }
+
+// SetForwardStatus wires the client daemon's forward-status snapshot into
+// /health (RQ-74).
+func (s *Server) SetForwardStatus(fn func() map[string]rfs.ForwardStatus) { s.forwardStatus = fn }
+
+// SetConfigChanged wires the daemon's config reconciler (RQ-75): called
+// after every successful API write to config.yaml so lanes converge
+// immediately instead of waiting for the next watch tick.
+func (s *Server) SetConfigChanged(fn func()) { s.configChanged = fn }
+
+// notifyConfigChanged fires the reconciler hook if one is wired.
+func (s *Server) notifyConfigChanged() {
+	if s.configChanged != nil {
+		s.configChanged()
+	}
+}
 
 // SetForwardStopper wires the client daemon's runtime forward teardown
 // (POST /targets/{name}/disconnect).
@@ -165,21 +230,16 @@ func (s *Server) handleDisconnectTarget(w http.ResponseWriter, r *http.Request) 
 }
 
 // handleConnectTarget — POST /targets/{name}/connect: start or replace the
-// target's remote CLI forward NOW, against the just-saved config. This is
-// what lets `runq connect` take effect without a daemon restart. The one
-// genuine restart case — the target has no lane because it was added after
-// daemon start — comes back as 409 with the restart instruction.
+// target's remote CLI forward NOW, against the just-saved config. The
+// forward starter runs a reconcile pass first (RQ-75), so even a target
+// added moments ago gets its lane built on the spot — no restart case left.
 func (s *Server) handleConnectTarget(w http.ResponseWriter, r *http.Request) {
 	if s.forwardStarter == nil {
 		notImplemented(w, "remote CLI forward")
 		return
 	}
 	if err := s.forwardStarter(r.PathValue("name")); err != nil {
-		status := http.StatusBadRequest
-		if errors.Is(err, ErrForwardRestartRequired) {
-			status = http.StatusConflict
-		}
-		writeErr(w, status, backend.CodeInvalidState, err.Error())
+		writeErr(w, http.StatusBadRequest, backend.CodeInvalidState, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, backend.ActionResponse{OK: true})
@@ -209,30 +269,37 @@ func (s *Server) handleRefreshTarget(w http.ResponseWriter, r *http.Request) {
 }
 
 type globalConfigPayload struct {
-	DataPath      string `json:"data_path"`
-	DefaultTarget string `json:"default_target"`
+	// Pointers (review fix #3): absent field = leave unchanged, present
+	// empty string = CLEAR the key. The old non-empty gate made clearing
+	// data_path impossible — 200 OK while the disk value silently stayed.
+	DataPath      *string `json:"data_path"`
+	DefaultTarget *string `json:"default_target"`
 }
 
-// handlePutGlobalConfig — PUT /config (D5: mode is gone). Writes global
-// keys via the same SetKey path the CLI uses. Takes effect on next start
-// — the GUI says so explicitly.
+// handlePutGlobalConfig — PUT /config (D5: mode is gone). Single
+// load-modify-save under one If-Match check (RQ-75) — the old SetKey×2
+// path could half-apply and each write raced separately.
+// default_target is hot (reconciler switches it); data_path stays
+// restart-bound (logged).
 func (s *Server) handlePutGlobalConfig(w http.ResponseWriter, r *http.Request) {
 	var p globalConfigPayload
 	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
 		writeErr(w, http.StatusBadRequest, backend.CodeBadRequest, err.Error())
 		return
 	}
-	if p.DataPath != "" {
-		if err := config.SetKey("data_path", p.DataPath); err != nil {
-			writeError(w, err)
-			return
-		}
+	cfg, err := config.Load()
+	if err != nil {
+		writeError(w, err)
+		return
 	}
-	if p.DefaultTarget != "" {
-		if err := config.SetKey("default_target", p.DefaultTarget); err != nil {
-			writeError(w, err)
-			return
-		}
+	if p.DataPath != nil {
+		cfg.DataPath = *p.DataPath
+	}
+	if p.DefaultTarget != nil {
+		cfg.DefaultTarget = *p.DefaultTarget
+	}
+	if !s.saveGlobalConfigCAS(w, r, cfg) {
+		return
 	}
 	writeJSON(w, http.StatusOK, backend.ActionResponse{OK: true})
 }

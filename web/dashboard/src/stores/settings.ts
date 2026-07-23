@@ -27,6 +27,8 @@ export const useSettingsStore = defineStore('settings', () => {
   const theme = ref(localStorage.getItem('runq-theme') || 'light')
   const locale = ref(localStorage.getItem('runq-locale') || 'en')
   const animeMode = ref(localStorage.getItem('runq-anime') === 'true')
+  // RQ-75: "don't ask again" for the cross-generation rerun dialog.
+  const skipGenRerunPrompt = ref(localStorage.getItem('runq-skip-gen-rerun') === 'true')
 
   async function loadWebhook() {
     webhook.value = readStoredWebhook()
@@ -52,5 +54,10 @@ export const useSettingsStore = defineStore('settings', () => {
     localStorage.setItem('runq-anime', String(v))
   }
 
-  return { webhook, theme, locale, animeMode, loadWebhook, saveWebhook, testWebhook, setTheme, setLocale, setAnimeMode }
+  function setSkipGenRerunPrompt(v: boolean) {
+    skipGenRerunPrompt.value = v
+    localStorage.setItem('runq-skip-gen-rerun', String(v))
+  }
+
+  return { webhook, theme, locale, animeMode, skipGenRerunPrompt, loadWebhook, saveWebhook, testWebhook, setTheme, setLocale, setAnimeMode, setSkipGenRerunPrompt }
 })

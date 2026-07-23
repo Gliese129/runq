@@ -18,6 +18,8 @@ import (
 	"github.com/gliese129/runq/internal/config"
 	"github.com/gliese129/runq/internal/dashboard"
 	"github.com/gliese129/runq/internal/executor"
+	"github.com/gliese129/runq/internal/genfile"
+	"github.com/gliese129/runq/internal/gensync"
 	"github.com/gliese129/runq/internal/project"
 	"github.com/gliese129/runq/internal/resource"
 	"github.com/gliese129/runq/internal/rfs"
@@ -42,8 +44,56 @@ type Daemon struct {
 	Dashboard       *dashboard.Server
 	dashboardListen string // TCP address, e.g. "127.0.0.1:8077"
 
-	// sshBackends holds SSHBackend references for cleanup on shutdown.
+	// sshBackends holds SSHBackend references for cleanup on shutdown
+	// (legacy/runqd assembly; the client deployment uses d.lanes below).
 	sshBackends []*backend.SSHBackend
+
+	// ── RQ-75: client-deployment lane registry (hot reload) ──
+	//
+	// lanes maps target name → live lane backend. It is MUTABLE: the config
+	// reconciler adds/replaces/removes entries as config.yaml changes.
+	// laneMu guards the map (not the lanes themselves — they have their own
+	// lifecycles). nil on runqd deployments.
+	laneMu sync.Mutex
+	lanes  map[string]backend.Backend
+
+	// multiBe is the routing backend the dashboard serves; the reconciler
+	// mutates its target set in lockstep with d.lanes.
+	multiBe *backend.MultiBackend
+
+	// buildLane constructs one lane from its target config (captures
+	// dataDir/store/logger from assembly). nil on runqd deployments — the
+	// reconciler is a no-op there.
+	buildLane func(tc config.TargetConfig, cfg *config.GlobalConfig) (backend.Backend, error)
+
+	// reconcileMu serializes ReconcileConfig passes (watcher tick, API
+	// write notify, connect can all fire concurrently).
+	reconcileMu sync.Mutex
+	// lastTargets / lastDefault are the reconciler's observed state — what
+	// the running lanes were built from.
+	lastTargets map[string]config.TargetConfig
+	lastDefault string
+	// bootDataPath detects restart-bound key changes (data_path is a
+	// storage root — hot-swapping it would strand task dirs mid-flight).
+	bootDataPath string
+	// laneBuildErrs dedupes build-failure logging across retry passes
+	// (target → last error string). Guarded by reconcileMu.
+	laneBuildErrs map[string]string
+	// laneCloseGrace delays closing a superseded lane so reads/streams that
+	// grabbed the old pointer before the routing swap finish naturally
+	// (0 = close synchronously; tests).
+	laneCloseGrace time.Duration
+	// retireZeroSeen: two-consecutive-zero close confirmation for retiring
+	// lanes (round 5 #4). Serialized with the sweep (reconcileMu callers +
+	// the single sweep ticker).
+	retireZeroSeen map[string]bool
+	// retiringLanes holds superseded lane generations still tracking their
+	// in-flight tasks (RQ-75), keyed "name@generation". Guarded by laneMu;
+	// registered in lockstep with multiBe's retiring registry.
+	retiringLanes map[string]backend.Backend
+
+	// cfgWatchCancel stops the config.yaml watcher goroutine on shutdown.
+	cfgWatchCancel context.CancelFunc
 
 	// forwards are the remote socket forwards (targets with remote_cli),
 	// keyed by target name: each keeps ~/.runq/runq.sock on its login node
@@ -53,11 +103,11 @@ type Daemon struct {
 	fwdMu    sync.Mutex
 	forwards map[string]*rfs.RemoteForward
 
-	// laneNames records which targets got a lane at assembly time. Lanes
-	// are NOT hot-reloaded (restart-bound by design); StartRemoteForward
-	// uses this to tell "start the forward now" apart from "the whole
-	// target is new — a restart is genuinely needed".
-	laneNames map[string]bool
+	// contactRecorder, when set (client deployment), records a
+	// daemon-observed reachability proof for one target — wired to
+	// MultiBackend.RecordTargetContact and called from forward
+	// OnEstablished hooks (RQ-74).
+	contactRecorder func(name string)
 
 	// pidPath is this deployment's PID file (client: daemon.pid,
 	// runqd: runqd.pid) — the two daemons coexist on one machine.
@@ -169,7 +219,7 @@ func NewDaemonWith(opts DaemonOptions) (*Daemon, error) {
 	defaultTarget := storageCfg.ResolveDefaultTarget()
 
 	resolvedTargets := storageCfg.ResolveTargets()
-	makeLocalBackend := func(targetName string) *backend.LocalBackend {
+	makeLocalBackend := func(targetName, generation string) *backend.LocalBackend {
 		return backend.NewLocalBackend(backend.LocalBackendDeps{
 			Store:      st,
 			Reg:        reg,
@@ -179,6 +229,7 @@ func NewDaemonWith(opts DaemonOptions) (*Daemon, error) {
 			Pool:       pool,
 			StorageCfg: storageCfg,
 			TargetName: targetName,
+			Generation: generation,
 		})
 	}
 
@@ -207,7 +258,7 @@ func NewDaemonWith(opts DaemonOptions) (*Daemon, error) {
 		} else {
 			// Local-type targets share daemon runtime components but keep separate
 			// routing keys so DB target filters remain correct.
-			be := makeLocalBackend(tc.Name)
+			be := makeLocalBackend(tc.Name, tc.SemanticGeneration())
 			targets[tc.Name] = be
 			localTargetNames = append(localTargetNames, tc.Name)
 			if localBe == nil {
@@ -219,7 +270,7 @@ func NewDaemonWith(opts DaemonOptions) (*Daemon, error) {
 		// HPC-only configs still need a LocalBackend for store/registry helpers
 		// used by API endpoints such as note resolution. It is not registered
 		// as a routable target.
-		localBe = makeLocalBackend("local")
+		localBe = makeLocalBackend("local", "") // helper-only, not routable: no generation
 	}
 
 	multiBe, err := backend.NewMultiBackend(targets, st, defaultTarget)
@@ -299,9 +350,43 @@ func (d *Daemon) Run() error {
 
 	// Client daemon: lanes restore themselves in Start(); the dashboard mux
 	// serves both listeners (unix socket for the CLI, TCP for the browser).
-	for _, sshBe := range d.sshBackends {
-		sshBe.Start(context.Background())
+	d.laneMu.Lock()
+	for _, be := range d.lanes {
+		if s, ok := be.(interface{ Start(context.Context) }); ok {
+			s.Start(context.Background())
+		}
 	}
+	d.laneMu.Unlock()
+	// RQ-75: retiring lane generations survive restarts — rebuild them
+	// from their config snapshots so long-running old-generation tasks
+	// keep being tracked on their original endpoints.
+	d.rebuildRetiringLanes()
+	// RQ-75: watch config.yaml for semantic changes — the lane reconciler
+	// converges running lanes onto the file without a restart. API writes
+	// notify the same reconciler directly (SetConfigChanged).
+	watchCtx, cancel := context.WithCancel(context.Background())
+	d.cfgWatchCancel = cancel
+	go gensync.WatchFile(watchCtx, config.ConfigPath(), 15*time.Second, d.Logger, func(*genfile.Doc) {
+		if err := d.ReconcileConfig("config.yaml changed"); err != nil {
+			d.Logger.Warn("config reconcile failed", "error", err)
+		}
+	})
+	// Retirement sweep: close retiring lanes whose unfinished count hit
+	// zero. Terminal transitions land via lane sensors at their own pace,
+	// so a periodic sweep (plus one after every reconcile pass) is the
+	// level-triggered way to notice.
+	go func() {
+		t := time.NewTicker(time.Minute)
+		defer t.Stop()
+		for {
+			select {
+			case <-watchCtx.Done():
+				return
+			case <-t.C:
+				d.SweepRetiringLanes()
+			}
+		}
+	}()
 	// Remote CLI forwards (targets with remote_cli): each supervises its
 	// own reconnect loop; failures never block the daemon.
 	d.fwdMu.Lock()
@@ -447,19 +532,16 @@ func (d *Daemon) localRestoreTargets() []string {
 	return d.localTargetNames
 }
 
-// Shutdown gracefully stops all daemon components.
-// errLaneRestartRequired distinguishes "target added after daemon start"
-// from forward-level problems: lanes are restart-bound by design, so this
-// is the one case where `runq connect` must still say "restart". Wraps the
-// dashboard sentinel so the /connect handler can map it to 409.
-var errLaneRestartRequired = fmt.Errorf("%w: target has no lane in the running daemon — `runq daemon restart` to build one", dashboard.ErrForwardRestartRequired)
-
 // StartRemoteForward (re)establishes the remote CLI forward for one target
-// at runtime — the path behind POST /targets/{name}/connect, so `runq
-// connect` takes effect without a daemon restart. It re-reads config.yaml
-// (connect just wrote it); an existing forward for the target is torn down
-// and replaced (idempotent — reconnect ceremony semantics).
+// at runtime — the path behind POST /targets/{name}/connect. It first runs
+// a reconcile pass: `runq connect` just wrote config.yaml, and a brand-new
+// target's LANE is exactly that diff's add-branch (RQ-75 — this is what
+// deleted errLaneRestartRequired; "restart to build a lane" is history).
+// An existing forward is torn down and replaced (reconnect ceremony).
 func (d *Daemon) StartRemoteForward(name string) error {
+	if err := d.ReconcileConfig("connect"); err != nil {
+		return err
+	}
 	cfg, err := config.Load()
 	if err != nil {
 		return err
@@ -479,28 +561,62 @@ func (d *Daemon) StartRemoteForward(name string) error {
 		return fmt.Errorf("target %q has no ssh section", name)
 	case !tc.RemoteCLI:
 		return fmt.Errorf("target %q does not have remote_cli enabled", name)
-	case !d.laneNames[name]:
-		return errLaneRestartRequired
 	}
+	if d.buildLane != nil { // client deployment: the lane must exist by now
+		d.laneMu.Lock()
+		_, ok := d.lanes[name]
+		d.laneMu.Unlock()
+		if !ok {
+			return fmt.Errorf("target %q has no lane — its build failed during reconcile; see daemon logs (Settings → runq logs)", name)
+		}
+	}
+	return d.startForwardFor(*tc)
+}
 
+// startForwardFor builds and launches the remote CLI forward for one
+// target, replacing any existing one. Shared by the reconciler (add/change
+// branches) and StartRemoteForward.
+func (d *Daemon) startForwardFor(tc config.TargetConfig) error {
 	// RemoteCLIHandler, not Handler: the runtime path must wear the same
 	// guard as the boot path — an unguarded forward is the RQ-45 escalation.
-	fwd, err := newRemoteCLIForward(*tc, d.Dashboard.RemoteCLIHandler(name), d.Logger)
+	fwd, err := newRemoteCLIForward(tc, d.Dashboard.RemoteCLIHandler(tc.Name), d.Logger, d.contactRecorderFor(tc.Name))
 	if err != nil {
 		return err
 	}
 	d.fwdMu.Lock()
-	if old, ok := d.forwards[name]; ok {
+	if old, ok := d.forwards[tc.Name]; ok {
 		_ = old.Close()
 	}
 	if d.forwards == nil {
 		d.forwards = map[string]*rfs.RemoteForward{}
 	}
-	d.forwards[name] = fwd
+	d.forwards[tc.Name] = fwd
 	d.fwdMu.Unlock()
 	go fwd.Run(context.Background())
-	d.Logger.Info("remote CLI forward (re)started at runtime", "target", name)
+	d.Logger.Info("remote CLI forward (re)started at runtime", "target", tc.Name)
 	return nil
+}
+
+// ForwardStatuses snapshots every remote CLI forward's observable state,
+// keyed by target name (RQ-74) — the /health "forwards" section.
+func (d *Daemon) ForwardStatuses() map[string]rfs.ForwardStatus {
+	d.fwdMu.Lock()
+	defer d.fwdMu.Unlock()
+	out := make(map[string]rfs.ForwardStatus, len(d.forwards))
+	for name, fwd := range d.forwards {
+		out[name] = fwd.Status()
+	}
+	return out
+}
+
+// contactRecorderFor binds the daemon's contact recorder to one target for
+// use as a forward OnEstablished hook (RQ-74). Returns nil when no recorder
+// is wired (runqd deployment), keeping the hook optional end to end.
+func (d *Daemon) contactRecorderFor(name string) func() {
+	if d.contactRecorder == nil {
+		return nil
+	}
+	return func() { d.contactRecorder(name) }
 }
 
 // StopRemoteForward tears down one target's remote CLI forward at runtime
@@ -532,6 +648,11 @@ func (d *Daemon) Shutdown(_ context.Context) {
 		_ = fwd.Close()
 	}
 	d.fwdMu.Unlock()
+	// Stop the config watcher before touching lanes: a reconcile racing
+	// the shutdown would rebuild what we are tearing down.
+	if d.cfgWatchCancel != nil {
+		d.cfgWatchCancel()
+	}
 	// Close lanes before the scheduler and store — outstanding SSH
 	// operations should drain before the DB is closed.
 	for _, sshBe := range d.sshBackends {
@@ -539,6 +660,22 @@ func (d *Daemon) Shutdown(_ context.Context) {
 			d.Logger.Warn("lane close failed", "error", err)
 		}
 	}
+	d.laneMu.Lock()
+	for name, be := range d.lanes {
+		if c, ok := be.(interface{ Close() error }); ok {
+			if err := c.Close(); err != nil {
+				d.Logger.Warn("lane close failed", "target", name, "error", err)
+			}
+		}
+	}
+	for key, be := range d.retiringLanes {
+		if c, ok := be.(interface{ Close() error }); ok {
+			if err := c.Close(); err != nil {
+				d.Logger.Warn("retiring lane close failed", "lane", key, "error", err)
+			}
+		}
+	}
+	d.laneMu.Unlock()
 	// Deployment-specific surfaces: runqd has Scheduler+gin Server; the
 	// client has the socket http.Server. Guard both — one Daemon type, two
 	// assemblies.

@@ -100,7 +100,9 @@
             </td>
             <td>
               <div class="d-flex ga-1">
-                <v-btn v-if="task.status === 'running'" icon size="x-small" variant="text" color="error"
+                <!-- unknown is killable (RQ-74 escape hatch) — same entry
+                     point as TaskDetail, not a detail-page-only affordance -->
+                <v-btn v-if="task.status === 'running' || task.status === 'unknown'" icon size="x-small" variant="text" color="error"
                   @click.stop="$emit('kill-task', task.id)"
                   :aria-label="t('job.kill')" :title="t('job.kill')"
                 ><v-icon size="14">mdi-stop</v-icon></v-btn>

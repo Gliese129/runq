@@ -17,6 +17,8 @@ export interface TaskCountGroup {
   completed: number
   /** failed + killed tasks (the backend folds killed in here) */
   failed: number
+  /** RQ-74: outcome-unknown submissions awaiting reconcile (absent when 0) */
+  unknown?: number
 }
 
 export interface JobSummary {
@@ -86,6 +88,8 @@ export interface TaskView {
   /** HPC-specific; empty in daemon mode. Check caps.state_model == 'poll'. */
   external_id?: string
   status_source?: string
+  /** RQ-74: verbatim pre-run failure evidence (submit rejection stderr + exit code + rendered command). */
+  failure_detail?: string
   /** Raw scheduler state token before signal mapping (e.g. "COMPLETING", "R"). */
   native_state?: string
   /** Scheduler queue/partition name (e.g. "gpu-a100", "cpu-batch"). */
@@ -214,6 +218,8 @@ export interface ConfigResponse {
   config_path: string
   default_target: string
   targets: TargetSummary[]
+  /** config.yaml semantic content hash (RQ-75) — send back as If-Match on writes */
+  config_generation?: string
 }
 
 /** POST /targets|jobs/{id}/refresh — D22: caller always learns the outcome. */
@@ -235,10 +241,26 @@ export interface TargetHealth {
   last_checked: number
 }
 
+/** One remote CLI forward's observable state (RQ-74, mirrors rfs.ForwardStatus). */
+export interface ForwardStatus {
+  state: 'up' | 'reconnecting' | 'closed'
+  /** unix: when the current state was entered */
+  since: number
+  /** unix: last moment the forward was serving; absent = never online */
+  last_online?: number
+  /** consecutive failed sessions since last up */
+  attempts?: number
+  last_error?: string
+}
+
 export interface HealthResponse {
   version: string
   uptime_seconds: number
   targets: TargetHealth[]
+  /** daemon identity — whose daemon answered (RQ-74) */
+  hostname?: string
+  /** per-target remote CLI forward state, keyed by target name (RQ-74) */
+  forwards?: Record<string, ForwardStatus>
 }
 
 /** POST /jobs/plan — merged dry-run + resolve-note (single wizard call). */

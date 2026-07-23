@@ -139,7 +139,7 @@ func (b *Backend) SchedulerProbe(ctx context.Context, floor time.Duration) error
 // decides whether that suspicion is worth a SchedulerProbe. Cost model:
 // N running tasks = ≤3N stats over the existing connection.
 func (b *Backend) HeartbeatProbe(ctx context.Context, silenceAfter time.Duration) (silent []string, err error) {
-	rows, err := b.Store.ListTasks(ctx, store.TaskFilter{Status: "running", Target: b.Cfg.Name})
+	rows, err := b.Store.ListTasks(ctx, store.TaskFilter{Status: "running", Target: b.Cfg.Name, Scope: b.Scope})
 	if err != nil {
 		return nil, err
 	}
@@ -176,7 +176,11 @@ func (b *Backend) HeartbeatProbe(ctx context.Context, silenceAfter time.Duration
 // attempt. Wrapper files on disk belong to the PREVIOUS attempt and must not
 // be reconciled against — remote.Launcher resets them at the next launch.
 func awaitingRelaunch(tk store.TaskRow) bool {
-	return tk.ExternalID == "" && tk.RetryCount > 0
+	// Only PENDING rows can be "requeued but not relaunched". An `unknown`
+	// task (RQ-74) also has no external id and may have retry_count > 0, but
+	// it is exactly the task reconcile must look at — its on-disk wrapper
+	// state is the evidence that settles it.
+	return tk.Status == "pending" && tk.ExternalID == "" && tk.RetryCount > 0
 }
 
 // persistDecision writes a reconcile decision. A terminal transition of a
@@ -198,11 +202,50 @@ func (b *Backend) persistDecision(ctx context.Context, tk store.TaskRow, d Decis
 		fields["native_state"] = "gone"
 		fields["queue"] = ""
 	}
+	// Leaving `unknown` (RQ-74 review finding 1): the resolved state must
+	// not keep the submit-era evidence — a task reconcile just confirmed
+	// RUNNING would otherwise still render "failed before running" — and
+	// the scheduler queue must follow the DB out of unknown, or the kill
+	// path keeps matching against a stale unknown-state condition.
+	// (Explicitly clearing failure_detail is idempotent with the terminal
+	// branch: completeTask's defaults clear it there anyway.)
+	if tk.Status == "unknown" && d.Status != "unknown" {
+		if _, ok := fields["failure_detail"]; !ok {
+			fields["failure_detail"] = nil
+		}
+		// Queue sync only for non-terminal exits (unknown → running);
+		// terminal exits settle the queue through FinishTask below.
+		if !isTerminal(d.Status) {
+			if ru, ok := b.Finisher.(interface{ ResumeUnknown(taskID string) }); ok {
+				ru.ResumeUnknown(tk.ID)
+			}
+		}
+	}
 	if b.Finisher != nil && isTerminal(d.Status) && !isTerminal(tk.Status) {
 		b.Finisher.FinishTask(rowToTask(tk), scheduler.TaskStatus(d.Status), fields)
+		// READ-BACK verification (review round 6 #1): FinishTask is a void
+		// funnel — a failed DB terminal write inside it must not be taken
+		// as success, or the caller (marker scan) deletes the done marker
+		// and the verdict is lost forever. The DB is the truth: check it.
+		row, gerr := b.Store.GetTask(ctx, tk.ID)
+		if gerr != nil {
+			return fmt.Errorf("verify terminal persist: %w", gerr)
+		}
+		if row == nil || !isTerminal(row.Status) {
+			return fmt.Errorf("terminal persist for %s did not land (status %q) — verdict will be redelivered",
+				tk.ID, statusOf(row))
+		}
 		return nil
 	}
 	return b.Store.UpdateTaskStatus(ctx, tk.ID, d.Status, fields)
+}
+
+// statusOf is a nil-safe row status reader for error messages.
+func statusOf(row *store.TaskRow) string {
+	if row == nil {
+		return "missing"
+	}
+	return row.Status
 }
 
 // probeIsFresh returns true if jobID's scheduler was probed within the TTL.
@@ -271,7 +314,7 @@ func (b *Backend) reconcile(ctx context.Context, jobID string, probe bool) error
 // shares one across all jobs so listing-style commands (bare `qstat`) hit
 // the scheduler once; single-job callers pass memoRunner(b.shellRunClassified).
 func (b *Backend) reconcileWith(ctx context.Context, jobID string, probe bool, probeRun runner) error {
-	tasks, err := b.Store.ListTasks(ctx, store.TaskFilter{JobID: jobID})
+	tasks, err := b.Store.ListTasks(ctx, store.TaskFilter{JobID: jobID, Scope: b.Scope})
 	if err != nil {
 		return err
 	}
@@ -373,7 +416,7 @@ func (b *Backend) reconcileWith(ctx context.Context, jobID string, probe bool, p
 // batch probe results instead of per-task scheduler queries. ext_ids absent
 // from the batch map are treated as SchedGone (job left the scheduler queue).
 func (b *Backend) reconcileWithBatch(ctx context.Context, jobID string, signals map[string]ProbeResult) error {
-	tasks, err := b.Store.ListTasks(ctx, store.TaskFilter{JobID: jobID})
+	tasks, err := b.Store.ListTasks(ctx, store.TaskFilter{JobID: jobID, Scope: b.Scope})
 	if err != nil {
 		return err
 	}

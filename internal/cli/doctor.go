@@ -75,6 +75,15 @@ func (d *doctorChecks) summary() {
 }
 
 func runDoctor(cmd *cobra.Command, args []string) error {
+	// Remote-CLI perspective (RQ-74): on a login node this binary is a thin
+	// client of a forwarded socket — there IS no local daemon to diagnose.
+	// Asking local questions here produces wrong answers ("daemon down"
+	// when it's the laptop that slept), so the perspective switches with
+	// the environment.
+	if os.Getenv("RUNQ_SOCKET") != "" {
+		return runDoctorRemote()
+	}
+
 	d := &doctorChecks{}
 
 	fmt.Println("== runq client ==")
@@ -87,6 +96,68 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		fmt.Println("== executor ==")
 		doctorExecutor(d, cfg)
 	}
+
+	d.summary()
+	return nil
+}
+
+// runDoctorRemote is doctor's login-node perspective (RQ-74): the only
+// questions that make sense here are "does the forwarded socket respond"
+// and "whose daemon is on the other side". Everything else (config, DB,
+// lanes) lives on the machine that owns the daemon.
+func runDoctorRemote() error {
+	d := &doctorChecks{}
+	target := os.Getenv("RUNQ_TARGET")
+	sock := os.Getenv("RUNQ_SOCKET")
+
+	fmt.Println("== runq remote CLI (login node) ==")
+	fmt.Println("Target binding:")
+	if target != "" {
+		d.check(true, fmt.Sprintf("RUNQ_TARGET=%s", target), "")
+	} else {
+		d.check(false, "", "RUNQ_TARGET unset — commands cannot scope to a target; re-run `runq connect` from your own machine to regenerate the env file")
+	}
+
+	fmt.Println("Forwarded socket:")
+	if _, err := os.Stat(sock); err != nil {
+		d.check(false, "", fmt.Sprintf("%s: not present — the forward is not established. It comes up automatically when the daemon on your own machine is running (or run `runq connect %s` there).", sock, target))
+		d.summary()
+		return nil
+	}
+	d.check(true, sock, "")
+
+	fmt.Println("Client daemon (other side of the forward):")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	client := api.NewClient(sock)
+	resp, err := client.Do(ctx, "GET", "/api/v1/health", nil)
+	if err != nil {
+		// The socket file exists but nobody answers: the OWNING side is
+		// gone (laptop asleep / offline / daemon stopped) — say exactly
+		// that instead of misdiagnosing a "local" daemon.
+		d.check(false, "", "socket exists but does not respond — the daemon on your own machine is disconnected (asleep/offline/stopped). It reconnects automatically once it is back; nothing to fix on this login node.")
+		d.summary()
+		return nil
+	}
+	defer resp.Body.Close()
+	var h struct {
+		Version  string `json:"version"`
+		Uptime   int64  `json:"uptime_seconds"`
+		Hostname string `json:"hostname"`
+	}
+	if jerr := json.NewDecoder(resp.Body).Decode(&h); jerr != nil {
+		d.check(false, "", fmt.Sprintf("health response unreadable: %v", jerr))
+		d.summary()
+		return nil
+	}
+	owner := h.Hostname
+	if owner == "" {
+		owner = "(unknown host — older daemon build)"
+	}
+	// Owner identity matters: with several machines forwarding to one
+	// cluster account, this line is what catches "the socket answers, but
+	// it's my desktop's daemon, not my laptop's".
+	d.check(true, fmt.Sprintf("%s · runq %s · up %s", owner, h.Version, (time.Duration(h.Uptime)*time.Second).Round(time.Second)), "")
 
 	d.summary()
 	return nil
@@ -235,6 +306,44 @@ type targetHealthLine struct {
 	checked   int64  // unix; 0 = no contact since daemon boot
 	age       string // " (checked 3m ago)" or ""
 	lastErr   string // ": <err>" or ""
+
+	// forward is the target's remote CLI forward state (RQ-74), nil when
+	// the target has no forward (remote_cli disabled / daemon predates it).
+	forward *forwardHealthLine
+}
+
+// forwardHealthLine mirrors rfs.ForwardStatus over the /health wire.
+type forwardHealthLine struct {
+	State      string `json:"state"`
+	Since      int64  `json:"since"`
+	LastOnline int64  `json:"last_online"`
+	Attempts   int    `json:"attempts"`
+	LastError  string `json:"last_error"`
+}
+
+// render turns the forward state into one honest doctor line ("up 2h" /
+// "reconnecting · attempt 3 · last online 12m ago: dial tcp ...").
+func (f *forwardHealthLine) render() string {
+	switch f.State {
+	case "up":
+		return fmt.Sprintf("forward up since %s ago", time.Since(time.Unix(f.Since, 0)).Round(time.Second))
+	case "reconnecting":
+		s := fmt.Sprintf("forward reconnecting (attempt %d", f.Attempts)
+		if f.LastOnline > 0 {
+			s += fmt.Sprintf(" · last online %s ago", time.Since(time.Unix(f.LastOnline, 0)).Round(time.Second))
+		} else {
+			s += " · never connected"
+		}
+		s += ")"
+		if f.LastError != "" {
+			s += ": " + f.LastError
+		}
+		return s
+	case "closed":
+		return "forward stopped (disconnected)"
+	default:
+		return "forward state: " + f.State
+	}
 }
 
 // fetchTargetHealth reads the daemon's PASSIVE reachability cache via the
@@ -257,6 +366,7 @@ func fetchTargetHealth(daemonUp bool) map[string]targetHealthLine {
 			LastError   string `json:"last_error"`
 			LastChecked int64  `json:"last_checked"`
 		} `json:"targets"`
+		Forwards map[string]forwardHealthLine `json:"forwards"`
 	}
 	if json.NewDecoder(resp.Body).Decode(&body) != nil {
 		return out
@@ -268,6 +378,10 @@ func fetchTargetHealth(daemonUp bool) map[string]targetHealthLine {
 		}
 		if t.LastError != "" {
 			line.lastErr = ": " + t.LastError
+		}
+		if fw, ok := body.Forwards[t.Name]; ok {
+			fwCopy := fw
+			line.forward = &fwCopy
 		}
 		out[t.Name] = line
 	}
@@ -383,7 +497,8 @@ func doctorConnection(cfg *config.GlobalConfig, health map[string]targetHealthLi
 	fmt.Println("== connection ==")
 	for _, t := range remotes {
 		avail := "no contact yet"
-		if h, found := health[t.Name]; found && h.checked > 0 {
+		h, found := health[t.Name]
+		if found && h.checked > 0 {
 			if h.reachable {
 				avail = "available" + h.age
 			} else {
@@ -391,6 +506,11 @@ func doctorConnection(cfg *config.GlobalConfig, health map[string]targetHealthLi
 			}
 		}
 		fmt.Printf("%s: %s\n", t.Name, avail)
+		// Forward state (RQ-74): the remote CLI's lifeline gets its own
+		// line — "target reachable" and "forward up" are separate facts.
+		if found && h.forward != nil {
+			fmt.Printf("  %s\n", h.forward.render())
+		}
 
 		block := sshConfigBlock(t.SSH.Host)
 		if len(block) > 0 {

@@ -19,6 +19,7 @@ import (
 	"github.com/gliese129/runq/internal/version"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/crypto/ssh"
 )
 
 // ── runq connect：连接一个已配置的 remote target（RQ-45）──
@@ -130,12 +131,23 @@ func connectOne(cmd *cobra.Command, cfg *config.GlobalConfig, name string) error
 	} else {
 		fmt.Printf("Connecting to %s ...\n", host)
 	}
-	hostKeys, err := rfs.TOFUHostKeyCallback(func(h, fingerprint string) bool {
-		fmt.Printf("\nThe authenticity of host %q can't be established.\n", h)
-		fmt.Printf("Key fingerprint: %s\n", fingerprint)
-		fmt.Println("Verify it against the cluster's published fingerprint if you can.")
-		return confirmYN("Trust this host and add it to ~/.ssh/known_hosts?")
-	})
+	// RQ-74: `StrictHostKeyChecking accept-new` in ~/.ssh/config skips the
+	// TOFU prompt — the user already told ssh to trust new hosts silently,
+	// and runq follows their config instead of adding ceremony. One line
+	// says so (self-report: silence is fine, invisibility is not).
+	var hostKeys ssh.HostKeyCallback
+	var err error
+	if rfs.ResolveHostKeyPolicy(tc.SSH.Host) == rfs.HostKeyAcceptNew {
+		fmt.Println("host key: new hosts auto-trusted (StrictHostKeyChecking accept-new in ~/.ssh/config)")
+		hostKeys, err = rfs.AcceptNewHostKeyCallback()
+	} else {
+		hostKeys, err = rfs.TOFUHostKeyCallback(func(h, fingerprint string) bool {
+			fmt.Printf("\nThe authenticity of host %q can't be established.\n", h)
+			fmt.Printf("Key fingerprint: %s\n", fingerprint)
+			fmt.Println("Verify it against the cluster's published fingerprint if you can.")
+			return confirmYN("Trust this host and add it to ~/.ssh/known_hosts?")
+		})
+	}
 	if err != nil {
 		return err
 	}

@@ -10,12 +10,22 @@
       style="border-right: 0.5px solid rgb(var(--v-theme-outline-variant))"
     >
       <div class="d-flex align-center ga-2 pa-3" style="height: 56px">
-        <router-link :to="{ name: 'overview' }" :aria-label="t('a11y.home')" class="text-decoration-none d-flex align-center ga-2">
+        <router-link
+          :to="{ name: 'overview' }"
+          :aria-label="t('a11y.home')"
+          class="text-decoration-none d-flex align-center ga-2"
+        >
           <RunqLogo :size="28" />
           <span v-if="!collapsed" class="text-body-1 font-weight-bold text-on-surface">runq</span>
         </router-link>
         <v-spacer />
-        <v-chip v-if="!collapsed && config.loaded" size="x-small" variant="tonal" color="primary" label>
+        <v-chip
+          v-if="!collapsed && config.loaded"
+          size="x-small"
+          variant="tonal"
+          color="primary"
+          label
+        >
           {{ config.targetLabel }}
         </v-chip>
       </div>
@@ -67,9 +77,19 @@
       <v-divider />
 
       <div class="pa-2 flex-grow-1 overflow-y-auto">
-        <div v-if="!collapsed" class="text-caption text-on-surface-variant px-2 mb-1 d-flex align-center justify-space-between">
+        <div
+          v-if="!collapsed"
+          class="text-caption text-on-surface-variant px-2 mb-1 d-flex align-center justify-space-between"
+        >
           {{ t('overview.projects') }}
-          <v-btn icon size="x-small" variant="text" :aria-label="t('common.refresh')" :title="t('common.refresh')" @click="refreshShellData">
+          <v-btn
+            icon
+            size="x-small"
+            variant="text"
+            :aria-label="t('common.refresh')"
+            :title="t('common.refresh')"
+            @click="refreshShellData"
+          >
             <v-icon size="12">mdi-refresh</v-icon>
           </v-btn>
         </div>
@@ -96,13 +116,18 @@
           <template #prepend>
             <div class="status-dot mr-2" :style="{ background: projectColor(proj.name) }" />
           </template>
-          <v-list-item-title v-if="!collapsed" class="text-body-2">{{ proj.name }}</v-list-item-title>
+          <v-list-item-title v-if="!collapsed" class="text-body-2">{{
+            proj.name
+          }}</v-list-item-title>
           <template v-if="!collapsed" #append>
             <span class="text-caption text-on-surface-variant">{{ proj.job_count }}</span>
           </template>
         </v-list-item>
 
-        <div v-if="projects.visible.length === 0 && !projects.loading && !collapsed" class="text-caption text-on-surface-variant text-center pa-3">
+        <div
+          v-if="projects.visible.length === 0 && !projects.loading && !collapsed"
+          class="text-caption text-on-surface-variant text-center pa-3"
+        >
           {{ t('overview.no_projects') }}
         </div>
       </div>
@@ -127,11 +152,15 @@
             rounded="lg"
             class="nav-btn mb-1"
             :class="collapsed ? 'justify-center' : 'justify-start px-3'"
-            :prepend-icon="settings.theme === 'dark' ? 'mdi-white-balance-sunny' : 'mdi-moon-waning-crescent'"
+            :prepend-icon="
+              settings.theme === 'dark' ? 'mdi-white-balance-sunny' : 'mdi-moon-waning-crescent'
+            "
             :aria-label="settings.theme === 'dark' ? t('layout.light_mode') : t('layout.dark_mode')"
             @click="toggleTheme"
           >
-            <span v-if="!collapsed" class="text-body-2">{{ settings.theme === 'dark' ? t('layout.light_mode') : t('layout.dark_mode') }}</span>
+            <span v-if="!collapsed" class="text-body-2">{{
+              settings.theme === 'dark' ? t('layout.light_mode') : t('layout.dark_mode')
+            }}</span>
           </v-btn>
           <v-btn
             v-if="!mobile"
@@ -148,7 +177,10 @@
             <span v-if="!collapsed" class="text-body-2">{{ t('common.collapse') }}</span>
           </v-btn>
           <div class="d-flex align-center ga-2 px-3 py-1">
-            <div class="status-dot" :class="conn.connected.value ? 'status-dot--completed' : 'status-dot--failed'" />
+            <div
+              class="status-dot"
+              :class="conn.connected.value ? 'status-dot--completed' : 'status-dot--failed'"
+            />
             <span v-if="!collapsed" class="text-caption text-on-surface-variant">
               {{ t(conn.statusKey.value) }}
             </span>
@@ -157,17 +189,35 @@
       </template>
     </v-navigation-drawer>
 
-    <v-app-bar elevation="0" color="transparent" density="compact" style="border-bottom: 0.5px solid rgb(var(--v-theme-outline-variant))">
-      <v-btn v-if="mobile" icon size="small" variant="text" :aria-label="t('a11y.open_menu')" @click="drawerOpen = !drawerOpen">
+    <v-app-bar
+      elevation="0"
+      color="transparent"
+      density="compact"
+      style="border-bottom: 0.5px solid rgb(var(--v-theme-outline-variant))"
+    >
+      <v-btn
+        v-if="mobile"
+        icon
+        size="small"
+        variant="text"
+        :aria-label="t('a11y.open_menu')"
+        @click="drawerOpen = !drawerOpen"
+      >
         <v-icon>mdi-menu</v-icon>
       </v-btn>
-      <v-breadcrumbs v-if="breadcrumbs.length > 0" :items="breadcrumbs" density="compact" class="text-body-2 pa-0 ml-2">
+      <v-breadcrumbs
+        v-if="breadcrumbs.length > 0"
+        :items="breadcrumbs"
+        density="compact"
+        class="text-body-2 pa-0 ml-2"
+      >
         <template #divider><v-icon size="12">mdi-chevron-right</v-icon></template>
       </v-breadcrumbs>
       <v-spacer />
       <v-chip
         v-if="config.caps.gpu_map && gpuTotal > 0"
-        size="small" variant="tonal"
+        size="small"
+        variant="tonal"
         :color="gpuFree > 0 ? 'success' : 'warning'"
         class="mr-2"
       >
@@ -177,6 +227,18 @@
     </v-app-bar>
 
     <v-main>
+      <!-- RQ-74: reconnect mode — the page never silently dies. Cached data
+           stays visible underneath; this banner says why nothing updates
+           and disappears on its own when the health probe reconnects. -->
+      <v-expand-transition>
+        <div
+          v-if="!conn.connected.value"
+          class="reconnect-banner d-flex align-center ga-2 px-4 py-2"
+        >
+          <v-progress-circular indeterminate size="14" width="2" />
+          <span class="text-body-2">{{ t('statusbar.reconnect_banner') }}</span>
+        </div>
+      </v-expand-transition>
       <v-container fluid class="pa-4 pa-md-6" style="max-width: 1200px">
         <!-- No route transition ON PURPOSE: mode="out-in" delayed the new
              view until the old one's leave finished, and a poll-driven
@@ -188,6 +250,11 @@
         </router-view>
       </v-container>
     </v-main>
+
+    <!-- RQ-74: VSCode-style status bar — connection, targets, forwards,
+         daemon identity. The one place that always answers "can I trust
+         what this page shows right now". -->
+    <StatusBar />
   </v-app>
 </template>
 
@@ -204,6 +271,7 @@ import { useConnection } from '@/composables/useConnection'
 import { useGpuQuery } from '@/queries/useGpuQuery'
 import { qk } from '@/queries/keys'
 import RunqLogo from '@/components/RunqLogo.vue'
+import StatusBar from '@/components/StatusBar.vue'
 
 const { t } = useI18n()
 const route = useRoute()
@@ -238,8 +306,18 @@ function toggleTheme() {
 }
 
 const navItems = computed(() => [
-  { name: 'overview', label: t('nav.overview'), icon: 'mdi-view-dashboard-outline', to: { name: 'overview' } },
-  { name: 'submit', label: t('nav.submit'), icon: 'mdi-plus-circle-outline', to: { name: 'submit' } },
+  {
+    name: 'overview',
+    label: t('nav.overview'),
+    icon: 'mdi-view-dashboard-outline',
+    to: { name: 'overview' },
+  },
+  {
+    name: 'submit',
+    label: t('nav.submit'),
+    icon: 'mdi-plus-circle-outline',
+    to: { name: 'submit' },
+  },
 ])
 
 function isActive(name: string): boolean {
@@ -249,12 +327,20 @@ function isActive(name: string): boolean {
 const breadcrumbs = computed(() => {
   const items: { title: string; to?: object; disabled?: boolean }[] = []
   if (route.params.project) {
-    items.push({ title: String(route.params.project), to: { name: 'project', params: { project: route.params.project } } })
+    items.push({
+      title: String(route.params.project),
+      to: { name: 'project', params: { project: route.params.project } },
+    })
   }
   if (route.params.jobId) {
     items.push({
       title: String(route.params.jobId).slice(0, 8),
-      to: route.params.taskId ? { name: 'job-detail', params: { project: route.params.project, jobId: route.params.jobId } } : undefined,
+      to: route.params.taskId
+        ? {
+            name: 'job-detail',
+            params: { project: route.params.project, jobId: route.params.jobId },
+          }
+        : undefined,
       disabled: !route.params.taskId,
     })
   }
@@ -264,7 +350,16 @@ const breadcrumbs = computed(() => {
   return items
 })
 
-const PROJECT_COLORS = ['#1E40AF', '#16A34A', '#D97706', '#DC2626', '#7C3AED', '#0891B2', '#DB2777', '#65A30D']
+const PROJECT_COLORS = [
+  '#1E40AF',
+  '#16A34A',
+  '#D97706',
+  '#DC2626',
+  '#7C3AED',
+  '#0891B2',
+  '#DB2777',
+  '#65A30D',
+]
 function projectColor(name: string): string {
   let hash = 0
   for (let i = 0; i < name.length; i++) hash = ((hash << 5) - hash + name.charCodeAt(i)) | 0
@@ -299,5 +394,12 @@ onMounted(async () => {
 :deep(.v-list-item__prepend > .v-icon) {
   position: relative;
   left: -8px;
+}
+/* RQ-74: reconnect banner — amber, never red: the daemon being briefly away
+   is a degraded state, not a failure verdict. */
+.reconnect-banner {
+  background: rgba(var(--v-theme-warning), 0.15);
+  color: rgb(var(--v-theme-warning));
+  border-bottom: 0.5px solid rgba(var(--v-theme-warning), 0.4);
 }
 </style>

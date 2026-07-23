@@ -64,6 +64,9 @@
   <div v-else class="d-flex justify-center pa-12">
     <v-progress-circular indeterminate color="primary" />
   </div>
+
+  <!-- RQ-75: cross-generation rerun confirmation -->
+  <GenerationRerunDialog v-model="genRerun.open.value" @confirm="genRerun.confirmRerun" />
 </template>
 
 <script setup lang="ts">
@@ -77,6 +80,8 @@ import { useConfirm } from '@/composables/useConfirm'
 import { useCancelling } from '@/composables/useCancelling'
 import { useJobDetailQuery, useCompareQuery, useJobActions } from '@/queries/useJobQueries'
 import { useTaskActions } from '@/queries/useTaskQueries'
+import { useGenerationRerun } from '@/composables/useGenerationRerun'
+import GenerationRerunDialog from '@/components/GenerationRerunDialog.vue'
 import JobHeader from './JobHeader.vue'
 import TaskTable from './TaskTable.vue'
 import StatusDot from '@/components/StatusDot.vue'
@@ -184,7 +189,9 @@ async function killJob() {
   const counts = detail.value.job.tasks
   const ok = await confirmDialog({
     title: t('confirm.kill_job_title'),
-    body: t('confirm.kill_job_body', { n: counts.running + counts.pending }),
+    // unknown tasks are live work too (RQ-74) — the confirm must not
+    // undercount what the kill will actually touch.
+    body: t('confirm.kill_job_body', { n: counts.running + counts.pending + (counts.unknown ?? 0) }),
     confirmText: t('job.kill'),
     danger: true,
   })
@@ -206,9 +213,15 @@ async function onKillTask(id: string) {
     .catch((e: any) => snack.error(e?.message || t('common.error')))
 }
 
+// RQ-75: cross-generation reruns confirm through the shared dialog.
+const genRerun = useGenerationRerun(
+  (p) => taskActions.retry.mutateAsync(p),
+  () => {},
+  (e: any) => snack.error(e?.message || t('common.error')),
+)
+
 function onRetryTask(id: string) {
-  taskActions.retry.mutateAsync(id)
-    .catch((e: any) => snack.error(e?.message || t('common.error')))
+  void genRerun.run(id)
 }
 
 async function archiveJob() {

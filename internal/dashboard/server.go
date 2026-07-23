@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"os"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -20,6 +21,7 @@ import (
 	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/logfile"
 	"github.com/gliese129/runq/internal/project"
+	"github.com/gliese129/runq/internal/rfs"
 	"github.com/gliese129/runq/internal/version"
 	"github.com/gliese129/runq/internal/workspace"
 )
@@ -54,6 +56,12 @@ type Server struct {
 	// a restart). nil on deployments without forwards (runqd) → 501.
 	forwardStarter func(name string) error
 	forwardStopper func(name string) error
+	// forwardStatus, when set (client daemon), snapshots every remote CLI
+	// forward's observable state for /health (RQ-74).
+	forwardStatus func() map[string]rfs.ForwardStatus
+	// configChanged, when set (client daemon), notifies the RQ-75 lane
+	// reconciler after a successful API write to config.yaml.
+	configChanged func()
 
 	// Per-job forced-refresh floor (D22): memory-only — a restart forgiving
 	// the throttle is harmless.
@@ -292,6 +300,11 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/v1/tasks/{id}/kill", s.handleKillTask)
 	s.mux.HandleFunc("POST /api/v1/tasks/{id}/retry", s.handleRetryTask)
 
+	// ── runq self-logs（RQ-74: 死因至少能在浏览器里读到）────────────────
+	s.mux.HandleFunc("GET /api/v1/daemon/logs", s.handleDaemonLogList)
+	s.mux.HandleFunc("GET /api/v1/daemon/logs/{name}", s.handleDaemonLog)
+	s.mux.HandleFunc("GET /api/v1/daemon/logs/{name}/stream", s.handleDaemonLogStream)
+
 	// ── §5.6 Log sessions（原 /utils/log）──────────────────────────────
 	s.mux.HandleFunc("POST /api/v1/log-sessions", s.handleUtilsLogUpload)
 	s.mux.HandleFunc("GET /api/v1/log-sessions/{id}", s.handleUtilsLogRead)
@@ -313,21 +326,32 @@ func (s *Server) registerRoutes() {
 // self-description (philosophy #2: declared facts, not inferences) — mode
 // is gone from the wire (D5/D9).
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
+	// RQ-75 review fix (#1): the WHOLE response reads config.yaml fresh —
+	// s.cfg is the boot snapshot and drifts as soon as the file is edited
+	// at runtime. The WebUI conflict dialog treats GET /config as "the
+	// disk version", so snapshot values here surfaced stale
+	// data_path/default_target/targets. All config-identity fields report
+	// the FILE (desired state); live routing/lane state belongs to
+	// /health. The snapshot is only the fallback while the file is
+	// momentarily unreadable.
+	cfg := s.cfg
+	if fresh, err := config.Load(); err == nil {
+		cfg = fresh
+	}
 	resp := backend.ConfigResponse{
-		DataPath:      s.cfg.DataPath,
-		ConfigPath:    config.ConfigPath(),
-		DefaultTarget: s.cfg.ResolveDefaultTarget(),
-		Targets:       []backend.TargetSummary{},
+		DataPath:         cfg.DataPath,
+		ConfigPath:       config.ConfigPath(),
+		DefaultTarget:    cfg.ResolveDefaultTarget(),
+		Targets:          []backend.TargetSummary{},
+		ConfigGeneration: cfg.Generation,
 	}
 	caps := map[string]backend.Capabilities{}
 	if mt, ok := s.backend.(interface {
 		PerTargetCapabilities() map[string]backend.Capabilities
-		DefaultTargetName() string
 	}); ok {
 		caps = mt.PerTargetCapabilities()
-		resp.DefaultTarget = mt.DefaultTargetName()
 	}
-	for _, t := range s.cfg.ResolveTargets() {
+	for _, t := range cfg.ResolveTargets() {
 		ts := backend.TargetSummary{
 			Name:      t.Name,
 			Type:      t.Type(),
@@ -406,11 +430,24 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if ph, ok := s.backend.(interface{ PerTargetHealth() []backend.TargetHealth }); ok {
 		targets = ph.PerTargetHealth()
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	body := map[string]any{
 		"version":        s.version,
 		"uptime_seconds": int64(time.Since(s.startedAt).Seconds()),
 		"targets":        targets,
-	})
+	}
+	// Identity (RQ-74): a remote CLI reaching this endpoint through a
+	// forwarded socket needs to know WHOSE daemon answered — with several
+	// machines running runq against one cluster account, "the socket
+	// responds" alone can hide a wrong-owner takeover.
+	if hn, err := os.Hostname(); err == nil {
+		body["hostname"] = hn
+	}
+	// Per-forward observability (RQ-74): up since / attempts / last error —
+	// the data behind doctor's forward line and the dashboard target panel.
+	if s.forwardStatus != nil {
+		body["forwards"] = s.forwardStatus()
+	}
+	writeJSON(w, http.StatusOK, body)
 }
 
 // handleListTasks — GET /tasks?job=&status=&target=&limit=&offset= (spec
@@ -1160,8 +1197,18 @@ func (s *Server) handleKillTask(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleRetryTask — POST /tasks/{id}/retry[?confirm_generation=true].
+// A rerun of a task whose target config changed since submission needs
+// explicit confirmation (RQ-75): unconfirmed → 409 generation_changed,
+// the WebUI shows a dialog and the CLI prompts y/N (-y skips).
 func (s *Server) handleRetryTask(w http.ResponseWriter, r *http.Request) {
+	confirm := r.URL.Query().Get("confirm_generation") == "true"
 	s.handleAction(w, r, func() error {
+		if gr, ok := s.backend.(interface {
+			RetryTaskGen(context.Context, string, bool) error
+		}); ok {
+			return gr.RetryTaskGen(r.Context(), r.PathValue("id"), confirm)
+		}
 		return s.backend.RetryTask(r.Context(), r.PathValue("id"))
 	})
 }
@@ -1248,6 +1295,22 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 // writeError classifies an error into the v1 (status, code) pair (spec §2).
 // Handlers that already know the code should call writeErr directly.
 func writeError(w http.ResponseWriter, err error) {
+	// Typed 409s carry structured payloads — handle before the string zoo.
+	var genChanged *backend.GenerationChangedError
+	if errors.As(err, &genChanged) {
+		writeJSON(w, http.StatusConflict, backend.ErrorResponse{
+			Error:   err.Error(),
+			Code:    backend.CodeGenerationChanged,
+			Details: "task generation " + genChanged.TaskGeneration + "; active generation " + genChanged.ActiveGeneration,
+		})
+		return
+	}
+	if errors.Is(err, backend.ErrLaneRetired) {
+		writeJSON(w, http.StatusConflict, backend.ErrorResponse{
+			Error: err.Error(), Code: backend.CodeLaneRetired, RetryAfterSeconds: 1,
+		})
+		return
+	}
 	status, code := http.StatusInternalServerError, backend.CodeInternal
 	msg := strings.ToLower(err.Error())
 	switch {

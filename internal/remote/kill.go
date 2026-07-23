@@ -92,7 +92,7 @@ func (b *Backend) Kill(ctx context.Context, target string) (killed int, err erro
 // job case, so the caller knows whether to refresh job aggregate status.
 func (b *Backend) resolveTargets(ctx context.Context, target string) ([]store.TaskRow, string, error) {
 	if job, err := b.Store.GetJob(ctx, target); err == nil && job != nil {
-		tasks, err := b.Store.ListTasks(ctx, store.TaskFilter{JobID: target})
+		tasks, err := b.Store.ListTasks(ctx, store.TaskFilter{JobID: target, Scope: b.Scope})
 		if err != nil {
 			return nil, "", err
 		}
