@@ -117,12 +117,13 @@ func (d *Daemon) ReconcileConfig(reason string) error {
 		// lane keeps its full scheduling loop and runs everything already
 		// accepted — pending included — under the config it was submitted
 		// against, isolated, until the count reaches zero.
-		retire, perr := d.prepareRetirement(name, d.lastTargets[name], be, "removed")
+		retire, perr := d.persistRetirement(name, d.lastTargets[name], be, "removed")
 		if perr != nil {
 			record[name] = d.lastTargets[name]
 			d.noteLaneBuildErr(name, fmt.Errorf("removal deferred: %w — retrying next pass", perr))
 			continue
 		}
+		markRetiring(be)
 		_ = d.StopRemoteForward(name)
 		d.multiBe.RemoveTarget(name)
 		d.laneMu.Lock()
@@ -139,6 +140,23 @@ func (d *Daemon) ReconcileConfig(reason string) error {
 
 	for _, name := range added {
 		tc := newTargets[name]
+		// A removed target re-added UNCHANGED (round 6 #4): its retiring
+		// lane still exists with the same generation — promote it.
+		if promoted, ok := d.takeRetiringLane(name, tc.SemanticGeneration()); ok {
+			promoteActive(promoted)
+			if d.Store != nil {
+				mctx, mcancel := context.WithTimeout(context.Background(), 10*time.Second)
+				_ = d.Store.MarkGenerationDone(mctx, name, tc.SemanticGeneration())
+				mcancel()
+			}
+			d.laneMu.Lock()
+			d.lanes[name] = promoted
+			d.laneMu.Unlock()
+			d.multiBe.SetTarget(name, promoted)
+			d.clearLaneBuildErr(name)
+			d.Logger.Info("retiring lane promoted back to active — target re-added unchanged", "target", name)
+			continue
+		}
 		be, berr := d.buildLane(tc, cfg)
 		if berr != nil {
 			// The lane stays absent but VISIBLE: logged (deduped) and
@@ -180,33 +198,52 @@ func (d *Daemon) ReconcileConfig(reason string) error {
 		d.laneMu.Lock()
 		old := d.lanes[name]
 		d.laneMu.Unlock()
-		// 2. Persist the retirement record BEFORE the replacement starts
-		//    (its restore must SEE it, or it adopts the old generation).
-		//    Failure = retry next pass; nothing observable changed.
-		retire, perr := d.prepareRetirement(name, d.lastTargets[name], old, "changed")
+		oldGen := laneGeneration(old)
+		newGen := tc.SemanticGeneration()
+		// 2. Persist the retirement record BEFORE anything observable
+		//    changes. Failure = retry next pass.
+		retire, perr := d.persistRetirement(name, d.lastTargets[name], old, "changed")
 		if perr != nil {
 			closeLane(d, name, newBe)
 			record[name] = d.lastTargets[name]
 			d.noteLaneBuildErr(name, fmt.Errorf("rotation deferred: %w — retrying next pass", perr))
 			continue
 		}
-		// 3. Start the replacement and swap routing atomically — the
-		//    target NAME never stops serving.
-		startLane(newBe)
-		_ = d.StopRemoteForward(name)
-		d.multiBe.SetTarget(name, newBe)
-		d.laneMu.Lock()
-		d.lanes[name] = newBe
-		d.laneMu.Unlock()
-		// 4. The superseded generation retires under SNAPSHOT ISOLATION
-		//    (round 5, user design): scope narrows, but the lane keeps
-		//    scheduling — everything it accepted (pending included, and
-		//    any straggler submit still holding its pointer) runs under
-		//    the config it was submitted against. New submissions route
-		//    to the new lane; only an explicit confirmed rerun crosses
-		//    generations.
+		// 3. Narrow the OLD lane's scope BEFORE the replacement exists
+		//    (round 6 #2): once retiring, its sensors can never treat the
+		//    incoming generation's rows as orphans.
+		markRetiring(old)
+		// 4. Generation loop (round 6 #4): if the new config's hash equals
+		//    a still-retiring generation (A→B→A), PROMOTE that lane back to
+		//    active instead of starting a same-hash twin.
+		if promoted, ok := d.takeRetiringLane(name, newGen); ok {
+			closeLane(d, name, newBe) // discard the cold-built twin
+			promoteActive(promoted)
+			if d.Store != nil {
+				mctx, mcancel := context.WithTimeout(context.Background(), 10*time.Second)
+				_ = d.Store.MarkGenerationDone(mctx, name, newGen)
+				mcancel()
+			}
+			d.multiBe.SetTarget(name, promoted)
+			d.laneMu.Lock()
+			d.lanes[name] = promoted
+			d.laneMu.Unlock()
+			d.Logger.Info("retiring lane promoted back to active — config returned to its generation",
+				"target", name, "generation", shortGen(newGen))
+		} else {
+			// 5. Start the replacement and swap routing atomically.
+			startLane(newBe)
+			_ = d.StopRemoteForward(name)
+			d.multiBe.SetTarget(name, newBe)
+			d.laneMu.Lock()
+			d.lanes[name] = newBe
+			d.laneMu.Unlock()
+		}
+		// 6. Register the superseded generation (ALWAYS when generated —
+		//    round 6 #3: the sweep owns closing, after its two-zero
+		//    confirmation; ungenerated fakes fall back to a plain close).
 		if retire {
-			d.registerRetiring(name, laneGeneration(old), old)
+			d.registerRetiring(name, oldGen, old)
 		} else {
 			d.closeLaneDeferred(name, old)
 		}
@@ -232,7 +269,7 @@ func (d *Daemon) ReconcileConfig(reason string) error {
 
 	d.lastTargets = record
 	// Terminal transitions may already have emptied a retiring generation.
-	d.SweepRetiringLanes()
+	d.sweepRetiringLocked()
 	return nil
 }
 
@@ -271,26 +308,17 @@ func startLane(be backend.Backend) {
 	}
 }
 
-// prepareRetirement runs the PERSISTENCE half of a rotation, BEFORE the
-// replacement starts (review #2/#4): count the old generation's unfinished
-// tasks, persist the retirement record when needed, and migrate pending
-// rows to the new generation. Every failure is returned — the caller
-// aborts the rotation (nothing observable has changed yet: writes are
-// idempotent and re-run next pass). Returns whether the lane must retire.
-func (d *Daemon) prepareRetirement(name string, oldTC config.TargetConfig, be backend.Backend, reason string) (bool, error) {
+// persistRetirement records a superseding/removal BEFORE anything
+// observable changes (round 6 #3: EVERY rotation registers — a zero
+// count is not a lifecycle barrier; the sweep owns closing). Returns
+// false for ungenerated lanes (test fakes): plain close instead.
+func (d *Daemon) persistRetirement(name string, oldTC config.TargetConfig, be backend.Backend, reason string) (bool, error) {
 	gen := laneGeneration(be)
 	if gen == "" || d.Store == nil || d.multiBe == nil {
-		return false, nil // ungenerated lane (test fake without gen): plain close
+		return false, nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	n, err := d.Store.CountUnfinishedGenerationTasks(ctx, name, gen)
-	if err != nil {
-		return false, fmt.Errorf("unfinished-count query failed: %w", err)
-	}
-	if n == 0 {
-		return false, nil
-	}
 	snap, merr := json.Marshal(oldTC)
 	if merr != nil {
 		return false, fmt.Errorf("target config snapshot failed: %w", merr)
@@ -301,16 +329,37 @@ func (d *Daemon) prepareRetirement(name string, oldTC config.TargetConfig, be ba
 	}); uerr != nil {
 		return false, fmt.Errorf("persist retiring generation failed: %w", uerr)
 	}
-	d.Logger.Info("lane retiring — tracking its remaining tasks to completion",
-		"target", name, "generation", shortGen(gen), "unfinished", n, "reason", reason)
+	d.Logger.Info("lane generation retiring", "target", name, "generation", shortGen(gen), "reason", reason)
 	return true, nil
+}
+
+// takeRetiringLane pops a retiring lane whose generation matches (round 6
+// #4: config changed BACK to a retiring generation — promote instead of
+// building a same-hash twin that would co-own every row).
+func (d *Daemon) takeRetiringLane(name, gen string) (backend.Backend, bool) {
+	d.laneMu.Lock()
+	be, ok := d.retiringLanes[name+"@"+gen]
+	if ok {
+		delete(d.retiringLanes, name+"@"+gen)
+	}
+	d.laneMu.Unlock()
+	if ok {
+		d.multiBe.RemoveRetiringLane(name, gen)
+	}
+	return be, ok
+}
+
+// promoteActive widens a promoted lane's scope back to active.
+func promoteActive(be backend.Backend) {
+	if p, ok := be.(interface{ PromoteActive() }); ok {
+		p.PromoteActive()
+	}
 }
 
 // registerRetiring flips the lane into retiring mode and registers it for
 // generation-routed ops and the sweep. Persistence happened earlier
 // (prepareRetirement) — this half cannot fail.
 func (d *Daemon) registerRetiring(name, gen string, be backend.Backend) {
-	markRetiring(be)
 	d.multiBe.SetRetiringLane(name, gen, be)
 	d.laneMu.Lock()
 	if d.retiringLanes == nil {
@@ -326,6 +375,16 @@ func (d *Daemon) registerRetiring(name, gen string, be backend.Backend) {
 // single zero reading — the confirmation window outlasts any bounded
 // request). Level-triggered: after each reconcile pass + a 1min ticker.
 func (d *Daemon) SweepRetiringLanes() {
+	d.reconcileMu.Lock()
+	defer d.reconcileMu.Unlock()
+	d.sweepRetiringLocked()
+}
+
+// sweepRetiringLocked is the body; the caller holds reconcileMu (round 6
+// #5: the ticker sweep and reconcile-pass sweep otherwise race on
+// retireZeroSeen and can double-Close a lane). reconcileMu is the ONE
+// writer lock for every lane transition — rotation, promotion, sweep.
+func (d *Daemon) sweepRetiringLocked() {
 	if d.Store == nil {
 		return
 	}

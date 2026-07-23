@@ -40,6 +40,7 @@ func (f *fakeLane) Close() error          { f.closed = true; f.rec("close"); ret
 func (f *fakeLane) Start(context.Context) { f.started = true; f.rec("start") }
 func (f *fakeLane) Generation() string    { return f.gen }
 func (f *fakeLane) MarkRetiring()         { f.retiring = true; f.rec("retire") }
+func (f *fakeLane) PromoteActive()        { f.retiring = false; f.rec("promote") }
 
 func writeCfg(t *testing.T, dir, content string) {
 	t.Helper()
@@ -154,11 +155,18 @@ func TestReconcileAddChangeRemove(t *testing.T) {
 	if err := d.ReconcileConfig("test"); err != nil {
 		t.Fatal(err)
 	}
-	if !oldB.closed {
-		t.Error("changed target's old lane not closed")
-	}
 	if d.lanes["b"].(*fakeLane) == oldB {
 		t.Error("changed target still routed to the old lane")
+	}
+	// Round 6: closing is the SWEEP's job (two-zero confirmation), never
+	// the rotation's.
+	if oldB.closed {
+		t.Error("rotation closed the old lane directly")
+	}
+	d.SweepRetiringLanes()
+	d.SweepRetiringLanes()
+	if !oldB.closed {
+		t.Error("emptied retiring lane not closed after two sweeps")
 	}
 
 	// Reformat/comment only: NO rebuild (semantic no-op reaches the
@@ -181,8 +189,10 @@ func TestReconcileAddChangeRemove(t *testing.T) {
 	if err := d.ReconcileConfig("test"); err != nil {
 		t.Fatal(err)
 	}
+	d.SweepRetiringLanes()
+	d.SweepRetiringLanes()
 	if !curB.closed {
-		t.Error("removed target's lane not closed")
+		t.Error("removed target's lane not closed after two sweeps")
 	}
 	if _, err := d.multiBe.TargetFS("b"); err == nil {
 		t.Error("removed target still routed")
@@ -253,8 +263,10 @@ targets:
 	if d.lanes["a"].(*fakeLane) == oldA {
 		t.Error("fixed edit did not swap to a fresh lane")
 	}
+	d.SweepRetiringLanes()
+	d.SweepRetiringLanes()
 	if !oldA.closed {
-		t.Error("fixed edit left the superseded lane open")
+		t.Error("fixed edit left the superseded lane open after two sweeps")
 	}
 }
 
@@ -336,7 +348,9 @@ targets:
 		t.Fatalf("event %s missing in %v", e, ev)
 		return -1
 	}
-	if !(idx("build:"+newA.id) < idx("start:"+newA.id) && idx("start:"+newA.id) < idx("retire:"+oldA.id)) {
+	// Round 6 #2: the OLD lane's scope narrows BEFORE the replacement
+	// starts — its sensors can never see the incoming generation.
+	if !(idx("build:"+newA.id) < idx("retire:"+oldA.id) && idx("retire:"+oldA.id) < idx("start:"+newA.id)) {
 		t.Fatalf("rotation order wrong: %v", ev)
 	}
 }
@@ -495,6 +509,59 @@ func TestReconcileRemoveStopsPendingAndRetires(t *testing.T) {
 	gens, _ := d.Store.ListRetiringGenerations(context.Background())
 	if len(gens) != 1 || gens[0].Reason != "removed" {
 		t.Fatalf("removed-target retirement not persisted: %+v", gens)
+	}
+}
+
+// Round 6 #4: config A→B→A must PROMOTE the still-retiring gen-A lane
+// back to active — never build a same-hash twin (double ownership).
+func TestReconcileGenerationLoopPromotes(t *testing.T) {
+	dir := t.TempDir()
+	writeCfg(t, dir, baseCfg)
+	d, _, _ := newReconcilerHarness(t, dir)
+	laneA1 := d.lanes["a"].(*fakeLane)
+	seedLaneTask(t, d.Store, "t-loop", "a", laneA1.gen, "running", "e1") // keeps gen-A retiring
+
+	// A → B
+	writeCfg(t, dir, `default_target: a
+targets:
+  - name: a
+    scheduler: slurm
+    submit_template: s2
+`)
+	if err := d.ReconcileConfig("test"); err != nil {
+		t.Fatal(err)
+	}
+	laneA2 := d.lanes["a"].(*fakeLane)
+	if laneA2 == laneA1 || !laneA1.retiring {
+		t.Fatal("rotation A→B did not retire the gen-A lane")
+	}
+
+	// B → A: same content hash as the retiring lane — promote it.
+	writeCfg(t, dir, baseCfg)
+	if err := d.ReconcileConfig("test"); err != nil {
+		t.Fatal(err)
+	}
+	if d.lanes["a"].(*fakeLane) != laneA1 {
+		t.Fatal("A→B→A built a twin instead of promoting the retiring gen-A lane")
+	}
+	if laneA1.retiring {
+		t.Error("promoted lane's scope not widened back to active")
+	}
+	if laneA1.closed {
+		t.Error("promoted lane was closed")
+	}
+	if _, ok := d.retiringLanes["a@"+laneA1.gen]; ok {
+		t.Error("promoted lane still registered as retiring")
+	}
+	// The intermediate gen-B lane retired in its place.
+	if !laneA2.retiring {
+		t.Error("superseded gen-B lane not retiring")
+	}
+	gens, _ := d.Store.ListRetiringGenerations(context.Background())
+	for _, g := range gens {
+		if g.Generation == laneA1.gen {
+			t.Fatalf("promoted generation still recorded as retiring: %+v", g)
+		}
 	}
 }
 

@@ -223,9 +223,29 @@ func (b *Backend) persistDecision(ctx context.Context, tk store.TaskRow, d Decis
 	}
 	if b.Finisher != nil && isTerminal(d.Status) && !isTerminal(tk.Status) {
 		b.Finisher.FinishTask(rowToTask(tk), scheduler.TaskStatus(d.Status), fields)
+		// READ-BACK verification (review round 6 #1): FinishTask is a void
+		// funnel — a failed DB terminal write inside it must not be taken
+		// as success, or the caller (marker scan) deletes the done marker
+		// and the verdict is lost forever. The DB is the truth: check it.
+		row, gerr := b.Store.GetTask(ctx, tk.ID)
+		if gerr != nil {
+			return fmt.Errorf("verify terminal persist: %w", gerr)
+		}
+		if row == nil || !isTerminal(row.Status) {
+			return fmt.Errorf("terminal persist for %s did not land (status %q) — verdict will be redelivered",
+				tk.ID, statusOf(row))
+		}
 		return nil
 	}
 	return b.Store.UpdateTaskStatus(ctx, tk.ID, d.Status, fields)
+}
+
+// statusOf is a nil-safe row status reader for error messages.
+func statusOf(row *store.TaskRow) string {
+	if row == nil {
+		return "missing"
+	}
+	return row.Status
 }
 
 // probeIsFresh returns true if jobID's scheduler was probed within the TTL.

@@ -39,7 +39,8 @@ func NewLaneScope(target, generation string) *LaneScope {
 // MarkRetiring narrows the scope to exactly this generation.
 func (s *LaneScope) MarkRetiring() { s.retiring.Store(true) }
 
-// ResumeActive widens the scope back (aborted rotation only).
+// ResumeActive widens the scope back — used when a retiring lane is
+// PROMOTED to active again (config changed back to its generation).
 func (s *LaneScope) ResumeActive() { s.retiring.Store(false) }
 
 // IsRetiring reports the current scope mode.

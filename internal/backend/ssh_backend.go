@@ -480,6 +480,13 @@ func (b *SSHBackend) Generation() string { return b.scope.Generation }
 // (explicit, confirmed cross-generation retry).
 func (b *SSHBackend) MarkRetiring() { b.scope.MarkRetiring() }
 
+// PromoteActive reverses MarkRetiring (round 6 #4): the config changed
+// BACK to this lane's generation (A→B→A, or a removed target re-added
+// unchanged), so instead of building a twin lane with the SAME content
+// hash — two lanes would co-own every row — the retiring lane is
+// promoted back to active. Same object, same queue, scope widened.
+func (b *SSHBackend) PromoteActive() { b.scope.ResumeActive() }
+
 // Close stops the sensor loops and the scheduler, then releases the SSH
 // connection (if any — the localhost lane has none). Must be called on
 // daemon shutdown.
