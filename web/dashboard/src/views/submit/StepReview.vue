@@ -108,6 +108,32 @@
       </div>
     </v-card>
 
+    <!-- Preflight suggestions with ready-made commands (HF pre-download):
+         warnings never block, but the fix is one click away — append the
+         commands to the project's setup command (runs on the login node
+         before submission, where internet is available). -->
+    <v-card
+      v-for="c in previewSuggestions" :key="c.name"
+      variant="tonal" :color="c.status === 'failed' ? 'error' : 'warning'" class="mt-3 pa-3"
+    >
+      <div class="d-flex align-center ga-2 mb-1">
+        <v-icon size="16">mdi-cloud-download-outline</v-icon>
+        <span class="text-body-2 font-weight-medium">{{ t('submit.preflight_suggestion', { name: c.name }) }}</span>
+      </div>
+      <div class="text-caption mb-2" style="word-break: break-word">{{ c.detail }}</div>
+      <div v-for="(cmd, i) in c.commands" :key="i" class="text-caption pl-2" style="font-family: monospace">$ {{ cmd }}</div>
+      <div class="d-flex align-center ga-2 mt-2">
+        <v-btn
+          size="x-small" variant="tonal" :disabled="setupCmdAdded"
+          :loading="setupCmdSaving" @click="appendToSetupCommand(c.commands || [])"
+        >
+          <v-icon start size="12">mdi-playlist-plus</v-icon>
+          {{ setupCmdAdded ? t('submit.added_to_setup') : t('submit.add_to_setup') }}
+        </v-btn>
+        <span class="text-caption text-on-surface-variant">{{ t('submit.add_to_setup_hint') }}</span>
+      </div>
+    </v-card>
+
     <!-- Rendered submit preview — the GUI face of `--dry-run`: same backend
          code path, zero side effects. Only rendered when the backend declares
          the capability (U2: shape from capabilities). -->
@@ -139,20 +165,27 @@
 import { computed, inject, onActivated, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { SUBMIT_STATE_KEY } from '@/types/submit'
-import { sweptParamNames as computeSwept, fixedParamPreview, buildJobConfig } from './submitFlow'
+import type { PreflightReport } from '@/types/api'
+import { sweptParamNames as computeSwept, fixedParamPreview, buildJobConfig, buildProjectPayload } from './submitFlow'
 import { jobsApi } from '@/apis/jobs'
+import { projectsApi } from '@/apis/projects'
+import { useSnackbar } from '@/composables/useSnackbar'
 import { useConfigStore } from '@/stores/config'
 
 const { t } = useI18n()
 const state = inject(SUBMIT_STATE_KEY)!
 const config = useConfigStore()
+const snack = useSnackbar()
 
 // Rendered submit preview (run.sh + submit command for the first task) —
 // fetched from the submit code path, never simulated here (U1).
 const previewOpen = ref(true)
 const previewText = ref('')
+const previewPreflight = ref<PreflightReport | null>(null)
 const previewLoading = ref(false)
 const previewError = ref('')
+const setupCmdSaving = ref(false)
+const setupCmdAdded = ref(false)
 // onActivated (not onMounted): this component lives inside <KeepAlive>,
 // so it must re-fetch every time the user re-enters review — a cached
 // preview of edited params would violate preview-is-backend-truth (U1).
@@ -164,7 +197,9 @@ onActivated(async () => {
   try {
     const cfg = buildJobConfig(state.projectName, state.note, state.rows, state.linkSets)
     if (state.jobName.trim()) cfg.name = state.jobName.trim()
-    previewText.value = (await jobsApi.previewSubmit(cfg, !state.preflightEnabled)).preview
+    const res = await jobsApi.previewSubmit(cfg, !state.preflightEnabled)
+    previewText.value = res.preview
+    previewPreflight.value = res.preflight ?? null
   } catch (e: any) {
     previewError.value = e?.message || t('common.error')
   } finally {
@@ -183,6 +218,35 @@ const resolvedNote = computed(() =>
 // commands block below, never simulated here (U1).
 const effectiveJobName = computed(() =>
   state.jobName.trim() || state.newProject.jobName || 'rq-{{task_id\u007d\u007d')
+
+// Preflight results that carry ready-made remediation commands (today:
+// uncached HF repos). Rendered as actionable cards, not buried in text.
+const previewSuggestions = computed(() =>
+  (previewPreflight.value?.results ?? []).filter(c => c.commands?.length))
+
+/** Append the suggested commands to the project's setup command and save
+ *  the project in place — setup runs once per submission on the login
+ *  node, exactly where a `huggingface-cli download` belongs. */
+async function appendToSetupCommand(cmds: string[]) {
+  const fresh = cmds.filter(c => !state.newProject.setupCmd.includes(c))
+  if (fresh.length === 0) {
+    setupCmdAdded.value = true
+    return
+  }
+  setupCmdSaving.value = true
+  try {
+    const prev = state.newProject.setupCmd.trim()
+    state.newProject.setupCmd = [prev, ...fresh].filter(Boolean).join('\n')
+    const name = state.projectName || state.newProject.name.trim()
+    await projectsApi.update(name, buildProjectPayload(state.newProject, state.newProject.source))
+    setupCmdAdded.value = true
+    snack.success(t('submit.added_to_setup_done', { name }))
+  } catch (e: any) {
+    snack.error(e?.message || t('common.error'))
+  } finally {
+    setupCmdSaving.value = false
+  }
+}
 
 const sweptParamNames = computed(() => computeSwept(state.rows, state.linkSets))
 const fixedParams = computed(() => fixedParamPreview(state.rows, state.linkSets))

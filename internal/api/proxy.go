@@ -534,15 +534,13 @@ func (p *Proxy) SubmitJob(ctx context.Context, cfg job.JobConfig, opts backend.S
 
 // PreviewSubmit routes through POST /jobs/preview, which delegates to the
 // target backend (full run.sh + submit command rendering).
-func (p *Proxy) PreviewSubmit(ctx context.Context, cfg job.JobConfig, skipPreflight bool) (string, error) {
+func (p *Proxy) PreviewSubmit(ctx context.Context, cfg job.JobConfig, skipPreflight bool) (backend.PreviewResult, error) {
 	body := submitWireBody{Config: cfg, Target: p.TargetFilter, SkipPreflight: skipPreflight}
-	var resp struct {
-		Preview string `json:"preview"`
-	}
+	var resp backend.PreviewResult
 	if err := p.do(ctx, "POST", "/api/v1/jobs/preview", body, &resp); err != nil {
-		return "", err
+		return backend.PreviewResult{}, err
 	}
-	return resp.Preview, nil
+	return resp, nil
 }
 
 // PlanJob — POST /jobs/plan (D12): cheap local expansion + note resolution

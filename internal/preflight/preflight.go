@@ -18,22 +18,30 @@ import (
 )
 
 // Preflight is the L2-C step 10 fail-fast check that runs **before** a
-// job is persisted + queued. The doc (F8 in stage2_sdk_design.md) lists
-// four classes of failure that should be caught at submit time, not
-// after the task waits 2 hours in a queue:
+// job is persisted + queued. The failure classes caught at submit time,
+// instead of after the task waits 2 hours in a queue:
 //
 //  1. **Imports**: the target script imports a module that the project
 //     Python env cannot resolve.
-//  2. **pip check**: the project env has resolved-but-incompatible
-//     dependency versions.
-//  3. **Path args**: the rendered command references an absolute path
+//  2. **Path args**: the rendered command references an absolute path
 //     that does not exist on disk.
-//  4. **Writability**: working_dir or task_dir parent is not writable.
+//  3. **Writability**: working_dir is not writable.
+//  4. **HuggingFace repos** (RQ-76): the script references a Hub repo
+//     that does not exist / is gated — or is not cached, in which case
+//     the compute node will try to download it at run time (legitimate
+//     on clusters with internet; fatal on air-gapped ones — surfaced as
+//     a warning with a ready-made pre-download command, never a block).
+//  5. **Python env**: the interpreter/env activates in a non-login,
+//     non-interactive shell — the shell class the compute node gives
+//     the task (a conda registered only in ~/.bashrc fails here).
 //
-// Each check returns a `PreflightFinding` describing the problem; the
-// final `PreflightReport` aggregates them. Empty findings → submission
-// proceeds. Non-empty → submission is refused with a single combined
-// error message.
+// Imports, HF, and env checks run as ONE generated python probe file
+// executed in ONE shell (single env activation) — see probe.go. The
+// old per-module subprocess design paid a conda activation per import
+// and routinely blew request timeouts.
+//
+// Each check folds into a `CheckResult`; the final `Report` aggregates
+// them. Only "failed" entries block submission.
 //
 // The `Skip` flag lets the CLI bypass the whole thing with
 // `runq submit --no-preflight`; users with conditional imports or
@@ -43,22 +51,17 @@ type Preflight struct {
 	// to the CLI's --no-preflight flag.
 	Skip bool
 
-	// PipCheckTimeout caps the `python -m pip check` subprocess. pip
-	// resolution can pause on slow disks; bound it so submission
-	// never hangs indefinitely. Default 10s.
-	PipCheckTimeout time.Duration
+	// ProbeTimeout caps the single probe execution (env activation +
+	// all imports + HF lookups). A timeout is never a failure — checks
+	// whose markers did not arrive report as skipped. Default 30s.
+	ProbeTimeout time.Duration
 
-	// ImportTimeout caps the per-module `python -c "import X"` probe.
-	// Default 5s — most imports finish in <100ms, but heavy native
-	// modules (torch, jax) can take 1-2s on cold cache.
-	ImportTimeout time.Duration
-
-	// DisableLocal turns the local-subprocess checks (imports, pip) into
-	// skipped results — for clusters whose login-node policy forbids them
-	// (hpc: preflight_local: false).
+	// DisableLocal turns the probe-based checks (imports, hf, env) into
+	// skipped results — for clusters whose login-node policy forbids
+	// running subprocesses there (hpc: preflight_local: false).
 	DisableLocal bool
 
-	// Scope labels where local checks ran (e.g. "on login node") so HPC
+	// Scope labels where probe checks ran (e.g. "on login node") so HPC
 	// users see the verification boundary in passed results.
 	Scope string
 
@@ -69,7 +72,7 @@ type Preflight struct {
 	// FS is the filesystem THE TASK will run against. nil = local os
 	// semantics (current machine). For remote targets this is the target's
 	// rfs.FS: path/writability checks stat the REMOTE filesystem, the
-	// script is read from it, and interpreter probes execute on the remote
+	// script is read from it, and the probe executes on the remote
 	// login node — checking the client machine would answer a question
 	// nobody asked. GPU checks are skipped for remote (login nodes have no
 	// GPUs; the probe would only produce noise).
@@ -88,7 +91,9 @@ func (p Preflight) fsys() rfs.FS {
 // bash, remotely via FS.Exec. Returns (combined output, exit code, err).
 // err non-nil means the probe COULD NOT RUN (transport/env problem) — no
 // fact was learned, and per the no-false-positive discipline that is never
-// a finding. A non-zero exit code is the probe's own verdict.
+// a finding. A non-zero exit code is the probe's own verdict. Partial
+// output is returned in every case (a timed-out probe still yields the
+// markers that made it out).
 func (p Preflight) runShell(ctx context.Context, cmd string) (string, int, error) {
 	if p.FS == nil {
 		out, err := exec.CommandContext(ctx, "bash", "-c", cmd).CombinedOutput()
@@ -108,14 +113,13 @@ func (p Preflight) runShell(ctx context.Context, cmd string) (string, int, error
 // DefaultPreflight returns a preflight runner with sane defaults.
 func DefaultPreflight() Preflight {
 	return Preflight{
-		PipCheckTimeout: 10 * time.Second,
-		ImportTimeout:   5 * time.Second,
+		ProbeTimeout: 30 * time.Second,
 	}
 }
 
 // Run executes preflight against a project and expanded task params,
 // rendering the sample command internally ("first task is representative").
-// Returns the three-state report; report.Err() is the blocking error.
+// Returns the four-state report; report.Err() is the blocking error.
 func (p Preflight) Run(ctx context.Context, proj *project.Config, taskParams []job.TaskParams) (Report, error) {
 	sampleCmd, err := renderSampleCommand(proj, taskParams, p.ExcludeParams)
 	if err != nil {
@@ -126,7 +130,7 @@ func (p Preflight) Run(ctx context.Context, proj *project.Config, taskParams []j
 
 // PreflightFinding is one failed check.
 type PreflightFinding struct {
-	Kind   string // "import" | "pip_check" | "path" | "writable"
+	Kind   string // "import" | "path" | "writable" | "hf"
 	Detail string
 }
 
@@ -136,18 +140,28 @@ func (f PreflightFinding) String() string {
 
 // CheckResult is one check in the four-state grammar: passed / failed /
 // warning / skipped. skipped means "could not be checked HERE" (missing
-// prerequisite, disabled by config); warning means "found something, but it
-// correlates too weakly with task runnability to block" (pip check). Only
-// "failed" blocks a submit.
+// prerequisite, disabled by config, probe timeout); warning means "found
+// something, but it correlates too weakly with task runnability to
+// block". Only "failed" blocks a submit.
 type CheckResult struct {
-	Name   string `json:"name"`   // writable | paths | imports | pip_check | gpu
+	Name   string `json:"name"`   // writable | paths | python_env | imports | huggingface | gpu
 	Status string `json:"status"` // passed | failed | warning | skipped
 	Detail string `json:"detail,omitempty"`
+	// Commands are ready-made remediation commands for this result (e.g.
+	// `huggingface-cli download org/model` for an uncached Hub repo).
+	// The CLI prints them; the WebUI offers one-click insertion into the
+	// project's setup command.
+	Commands []string `json:"commands,omitempty"`
 }
 
 // Report aggregates all check results. Only failed entries block.
 type Report struct {
 	Results []CheckResult `json:"results"`
+	// HomeDir / PythonPrefix are facts the probe learned about the target
+	// environment (login node): the absolute $HOME (used by run.sh HOME
+	// restoration, RQ-76 ①) and the resolved sys.prefix. Informational.
+	HomeDir      string `json:"home_dir,omitempty"`
+	PythonPrefix string `json:"python_prefix,omitempty"`
 }
 
 func (r Report) OK() bool {
@@ -174,51 +188,33 @@ func (r Report) Err() error {
 	return errors.New(strings.Join(lines, "\n"))
 }
 
-// fold collapses a category's findings into one three-state result. scope
-// ("on login node") is appended to passed local checks — login-node imports
-// passing does not guarantee the compute-node environment, and the report
-// should say so rather than imply more than was verified.
+// fold collapses a category's findings into one result. scope ("on login
+// node") is appended to passed checks — login-node facts do not
+// guarantee the compute-node environment, and the report should say so
+// rather than imply more than was verified.
 func fold(name string, findings []PreflightFinding, scope string) CheckResult {
 	if len(findings) > 0 {
 		details := make([]string, 0, len(findings))
 		for _, f := range findings {
 			details = append(details, f.Detail)
 		}
-		return CheckResult{name, "failed", strings.Join(details, "; ")}
+		return CheckResult{Name: name, Status: "failed", Detail: strings.Join(details, "; ")}
 	}
 	detail := "ok"
 	if scope != "" {
 		detail = "ok (verified " + scope + ")"
 	}
-	return CheckResult{name, "passed", detail}
+	return CheckResult{Name: name, Status: "passed", Detail: detail}
 }
 
-// foldAdvisory is fold for checks whose findings should be SEEN but never
-// block a submit: status "warning" is excluded from Report.OK()/Err().
-func foldAdvisory(name string, findings []PreflightFinding, scope string) CheckResult {
-	r := fold(name, findings, scope)
-	if r.Status == "failed" {
-		r.Status = "warning"
-	}
-	return r
-}
-
-// RunPreflight executes all four checks against the project config + a
+// RunPreflight executes all checks against the project config + a
 // **sample rendered command** (the first task's command is the natural
 // choice — all tasks in a sweep share the same script + same env, only
 // the args differ, and path-arg / import checks are independent of which
 // concrete arg values are used).
-//
-// SubmitJob is expected to:
-//
-//	pf := DefaultPreflight()
-//	pf.Skip = noPreflightFlag
-//	if err := pf.RunPreflight(ctx, proj, sampleCmd); err != nil { return err }
-//
-// before persisting the job.
 func (p Preflight) RunPreflight(ctx context.Context, proj *project.Config, sampleCmd string) Report {
 	if p.Skip {
-		return Report{Results: []CheckResult{{"preflight", "skipped", "disabled by --no-preflight"}}}
+		return Report{Results: []CheckResult{{Name: "preflight", Status: "skipped", Detail: "disabled by --no-preflight"}}}
 	}
 	var results []CheckResult
 
@@ -226,43 +222,278 @@ func (p Preflight) RunPreflight(ctx context.Context, proj *project.Config, sampl
 	results = append(results, fold("writable", p.checkWritable(proj.WorkingDir, "working_dir"), p.Scope))
 	results = append(results, fold("paths", p.checkPathArgs(sampleCmd), p.Scope))
 
-	// Tier cheap: local subprocesses (python imports, pip). Skippable by
-	// cluster policy; scope-labelled because "here" may not be the
-	// execution node.
+	// Tier probe: one generated python file, one shell, one env
+	// activation. Skippable by cluster policy.
+	var report Report
 	if p.DisableLocal {
 		results = append(results,
-			CheckResult{"imports", "skipped", "disabled by hpc preflight_local"},
-			CheckResult{"pip_check", "skipped", "disabled by hpc preflight_local"})
+			CheckResult{Name: "imports", Status: "skipped", Detail: "disabled by hpc preflight_local"},
+			CheckResult{Name: "huggingface", Status: "skipped", Detail: "disabled by hpc preflight_local"})
 	} else {
-		// Probe with THE interpreter the task will run — never a hardcoded
-		// "python". A `python3`-only environment (most modern distros ship
-		// no bare `python`) would otherwise fail every import probe and
-		// train users to always pass --no-preflight.
-		interp := pythonInterpreter(sampleCmd)
-		scriptPath, importNames, _ := p.extractImports(sampleCmd, proj.WorkingDir)
-		if scriptPath == "" {
-			results = append(results, CheckResult{"imports", "skipped", "no python script in command"})
-		} else {
-			results = append(results, fold("imports", p.checkImports(ctx, proj, interp, importNames, p.ImportTimeout), p.Scope))
-		}
-		// pip check is ADVISORY: its findings (env-wide dependency
-		// inconsistencies) correlate weakly with whether THIS task can run —
-		// a broken global stub package must not block a runnable job.
-		// Warnings display but never fail the submit (imports stay blocking:
-		// they directly predict a crash).
-		results = append(results, foldAdvisory("pip_check", p.checkPipCheck(ctx, proj, interp, p.PipCheckTimeout), p.Scope))
+		results = append(results, p.probeChecks(ctx, proj, sampleCmd, &report)...)
 	}
 
 	// GPU smoke test: probe-don't-enumerate (C2). No driver here ≠ failure.
 	// Remote targets skip outright: GPUs live on compute nodes, and probing
 	// a login node's nvidia-smi would only produce noise.
 	if p.FS != nil {
-		results = append(results, CheckResult{"gpu", "skipped", "remote target: GPUs live on compute nodes"})
+		results = append(results, CheckResult{Name: "gpu", Status: "skipped", Detail: "remote target: GPUs live on compute nodes"})
 	} else {
 		results = append(results, checkGPU(ctx, proj, p.Scope))
 	}
 
-	return Report{Results: results}
+	report.Results = results
+	return report
+}
+
+// probeChecks runs the single-probe tier (imports + HF + env) and folds
+// the outcome into results. Facts about the environment (home, prefix)
+// land on the report.
+func (p Preflight) probeChecks(ctx context.Context, proj *project.Config, sampleCmd string, report *Report) []CheckResult {
+	scriptPath, src, err := p.readScript(sampleCmd, proj.WorkingDir)
+	if scriptPath == "" {
+		return []CheckResult{{Name: "imports", Status: "skipped", Detail: "no python script in command"}}
+	}
+	if err != nil {
+		// The paths check usually flags the missing script with a hard
+		// failure; here it just means nothing to probe.
+		return []CheckResult{{Name: "imports", Status: "skipped", Detail: fmt.Sprintf("cannot read script: %v", err)}}
+	}
+
+	modules := p.filterLocalModules(parseImports(src), proj.WorkingDir)
+	refs := ExtractHFRefs(src)
+	interp := pythonInterpreter(sampleCmd)
+
+	timeout := p.ProbeTimeout
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	cctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	out, code, runErr, writeErr := p.execProbe(cctx, proj, interp, modules, refs)
+	if writeErr != nil {
+		return []CheckResult{
+			{Name: "imports", Status: "skipped", Detail: fmt.Sprintf("cannot write probe file: %v", writeErr)},
+			{Name: "huggingface", Status: "skipped", Detail: "probe not run"},
+		}
+	}
+
+	res := parseProbeOutput(out, refs)
+	report.HomeDir = res.Home
+	report.PythonPrefix = res.Prefix
+	timedOut := cctx.Err() != nil
+
+	if !res.Ran {
+		switch {
+		case timedOut:
+			d := fmt.Sprintf("probe timed out after %s (login node slow?) — nothing verified", timeout)
+			return []CheckResult{
+				{Name: "imports", Status: "skipped", Detail: d},
+				{Name: "huggingface", Status: "skipped", Detail: d},
+			}
+		case runErr != nil:
+			// Transport problem: probe could not run — no fact learned.
+			d := fmt.Sprintf("probe could not run: %v", runErr)
+			return []CheckResult{
+				{Name: "imports", Status: "skipped", Detail: d},
+				{Name: "huggingface", Status: "skipped", Detail: d},
+			}
+		case code != 0:
+			// The shell ran and failed before python emitted anything:
+			// env activation is broken in a non-interactive shell — the
+			// exact failure the compute node would hit (RQ-76 ①/feedback:
+			// conda registered only in ~/.bashrc).
+			return []CheckResult{
+				{Name: "python_env", Status: "failed", Detail: fmt.Sprintf(
+					"environment failed to activate in a non-interactive shell: %s — compute nodes use the same shell class (no ~/.bashrc), so the task would fail too; make the env available via env_setup / absolute paths",
+					lastLine(out))},
+				{Name: "imports", Status: "skipped", Detail: "environment activation failed"},
+				{Name: "huggingface", Status: "skipped", Detail: "environment activation failed"},
+			}
+		default:
+			return []CheckResult{{Name: "imports", Status: "skipped", Detail: "probe produced no output"}}
+		}
+	}
+
+	results := []CheckResult{p.envCheck(proj, res.Prefix)}
+	results = append(results, p.importsCheck(modules, res, timedOut, timeout))
+	if len(refs) > 0 {
+		results = append(results, p.hfCheck(refs, res, timedOut, timeout))
+	}
+	return results
+}
+
+// execProbe writes the probe file next to the project (so relative
+// resolution matches the task's world), runs it through the SAME env
+// wrapper the task command gets, and removes it in the same shell.
+func (p Preflight) execProbe(ctx context.Context, proj *project.Config, interp string, modules []string, refs []HFRef) (out string, code int, runErr, writeErr error) {
+	script := buildProbeScript(modules, refs)
+	probePath := path.Join(proj.WorkingDir, fmt.Sprintf(".runq_preflight_%d.py", time.Now().UnixNano()))
+	if p.FS == nil {
+		writeErr = os.WriteFile(probePath, []byte(script), 0o644)
+	} else {
+		writeErr = p.FS.WriteFile(probePath, []byte(script), 0o644)
+	}
+	if writeErr != nil {
+		return "", 0, nil, writeErr
+	}
+
+	wrapped := utils.WrapCommand(
+		proj.PythonEnv.Type, proj.PythonEnv.Path, proj.PythonEnv.Name,
+		interp+" "+shQuote(probePath),
+		proj.WorkingDir,
+	)
+	// Group the wrapped chain so cleanup runs regardless of its verdict,
+	// while the probe's own exit code is preserved.
+	full := fmt.Sprintf("{ %s ; }; rc=$?; rm -f %s; exit $rc", wrapped, shQuote(probePath))
+	out, code, runErr = p.runShell(ctx, full)
+	return out, code, runErr, nil
+}
+
+// envCheck verifies the resolved sys.prefix against the declared env.
+// The probe RUNNING already proves activation works in a non-interactive
+// shell; this only cross-checks that it resolved to the env the user
+// meant. Mismatches warn (never block): activation clearly produced a
+// working python, and prefix layouts vary across conda installs.
+func (p Preflight) envCheck(proj *project.Config, prefix string) CheckResult {
+	scoped := func(d string) string {
+		if p.Scope != "" {
+			return d + " (verified " + p.Scope + ")"
+		}
+		return d
+	}
+	if prefix == "" {
+		return CheckResult{Name: "python_env", Status: "passed", Detail: scoped("environment activates in a non-interactive shell")}
+	}
+	switch proj.PythonEnv.Type {
+	case "conda":
+		name := proj.PythonEnv.Name
+		if name != "" && name != "base" {
+			if path.Base(prefix) == name || strings.Contains(prefix, "/envs/"+name) {
+				return CheckResult{Name: "python_env", Status: "passed", Detail: scoped("conda env " + name + " at " + prefix)}
+			}
+			return CheckResult{Name: "python_env", Status: "warning", Detail: fmt.Sprintf(
+				"python resolves to %s, which does not look like conda env %q — check the env name", prefix, name)}
+		}
+	case "venv", "uv":
+		envPath := proj.PythonEnv.Path
+		if envPath == "" {
+			envPath = ".venv"
+		}
+		if !path.IsAbs(envPath) {
+			envPath = path.Join(proj.WorkingDir, envPath)
+		}
+		if path.Clean(prefix) == path.Clean(envPath) {
+			return CheckResult{Name: "python_env", Status: "passed", Detail: scoped("venv at " + prefix)}
+		}
+		return CheckResult{Name: "python_env", Status: "warning", Detail: fmt.Sprintf(
+			"python resolves to %s, expected venv %s", prefix, envPath)}
+	}
+	return CheckResult{Name: "python_env", Status: "passed", Detail: scoped("python at " + prefix)}
+}
+
+// importsCheck folds the probe's per-module verdicts. A cut-short probe
+// (timeout) skips rather than passes: unverified is not verified.
+func (p Preflight) importsCheck(modules []string, res probeOutcome, timedOut bool, timeout time.Duration) CheckResult {
+	var findings []PreflightFinding
+	for _, imp := range res.Imports {
+		if !imp.OK {
+			findings = append(findings, PreflightFinding{
+				Kind:   "import",
+				Detail: fmt.Sprintf("cannot import %q in env: %s", imp.Module, imp.Detail),
+			})
+		}
+	}
+	if len(findings) > 0 {
+		return fold("imports", findings, p.Scope)
+	}
+	if len(res.Imports) < len(modules) {
+		detail := fmt.Sprintf("checked %d/%d modules, none failed", len(res.Imports), len(modules))
+		if timedOut {
+			detail = fmt.Sprintf("probe timed out after %s — %s", timeout, detail)
+		}
+		return CheckResult{Name: "imports", Status: "skipped", Detail: detail}
+	}
+	if len(modules) == 0 {
+		return CheckResult{Name: "imports", Status: "skipped", Detail: "no external imports to check"}
+	}
+	return fold("imports", nil, p.Scope)
+}
+
+// hfCheck folds the probe's Hub verdicts:
+//
+//   - missing / gated repo → failed (the task cannot possibly load it)
+//   - reachable but not cached → warning + pre-download commands: two
+//     legitimate worlds exist (already planning to download on the
+//     compute node vs air-gapped compute), so runq surfaces instead of
+//     blocking — and hands the user the exact command to pin the data
+//     down beforehand.
+//   - all cached → passed
+//   - huggingface_hub missing / network unknown / cut short → skipped
+func (p Preflight) hfCheck(refs []HFRef, res probeOutcome, timedOut bool, timeout time.Duration) CheckResult {
+	var findings []PreflightFinding
+	var uncached []HFRef
+	var unknown, nohub, cached int
+	for _, h := range res.HF {
+		switch h.Status {
+		case "cached":
+			cached++
+		case "reachable":
+			uncached = append(uncached, h.Ref)
+		case "missing":
+			findings = append(findings, PreflightFinding{
+				Kind:   "hf",
+				Detail: fmt.Sprintf("repo %q not found on the Hub (%s)", h.Ref.RepoID, h.Detail),
+			})
+		case "gated":
+			findings = append(findings, PreflightFinding{
+				Kind:   "hf",
+				Detail: fmt.Sprintf("repo %q is gated — request access and make the HF token available where the task runs (%s)", h.Ref.RepoID, h.Detail),
+			})
+		case "nohub":
+			nohub++
+		default:
+			unknown++
+		}
+	}
+	if len(findings) > 0 {
+		return fold("huggingface", findings, p.Scope)
+	}
+	if nohub > 0 {
+		return CheckResult{Name: "huggingface", Status: "skipped",
+			Detail: fmt.Sprintf("huggingface_hub not installed in env — %d referenced repo(s) not verified", len(refs))}
+	}
+	if len(uncached) > 0 {
+		cmds := make([]string, 0, len(uncached))
+		ids := make([]string, 0, len(uncached))
+		for _, r := range uncached {
+			cmds = append(cmds, r.DownloadCommand())
+			ids = append(ids, r.RepoID)
+		}
+		return CheckResult{
+			Name:     "huggingface",
+			Status:   "warning",
+			Detail:   fmt.Sprintf("not in local HF cache: %s — the compute node will download at run time (fails on air-gapped clusters); pre-download to pin the exact revision", strings.Join(ids, ", ")),
+			Commands: cmds,
+		}
+	}
+	if len(res.HF) < len(refs) {
+		detail := fmt.Sprintf("checked %d/%d repo(s)", len(res.HF), len(refs))
+		if timedOut {
+			detail = fmt.Sprintf("probe timed out after %s — %s", timeout, detail)
+		}
+		return CheckResult{Name: "huggingface", Status: "skipped", Detail: detail}
+	}
+	if unknown > 0 {
+		return CheckResult{Name: "huggingface", Status: "skipped",
+			Detail: fmt.Sprintf("Hub unreachable from here for %d repo(s) — nothing verified", unknown)}
+	}
+	scoped := fmt.Sprintf("%d repo(s) in local HF cache", cached)
+	if p.Scope != "" {
+		scoped += " (verified " + p.Scope + ")"
+	}
+	return CheckResult{Name: "huggingface", Status: "passed", Detail: scoped}
 }
 
 // checkGPU verifies GPU visibility when the project requests GPUs. The
@@ -270,17 +501,17 @@ func (p Preflight) RunPreflight(ctx context.Context, proj *project.Config, sampl
 // "skipped", never a failure: on an HPC login node GPUs live elsewhere.
 func checkGPU(ctx context.Context, proj *project.Config, scope string) CheckResult {
 	if proj.Defaults.GPUsPerTask <= 0 {
-		return CheckResult{"gpu", "skipped", "no GPUs requested (gpus_per_task: 0)"}
+		return CheckResult{Name: "gpu", Status: "skipped", Detail: "no GPUs requested (gpus_per_task: 0)"}
 	}
 	smi, err := exec.LookPath("nvidia-smi")
 	if err != nil {
-		return CheckResult{"gpu", "skipped", "nvidia-smi not found on this node"}
+		return CheckResult{Name: "gpu", Status: "skipped", Detail: "nvidia-smi not found on this node"}
 	}
 	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(cctx, smi, "-L").Output()
 	if err != nil {
-		return CheckResult{"gpu", "failed", fmt.Sprintf("nvidia-smi -L: %v", err)}
+		return CheckResult{Name: "gpu", Status: "failed", Detail: fmt.Sprintf("nvidia-smi -L: %v", err)}
 	}
 	n := strings.Count(strings.TrimSpace(string(out)), "GPU ")
 	detail := fmt.Sprintf("%d GPU(s) visible", n)
@@ -290,7 +521,7 @@ func checkGPU(ctx context.Context, proj *project.Config, scope string) CheckResu
 	if n < proj.Defaults.GPUsPerTask {
 		detail += fmt.Sprintf(" — fewer than gpus_per_task=%d", proj.Defaults.GPUsPerTask)
 	}
-	return CheckResult{"gpu", "passed", detail}
+	return CheckResult{Name: "gpu", Status: "passed", Detail: detail}
 }
 
 // ---- (1) writability ----------------------------------------------
@@ -440,23 +671,11 @@ var topLevelImportRegex = regexp.MustCompile(
 	`(?m)^[ \t]*(?:from[ \t]+([\w.]+)[ \t]+import\b|import[ \t]+([^\n#]+))`,
 )
 
-// extractImports reads the python script referenced by `sampleCmd`
-// (resolved against `workingDir` if relative) and returns:
-//
-//   - the absolute path of the script
-//   - the list of top-level module names it imports
-//   - any error encountered while reading the script
-//
-// stdlib modules and obviously-local imports (single-letter names,
-// names matching the script's own basename) are NOT filtered here;
-// the import check loop is responsible for ignoring stdlib hits in
-// its results so we don't have to maintain a stdlib allowlist.
-//
-// "Top-level" means lines that start at column 0 (or after whitespace
-// at the file's outer scope). Imports inside functions / classes /
-// `if TYPE_CHECKING:` are intentionally not checked — they may be
-// conditional and we'd produce false-positive failures.
-func (p Preflight) extractImports(sampleCmd, workingDir string) (string, []string, error) {
+// readScript resolves and reads the python script referenced by
+// `sampleCmd` (resolved against `workingDir` if relative) through the
+// check filesystem. Returns ("", nil, nil) when the command references
+// no python script.
+func (p Preflight) readScript(sampleCmd, workingDir string) (string, []byte, error) {
 	m := scriptRegex.FindStringSubmatch(sampleCmd)
 	if len(m) < 2 {
 		return "", nil, nil
@@ -469,11 +688,30 @@ func (p Preflight) extractImports(sampleCmd, workingDir string) (string, []strin
 	}
 	src, err := p.fsys().ReadFile(scriptPath)
 	if err != nil {
-		// Not finding the script is a finding in its own right; the
-		// path-args check above usually catches it first, but we
-		// surface a clean message either way.
 		return scriptPath, nil, err
 	}
+	return scriptPath, src, nil
+}
+
+// extractImports reads the python script referenced by `sampleCmd` and
+// returns its absolute path, the top-level module names it imports, and
+// any read error. Kept as the composed read+parse entry point (tests
+// exercise it directly).
+//
+// "Top-level" means lines that start at column 0 (or after whitespace
+// at the file's outer scope). Imports inside functions / classes /
+// `if TYPE_CHECKING:` are intentionally not checked — they may be
+// conditional and we'd produce false-positive failures.
+func (p Preflight) extractImports(sampleCmd, workingDir string) (string, []string, error) {
+	scriptPath, src, err := p.readScript(sampleCmd, workingDir)
+	if scriptPath == "" || err != nil {
+		return scriptPath, nil, err
+	}
+	return scriptPath, parseImports(src), nil
+}
+
+// parseImports extracts top-level module heads from python source.
+func parseImports(src []byte) []string {
 	var names []string
 	seen := map[string]bool{}
 	for _, m := range topLevelImportRegex.FindAllStringSubmatch(string(src), -1) {
@@ -503,12 +741,27 @@ func (p Preflight) extractImports(sampleCmd, workingDir string) (string, []strin
 			}
 		}
 	}
-	return scriptPath, names, nil
+	return names
+}
+
+// filterLocalModules drops modules the project itself defines, so the
+// probe doesn't fail on "cannot import 'mylib'" for files that live
+// alongside the script — and doesn't EXECUTE project code (a local
+// module import runs it; side effects are not preflight's to trigger).
+func (p Preflight) filterLocalModules(modules []string, workingDir string) []string {
+	local := p.localModuleNames(workingDir)
+	out := make([]string, 0, len(modules))
+	for _, m := range modules {
+		if !local[m] {
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 // topLevelModule returns the first dot-separated component of a
 // dotted module path (`torch.nn.functional` → `torch`). This is what
-// `python -c "import X"` will resolve.
+// `import X` will resolve.
 func topLevelModule(name string) string {
 	if i := strings.Index(name, "."); i >= 0 {
 		return name[:i]
@@ -527,46 +780,6 @@ func pythonInterpreter(sampleCmd string) string {
 		return m[1]
 	}
 	return "python"
-}
-
-// checkImports probes each module with `<interp> -c "import X"` inside
-// the project env, ON the target (locally, or over FS.Exec on a remote
-// login node). A non-zero exit → finding with the actual import error;
-// a probe that could not run at all (transport) is silently no-fact.
-// Skips modules that look like local modules of the project.
-func (p Preflight) checkImports(ctx context.Context, proj *project.Config, interp string, modules []string, timeout time.Duration) []PreflightFinding {
-	if len(modules) == 0 {
-		return nil
-	}
-	// Build a Set of plausible local module names so we don't try to
-	// resolve them via pip / site-packages. Read from the target FS:
-	// the project lives where the task runs.
-	local := p.localModuleNames(proj.WorkingDir)
-
-	var findings []PreflightFinding
-	for _, mod := range modules {
-		if local[mod] {
-			continue
-		}
-		cctx, cancel := context.WithTimeout(ctx, timeout)
-		cmd := utils.WrapCommand(
-			proj.PythonEnv.Type, proj.PythonEnv.Path, proj.PythonEnv.Name,
-			fmt.Sprintf("%s -c %q", interp, "import "+mod),
-			proj.WorkingDir,
-		)
-		out, code, rerr := p.runShell(cctx, cmd)
-		cancel()
-		if rerr != nil {
-			continue // probe couldn't run — no fact learned, never a finding
-		}
-		if code != 0 {
-			findings = append(findings, PreflightFinding{
-				Kind:   "import",
-				Detail: fmt.Sprintf("cannot import %q in env: %s", mod, lastLine(out)),
-			})
-		}
-	}
-	return findings
 }
 
 // localModuleNames returns the set of top-level identifiers that the
@@ -591,59 +804,15 @@ func (p Preflight) localModuleNames(workingDir string) map[string]bool {
 }
 
 // lastLine returns the last non-empty line of a multi-line string,
-// which for Python tracebacks is the actual exception (e.g.
-// `ModuleNotFoundError: No module named 'transformers'`). Avoids
-// dumping a 20-line traceback into the user's submit error.
+// which for shell/activation failures is the actual error (e.g.
+// `sh: conda: command not found`). Avoids dumping a 20-line dump into
+// the user's submit error.
 func lastLine(s string) string {
 	lines := strings.Split(strings.TrimSpace(s), "\n")
 	if len(lines) == 0 {
 		return ""
 	}
 	return strings.TrimSpace(lines[len(lines)-1])
-}
-
-// ---- (4) pip check -------------------------------------------------
-
-// checkPipCheck runs `python -m pip check` inside the project env. The
-// output is either empty (env is consistent) or a series of lines
-// like:
-//
-//	tensorflow 2.5.0 has requirement numpy~=1.19.2, but you have numpy 1.24.0.
-//
-// Each non-empty line becomes a finding. Subprocess timeouts and
-// generic failures are NOT treated as preflight failures (we don't
-// know if it's a pip-was-busy situation vs. a real env break); they're
-// silently dropped so this check stays advisory.
-func (p Preflight) checkPipCheck(ctx context.Context, proj *project.Config, interp string, timeout time.Duration) []PreflightFinding {
-	cctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	cmd := utils.WrapCommand(
-		proj.PythonEnv.Type, proj.PythonEnv.Path, proj.PythonEnv.Name,
-		interp+" -m pip check",
-		proj.WorkingDir,
-	)
-	out, _, rerr := p.runShell(cctx, cmd)
-	if cctx.Err() != nil || rerr != nil {
-		return nil // advisory check: timeout / can't-run is never a finding
-	}
-	// pip exits non-zero when it finds issues; the output content is
-	// what we care about, not the exit code.
-	text := strings.TrimSpace(out)
-	if text == "" || text == "No broken requirements found." {
-		return nil
-	}
-	var findings []PreflightFinding
-	for _, line := range strings.Split(text, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.EqualFold(line, "No broken requirements found.") {
-			continue
-		}
-		findings = append(findings, PreflightFinding{
-			Kind:   "pip_check",
-			Detail: line,
-		})
-	}
-	return findings
 }
 
 // ---- helpers for SubmitJob hookup ---------------------------------

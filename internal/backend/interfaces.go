@@ -128,8 +128,9 @@ type Backend interface {
 	SubmitJob(ctx context.Context, cfg job.JobConfig, opts SubmitOptions) (jobID string, totalTasks int, err error)
 	DryRun(ctx context.Context, cfg job.JobConfig) (*DryRunResult, error)
 	// PreviewSubmit renders what WOULD be submitted (preview is truth, zero
-	// side effects). Backends without the concept return ErrNotSupported.
-	PreviewSubmit(ctx context.Context, cfg job.JobConfig, skipPreflight bool) (string, error)
+	// side effects), plus the structured preflight report. Backends without
+	// the concept return ErrNotSupported.
+	PreviewSubmit(ctx context.Context, cfg job.JobConfig, skipPreflight bool) (PreviewResult, error)
 	// Archive = hide from default lists, keep everything; reversible.
 	// ListJobs returns visible jobs only; ListArchivedJobs the rest.
 	ListArchivedJobs(ctx context.Context) ([]JobSummary, error)

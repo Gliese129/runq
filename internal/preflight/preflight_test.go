@@ -205,7 +205,7 @@ func TestThreeStateReport(t *testing.T) {
 		t.Fatalf("skip: %+v", rep.Results)
 	}
 
-	// DisableLocal → imports/pip skipped with config reason; still OK.
+	// DisableLocal → probe checks skipped with config reason; still OK.
 	pf = DefaultPreflight()
 	pf.DisableLocal = true
 	pf.Scope = "on this login node"
@@ -214,7 +214,7 @@ func TestThreeStateReport(t *testing.T) {
 	for _, c := range rep.Results {
 		statuses[c.Name] = c.Status
 	}
-	if statuses["imports"] != "skipped" || statuses["pip_check"] != "skipped" {
+	if statuses["imports"] != "skipped" || statuses["huggingface"] != "skipped" {
 		t.Errorf("disable_local: %+v", rep.Results)
 	}
 	if statuses["writable"] != "passed" || statuses["paths"] != "passed" {

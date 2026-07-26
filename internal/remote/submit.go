@@ -111,6 +111,10 @@ func printPreflight(r preflight.Report) {
 			mark = "!"
 		}
 		fmt.Printf("%s %-10s %s\n", mark, c.Name, c.Detail)
+		// Remediation commands (e.g. HF pre-download): copy-paste ready.
+		for _, cmd := range c.Commands {
+			fmt.Printf("             $ %s\n", cmd)
+		}
 	}
 }
 

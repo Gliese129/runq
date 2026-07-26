@@ -1181,12 +1181,16 @@ func (b *SSHBackend) SubmitJob(ctx context.Context, cfg job.JobConfig, opts Subm
 	return jobID, len(rows), nil
 }
 
-func (b *SSHBackend) PreviewSubmit(ctx context.Context, cfg job.JobConfig, skipPreflight bool) (string, error) {
+func (b *SSHBackend) PreviewSubmit(ctx context.Context, cfg job.JobConfig, skipPreflight bool) (PreviewResult, error) {
 	proj, err := b.reg.Get(ctx, cfg.Project)
 	if err != nil {
-		return "", fmt.Errorf("project %q: %w", cfg.Project, err)
+		return PreviewResult{}, fmt.Errorf("project %q: %w", cfg.Project, err)
 	}
-	return b.backend.Preview(ctx, cfg, proj, skipPreflight)
+	text, report, err := b.backend.Preview(ctx, cfg, proj, skipPreflight)
+	if err != nil {
+		return PreviewResult{}, err
+	}
+	return PreviewResult{Preview: text, Preflight: report}, nil
 }
 
 func (b *SSHBackend) ResolveNote(ctx context.Context, cfg job.JobConfig) (string, error) {

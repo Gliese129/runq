@@ -156,12 +156,10 @@ func submitDryRun(ctx context.Context, be backend.Backend, jobCfg job2.JobConfig
 	out, err := be.PreviewSubmit(ctx, jobCfg, noPreflight)
 	if err == nil {
 		if jsonOut {
-			printJSON(struct {
-				Preview string `json:"preview"`
-			}{Preview: out})
+			printJSON(out)
 			return nil
 		}
-		fmt.Println(out)
+		fmt.Println(out.Preview)
 		return nil
 	}
 	if !errors.Is(err, backend.ErrNotSupported) {

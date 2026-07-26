@@ -1,7 +1,7 @@
 import { api, type RequestOptions } from './client'
 import type {
   CompareRow, JobActivityResponse, JobConfigPayload, JobDetail, JobLogSearchResponse,
-  JobPlanResponse, JobSubmitResponse, JobSummary, MessageResponse, RefreshReceipt,
+  JobPlanResponse, JobPreviewResponse, JobSubmitResponse, JobSummary, MessageResponse, RefreshReceipt,
 } from '@/types/api'
 
 export interface SubmitJobOptions extends RequestOptions {
@@ -48,7 +48,7 @@ export const jobsApi = {
 
   /** GUI face of `--dry-run`: rendered run.sh + submit command, zero side effects. */
   previewSubmit: (cfg: JobConfigPayload, skipPreflight: boolean, target = '') =>
-    api.post<{ preview: string }>('/jobs/preview', submitBody(cfg, skipPreflight, target), { silent: true }),
+    api.post<JobPreviewResponse>('/jobs/preview', submitBody(cfg, skipPreflight, target), { silent: true }),
 
   submit: (cfg: JobConfigPayload, opts: SubmitJobOptions = {}) => {
     const skip = opts.forceSkipPreflight === true || opts.preflightEnabled === false

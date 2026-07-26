@@ -270,6 +270,28 @@ export interface JobPlanResponse {
   warnings: string[]
 }
 
+/** One preflight check in the four-state grammar (passed/failed/warning/skipped). */
+export interface PreflightCheck {
+  name: string
+  status: 'passed' | 'failed' | 'warning' | 'skipped'
+  detail?: string
+  /** Ready-made remediation commands (e.g. `huggingface-cli download …`). */
+  commands?: string[]
+}
+
+/** Structured preflight report attached to POST /jobs/preview (RQ-76 ②). */
+export interface PreflightReport {
+  results?: PreflightCheck[]
+  home_dir?: string
+  python_prefix?: string
+}
+
+/** POST /jobs/preview — rendered dry-run text + structured preflight. */
+export interface JobPreviewResponse {
+  preview: string
+  preflight?: PreflightReport
+}
+
 export interface ActionResponse {
   ok: boolean
 }

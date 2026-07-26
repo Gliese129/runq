@@ -125,8 +125,8 @@ func (b *UnavailableBackend) ArchiveProject(context.Context, string) error { ret
 
 func (b *UnavailableBackend) UnarchiveProject(context.Context, string) error { return b.wrap() }
 
-func (b *UnavailableBackend) PreviewSubmit(context.Context, job.JobConfig, bool) (string, error) {
-	return "", b.wrap()
+func (b *UnavailableBackend) PreviewSubmit(context.Context, job.JobConfig, bool) (PreviewResult, error) {
+	return PreviewResult{}, b.wrap()
 }
 
 func (b *UnavailableBackend) DryRun(ctx context.Context, cfg job.JobConfig) (*DryRunResult, error) {
