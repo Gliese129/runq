@@ -91,6 +91,15 @@ type Backend struct {
 	// by tests and any path not yet running under a per-target scheduler.
 	Finisher TaskFinisher
 
+	// HOME restoration (RQ-76 ①): the login node's absolute $HOME,
+	// resolved ONCE per lane and baked into run.sh as `export HOME=...`
+	// so tilde expansion works on compute nodes even under
+	// --export=NONE. A lane lives exactly one target generation, so a
+	// config edit (new lane) naturally re-resolves.
+	homeOnce sync.Once
+	homeDir  string
+	homeErr  error
+
 	// Per-job TTL cache (see refresh.go): tracks when each job's scheduler
 	// was last probed, so EnsureFresh can skip the probe (not the local
 	// reconcile) within the caller's TTL window.

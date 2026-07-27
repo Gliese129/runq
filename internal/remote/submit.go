@@ -363,6 +363,39 @@ func (b *Backend) Submit(ctx context.Context, jobCfg job.JobConfig, proj *projec
 	return jobID, submitted, nil
 }
 
+// homeDirCached resolves the login node's absolute $HOME once per lane
+// (RQ-76 ①). Resolution happens where sshd sets HOME correctly; the value
+// is then baked into run.sh so the COMPUTE node — whose scheduler may
+// strip the environment (--export=NONE) — still expands `~` right.
+// Failure is remembered and non-fatal: run.sh simply skips the export
+// (most schedulers do pass HOME; restoration is belt and suspenders).
+func (b *Backend) homeDirCached() (string, error) {
+	b.homeOnce.Do(func() {
+		fsys := b.FS
+		if fsys == nil {
+			fsys = rfs.NewLocalFS() // tests / legacy local lanes
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		stdout, stderr, code, err := fsys.Exec(ctx, "sh", "-c", `printf %s "$HOME"`)
+		if err != nil {
+			b.homeErr = err
+			return
+		}
+		if code != 0 {
+			b.homeErr = fmt.Errorf("exit %d: %s", code, strings.TrimSpace(string(stderr)))
+			return
+		}
+		home := strings.TrimSpace(string(stdout))
+		if !strings.HasPrefix(home, "/") {
+			b.homeErr = fmt.Errorf("resolved HOME %q is not absolute", home)
+			return
+		}
+		b.homeDir = home
+	})
+	return b.homeDir, b.homeErr
+}
+
 // buildRunScript assembles the wrapper script. The script SKELETON is glue; the
 // security-sensitive part — escaping every env value — is delegated to
 // utils.ShellQuote. The user's command (t.Command, already env-activation
@@ -408,6 +441,24 @@ func (b *Backend) buildRunScript(t submitplan.PlannedTask, plan submitplan.Plan)
 	// so `runq logs` / the dashboard work regardless of how the user's
 	// submit_template routes -o/-e (those keep only scheduler-level noise).
 	fmt.Fprintf(&s, "exec >> %s 2>&1\n", utils.ShellQuote(t.LogPath))
+	// HOME restoration (RQ-76 ①): restore CONTEXT instead of rewriting
+	// scripts — with an absolute HOME exported first, every `~` in
+	// env_setup / user code expands natively, no textual surgery. The
+	// value was resolved on the login node (where sshd sets it) because
+	// the compute node's batch shell may have HOME stripped entirely.
+	// Placed after the log redirect so env_setup output lands in the log.
+	if home, err := b.homeDirCached(); err == nil && home != "" {
+		s.WriteString("# HOME resolved on the login node: batch shells may strip or misplace it\n")
+		fmt.Fprintf(&s, "export HOME=%s\n", utils.ShellQuote(home))
+	}
+	// Target env_setup: the user's declared way to make the python env
+	// reachable in a bashrc-less shell. Runs AFTER the HOME export (so ~
+	// works, and a node-local scratch HOME can still be overridden here)
+	// and BEFORE .env / explicit env exports (which must win).
+	if setup := strings.TrimSpace(b.Cfg.EnvSetup); setup != "" {
+		s.WriteString("# env_setup (config.yaml target." + b.Cfg.Name + ")\n")
+		s.WriteString(setup + "\n")
+	}
 	if envFile := env["RUNQ_ENV_FILE"]; envFile != "" {
 		q := utils.ShellQuote(envFile)
 		fmt.Fprintf(&s, "if [ -f %s ]; then set -a; . %s; set +a; fi\n", q, q)
