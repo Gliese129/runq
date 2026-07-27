@@ -77,6 +77,11 @@ type Preflight struct {
 	// nobody asked. GPU checks are skipped for remote (login nodes have no
 	// GPUs; the probe would only produce noise).
 	FS rfs.FS
+
+	// taskParams is the full expanded sweep, set by Run — "{{param.X}}"
+	// entries in the project's preflight.hf contract expand against EVERY
+	// task's value, not just the sample command's.
+	taskParams []job.TaskParams
 }
 
 // fsys returns the filesystem checks run against (local when unset).
@@ -125,6 +130,7 @@ func (p Preflight) Run(ctx context.Context, proj *project.Config, taskParams []j
 	if err != nil {
 		return Report{}, err
 	}
+	p.taskParams = taskParams
 	return p.RunPreflight(ctx, proj, sampleCmd), nil
 }
 
@@ -216,6 +222,9 @@ func (p Preflight) RunPreflight(ctx context.Context, proj *project.Config, sampl
 	if p.Skip {
 		return Report{Results: []CheckResult{{Name: "preflight", Status: "skipped", Detail: "disabled by --no-preflight"}}}
 	}
+	if !proj.Preflight.EnabledOrDefault() {
+		return Report{Results: []CheckResult{{Name: "preflight", Status: "skipped", Detail: "disabled by project preflight.enabled"}}}
+	}
 	var results []CheckResult
 
 	// Tier free: filesystem checks — against the TARGET's filesystem.
@@ -246,23 +255,136 @@ func (p Preflight) RunPreflight(ctx context.Context, proj *project.Config, sampl
 	return report
 }
 
-// probeChecks runs the single-probe tier (imports + HF + env) and folds
-// the outcome into results. Facts about the environment (home, prefix)
-// land on the report.
-func (p Preflight) probeChecks(ctx context.Context, proj *project.Config, sampleCmd string, report *Report) []CheckResult {
-	scriptPath, src, err := p.readScript(sampleCmd, proj.WorkingDir)
-	if scriptPath == "" {
-		return []CheckResult{{Name: "imports", Status: "skipped", Detail: "no python script in command"}}
+// contractParamRegex matches "{{param.NAME}}" placeholders in declared
+// preflight.hf entries.
+var contractParamRegex = regexp.MustCompile(`^\{\{param\.(\w+)}}$`)
+
+// expandContractHF turns the declared preflight.hf list into concrete
+// refs. "{{param.NAME}}" entries expand against EVERY task's value —
+// sweep 8 models and all 8 ids are verified, not just the sample.
+// Declared entries are a contract, so malformed ones are hard findings,
+// never silently dropped.
+func expandContractHF(declared []string, taskParams []job.TaskParams) ([]HFRef, []PreflightFinding) {
+	var refs []HFRef
+	var findings []PreflightFinding
+	seen := map[string]bool{}
+	add := func(id, origin string) {
+		if !looksLikeHFRepoID(id) {
+			findings = append(findings, PreflightFinding{
+				Kind:   "hf",
+				Detail: fmt.Sprintf("preflight.hf entry %s resolves to %q — not a valid HuggingFace repo id", origin, id),
+			})
+			return
+		}
+		if !seen[id] {
+			seen[id] = true
+			refs = append(refs, HFRef{RepoID: id, RepoType: "any"})
+		}
 	}
-	if err != nil {
-		// The paths check usually flags the missing script with a hard
-		// failure; here it just means nothing to probe.
-		return []CheckResult{{Name: "imports", Status: "skipped", Detail: fmt.Sprintf("cannot read script: %v", err)}}
+	for _, entry := range declared {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		m := contractParamRegex.FindStringSubmatch(entry)
+		if m == nil {
+			add(entry, "\""+entry+"\"")
+			continue
+		}
+		name := m[1]
+		found := false
+		for _, params := range taskParams {
+			if v, ok := params[name]; ok {
+				found = true
+				add(fmt.Sprintf("%v", v), entry)
+			}
+		}
+		if !found {
+			findings = append(findings, PreflightFinding{
+				Kind:   "hf",
+				Detail: fmt.Sprintf("preflight.hf entry %q references a param that no task defines", entry),
+			})
+		}
+	}
+	return refs, findings
+}
+
+// shellEntryRegex extracts the shell script path from a `bash x.sh` /
+// `sh x.sh` / `./x.sh` entry command.
+var shellEntryRegex = regexp.MustCompile(`(?:^|\s)(?:bash\s+|sh\s+)?((?:\.?/)?[^\s]+\.sh)\b`)
+
+// shellEntry resolves the entry .sh path (against workingDir) or "".
+func shellEntry(sampleCmd, workingDir string) string {
+	m := shellEntryRegex.FindStringSubmatch(sampleCmd)
+	if len(m) < 2 {
+		return ""
+	}
+	s := m[1]
+	if !strings.HasPrefix(s, "/") {
+		s = path.Join(workingDir, s)
+	}
+	return s
+}
+
+// probeChecks runs the single-probe tier (env + imports + HF + wandb +
+// extra_run contract + shell syntax) and folds the outcome into results.
+// Facts about the environment (home, prefix) land on the report.
+//
+// The contract principle (RQ-76 ②): what project.yaml DECLARES is
+// verified exactly and blocks on failure; what is not declared is
+// best-effort static analysis of a .py entry — and when there is
+// nothing to analyze (shell entry), the report says so and points at
+// the contract instead of guessing.
+func (p Preflight) probeChecks(ctx context.Context, proj *project.Config, sampleCmd string, report *Report) []CheckResult {
+	contract := proj.Preflight
+	scriptPath, src, readErr := p.readScript(sampleCmd, proj.WorkingDir)
+
+	// Imports: best-effort tier, gated by the contract switch.
+	var modules []string
+	importsSkip := ""
+	switch {
+	case !contract.ImportsOrDefault():
+		importsSkip = "disabled by preflight.imports"
+	case scriptPath == "":
+		importsSkip = "no python entry — static analysis covers .py entries only; declare preflight.hf / preflight.extra_run in project.yaml to verify shell workloads"
+	case readErr != nil:
+		importsSkip = fmt.Sprintf("cannot read script: %v", readErr)
+	default:
+		modules = p.filterLocalModules(parseImports(src), proj.WorkingDir)
 	}
 
-	modules := p.filterLocalModules(parseImports(src), proj.WorkingDir)
-	refs := ExtractHFRefs(src)
+	// HF refs: best-effort static extraction + declared contract entries.
+	var refs []HFRef
+	if src != nil {
+		refs = ExtractHFRefs(src)
+	}
+	declaredRefs, hfContractFindings := expandContractHF(contract.HFRepos(), p.taskParams)
+	seenRef := map[string]bool{}
+	for _, r := range refs {
+		seenRef[r.RepoID] = true
+	}
+	for _, r := range declaredRefs {
+		if !seenRef[r.RepoID] {
+			refs = append(refs, r)
+		}
+	}
+
+	wandb := contract.WandbOrDefault()
+	extraRun := strings.TrimSpace(contract.ExtraRunOrEmpty())
+	shEntry := shellEntry(sampleCmd, proj.WorkingDir)
 	interp := pythonInterpreter(sampleCmd)
+	envDeclared := proj.PythonEnv.Type != ""
+
+	// Malformed contract entries block before any probe runs — a contract
+	// that cannot be verified must not pass silently.
+	if len(hfContractFindings) > 0 {
+		return []CheckResult{fold("huggingface", hfContractFindings, p.Scope)}
+	}
+
+	needPython := len(modules) > 0 || len(refs) > 0 || wandb || envDeclared
+	if !needPython && extraRun == "" && shEntry == "" {
+		return []CheckResult{{Name: "imports", Status: "skipped", Detail: importsSkip}}
+	}
 
 	timeout := p.ProbeTimeout
 	if timeout <= 0 {
@@ -271,7 +393,7 @@ func (p Preflight) probeChecks(ctx context.Context, proj *project.Config, sample
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	out, code, runErr, writeErr := p.execProbe(cctx, proj, interp, modules, refs)
+	out, code, runErr, writeErr := p.execProbe(cctx, proj, interp, modules, refs, wandb, extraRun, shEntry, needPython)
 	if writeErr != nil {
 		return []CheckResult{
 			{Name: "imports", Status: "skipped", Detail: fmt.Sprintf("cannot write probe file: %v", writeErr)},
@@ -284,51 +406,133 @@ func (p Preflight) probeChecks(ctx context.Context, proj *project.Config, sample
 	report.PythonPrefix = res.Prefix
 	timedOut := cctx.Err() != nil
 
-	if !res.Ran {
+	var results []CheckResult
+
+	// Shell syntax (bash -n): runs before env activation, so its verdict
+	// survives even an activation failure. Zero false positives — the
+	// same parser that will run the script parsed it.
+	if shEntry != "" && res.ShellSyntaxRC >= 0 {
+		if res.ShellSyntaxRC == 0 {
+			results = append(results, CheckResult{Name: "shell_syntax", Status: "passed", Detail: "bash -n ok"})
+		} else {
+			results = append(results, CheckResult{Name: "shell_syntax", Status: "failed",
+				Detail: fmt.Sprintf("entry script has shell syntax errors: %s", res.ShellSyntaxDetail)})
+		}
+	}
+
+	skipRest := func(reason string) []CheckResult {
+		if importsSkip == "" {
+			importsSkip = reason
+		}
+		results = append(results, CheckResult{Name: "imports", Status: "skipped", Detail: importsSkip})
+		if len(refs) > 0 {
+			results = append(results, CheckResult{Name: "huggingface", Status: "skipped", Detail: reason})
+		}
+		if extraRun != "" {
+			results = append(results, CheckResult{Name: "extra_run", Status: "skipped", Detail: reason})
+		}
+		return results
+	}
+
+	if !res.PythonRan && !res.InnerRan {
 		switch {
 		case timedOut:
-			d := fmt.Sprintf("probe timed out after %s (login node slow?) — nothing verified", timeout)
-			return []CheckResult{
-				{Name: "imports", Status: "skipped", Detail: d},
-				{Name: "huggingface", Status: "skipped", Detail: d},
-			}
+			return skipRest(fmt.Sprintf("probe timed out after %s (login node slow?) — nothing verified", timeout))
 		case runErr != nil:
 			// Transport problem: probe could not run — no fact learned.
-			d := fmt.Sprintf("probe could not run: %v", runErr)
-			return []CheckResult{
-				{Name: "imports", Status: "skipped", Detail: d},
-				{Name: "huggingface", Status: "skipped", Detail: d},
-			}
-		case code != 0:
+			return skipRest(fmt.Sprintf("probe could not run: %v", runErr))
+		case code != 0 && envDeclared:
 			// The shell ran and failed before python emitted anything:
 			// env activation is broken in a non-interactive shell — the
 			// exact failure the compute node would hit (RQ-76 ①/feedback:
 			// conda registered only in ~/.bashrc).
-			return []CheckResult{
-				{Name: "python_env", Status: "failed", Detail: fmt.Sprintf(
-					"environment failed to activate in a non-interactive shell: %s — compute nodes use the same shell class (no ~/.bashrc), so the task would fail too; make the env available via env_setup / absolute paths",
-					lastLine(out))},
-				{Name: "imports", Status: "skipped", Detail: "environment activation failed"},
-				{Name: "huggingface", Status: "skipped", Detail: "environment activation failed"},
-			}
+			results = append(results, CheckResult{Name: "python_env", Status: "failed", Detail: fmt.Sprintf(
+				"environment failed to activate in a non-interactive shell: %s — compute nodes use the same shell class (no ~/.bashrc), so the task would fail too; make the env available via env_setup / absolute paths",
+				lastLine(out))})
+			return skipRest("environment activation failed")
+		case code != 0:
+			return skipRest(fmt.Sprintf("probe shell failed: %s", lastLine(out)))
 		default:
-			return []CheckResult{{Name: "imports", Status: "skipped", Detail: "probe produced no output"}}
+			return skipRest("probe produced no output")
 		}
 	}
 
-	results := []CheckResult{p.envCheck(proj, res.Prefix)}
-	results = append(results, p.importsCheck(modules, res, timedOut, timeout))
-	if len(refs) > 0 {
-		results = append(results, p.hfCheck(refs, res, timedOut, timeout))
+	if !res.PythonRan {
+		// The wrapped chain ran (pyexit arrived) but python emitted
+		// nothing — interpreter missing or broken.
+		if envDeclared {
+			results = append(results, CheckResult{Name: "python_env", Status: "failed", Detail: fmt.Sprintf(
+				"environment activated but %q did not run (exit %d): %s", interp, res.PyExit, lastLine(out))})
+		} else if needPython {
+			results = append(results, CheckResult{Name: "python_env", Status: "skipped", Detail: fmt.Sprintf(
+				"no usable python on the target (exit %d) — python checks skipped; use preflight.extra_run for shell-level verification", res.PyExit)})
+		}
+		if importsSkip == "" {
+			importsSkip = "python did not run"
+		}
+		results = append(results, CheckResult{Name: "imports", Status: "skipped", Detail: importsSkip})
+		if len(refs) > 0 {
+			results = append(results, CheckResult{Name: "huggingface", Status: "skipped", Detail: "python did not run"})
+		}
+	} else {
+		results = append(results, p.envCheck(proj, res.Prefix))
+		if importsSkip != "" {
+			results = append(results, CheckResult{Name: "imports", Status: "skipped", Detail: importsSkip})
+		} else {
+			results = append(results, p.importsCheck(modules, res, timedOut, timeout))
+		}
+		if len(refs) > 0 {
+			results = append(results, p.hfCheck(refs, res, timedOut, timeout))
+		}
+		if wandb {
+			switch res.Wandb {
+			case "ok":
+				results = append(results, CheckResult{Name: "wandb", Status: "passed", Detail: "credentials found (WANDB_API_KEY or ~/.netrc)"})
+			case "missing":
+				results = append(results, CheckResult{Name: "wandb", Status: "warning", Detail: "no WANDB_API_KEY and no api.wandb.ai entry in ~/.netrc — the task may hang on wandb login"})
+			default:
+				results = append(results, CheckResult{Name: "wandb", Status: "skipped", Detail: "probe cut short before the wandb check"})
+			}
+		}
 	}
+
+	// extra_run contract: user-authored, runs inside the activated env in
+	// the SAME shell. Non-zero exit blocks — the whole point is that the
+	// user declared "this must hold before anything is queued".
+	if extraRun != "" {
+		switch {
+		case res.ExtraRC == 0:
+			results = append(results, CheckResult{Name: "extra_run", Status: "passed", Detail: "custom check ok"})
+		case res.ExtraRC > 0:
+			tail := res.ExtraOut
+			if len(tail) > 3 {
+				tail = tail[len(tail)-3:]
+			}
+			results = append(results, CheckResult{Name: "extra_run", Status: "failed",
+				Detail: fmt.Sprintf("custom check exited %d: %s", res.ExtraRC, strings.Join(tail, " | "))})
+		case res.ExtraStarted:
+			results = append(results, CheckResult{Name: "extra_run", Status: "skipped",
+				Detail: fmt.Sprintf("custom check cut short (probe timeout %s)", timeout)})
+		default:
+			results = append(results, CheckResult{Name: "extra_run", Status: "skipped", Detail: "custom check did not run"})
+		}
+	}
+
 	return results
 }
 
 // execProbe writes the probe file next to the project (so relative
-// resolution matches the task's world), runs it through the SAME env
-// wrapper the task command gets, and removes it in the same shell.
-func (p Preflight) execProbe(ctx context.Context, proj *project.Config, interp string, modules []string, refs []HFRef) (out string, code int, runErr, writeErr error) {
-	script := buildProbeScript(modules, refs)
+// resolution matches the task's world) and runs ONE shell:
+//
+//	[bash -n entry.sh]                      — outside the env (parser only)
+//	activate env → python probe → extra_run — one activation for everything
+//	rm probe
+//
+// Marker lines emitted by the shell itself (pyexit, shellsyntax, extra
+// begin/end) let the parser attribute failures precisely: activation vs
+// interpreter vs the user's custom check.
+func (p Preflight) execProbe(ctx context.Context, proj *project.Config, interp string, modules []string, refs []HFRef, wandb bool, extraRun, shEntry string, needPython bool) (out string, code int, runErr, writeErr error) {
+	script := buildProbeScript(modules, refs, wandb)
 	probePath := path.Join(proj.WorkingDir, fmt.Sprintf(".runq_preflight_%d.py", time.Now().UnixNano()))
 	if p.FS == nil {
 		writeErr = os.WriteFile(probePath, []byte(script), 0o644)
@@ -339,14 +543,43 @@ func (p Preflight) execProbe(ctx context.Context, proj *project.Config, interp s
 		return "", 0, nil, writeErr
 	}
 
+	// Inner chain: python probe (+ its exit marker), then the extra_run
+	// contract bracketed by markers — all inside ONE env activation.
+	inner := interp + " " + shQuote(probePath) + `; printf '` + probeMarker + `\tpyexit\t-\t%s\n' "$?"`
+	if extraRun != "" {
+		inner += `; printf '` + probeMarker + `\textra\tbegin\t0\n'; { ` + extraRun + `
+} ; printf '` + probeMarker + `\textra\tend\t%s\n' "$?"`
+	}
+	if !needPython {
+		// Pure-shell contract: no python work to do; run only extra_run
+		// inside the env (activation may still matter to it).
+		inner = `printf '` + probeMarker + `\tpyexit\t-\t0\n'`
+		if extraRun != "" {
+			inner += `; printf '` + probeMarker + `\textra\tbegin\t0\n'; { ` + extraRun + `
+} ; printf '` + probeMarker + `\textra\tend\t%s\n' "$?"`
+		}
+	}
+	// Group the inner chain: WrapCommand joins with `&&`, and a bare `;`
+	// inside inner would detach the marker printfs from that chain — the
+	// pyexit marker would then fire even when ACTIVATION failed, and the
+	// parser would misread an activation failure as "python missing".
+	inner = "{ " + inner + " ; }"
 	wrapped := utils.WrapCommand(
 		proj.PythonEnv.Type, proj.PythonEnv.Path, proj.PythonEnv.Name,
-		interp+" "+shQuote(probePath),
+		inner,
 		proj.WorkingDir,
 	)
+
+	var pre string
+	if shEntry != "" {
+		// bash -n before activation: a syntax verdict must survive an
+		// activation failure. Output flattened to one marker line.
+		pre = `__pf_out=$(bash -n ` + shQuote(shEntry) + ` 2>&1); printf '` + probeMarker + `\tshellsyntax\tscript\t%s\t%s\n' "$?" "$(printf '%s' "$__pf_out" | tr '\n\t' '  ')"; `
+	}
+
 	// Group the wrapped chain so cleanup runs regardless of its verdict,
 	// while the probe's own exit code is preserved.
-	full := fmt.Sprintf("{ %s ; }; rc=$?; rm -f %s; exit $rc", wrapped, shQuote(probePath))
+	full := fmt.Sprintf("%s{ %s ; }; rc=$?; rm -f %s; exit $rc", pre, wrapped, shQuote(probePath))
 	out, code, runErr = p.runShell(ctx, full)
 	return out, code, runErr, nil
 }

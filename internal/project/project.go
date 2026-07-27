@@ -3,6 +3,7 @@ package project
 import (
 	"fmt"
 	"path"
+	"regexp"
 
 	"github.com/gliese129/runq/internal/rfs"
 
@@ -51,7 +52,47 @@ func (c *Config) OverwriteYAML(fsys rfs.FS) error {
 		return fmt.Errorf("marshal project config: %w", err)
 	}
 	content := yamlHeader + string(data)
+	// Scaffold the preflight contract when the config has none: the block
+	// spells out the defaults WITH comments, so the contract is
+	// discoverable in the one file users actually read. Semantics are
+	// identical with or without the block — this only makes them visible.
+	if c.Preflight == nil {
+		content += c.preflightScaffold()
+	}
 	return fsys.WriteFile(path.Join(c.WorkingDir, "project.yaml"), []byte(content), 0o644)
+}
+
+// hfParamNameRegex spots params whose values look like they carry HF
+// repo ids — used only to pre-fill the scaffold suggestion.
+var hfParamNameRegex = regexp.MustCompile(`(?i)^(hf_|model|.*model_name|.*model$|dataset|.*dataset$)`)
+
+// preflightScaffold renders the commented preflight block appended to a
+// freshly written project.yaml. Params with model/dataset-ish names are
+// suggested as "{{param.X}}" entries (quoted — a bare {{ is not valid
+// YAML); the user removes wrong guesses rather than authoring from zero.
+func (c *Config) preflightScaffold() string {
+	var hfLines string
+	for _, p := range c.Params {
+		if hfParamNameRegex.MatchString(p.Name) {
+			hfLines += fmt.Sprintf("    - \"{{param.%s}}\"  # suggested from param names — remove if this is not a HuggingFace repo id\n", p.Name)
+		}
+	}
+	hfBlock := "  hf: []              # HuggingFace repos to verify; \"{{param.NAME}}\" checks every sweep value\n"
+	if hfLines != "" {
+		hfBlock = "  hf:                 # HuggingFace repos to verify; \"{{param.NAME}}\" checks every sweep value\n" + hfLines
+	}
+	return `
+# Submit-time checks (preflight). Declared entries are a contract: they are
+# verified inside the task's env in a NON-INTERACTIVE shell (the shell class
+# compute nodes use — no ~/.bashrc) on every submit; failures block before
+# anything is queued. Undeclared checks fall back to best-effort static
+# analysis of the entry .py.
+preflight:
+  enabled: true       # master switch; runq submit --no-preflight still skips per-run
+  imports: true       # probe top-level imports of the entry .py (best effort)
+  wandb: false        # verify wandb credentials when wandb is configured
+` + hfBlock + `  extra_run: ""       # custom shell check; non-zero exit blocks submission
+`
 }
 
 // Config represents a parsed project.yaml file.
@@ -91,6 +132,67 @@ type Config struct {
 	PythonEnv PythonEnvConfig `yaml:"python_env,omitempty" json:"python_env,omitempty"`
 	Wandb     *WandbConfig    `yaml:"wandb,omitempty" json:"wandb,omitempty"`
 	Params    []ParamDef      `yaml:"params,omitempty" json:"params,omitempty"`
+	// Preflight is the project's submit-time check CONTRACT (RQ-76 ②).
+	// nil = the same defaults the scaffold makes visible — an absent block
+	// never means a second set of semantics.
+	Preflight *PreflightConfig `yaml:"preflight,omitempty" json:"preflight,omitempty"`
+}
+
+// PreflightConfig declares what preflight verifies for this project.
+// Principle: what is DECLARED is a contract (verified exactly, failures
+// block); what is not declared is best-effort static analysis. The
+// checks run inside the task's env in a NON-INTERACTIVE shell — the
+// shell class compute nodes give the task — which is what a manual
+// login-shell check can never prove.
+type PreflightConfig struct {
+	// Enabled is the project-level master switch. nil/true = on.
+	// `runq submit --no-preflight` still skips per-run.
+	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	// Imports probes top-level imports of the entry .py (best effort;
+	// shell entries have nothing to statically analyze). nil/true = on.
+	Imports *bool `yaml:"imports,omitempty" json:"imports,omitempty"`
+	// Wandb verifies wandb credentials (WANDB_API_KEY / ~/.netrc) are
+	// visible where the task runs. nil/false = off.
+	Wandb *bool `yaml:"wandb,omitempty" json:"wandb,omitempty"`
+	// HF lists HuggingFace repos to verify. "{{param.NAME}}" entries
+	// expand against the sweep — EVERY value is checked. Declared repos
+	// that are missing or gated block the submit.
+	HF []string `yaml:"hf,omitempty" json:"hf,omitempty"`
+	// ExtraRun is a custom shell check executed inside the activated env
+	// in the same probe shell; non-zero exit blocks the submit. The
+	// catch-all for anything runq cannot see statically.
+	ExtraRun string `yaml:"extra_run,omitempty" json:"extra_run,omitempty"`
+}
+
+// EnabledOrDefault: absent block / absent key = enabled.
+func (p *PreflightConfig) EnabledOrDefault() bool {
+	return p == nil || p.Enabled == nil || *p.Enabled
+}
+
+// ImportsOrDefault: absent = on (best-effort static analysis).
+func (p *PreflightConfig) ImportsOrDefault() bool {
+	return p == nil || p.Imports == nil || *p.Imports
+}
+
+// WandbOrDefault: absent = off (many projects run wandb-less).
+func (p *PreflightConfig) WandbOrDefault() bool {
+	return p != nil && p.Wandb != nil && *p.Wandb
+}
+
+// HFRepos returns the declared repo list (nil-safe).
+func (p *PreflightConfig) HFRepos() []string {
+	if p == nil {
+		return nil
+	}
+	return p.HF
+}
+
+// ExtraRunOrEmpty returns the custom check command (nil-safe).
+func (p *PreflightConfig) ExtraRunOrEmpty() string {
+	if p == nil {
+		return ""
+	}
+	return p.ExtraRun
 }
 
 // ParamDef defines a parameter's metadata for the web UI.

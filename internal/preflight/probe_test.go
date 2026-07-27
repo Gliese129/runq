@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/project"
 )
 
@@ -74,8 +75,8 @@ func TestParseProbeOutput(t *testing.T) {
 		"##RUNQ_PF##\tdone\tdone\tok\t",
 	}, "\n")
 	res := parseProbeOutput(out, refs)
-	if !res.Ran || !res.Done {
-		t.Fatalf("ran/done = %v/%v", res.Ran, res.Done)
+	if !res.PythonRan || !res.Done {
+		t.Fatalf("ran/done = %v/%v", res.PythonRan, res.Done)
 	}
 	if res.Home != "/home/alice" || res.Prefix != "/opt/conda/envs/ml" {
 		t.Fatalf("env facts: %q %q", res.Home, res.Prefix)
@@ -93,7 +94,7 @@ func TestParseProbeOutput(t *testing.T) {
 
 func TestParseProbeOutputEmpty(t *testing.T) {
 	res := parseProbeOutput("sh: conda: command not found\n", nil)
-	if res.Ran || res.Done {
+	if res.PythonRan || res.Done {
 		t.Fatalf("noise must not count as a probe run: %+v", res)
 	}
 }
@@ -196,7 +197,7 @@ func TestProbeActivationFailure(t *testing.T) {
 func TestImportsCheckCutShort(t *testing.T) {
 	pf := DefaultPreflight()
 	modules := []string{"a", "b", "c"}
-	res := probeOutcome{Ran: true, Imports: []probeImport{{Module: "a", OK: true}}}
+	res := probeOutcome{PythonRan: true, Imports: []probeImport{{Module: "a", OK: true}}}
 	r := pf.importsCheck(modules, res, true, pf.ProbeTimeout)
 	if r.Status != "skipped" || !strings.Contains(r.Detail, "1/3") {
 		t.Fatalf("cut-short probe must skip, not pass: %+v", r)
@@ -216,7 +217,7 @@ func TestHFCheckVerdicts(t *testing.T) {
 	refs := []HFRef{m, d}
 
 	// missing → failed
-	res := probeOutcome{Ran: true, Done: true, HF: []probeHF{{Ref: m, Status: "missing", Detail: "404"}, {Ref: d, Status: "cached"}}}
+	res := probeOutcome{PythonRan: true, Done: true, HF: []probeHF{{Ref: m, Status: "missing", Detail: "404"}, {Ref: d, Status: "cached"}}}
 	if r := pf.hfCheck(refs, res, false, 0); r.Status != "failed" || !strings.Contains(r.Detail, "org/m") {
 		t.Fatalf("missing: %+v", r)
 	}
@@ -268,7 +269,7 @@ func TestProbeScriptCompiles(t *testing.T) {
 		{[]string{"json", "os"}, nil},
 		{[]string{"json"}, []HFRef{{RepoID: "org/m", RepoType: "model"}}},
 	} {
-		script := buildProbeScript(tc.modules, tc.refs)
+		script := buildProbeScript(tc.modules, tc.refs, false)
 		dir := t.TempDir()
 		path := dir + "/probe.py"
 		if err := os.WriteFile(path, []byte(script), 0o644); err != nil {
@@ -277,6 +278,189 @@ func TestProbeScriptCompiles(t *testing.T) {
 		cmd := exec.Command(interp, "-m", "py_compile", path)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("probe does not compile (%v): %s\n%s", err, out, script)
+		}
+	}
+}
+
+// ----------------------------------------------------------------------
+// Contract layer (RQ-76 ②): declared = verified, undeclared = best effort
+// ----------------------------------------------------------------------
+
+func TestExpandContractHF(t *testing.T) {
+	params := []job.TaskParams{
+		{"model_name": "org/a", "seed": 1},
+		{"model_name": "org/b", "seed": 2},
+		{"model_name": "org/a", "seed": 3}, // dup value → dedup
+	}
+	refs, findings := expandContractHF([]string{"org/static", "{{param.model_name}}"}, params)
+	if len(findings) != 0 {
+		t.Fatalf("unexpected findings: %+v", findings)
+	}
+	want := []string{"org/static", "org/a", "org/b"}
+	if len(refs) != len(want) {
+		t.Fatalf("refs = %+v, want ids %v", refs, want)
+	}
+	for i, r := range refs {
+		if r.RepoID != want[i] || r.RepoType != "any" {
+			t.Fatalf("ref %d = %+v, want id %q type any", i, r, want[i])
+		}
+	}
+
+	// Unknown param and malformed id are HARD findings — a contract that
+	// cannot be verified must not pass silently.
+	_, findings = expandContractHF([]string{"{{param.nope}}"}, params)
+	if len(findings) != 1 || !strings.Contains(findings[0].Detail, "nope") {
+		t.Fatalf("unknown param: %+v", findings)
+	}
+	_, findings = expandContractHF([]string{"/abs/path"}, params)
+	if len(findings) != 1 {
+		t.Fatalf("malformed id: %+v", findings)
+	}
+}
+
+func TestShellEntry(t *testing.T) {
+	if got := shellEntry("bash scripts/run.sh --x 1", "/wd"); got != "/wd/scripts/run.sh" {
+		t.Fatalf("bash form: %q", got)
+	}
+	if got := shellEntry("./run.sh", "/wd"); got != "/wd/run.sh" {
+		t.Fatalf("dot-slash form: %q", got)
+	}
+	if got := shellEntry("sh /abs/run.sh", "/wd"); got != "/abs/run.sh" {
+		t.Fatalf("abs form: %q", got)
+	}
+	if got := shellEntry("python train.py", "/wd"); got != "" {
+		t.Fatalf("python entry must not match: %q", got)
+	}
+}
+
+// extra_run is the user's own check: non-zero exit blocks, output comes
+// back as the detail. It must run even for a pure-shell project with no
+// python entry at all.
+func TestExtraRunContract(t *testing.T) {
+	probePython(t)
+	dir := t.TempDir()
+	proj := &project.Config{ProjectName: "p", WorkingDir: dir, CmdTemplate: "echo hi"}
+	proj.Preflight = &project.PreflightConfig{ExtraRun: "echo custom-broke; false"}
+
+	pf := DefaultPreflight()
+	var report Report
+	results := pf.probeChecks(context.Background(), proj, "echo hi", &report)
+	statuses := map[string]CheckResult{}
+	for _, c := range results {
+		statuses[c.Name] = c
+	}
+	er := statuses["extra_run"]
+	if er.Status != "failed" || !strings.Contains(er.Detail, "custom-broke") {
+		t.Fatalf("extra_run: %+v", er)
+	}
+
+	// Passing contract → passed.
+	proj.Preflight.ExtraRun = "true"
+	results = pf.probeChecks(context.Background(), proj, "echo hi", &report)
+	for _, c := range results {
+		if c.Name == "extra_run" && c.Status != "passed" {
+			t.Fatalf("passing extra_run: %+v", c)
+		}
+	}
+}
+
+// Shell entry with a syntax error: bash -n catches it before anything
+// else, even though there is no python to probe.
+func TestShellSyntaxCheck(t *testing.T) {
+	probePython(t)
+	dir := t.TempDir()
+	bad := "if [ 1 ]; then\necho unclosed\n" // missing fi
+	if err := os.WriteFile(dir+"/run.sh", []byte(bad), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	proj := &project.Config{ProjectName: "p", WorkingDir: dir, CmdTemplate: "bash run.sh"}
+
+	pf := DefaultPreflight()
+	var report Report
+	results := pf.probeChecks(context.Background(), proj, "bash run.sh", &report)
+	statuses := map[string]CheckResult{}
+	for _, c := range results {
+		statuses[c.Name] = c
+	}
+	ss := statuses["shell_syntax"]
+	if ss.Status != "failed" {
+		t.Fatalf("shell_syntax: %+v", ss)
+	}
+	// And the imports skip explains WHERE to declare checks instead.
+	if imp := statuses["imports"]; imp.Status != "skipped" || !strings.Contains(imp.Detail, "preflight.hf") {
+		t.Fatalf("imports guidance: %+v", imp)
+	}
+
+	// Valid script → passed.
+	if err := os.WriteFile(dir+"/run.sh", []byte("echo ok\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	results = pf.probeChecks(context.Background(), proj, "bash run.sh", &report)
+	for _, c := range results {
+		if c.Name == "shell_syntax" && c.Status != "passed" {
+			t.Fatalf("valid script: %+v", c)
+		}
+	}
+}
+
+// python_env is decoupled from the command shape: a declared conda env is
+// probed even when the entry is a shell script (the user's actual ask —
+// "conda 对不对" must not depend on how the job is launched).
+func TestEnvProbeDecoupledFromScript(t *testing.T) {
+	interp := probePython(t)
+	dir := t.TempDir()
+	proj := &project.Config{ProjectName: "p", WorkingDir: dir, CmdTemplate: "bash run.sh"}
+	if err := os.WriteFile(dir+"/run.sh", []byte("echo ok\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// "venv" pointing at the real python's prefix: activation will fail
+	// (no activate script) → python_env must FAIL despite shell entry.
+	proj.PythonEnv.Type = "venv"
+	proj.PythonEnv.Path = dir + "/no-such-venv"
+	_ = interp
+
+	pf := DefaultPreflight()
+	var report Report
+	results := pf.probeChecks(context.Background(), proj, "bash run.sh", &report)
+	statuses := map[string]CheckResult{}
+	for _, c := range results {
+		statuses[c.Name] = c
+	}
+	if statuses["python_env"].Status != "failed" {
+		t.Fatalf("python_env with broken venv + shell entry: %+v", statuses["python_env"])
+	}
+}
+
+// Project-level master switch: preflight.enabled=false skips everything
+// with one honest entry; per-run --no-preflight keeps its own wording.
+func TestProjectEnabledSwitch(t *testing.T) {
+	dir := t.TempDir()
+	off := false
+	proj := &project.Config{ProjectName: "p", WorkingDir: dir, CmdTemplate: "echo hi",
+		Preflight: &project.PreflightConfig{Enabled: &off}}
+	rep := DefaultPreflight().RunPreflight(context.Background(), proj, "echo hi")
+	if len(rep.Results) != 1 || rep.Results[0].Status != "skipped" ||
+		!strings.Contains(rep.Results[0].Detail, "preflight.enabled") {
+		t.Fatalf("enabled=false: %+v", rep.Results)
+	}
+}
+
+// imports:false gates the static tier without touching the rest.
+func TestImportsSwitch(t *testing.T) {
+	interp := probePython(t)
+	dir := t.TempDir()
+	if err := os.WriteFile(dir+"/train.py", []byte("import definitely_not_a_module_zz\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	off := false
+	proj := &project.Config{ProjectName: "p", WorkingDir: dir, CmdTemplate: interp + " train.py",
+		Preflight: &project.PreflightConfig{Imports: &off}}
+	pf := DefaultPreflight()
+	var report Report
+	results := pf.probeChecks(context.Background(), proj, interp+" train.py", &report)
+	for _, c := range results {
+		if c.Name == "imports" && c.Status != "skipped" {
+			t.Fatalf("imports with switch off: %+v", c)
 		}
 	}
 }
