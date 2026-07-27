@@ -428,6 +428,9 @@ type ScriptArg struct {
 	Name    string  `json:"name"`
 	Type    string  `json:"type"`
 	Default *string `json:"default,omitempty"`
+	// Style "flag" = argparse store_true switch: bare `--name` when true,
+	// omitted when false (never `--name=false`).
+	Style string `json:"style,omitempty"`
 }
 
 // ── Thaw types ──

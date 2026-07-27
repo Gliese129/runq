@@ -160,6 +160,7 @@ export function buildProjectPayload(project: SubmitProjectDraft, base?: ProjectC
         include: p.include, // persist curation — heuristic must run only once
         strict: p.strict || undefined,
         scope: p.scope || undefined,
+        style: p.style || undefined,
       }
     })
   }

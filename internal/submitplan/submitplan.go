@@ -8,6 +8,7 @@ import (
 	"os"
 	posixpath "path"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/gliese129/runq/internal/job"
@@ -107,6 +108,64 @@ func validateStrictChoices(proj *project.Config, tasks []job.TaskParams) error {
 		}
 	}
 	return nil
+}
+
+// validateParamTypes is the last line of defense for the param value
+// chain (feedback group 2): an int/float param whose value cannot parse
+// — the canonical case is the string "None" replayed from an old job
+// config — is rejected AT SUBMIT with the param named, instead of
+// argparse rejecting the task hours later on a compute node.
+func validateParamTypes(proj *project.Config, tasks []job.TaskParams) error {
+	for _, def := range proj.Params {
+		if def.Type != "int" && def.Type != "float" && def.Type != "bool" {
+			continue
+		}
+		for _, params := range tasks {
+			v, present := params[def.Name]
+			if !present {
+				continue
+			}
+			s := strings.TrimSpace(fmt.Sprintf("%v", v))
+			var ok bool
+			switch def.Type {
+			case "int":
+				_, err := strconv.ParseInt(s, 10, 64)
+				ok = err == nil
+			case "float":
+				_, err := strconv.ParseFloat(s, 64)
+				ok = err == nil
+			case "bool":
+				switch strings.ToLower(s) {
+				case "true", "false", "1", "0", "yes", "no", "y", "n", "on", "off":
+					ok = true
+				}
+			}
+			if !ok {
+				hint := ""
+				if s == "None" || s == "" {
+					hint = " — an unset optional param must be OMITTED, not sent as " + strconv.Quote(s)
+				}
+				return fmt.Errorf("param %q (%s) got non-%s value %q%s",
+					def.Name, def.Type, def.Type, s, hint)
+			}
+		}
+	}
+	return nil
+}
+
+// flagParamNames collects params declared `style: flag` (store_true
+// switches) for the renderer: truthy → bare `--name`, falsy → omitted.
+func flagParamNames(proj *project.Config) map[string]bool {
+	var flags map[string]bool
+	for _, def := range proj.Params {
+		if def.Style == "flag" {
+			if flags == nil {
+				flags = map[string]bool{}
+			}
+			flags[def.Name] = true
+		}
+	}
+	return flags
 }
 
 // resolveEnvFile applies the project's env_file semantics: nil = auto-use
@@ -222,6 +281,9 @@ func Build(ctx context.Context, cfg job.JobConfig, proj *project.Config, d Deps)
 	if err := validateStrictChoices(proj, taskParams); err != nil {
 		return Plan{}, err
 	}
+	if err := validateParamTypes(proj, taskParams); err != nil {
+		return Plan{}, err
+	}
 
 	// Scheduler params: DECLARED scope wins (self-describing config);
 	// template-reference inference remains as a fallback for configs that
@@ -262,9 +324,10 @@ func Build(ctx context.Context, cfg job.JobConfig, proj *project.Config, d Deps)
 	if strings.TrimSpace(nameTmpl) == "" {
 		nameTmpl = proj.JobName
 	}
+	flagParams := flagParamNames(proj)
 	tasks := make([]PlannedTask, 0, len(taskParams))
 	for _, params := range taskParams {
-		cmd, err := job.RenderExcluding(proj.CmdTemplate, params, schedParams)
+		cmd, err := job.RenderWithFlags(proj.CmdTemplate, params, schedParams, flagParams)
 		if err != nil {
 			return Plan{}, fmt.Errorf("render command failed: %w", err)
 		}

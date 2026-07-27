@@ -11,6 +11,11 @@ type ArgInfo struct {
 	Name    string // flag name without "--", e.g. "lr", "batch_size"
 	Type    string // python type: "float", "int", "str", "bool", "" if unknown
 	Default string // default value as string, "" if none
+	// Style "flag" marks store_true switches: present = true, absent =
+	// false. The renderer must emit `--name` (bare) when true and OMIT
+	// the flag entirely when false — `--name=false` is read by argparse
+	// as store_true firing (feedback group 2: `-sample=false` bug).
+	Style string // "" | "flag"
 }
 
 // ScanArgparse scans a Python file for argparse add_argument calls and extracts
@@ -85,15 +90,25 @@ func ScanArgparseBytes(content []byte) ([]ArgInfo, error) {
 		if m := defaultReg.FindStringSubmatch(c); len(m) >= 2 {
 			default_ = stripQuotes(m[1])
 		}
+		// Python `default=None` means NO default — capturing the literal
+		// string "None" poisons the whole value chain downstream: the
+		// rendered command gets `--x None` and argparse rejects it hours
+		// later on the compute node (feedback group 2).
+		if default_ == "None" {
+			default_ = ""
+		}
+		var style_ string
 		if storeReg.MatchString(c) {
 			type_ = "bool"
 			default_ = "false"
+			style_ = "flag"
 		}
 
 		arg := ArgInfo{
 			Name:    name_,
 			Type:    type_,
 			Default: default_,
+			Style:   style_,
 		}
 
 		if arg.Name != "" {

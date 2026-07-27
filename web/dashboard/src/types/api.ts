@@ -318,12 +318,14 @@ export interface ParseResult {
   suggested_command: string
 }
 
-/** Backend parse-script emits ONLY these three fields — choices/min/max
+/** Backend parse-script emits ONLY these fields — choices/min/max
  *  belong to project.ParamDef, not to script parsing. */
 export interface ScriptArg {
   name: string
   type: string
   default?: string
+  /** "flag" = store_true switch (bare --name when true, omitted when false) */
+  style?: string
 }
 
 export interface ProjectSummary {
@@ -379,6 +381,8 @@ export interface ProjectConfig {
     strict?: boolean
     /** "scheduler" = consumed by submit_template only (never by the command) */
     scope?: string
+    /** "flag" = store_true switch: rendered as bare --name / omitted */
+    style?: string
   }>
 }
 

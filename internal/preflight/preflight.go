@@ -1058,5 +1058,16 @@ func renderSampleCommand(proj *project.Config, taskParams []job.TaskParams, excl
 	if len(taskParams) == 0 {
 		return "", nil
 	}
-	return job.RenderExcluding(proj.CmdTemplate, taskParams[0], exclude)
+	// Flag-style params render with store_true semantics here too — the
+	// sample must be the SAME command the plan will submit.
+	var flags map[string]bool
+	for _, def := range proj.Params {
+		if def.Style == "flag" {
+			if flags == nil {
+				flags = map[string]bool{}
+			}
+			flags[def.Name] = true
+		}
+	}
+	return job.RenderWithFlags(proj.CmdTemplate, taskParams[0], exclude, flags)
 }

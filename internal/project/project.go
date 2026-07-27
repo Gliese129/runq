@@ -1,9 +1,11 @@
 package project
 
 import (
+	"encoding/json"
 	"fmt"
 	"path"
 	"regexp"
+	"strings"
 
 	"github.com/gliese129/runq/internal/rfs"
 
@@ -219,6 +221,61 @@ type ParamDef struct {
 	// value outside Choices is a submit-time error (enforced in
 	// submitplan.Build — one point, both CLI and GUI).
 	Strict bool `yaml:"strict,omitempty" json:"strict,omitempty"`
+	// Style "flag" marks store_true-style switches (auto-annotated by the
+	// argparse scan): the renderer emits a bare `--name` when the value is
+	// truthy and OMITS the flag entirely otherwise — `--name=false` would
+	// fire a store_true (feedback group 2).
+	Style string `yaml:"style,omitempty" json:"style,omitempty"`
+}
+
+// UnmarshalYAML accepts non-string `default:` scalars (42, 0.6, false)
+// by coercing them to their string form in the node tree before the
+// normal decode. Hand-written project.yaml files routinely leave number
+// defaults unquoted; rejecting them with a type error taught users to
+// quote-everything instead of fixing anything (feedback group 2).
+func (p *ParamDef) UnmarshalYAML(value *yaml.Node) error {
+	for i := 0; i+1 < len(value.Content); i += 2 {
+		k, v := value.Content[i], value.Content[i+1]
+		if k.Value != "default" || v.Kind != yaml.ScalarNode {
+			continue
+		}
+		if v.Tag == "!!null" {
+			v.Tag, v.Value = "!!str", "" // explicit null = no default
+		} else if v.Tag != "!!str" {
+			v.Tag = "!!str" // keep the literal text (42 → "42", 1e-4 → "1e-4")
+		}
+	}
+	type paramDefAlias ParamDef // drops methods: no recursion
+	return value.Decode((*paramDefAlias)(p))
+}
+
+// UnmarshalJSON is the same tolerance on the API face: js-yaml on the
+// dashboard parses `default: 42` to a JS number, and older frontend
+// bundles send it through as-is.
+func (p *ParamDef) UnmarshalJSON(data []byte) error {
+	type paramDefAlias ParamDef
+	aux := struct {
+		*paramDefAlias
+		Default json.RawMessage `json:"default,omitempty"`
+	}{paramDefAlias: (*paramDefAlias)(p)}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	raw := strings.TrimSpace(string(aux.Default))
+	switch {
+	case raw == "" || raw == "null":
+		p.Default = ""
+	case raw[0] == '"':
+		var s string
+		if err := json.Unmarshal(aux.Default, &s); err != nil {
+			return fmt.Errorf("param %q: default: %w", p.Name, err)
+		}
+		p.Default = s
+	default:
+		// Number / bool literal: its JSON text IS the string form.
+		p.Default = raw
+	}
+	return nil
 }
 
 type WandbConfig struct {
