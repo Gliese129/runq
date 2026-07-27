@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -69,6 +70,14 @@ type Preflight struct {
 	// {{param.*}}) — the sample command renders without demanding them.
 	ExcludeParams map[string]bool
 
+	// Env is the merged task environment (project environment + job
+	// overrides, incl. the reserved RUNQ_ENV_FILE) and EnvSetup the
+	// target's env_setup fragment: the probe assembles THE SAME
+	// environment run.sh gives the task — one injection point, so
+	// preflight and run can never disagree about what is exported.
+	Env      map[string]string
+	EnvSetup string
+
 	// FS is the filesystem THE TASK will run against. nil = local os
 	// semantics (current machine). For remote targets this is the target's
 	// rfs.FS: path/writability checks stat the REMOTE filesystem, the
@@ -101,7 +110,15 @@ func (p Preflight) fsys() rfs.FS {
 // markers that made it out).
 func (p Preflight) runShell(ctx context.Context, cmd string) (string, int, error) {
 	if p.FS == nil {
-		out, err := exec.CommandContext(ctx, "bash", "-c", cmd).CombinedOutput()
+		c := exec.CommandContext(ctx, "bash", "-c", cmd)
+		// ProbeTimeout is a WALL-CLOCK contract (Codex r1 #5): killing
+		// only the outer bash leaves grandchildren holding the output
+		// pipe, and CombinedOutput then blocks until THEY exit. Kill the
+		// whole process group on cancel, and cap the post-cancel pipe
+		// wait as a backstop.
+		setupProcessGroup(c)
+		c.WaitDelay = time.Second
+		out, err := c.CombinedOutput()
 		if err != nil {
 			var ee *exec.ExitError
 			if errors.As(err, &ee) {
@@ -115,10 +132,13 @@ func (p Preflight) runShell(ctx context.Context, cmd string) (string, int, error
 	return string(stdout) + string(stderr), code, err
 }
 
-// DefaultPreflight returns a preflight runner with sane defaults.
+// DefaultPreflight returns a preflight runner with sane defaults. 20s
+// keeps the whole preflight under the dashboard's 30s request timeout
+// even with slow login-node imports (Codex r1 #5: probe timeout must
+// undercut the transport timeout, or the browser gives up first).
 func DefaultPreflight() Preflight {
 	return Preflight{
-		ProbeTimeout: 30 * time.Second,
+		ProbeTimeout: 20 * time.Second,
 	}
 }
 
@@ -337,26 +357,37 @@ func shellEntry(sampleCmd, workingDir string) string {
 // the contract instead of guessing.
 func (p Preflight) probeChecks(ctx context.Context, proj *project.Config, sampleCmd string, report *Report) []CheckResult {
 	contract := proj.Preflight
-	scriptPath, src, readErr := p.readScript(sampleCmd, proj.WorkingDir)
 
-	// Imports: best-effort tier, gated by the contract switch.
-	var modules []string
+	// Source discovery follows the code the task runs (Codex r1 #2):
+	// .py entry directly, .sh entry via the python invocations inside it,
+	// then the LOCAL import graph (train → helper → third-party).
+	entrySources, shEntryPath, readErr := p.collectEntrySources(sampleCmd, proj.WorkingDir)
+	modules, scanned := p.walkImportGraph(entrySources, proj.WorkingDir)
+
 	importsSkip := ""
 	switch {
 	case !contract.ImportsOrDefault():
-		importsSkip = "disabled by preflight.imports"
-	case scriptPath == "":
-		importsSkip = "no python entry — static analysis covers .py entries only; declare preflight.hf / preflight.extra_run in project.yaml to verify shell workloads"
+		importsSkip, modules = "disabled by preflight.imports", nil
 	case readErr != nil:
-		importsSkip = fmt.Sprintf("cannot read script: %v", readErr)
-	default:
-		modules = p.filterLocalModules(parseImports(src), proj.WorkingDir)
+		importsSkip = fmt.Sprintf("cannot read entry script: %v", readErr)
+	case len(entrySources) == 0 && shEntryPath != "":
+		importsSkip = "no python invocation found inside the shell entry — declare preflight.hf / preflight.extra_run in project.yaml to verify what it runs"
+	case len(entrySources) == 0:
+		importsSkip = "no python entry — declare preflight.hf / preflight.extra_run in project.yaml to verify non-python workloads"
 	}
 
-	// HF refs: best-effort static extraction + declared contract entries.
+	// HF refs: best-effort static extraction over EVERY scanned source
+	// (entry + shell-invoked scripts + local deps) + declared contract.
 	var refs []HFRef
-	if src != nil {
-		refs = ExtractHFRefs(src)
+	seenHF := map[string]bool{}
+	for _, s := range scanned {
+		for _, r := range ExtractHFRefs(s.Src) {
+			key := r.RepoType + ":" + r.RepoID
+			if !seenHF[key] {
+				seenHF[key] = true
+				refs = append(refs, r)
+			}
+		}
 	}
 	declaredRefs, hfContractFindings := expandContractHF(contract.HFRepos(), p.taskParams)
 	seenRef := map[string]bool{}
@@ -371,8 +402,15 @@ func (p Preflight) probeChecks(ctx context.Context, proj *project.Config, sample
 
 	wandb := contract.WandbOrDefault()
 	extraRun := strings.TrimSpace(contract.ExtraRunOrEmpty())
-	shEntry := shellEntry(sampleCmd, proj.WorkingDir)
+	shEntry := shEntryPath
+	// Interpreter: the entry command's python token, else the one the
+	// shell script invokes, else plain "python".
 	interp := pythonInterpreter(sampleCmd)
+	if interp == "python" && shEntry != "" && len(entrySources) > 0 {
+		if shSrc, err := p.fsys().ReadFile(shEntry); err == nil {
+			interp = pythonInterpreter(string(shSrc))
+		}
+	}
 	envDeclared := proj.PythonEnv.Type != ""
 
 	// Malformed contract entries block before any probe runs — a contract
@@ -543,6 +581,27 @@ func (p Preflight) execProbe(ctx context.Context, proj *project.Config, interp s
 		return "", 0, nil, writeErr
 	}
 
+	// SAME ENVIRONMENT AS THE TASK (Codex r1 #3): the probe mirrors
+	// run.sh's environment assembly — target env_setup, the ambient .env
+	// file, then the project/override env exports (which must win). A
+	// probe that checks a DIFFERENT environment than the task runs in
+	// produces false verdicts (wandb creds exported by run.sh, reported
+	// missing by preflight).
+	var envPrefix strings.Builder
+	if setup := strings.TrimSpace(p.EnvSetup); setup != "" {
+		envPrefix.WriteString(setup + "\n")
+	}
+	if envFile := p.Env["RUNQ_ENV_FILE"]; envFile != "" {
+		q := shQuote(envFile)
+		envPrefix.WriteString("if [ -f " + q + " ]; then set -a; . " + q + "; set +a; fi\n")
+	}
+	for _, k := range sortedEnvKeys(p.Env) {
+		if k == "RUNQ_ENV_FILE" {
+			continue
+		}
+		envPrefix.WriteString("export " + k + "=" + shQuote(p.Env[k]) + "\n")
+	}
+
 	// Inner chain: python probe (+ its exit marker), then the extra_run
 	// contract bracketed by markers — all inside ONE env activation.
 	inner := interp + " " + shQuote(probePath) + `; printf '` + probeMarker + `\tpyexit\t-\t%s\n' "$?"`
@@ -579,9 +638,37 @@ func (p Preflight) execProbe(ctx context.Context, proj *project.Config, interp s
 
 	// Group the wrapped chain so cleanup runs regardless of its verdict,
 	// while the probe's own exit code is preserved.
-	full := fmt.Sprintf("%s{ %s ; }; rc=$?; rm -f %s; exit $rc", pre, wrapped, shQuote(probePath))
+	full := fmt.Sprintf("%s%s{ %s ; }; rc=$?; rm -f %s; exit $rc",
+		pre, envPrefix.String(), wrapped, shQuote(probePath))
 	out, code, runErr = p.runShell(ctx, full)
+	if ctx.Err() != nil {
+		// The shell was killed before its own `rm -f` could run — clean
+		// the probe file up from THIS side (Codex r1 #5: 100ms-timeout
+		// runs left .runq_preflight_*.py behind).
+		p.removeProbe(probePath)
+	}
 	return out, code, runErr, nil
+}
+
+// removeProbe best-effort deletes a probe file after a killed run.
+func (p Preflight) removeProbe(probePath string) {
+	if p.FS == nil {
+		_ = os.Remove(probePath)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, _, _, _ = p.FS.Exec(ctx, "rm", "-f", probePath)
+}
+
+// sortedEnvKeys returns map keys sorted for deterministic script output.
+func sortedEnvKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // envCheck verifies the resolved sys.prefix against the declared env.
@@ -977,21 +1064,6 @@ func parseImports(src []byte) []string {
 	return names
 }
 
-// filterLocalModules drops modules the project itself defines, so the
-// probe doesn't fail on "cannot import 'mylib'" for files that live
-// alongside the script — and doesn't EXECUTE project code (a local
-// module import runs it; side effects are not preflight's to trigger).
-func (p Preflight) filterLocalModules(modules []string, workingDir string) []string {
-	local := p.localModuleNames(workingDir)
-	out := make([]string, 0, len(modules))
-	for _, m := range modules {
-		if !local[m] {
-			out = append(out, m)
-		}
-	}
-	return out
-}
-
 // topLevelModule returns the first dot-separated component of a
 // dotted module path (`torch.nn.functional` → `torch`). This is what
 // `import X` will resolve.
@@ -1013,27 +1085,6 @@ func pythonInterpreter(sampleCmd string) string {
 		return m[1]
 	}
 	return "python"
-}
-
-// localModuleNames returns the set of top-level identifiers that the
-// project itself defines, so the import probe doesn't fail on
-// "cannot import 'mylib'" for files that live alongside the script.
-func (p Preflight) localModuleNames(workingDir string) map[string]bool {
-	out := map[string]bool{}
-	entries, err := p.fsys().ReadDir(workingDir)
-	if err != nil {
-		return out
-	}
-	for _, e := range entries {
-		if e.IsDir() {
-			out[e.Name()] = true
-			continue
-		}
-		if strings.HasSuffix(e.Name(), ".py") {
-			out[strings.TrimSuffix(e.Name(), ".py")] = true
-		}
-	}
-	return out
 }
 
 // lastLine returns the last non-empty line of a multi-line string,

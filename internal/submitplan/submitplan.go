@@ -44,6 +44,10 @@ type Deps struct {
 	// TARGET's rfs.FS for remote targets (paths statted remotely, script
 	// read remotely, probes executed on the login node). nil = local os.
 	PreflightFS rfs.FS
+	// PreflightEnvSetup is the target's env_setup fragment: the probe
+	// runs it before env activation, exactly like run.sh — ONE injection
+	// point shared by preflight and run (RQ-76 core contract).
+	PreflightEnvSetup string
 	// SchedulerParams are param names consumed by the HPC submit_template
 	// ({{param.*}}): exempt from the command renderer's unconsumed check
 	// and excluded from {{args}} injection.
@@ -304,12 +308,19 @@ func Build(ctx context.Context, cfg job.JobConfig, proj *project.Config, d Deps)
 	pf.Scope = d.PreflightScope
 	pf.ExcludeParams = schedParams
 	pf.FS = d.PreflightFS
+	// The probe checks THE SAME environment the task gets: merged env
+	// (project + overrides + RUNQ_ENV_FILE) and the target's env_setup.
+	pf.Env = env
+	pf.EnvSetup = d.PreflightEnvSetup
 	pfReport, err := pf.Run(ctx, proj, taskParams)
 	if err != nil {
 		return Plan{}, err
 	}
 	if err := pfReport.Err(); err != nil {
-		return Plan{}, err
+		// The structured report travels WITH the error (Codex r1 #6):
+		// a failed preview must still show which checks failed, not a
+		// bare error string.
+		return Plan{Preflight: pfReport}, err
 	}
 
 	jobID := d.JobID

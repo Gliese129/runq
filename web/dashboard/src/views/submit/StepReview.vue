@@ -194,6 +194,13 @@ onActivated(async () => {
   if (!config.caps.submit_preview) return
   previewLoading.value = true
   previewError.value = ''
+  // Every fetch starts from a clean slate (Codex r1 #6): stale HF
+  // suggestions / an "Added" badge from the PREVIOUS report next to this
+  // round's error can push a wrong command into the project.
+  previewText.value = ''
+  previewPreflight.value = null
+  setupCmdAdded.value = false
+  setupCmdSaving.value = false
   try {
     const cfg = buildJobConfig(state.projectName, state.note, state.rows, state.linkSets)
     if (state.jobName.trim()) cfg.name = state.jobName.trim()

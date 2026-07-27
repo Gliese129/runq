@@ -155,6 +155,7 @@ func (b *Backend) planDeps(skipPreflight bool) submitplan.Deps {
 		PreflightDisableLocal: b.Cfg.PreflightLocal != nil && !*b.Cfg.PreflightLocal,
 		PreflightScope:        fmt.Sprintf("on %s login node", b.Cfg.Name),
 		PreflightFS:           b.FS,
+		PreflightEnvSetup:     b.Cfg.EnvSetup,
 		SchedulerParams:       config.HPCTemplateParamRefs(b.Cfg.SubmitTemplate),
 	}
 }
@@ -245,7 +246,7 @@ func (b *Backend) Prepare(ctx context.Context, jobCfg job.JobConfig, proj *proje
 
 	// One-shot job setup (e.g. model pre-download on the login node).
 	// Runs before any DB row or cluster submission — failure leaves nothing.
-	if err := submitplan.RunSetup(ctx, proj, jobCfg); err != nil {
+	if err := submitplan.RunSetup(ctx, proj, jobCfg, b.FS, b.Cfg.EnvSetup); err != nil {
 		return "", nil, err
 	}
 

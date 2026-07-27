@@ -99,7 +99,7 @@ if HF_REFS:
 
         def probe_one(rid, rt):
             try:
-                api.repo_info(rid, repo_type=rt, timeout=5)
+                api.repo_info(rid, repo_type=rt, timeout=3)
                 return "reachable", ""
             except BaseException as e:
                 name = type(e).__name__

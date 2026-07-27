@@ -24,6 +24,27 @@ func (b *Backend) Preview(ctx context.Context, jobCfg job.JobConfig, proj *proje
 	deps.Paths = submitplan.Paths{WorkspaceRoot: "<workspace>", LogRoot: "<workspace>"}
 	plan, err := submitplan.Build(ctx, jobCfg, proj, deps)
 	if err != nil {
+		// A preflight failure is a RESULT for a dry-run, not an error
+		// (Codex r1 #6): return the structured report + readable text so
+		// the WebUI replaces last round's findings instead of keeping
+		// them next to a bare error string. Other Build errors (render,
+		// validation) still propagate.
+		if len(plan.Preflight.Results) > 0 && !plan.Preflight.OK() {
+			var s strings.Builder
+			s.WriteString("preflight failed — nothing would be submitted:\n\n")
+			for _, c := range plan.Preflight.Results {
+				mark := map[string]string{"passed": "✓", "failed": "✗", "warning": "!"}[c.Status]
+				if mark == "" {
+					mark = "-"
+				}
+				fmt.Fprintf(&s, "%s %-10s %s\n", mark, c.Name, c.Detail)
+				for _, rc := range c.Commands {
+					fmt.Fprintf(&s, "             $ %s\n", rc)
+				}
+			}
+			s.WriteString("\nFix the failed checks, or submit with --no-preflight.")
+			return s.String(), plan.Preflight, nil
+		}
 		return "", preflight.Report{}, err
 	}
 

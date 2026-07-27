@@ -726,7 +726,7 @@ func (b *LocalBackend) submitJob(ctx context.Context, jobCfg job.JobConfig, skip
 		return "", 0, err
 	}
 
-	if err := submitplan.RunSetup(ctx, proj, jobCfg); err != nil {
+	if err := submitplan.RunSetup(ctx, proj, jobCfg, nil, ""); err != nil {
 		return "", 0, err
 	}
 
