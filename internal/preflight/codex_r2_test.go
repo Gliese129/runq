@@ -7,8 +7,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gliese129/runq/internal/project"
+	"github.com/gliese129/runq/internal/rfs"
 )
 
 // Codex r2 #1a: `from pkg.helper import x` must verify the WHOLE dotted
@@ -147,23 +149,33 @@ func TestPython3OnlyHost(t *testing.T) {
 	t.Fatalf("no wandb result on python3-only host: %+v", results)
 }
 
-// Discovery honors the probe deadline (Codex r2 #1b): an
-// already-expired context must truncate the walk instead of reading on.
-func TestDiscoveryHonorsDeadline(t *testing.T) {
+// The single remaining Go-side read is ctx-bounded (Codex r3): a slow
+// transport read cannot hold preflight past its deadline — the caller
+// returns at the deadline while the read finishes in the background.
+func TestReadFileCtxDeadline(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "train.py"), []byte("import helper\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "x"), []byte("hi"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "helper.py"), []byte("import json\n"), 0o644); err != nil {
-		t.Fatal(err)
+	slow := slowFS{FS: rfs.NewLocalFS(), delay: 250 * time.Millisecond}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err := readFileCtx(ctx, slow, filepath.Join(dir, "x"))
+	if err == nil {
+		t.Fatal("deadline not enforced")
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // expired before discovery starts
-	var d discovery
-	p := Preflight{}
-	entry, _, _ := p.collectEntrySources(context.Background(), "python train.py", dir)
-	p.walkImportGraph(ctx, &d, dir, entry)
-	if !d.Truncated {
-		t.Fatalf("expired ctx did not truncate the walk: %+v", d)
+	if elapsed := time.Since(start); elapsed > 150*time.Millisecond {
+		t.Fatalf("readFileCtx held past deadline: %s", elapsed)
 	}
+}
+
+type slowFS struct {
+	rfs.FS
+	delay time.Duration
+}
+
+func (s slowFS) ReadFile(p string) ([]byte, error) {
+	time.Sleep(s.delay)
+	return s.FS.ReadFile(p)
 }

@@ -1,25 +1,26 @@
 package preflight
 
 import (
+	_ "embed"
 	"fmt"
 	"strconv"
 	"strings"
 )
 
-// The single-probe design (RQ-76 ②): instead of one `conda activate &&
-// python -c "import X"` round trip PER MODULE (the old shape — a dozen
-// serial SSH execs, each paying 1-3s of conda activation, routinely
-// blowing the dashboard's request timeout), preflight now generates ONE
-// python probe file, uploads it, and executes it in ONE shell:
-//
-//	[bash -n entry.sh] → activate env once → import every module →
-//	verify HF repos → wandb creds → extra_run contract → done
+// The single-probe design (RQ-76 ②): ONE generated python file, ONE
+// shell, ONE env activation. Since Codex r3 the probe also owns the
+// whole dependency analysis — see probe.py.tmpl for the rationale
+// (ast + CPython's own resolver instead of Go-side regexes) — which
+// has a second structural benefit: discovery reads files LOCALLY on
+// the target inside the probe process, so it sits under the same
+// process-group wall-clock kill as everything else. No more serial
+// remote Stat/ReadFile outside the timeout.
 //
 // The probe prints machine-readable marker lines; Go parses them back
-// into the existing four-state CheckResult grammar. Ordering inside the
-// probe is deliberate — cheap facts first — so a timeout still yields
-// partial results (whatever markers arrived are used; the rest report
-// as skipped, never failed: a timeout learns no fact).
+// into the four-state CheckResult grammar. Ordering inside the probe is
+// deliberate — env facts → import walk → wandb → HF — so a timeout
+// still yields partial results (whatever markers arrived are used; the
+// rest report as skipped, never failed: a timeout learns no fact).
 //
 // The probe runs in a NON-LOGIN, NON-INTERACTIVE shell (`sh -c` over
 // SSH) — the same shell class compute nodes give the task. That is a
@@ -30,59 +31,10 @@ import (
 // Fields are tab-separated: MARKER \t kind \t key \t status \t detail.
 const probeMarker = "##RUNQ_PF##"
 
-// buildProbeScript renders the python probe source. Module names and
-// repo ids were validated by the extraction regexes (`[\w.]` heads,
-// hfRepoIDRegex) — %q quoting makes them safe python string literals
-// regardless. Declared contract refs carry repo_type "any": the probe
-// tries the model namespace first, then dataset, and only reports
-// missing when both miss.
-//
-// Imports use importlib.util.find_spec, NOT import_module (user-aligned
-// r2): the real-world failure modes are "env didn't activate" and
-// "import root / layout is wrong", not "the verified env's package is
-// broken" — find_spec answers exactly resolvability, executes no module
-// code (so LOCAL modules are safely probed too), and skips the
-// multi-second torch import. sys.path is corrected to the TASK's shape:
-// cwd = working_dir, path[0] = the entry script's directory (that is
-// what `python script.py` does — and precisely where the two import
-// styles, project-root vs relative+package, diverge).
-func buildProbeScript(modules []string, refs []HFRef, wandb bool, scriptDir, workingDir string) string {
-	var b strings.Builder
-	b.WriteString(`import importlib.util, os, sys
+//go:embed probe.py.tmpl
+var probeTemplate string
 
-def emit(kind, key, status, detail=""):
-    detail = str(detail).replace("\t", " ").replace("\n", " ")
-    print("\t".join(["` + probeMarker + `", kind, key, status, detail]), flush=True)
-
-emit("env", "home", "info", os.path.expanduser("~"))
-emit("env", "prefix", "info", sys.prefix)
-
-try:
-    os.chdir(` + fmt.Sprintf("%q", workingDir) + `)
-except BaseException:
-    pass
-`)
-	if scriptDir != "" {
-		fmt.Fprintf(&b, "sys.path[0] = %q  # mirror `python script.py`: path[0] is the script's dir\n", scriptDir)
-	}
-	b.WriteString(`
-MODULES = [`)
-	for _, m := range modules {
-		fmt.Fprintf(&b, "%q, ", m)
-	}
-	b.WriteString(`]
-for m in MODULES:
-    try:
-        spec = importlib.util.find_spec(m)
-        if spec is not None:
-            emit("import", m, "ok")
-        else:
-            emit("import", m, "fail", "not resolvable on sys.path")
-    except BaseException as e:
-        emit("import", m, "fail", "%s: %s" % (type(e).__name__, e))
-`)
-	if wandb {
-		b.WriteString(`
+const wandbSection = `
 netrc = os.path.join(os.path.expanduser("~"), ".netrc")
 has_cred = bool(os.environ.get("WANDB_API_KEY"))
 if not has_cred:
@@ -92,70 +44,49 @@ if not has_cred:
     except BaseException:
         pass
 emit("wandb", "cred", "ok" if has_cred else "missing")
-`)
-	}
-	b.WriteString(`
-HF_REFS = [`)
-	for _, r := range refs {
-		fmt.Fprintf(&b, "(%q, %q), ", r.RepoID, r.RepoType)
-	}
-	b.WriteString(`]
-if HF_REFS:
-    hub = None
-    try:
-        import huggingface_hub as hub
-    except BaseException:
-        for rid, rt in HF_REFS:
-            emit("hf", rt + ":" + rid, "nohub")
-    if hub is not None:
-        # Resolution goes through huggingface_hub itself — the SAME cache
-        # lookup (HF_HOME / HF_HUB_CACHE) and the SAME token discovery the
-        # task will use at run time, so the verdict is reproducible.
-        cached = set()
-        try:
-            for repo in hub.scan_cache_dir().repos:
-                cached.add(repo.repo_type + ":" + repo.repo_id)
-        except BaseException:
-            pass
-        api = hub.HfApi()
+`
 
-        def probe_one(rid, rt):
-            try:
-                api.repo_info(rid, repo_type=rt, timeout=3)
-                return "reachable", ""
-            except BaseException as e:
-                name = type(e).__name__
-                first = (str(e).splitlines() or [""])[0]
-                if name == "RepositoryNotFoundError":
-                    return "missing", first or name
-                if name == "GatedRepoError":
-                    return "gated", first or name
-                return "unknown", name
-
-        for rid, rt in HF_REFS:
-            key = rt + ":" + rid
-            types = ["model", "dataset"] if rt == "any" else [rt]
-            if any((t + ":" + rid) in cached for t in types):
-                emit("hf", key, "cached")
-                continue
-            status, detail = "missing", ""
-            for t in types:
-                s, d = probe_one(rid, t)
-                if s != "missing":
-                    status, detail = s, d
-                    break
-                detail = d
-            emit("hf", key, status, detail)
-
-emit("done", "done", "ok")
-`)
-	return b.String()
+// pyq renders s as a python string literal. Go's %q escaping (\", \\,
+// \xNN, \uNNNN) is valid python string syntax.
+func pyq(s string) string {
+	return fmt.Sprintf("%q", s)
 }
 
-// probeImport is one module's verdict from the probe.
+// buildProbeScript instantiates probe.py.tmpl. entryMode is "script"
+// (entry = absolute .py path), "module" (entry = the -m dotted name) or
+// "" (no python entry: contract-only probe). budget bounds the
+// dependency walk INSIDE the probe (seconds); maxFiles caps scanned
+// project files. Contract refs carry repo_type "any" (model first,
+// then dataset).
+func buildProbeScript(entryMode, entry, workdir string, contract []HFRef, wandb bool, budget float64, maxFiles int) string {
+	var refs strings.Builder
+	refs.WriteString("[")
+	for _, r := range contract {
+		fmt.Fprintf(&refs, "(%s, %s), ", pyq(r.RepoID), pyq(r.RepoType))
+	}
+	refs.WriteString("]")
+	ws := ""
+	if wandb {
+		ws = wandbSection
+	}
+	return strings.NewReplacer(
+		"__MARK__", probeMarker,
+		"__WORKDIR__", pyq(workdir),
+		"__ENTRY_MODE__", pyq(entryMode),
+		"__ENTRY__", pyq(entry),
+		"__BUDGET__", fmt.Sprintf("%.1f", budget),
+		"__MAXFILES__", strconv.Itoa(maxFiles),
+		"__CONTRACT_REFS__", refs.String(),
+		"__WANDB_SECTION__", ws,
+	).Replace(probeTemplate)
+}
+
+// probeImport is one module's verdict: ok | fail | subwarn (an external
+// package's submodule that is not STATICALLY resolvable — may be
+// attached dynamically, so never a hard fail).
 type probeImport struct {
 	Module string
-	OK     bool
+	Status string
 	Detail string
 }
 
@@ -186,6 +117,16 @@ type probeOutcome struct {
 	Imports []probeImport
 	HF      []probeHF
 
+	// Scan facts self-reported by the probe's dependency walk.
+	ScanSeen      bool // the walk finished (its summary marker arrived)
+	ScanFiles     int
+	ScanTruncated bool
+
+	// HFTotal: how many refs the probe intended to check (discovered +
+	// contract) — lets Go detect a cut-short HF pass without knowing the
+	// discovered set in advance.
+	HFTotal int
+
 	// Wandb: "" (not checked) | "ok" | "missing".
 	Wandb string
 
@@ -203,11 +144,7 @@ type probeOutcome struct {
 // Non-marker noise (activation banners, warnings libraries print on
 // import) is ignored — except between the extra begin/end markers,
 // where it IS the custom check's output.
-func parseProbeOutput(out string, refs []HFRef) probeOutcome {
-	byKey := map[string]HFRef{}
-	for _, r := range refs {
-		byKey[r.RepoType+":"+r.RepoID] = r
-	}
+func parseProbeOutput(out string) probeOutcome {
 	res := probeOutcome{PyExit: -1, ShellSyntaxRC: -1, ExtraRC: -1}
 	inExtra := false
 	for _, line := range strings.Split(out, "\n") {
@@ -238,17 +175,29 @@ func parseProbeOutput(out string, refs []HFRef) probeOutcome {
 			}
 		case "import":
 			res.PythonRan = true
-			res.Imports = append(res.Imports, probeImport{Module: key, OK: status == "ok", Detail: detail})
+			res.Imports = append(res.Imports, probeImport{Module: key, Status: status, Detail: detail})
+		case "scan":
+			res.PythonRan = true
+			res.ScanSeen = true
+			if n, err := strconv.Atoi(status); err == nil {
+				res.ScanFiles = n
+			}
+			res.ScanTruncated = detail == "truncated"
 		case "wandb":
 			res.PythonRan = true
 			res.Wandb = status
+		case "hftotal":
+			res.PythonRan = true
+			if n, err := strconv.Atoi(status); err == nil {
+				res.HFTotal = n
+			}
 		case "hf":
 			res.PythonRan = true
-			ref, ok := byKey[key]
+			rt, rid, ok := strings.Cut(key, ":")
 			if !ok {
 				continue
 			}
-			res.HF = append(res.HF, probeHF{Ref: ref, Status: status, Detail: detail})
+			res.HF = append(res.HF, probeHF{Ref: HFRef{RepoID: rid, RepoType: rt}, Status: status, Detail: detail})
 		case "done":
 			res.PythonRan = true
 			res.Done = true

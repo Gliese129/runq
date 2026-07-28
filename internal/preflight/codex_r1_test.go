@@ -147,23 +147,25 @@ func TestProbeTimeoutIsWallClock(t *testing.T) {
 	}
 }
 
-// Source discovery units.
-func TestCollectEntrySources(t *testing.T) {
+// Entry detection units (the graph walk itself lives in the probe).
+func TestDetectEntry(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.WriteFile(dir+"/run.sh", []byte("python3 a.py\npython3 a.py\npython b.py --x\n"), 0o644); err != nil {
+	if err := os.WriteFile(dir+"/run.sh", []byte("python3 a.py --x\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	for _, f := range []string{"a.py", "b.py"} {
-		if err := os.WriteFile(dir+"/"+f, []byte("import os\n"), 0o644); err != nil {
-			t.Fatal(err)
-		}
+	if err := os.WriteFile(dir+"/a.py", []byte("import os\n"), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	sources, sh, err := (Preflight{}).collectEntrySources(context.Background(), "bash run.sh", dir)
-	if err != nil || sh == "" || len(sources) != 2 {
-		t.Fatalf("sh entry: sources=%d sh=%q err=%v", len(sources), sh, err)
+	e, err := (Preflight{}).detectEntry(context.Background(), "bash run.sh", dir)
+	if err != nil || e.Mode != "script" || !strings.HasSuffix(e.Val, "/a.py") || e.ShPath == "" {
+		t.Fatalf("sh entry: %+v err=%v", e, err)
 	}
-	sources, sh, err = (Preflight{}).collectEntrySources(context.Background(), "python3 a.py", dir)
-	if err != nil || sh != "" || len(sources) != 1 {
-		t.Fatalf("py entry: sources=%d sh=%q err=%v", len(sources), sh, err)
+	e, err = (Preflight{}).detectEntry(context.Background(), "python3 a.py", dir)
+	if err != nil || e.Mode != "script" || e.ShPath != "" {
+		t.Fatalf("py entry: %+v err=%v", e, err)
+	}
+	e, err = (Preflight{}).detectEntry(context.Background(), "python -m eval.eval --x 1", dir)
+	if err != nil || e.Mode != "module" || e.Val != "eval.eval" {
+		t.Fatalf("-m entry: %+v err=%v", e, err)
 	}
 }

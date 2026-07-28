@@ -64,7 +64,6 @@ func TestHFDownloadCommand(t *testing.T) {
 // ----------------------------------------------------------------------
 
 func TestParseProbeOutput(t *testing.T) {
-	refs := []HFRef{{RepoID: "org/m", RepoType: "model"}}
 	out := strings.Join([]string{
 		"conda activation banner noise",
 		"##RUNQ_PF##\tenv\thome\tinfo\t/home/alice",
@@ -74,14 +73,14 @@ func TestParseProbeOutput(t *testing.T) {
 		"##RUNQ_PF##\thf\tmodel:org/m\treachable\t",
 		"##RUNQ_PF##\tdone\tdone\tok\t",
 	}, "\n")
-	res := parseProbeOutput(out, refs)
+	res := parseProbeOutput(out)
 	if !res.PythonRan || !res.Done {
 		t.Fatalf("ran/done = %v/%v", res.PythonRan, res.Done)
 	}
 	if res.Home != "/home/alice" || res.Prefix != "/opt/conda/envs/ml" {
 		t.Fatalf("env facts: %q %q", res.Home, res.Prefix)
 	}
-	if len(res.Imports) != 2 || res.Imports[0].OK != true || res.Imports[1].OK != false {
+	if len(res.Imports) != 2 || res.Imports[0].Status != "ok" || res.Imports[1].Status != "fail" {
 		t.Fatalf("imports: %+v", res.Imports)
 	}
 	if !strings.Contains(res.Imports[1].Detail, "ModuleNotFoundError") {
@@ -93,7 +92,7 @@ func TestParseProbeOutput(t *testing.T) {
 }
 
 func TestParseProbeOutputEmpty(t *testing.T) {
-	res := parseProbeOutput("sh: conda: command not found\n", nil)
+	res := parseProbeOutput("sh: conda: command not found\n")
 	if res.PythonRan || res.Done {
 		t.Fatalf("noise must not count as a probe run: %+v", res)
 	}
@@ -196,17 +195,24 @@ func TestProbeActivationFailure(t *testing.T) {
 
 func TestImportsCheckCutShort(t *testing.T) {
 	pf := DefaultPreflight()
-	modules := []string{"a", "b", "c"}
-	res := probeOutcome{PythonRan: true, Imports: []probeImport{{Module: "a", OK: true}}}
-	r := pf.importsCheck(modules, res, true, pf.ProbeTimeout, nil, "")
-	if r.Status != "skipped" || !strings.Contains(r.Detail, "1/3") {
+	// Walk summary never arrived (probe cut short) -> skipped, not passed.
+	res := probeOutcome{PythonRan: true, Imports: []probeImport{{Module: "a", Status: "ok"}}}
+	r := pf.importsCheck(res, true, pf.ProbeTimeout)
+	if r.Status != "skipped" || !strings.Contains(r.Detail, "cut short") {
 		t.Fatalf("cut-short probe must skip, not pass: %+v", r)
 	}
 	// But a failure that DID arrive still blocks, cut short or not.
-	res.Imports = append(res.Imports, probeImport{Module: "b", OK: false, Detail: "boom"})
-	r = pf.importsCheck(modules, res, true, pf.ProbeTimeout, nil, "")
+	res.Imports = append(res.Imports, probeImport{Module: "b", Status: "fail", Detail: "boom"})
+	r = pf.importsCheck(res, true, pf.ProbeTimeout)
 	if r.Status != "failed" {
 		t.Fatalf("arrived failure must block: %+v", r)
+	}
+	// Self-reported truncation without failures -> skipped (unverified != verified).
+	res.Imports = res.Imports[:1]
+	res.ScanSeen, res.ScanTruncated, res.ScanFiles = true, true, 3
+	r = pf.importsCheck(res, false, pf.ProbeTimeout)
+	if r.Status != "skipped" || !strings.Contains(r.Detail, "truncated") {
+		t.Fatalf("truncated walk must skip: %+v", r)
 	}
 }
 
@@ -214,23 +220,23 @@ func TestHFCheckVerdicts(t *testing.T) {
 	pf := DefaultPreflight()
 	m := HFRef{RepoID: "org/m", RepoType: "model"}
 	d := HFRef{RepoID: "org/d", RepoType: "dataset"}
-	refs := []HFRef{m, d}
 
-	// missing → failed
-	res := probeOutcome{PythonRan: true, Done: true, HF: []probeHF{{Ref: m, Status: "missing", Detail: "404"}, {Ref: d, Status: "cached"}}}
-	if r := pf.hfCheck(refs, res, false, 0); r.Status != "failed" || !strings.Contains(r.Detail, "org/m") {
+	// missing -> failed
+	res := probeOutcome{PythonRan: true, Done: true, HFTotal: 2,
+		HF: []probeHF{{Ref: m, Status: "missing", Detail: "404"}, {Ref: d, Status: "cached"}}}
+	if r := pf.hfCheck(res, false, 0); r.Status != "failed" || !strings.Contains(r.Detail, "org/m") {
 		t.Fatalf("missing: %+v", r)
 	}
 
-	// gated → failed with token hint
+	// gated -> failed with token hint
 	res.HF[0] = probeHF{Ref: m, Status: "gated", Detail: "401"}
-	if r := pf.hfCheck(refs, res, false, 0); r.Status != "failed" || !strings.Contains(r.Detail, "token") {
+	if r := pf.hfCheck(res, false, 0); r.Status != "failed" || !strings.Contains(r.Detail, "token") {
 		t.Fatalf("gated: %+v", r)
 	}
 
-	// reachable-not-cached → warning + download commands
+	// reachable-not-cached -> warning + download commands
 	res.HF[0] = probeHF{Ref: m, Status: "reachable"}
-	r := pf.hfCheck(refs, res, false, 0)
+	r := pf.hfCheck(res, false, 0)
 	if r.Status != "warning" {
 		t.Fatalf("uncached: %+v", r)
 	}
@@ -238,21 +244,27 @@ func TestHFCheckVerdicts(t *testing.T) {
 		t.Fatalf("commands: %+v", r.Commands)
 	}
 
-	// all cached → passed
+	// all cached -> passed
 	res.HF[0] = probeHF{Ref: m, Status: "cached"}
-	if r := pf.hfCheck(refs, res, false, 0); r.Status != "passed" {
+	if r := pf.hfCheck(res, false, 0); r.Status != "passed" {
 		t.Fatalf("cached: %+v", r)
 	}
 
-	// no hub → skipped (cannot verify ≠ broken)
+	// cut short (fewer verdicts than announced) -> skipped
+	res.HF = res.HF[:1]
+	if r := pf.hfCheck(res, true, 0); r.Status != "skipped" {
+		t.Fatalf("cut short: %+v", r)
+	}
+
+	// no hub -> skipped (cannot verify != broken)
 	res.HF = []probeHF{{Ref: m, Status: "nohub"}, {Ref: d, Status: "nohub"}}
-	if r := pf.hfCheck(refs, res, false, 0); r.Status != "skipped" {
+	if r := pf.hfCheck(res, false, 0); r.Status != "skipped" {
 		t.Fatalf("nohub: %+v", r)
 	}
 
-	// network unknown → skipped
-	res.HF = []probeHF{{Ref: m, Status: "unknown", Detail: "ConnectionError"}, {Ref: d, Status: "unknown", Detail: "ConnectionError"}}
-	if r := pf.hfCheck(refs, res, false, 0); r.Status != "skipped" {
+	// network unknown -> skipped
+	res.HF = []probeHF{{Ref: m, Status: "unknown"}, {Ref: d, Status: "unknown"}}
+	if r := pf.hfCheck(res, false, 0); r.Status != "skipped" {
 		t.Fatalf("unknown: %+v", r)
 	}
 }
@@ -262,14 +274,15 @@ func TestHFCheckVerdicts(t *testing.T) {
 func TestProbeScriptCompiles(t *testing.T) {
 	interp := probePython(t)
 	for _, tc := range []struct {
-		modules []string
-		refs    []HFRef
+		mode  string
+		entry string
+		refs  []HFRef
 	}{
-		{nil, nil},
-		{[]string{"json", "os"}, nil},
-		{[]string{"json"}, []HFRef{{RepoID: "org/m", RepoType: "model"}}},
+		{"", "", nil},
+		{"script", "/wd/train.py", nil},
+		{"module", "pkg.mod", []HFRef{{RepoID: "org/m", RepoType: "any"}}},
 	} {
-		script := buildProbeScript(tc.modules, tc.refs, false, "", ".")
+		script := buildProbeScript(tc.mode, tc.entry, ".", tc.refs, false, 5, 64)
 		dir := t.TempDir()
 		path := dir + "/probe.py"
 		if err := os.WriteFile(path, []byte(script), 0o644); err != nil {

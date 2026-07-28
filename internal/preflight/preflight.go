@@ -357,10 +357,10 @@ func shellEntry(sampleCmd, workingDir string) string {
 func (p Preflight) probeChecks(ctx context.Context, proj *project.Config, sampleCmd string, report *Report) []CheckResult {
 	contract := proj.Preflight
 
-	// The probe deadline covers DISCOVERY too (Codex r2 #1): serial
-	// remote Stat/ReadFile during the graph walk spends the same budget
-	// as the probe itself; the walk checks the deadline between reads
-	// and truncates instead of overrunning.
+	// One deadline for EVERYTHING (Codex r2/r3): entry detection (the
+	// only Go-side read, ctx-bounded via readFileCtx) and the probe —
+	// whose in-process dependency walk reads project files LOCALLY on
+	// the target, under the same process-group wall-clock kill.
 	timeout := p.ProbeTimeout
 	if timeout <= 0 {
 		timeout = 20 * time.Second
@@ -368,97 +368,56 @@ func (p Preflight) probeChecks(ctx context.Context, proj *project.Config, sample
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	// Source discovery follows the code the task runs (Codex r1 #2):
-	// .py entry directly, .sh entry via the python invocations inside it,
-	// then the LOCAL import graph — dotted imports resolve the whole
-	// chain (r2 #1), missing chain links are static layout findings.
-	entrySources, shEntryPath, readErr := p.collectEntrySources(cctx, sampleCmd, proj.WorkingDir)
-	var disc discovery
-	if len(entrySources) > 0 {
-		disc.ScriptDir = path.Dir(entrySources[0].Path)
-	}
-	p.walkImportGraph(cctx, &disc, proj.WorkingDir, entrySources)
-	modules := append(append([]string{}, disc.External...), disc.LocalTop...)
-	localSet := map[string]bool{}
-	for _, m := range disc.LocalTop {
-		localSet[m] = true
-	}
-	scanned := disc.Scanned
+	entry, entryErr := p.detectEntry(cctx, sampleCmd, proj.WorkingDir)
 
+	importsOn := contract.ImportsOrDefault()
 	importsSkip := ""
 	switch {
-	case !contract.ImportsOrDefault():
-		importsSkip, modules = "disabled by preflight.imports", nil
-	case readErr != nil:
-		importsSkip = fmt.Sprintf("cannot read entry script: %v", readErr)
-	case len(entrySources) == 0 && shEntryPath != "":
+	case !importsOn:
+		importsSkip = "disabled by preflight.imports"
+	case entryErr != nil:
+		importsSkip = fmt.Sprintf("cannot read entry script: %v", entryErr)
+	case entry.Mode == "" && entry.ShPath != "":
 		importsSkip = "no python invocation found inside the shell entry — declare preflight.hf / preflight.extra_run in project.yaml to verify what it runs"
-	case len(entrySources) == 0:
+	case entry.Mode == "":
 		importsSkip = "no python entry — declare preflight.hf / preflight.extra_run in project.yaml to verify non-python workloads"
 	}
-
-	// Static layout findings are facts regardless of the probe: a dotted
-	// local import whose module file does not exist fails the same way
-	// python would (r2 #1 / user-aligned: layout is a disaster zone).
-	if len(disc.LayoutFindings) > 0 && contract.ImportsOrDefault() {
-		return []CheckResult{fold("imports", disc.LayoutFindings, p.Scope)}
+	probeEntry := entry
+	if !importsOn {
+		probeEntry.Mode, probeEntry.Val = "", "" // contract switch gates the walk
 	}
 
-	// HF refs: best-effort static extraction over EVERY scanned source
-	// (entry + shell-invoked scripts + local deps) + declared contract.
-	var refs []HFRef
-	seenHF := map[string]bool{}
-	for _, s := range scanned {
-		for _, r := range ExtractHFRefs(s.Src) {
-			key := r.RepoType + ":" + r.RepoID
-			if !seenHF[key] {
-				seenHF[key] = true
-				refs = append(refs, r)
-			}
-		}
+	// Contract HF refs expand {{param.X}} against the whole sweep here
+	// (needs taskParams); runtime-discovered refs are extracted by the
+	// probe itself over every file its walk reads.
+	contractRefs, hfContractFindings := expandContractHF(contract.HFRepos(), p.taskParams)
+	if len(hfContractFindings) > 0 {
+		// A contract that cannot be verified must not pass silently.
+		return []CheckResult{fold("huggingface", hfContractFindings, p.Scope)}
 	}
-	declaredRefs, hfContractFindings := expandContractHF(contract.HFRepos(), p.taskParams)
-	seenRef := map[string]bool{}
-	for _, r := range refs {
-		seenRef[r.RepoID] = true
-	}
-	for _, r := range declaredRefs {
-		if !seenRef[r.RepoID] {
-			refs = append(refs, r)
-		}
-	}
+	hfWanted := len(contractRefs) > 0 || probeEntry.Mode != ""
 
 	wandb := contract.WandbOrDefault()
 	extraRun := strings.TrimSpace(contract.ExtraRunOrEmpty())
-	shEntry := shEntryPath
+	shEntry := entry.ShPath
 	// Interpreter: the entry command's python token, else the one the
-	// shell script invokes. When NEITHER names one (pure-shell entry with
-	// contract checks), the probe picks at runtime — `command -v python3
-	// || command -v python` — instead of hardcoding "python", which does
-	// not exist on python3-only hosts (Codex r2 #4). A command that
-	// EXPLICITLY says `python` keeps it verbatim: probing what the task
-	// runs is the point, and if python is missing the task is broken too.
+	// shell script invokes. When NEITHER names one, the probe picks at
+	// runtime (`command -v python3 || command -v python`) — python3-only
+	// hosts have no `python` (Codex r2 #4). An EXPLICIT `python` in the
+	// command stays verbatim: probing what the task runs is the point.
 	interp, interpFound := pythonInterpreterIn(sampleCmd)
-	if !interpFound && shEntry != "" && len(entrySources) > 0 {
-		if shSrc, err := p.fsys().ReadFile(shEntry); err == nil {
-			interp, interpFound = pythonInterpreterIn(string(shSrc))
-		}
+	if !interpFound && entry.ShSrc != "" {
+		interp, interpFound = pythonInterpreterIn(entry.ShSrc)
 	}
 	interpGuessed := !interpFound
 	envDeclared := proj.PythonEnv.Type != ""
 
-	// Malformed contract entries block before any probe runs — a contract
-	// that cannot be verified must not pass silently.
-	if len(hfContractFindings) > 0 {
-		return []CheckResult{fold("huggingface", hfContractFindings, p.Scope)}
-	}
-
-	needPython := len(modules) > 0 || len(refs) > 0 || wandb || envDeclared
+	needPython := probeEntry.Mode != "" || len(contractRefs) > 0 || wandb || envDeclared
 	if !needPython && extraRun == "" && shEntry == "" {
 		return []CheckResult{{Name: "imports", Status: "skipped", Detail: importsSkip}}
 	}
 
-	out, code, runErr, writeErr := p.execProbe(cctx, proj, interp, interpGuessed, modules, refs, wandb, extraRun, shEntry, needPython, disc.ScriptDir)
+	out, code, runErr, writeErr := p.execProbe(cctx, proj, interp, interpGuessed, probeEntry, contractRefs, wandb, extraRun, needPython, timeout)
 	if writeErr != nil {
 		return []CheckResult{
 			{Name: "imports", Status: "skipped", Detail: fmt.Sprintf("cannot write probe file: %v", writeErr)},
@@ -466,7 +425,7 @@ func (p Preflight) probeChecks(ctx context.Context, proj *project.Config, sample
 		}
 	}
 
-	res := parseProbeOutput(out, refs)
+	res := parseProbeOutput(out)
 	report.HomeDir = res.Home
 	report.PythonPrefix = res.Prefix
 	timedOut := cctx.Err() != nil
@@ -490,7 +449,7 @@ func (p Preflight) probeChecks(ctx context.Context, proj *project.Config, sample
 			importsSkip = reason
 		}
 		results = append(results, CheckResult{Name: "imports", Status: "skipped", Detail: importsSkip})
-		if len(refs) > 0 {
+		if hfWanted {
 			results = append(results, CheckResult{Name: "huggingface", Status: "skipped", Detail: reason})
 		}
 		if extraRun != "" {
@@ -536,7 +495,7 @@ func (p Preflight) probeChecks(ctx context.Context, proj *project.Config, sample
 			importsSkip = "python did not run"
 		}
 		results = append(results, CheckResult{Name: "imports", Status: "skipped", Detail: importsSkip})
-		if len(refs) > 0 {
+		if hfWanted {
 			results = append(results, CheckResult{Name: "huggingface", Status: "skipped", Detail: "python did not run"})
 		}
 	} else {
@@ -544,10 +503,14 @@ func (p Preflight) probeChecks(ctx context.Context, proj *project.Config, sample
 		if importsSkip != "" {
 			results = append(results, CheckResult{Name: "imports", Status: "skipped", Detail: importsSkip})
 		} else {
-			results = append(results, p.importsCheck(modules, res, timedOut || disc.Truncated, timeout, localSet, disc.ScriptDir))
+			results = append(results, p.importsCheck(res, timedOut, timeout))
 		}
-		if len(refs) > 0 {
-			results = append(results, p.hfCheck(refs, res, timedOut, timeout))
+		switch {
+		case res.HFTotal > 0:
+			results = append(results, p.hfCheck(res, timedOut, timeout))
+		case hfWanted && !res.Done:
+			results = append(results, CheckResult{Name: "huggingface", Status: "skipped",
+				Detail: fmt.Sprintf("probe cut short before the HF check (timeout %s)", timeout)})
 		}
 		if wandb {
 			switch res.Wandb {
@@ -597,8 +560,14 @@ func (p Preflight) probeChecks(ctx context.Context, proj *project.Config, sample
 // Marker lines emitted by the shell itself (pyexit, shellsyntax, extra
 // begin/end) let the parser attribute failures precisely: activation vs
 // interpreter vs the user's custom check.
-func (p Preflight) execProbe(ctx context.Context, proj *project.Config, interp string, interpGuessed bool, modules []string, refs []HFRef, wandb bool, extraRun, shEntry string, needPython bool, scriptDir string) (out string, code int, runErr, writeErr error) {
-	script := buildProbeScript(modules, refs, wandb, scriptDir, proj.WorkingDir)
+func (p Preflight) execProbe(ctx context.Context, proj *project.Config, interp string, interpGuessed bool, entry entrySpec, contractRefs []HFRef, wandb bool, extraRun string, needPython bool, timeout time.Duration) (out string, code int, runErr, writeErr error) {
+	// The walk budget leaves headroom for env activation and the HF
+	// pass; a truncated walk reports itself (scan marker) — never fails.
+	budget := timeout.Seconds() - 8
+	if budget < 3 {
+		budget = 3
+	}
+	script := buildProbeScript(entry.Mode, entry.Val, proj.WorkingDir, contractRefs, wandb, budget, 64)
 	probePath := path.Join(proj.WorkingDir, fmt.Sprintf(".runq_preflight_%d.py", time.Now().UnixNano()))
 	if p.FS == nil {
 		writeErr = os.WriteFile(probePath, []byte(script), 0o644)
@@ -658,10 +627,10 @@ func (p Preflight) execProbe(ctx context.Context, proj *project.Config, interp s
 	)
 
 	var pre string
-	if shEntry != "" {
+	if entry.ShPath != "" {
 		// bash -n before activation: a syntax verdict must survive an
 		// activation failure. Output flattened to one marker line.
-		pre = `__pf_out=$(bash -n ` + shQuote(shEntry) + ` 2>&1); printf '` + probeMarker + `\tshellsyntax\tscript\t%s\t%s\n' "$?" "$(printf '%s' "$__pf_out" | tr '\n\t' '  ')"; `
+		pre = `__pf_out=$(bash -n ` + shQuote(entry.ShPath) + ` 2>&1); printf '` + probeMarker + `\tshellsyntax\tscript\t%s\t%s\n' "$?" "$(printf '%s' "$__pf_out" | tr '\n\t' '  ')"; `
 	}
 
 	// Group the wrapped chain so cleanup runs regardless of its verdict,
@@ -733,35 +702,50 @@ func (p Preflight) envCheck(proj *project.Config, prefix string) CheckResult {
 
 // importsCheck folds the probe's per-module verdicts. A cut-short probe
 // (timeout) skips rather than passes: unverified is not verified.
-func (p Preflight) importsCheck(modules []string, res probeOutcome, timedOut bool, timeout time.Duration, localSet map[string]bool, scriptDir string) CheckResult {
+func (p Preflight) importsCheck(res probeOutcome, timedOut bool, timeout time.Duration) CheckResult {
 	var findings []PreflightFinding
+	var subwarns []string
+	okCount := 0
 	for _, imp := range res.Imports {
-		if !imp.OK {
-			detail := fmt.Sprintf("cannot import %q in env: %s", imp.Module, imp.Detail)
-			if localSet[imp.Module] {
-				// A LOCAL module failing to resolve is a layout problem,
-				// not an env problem (user-aligned r2): sys.path[0] is
-				// the script's dir, and that is where the project-root
-				// vs relative import styles diverge.
-				detail = fmt.Sprintf("local module %q not resolvable in the task's sys.path (script dir %s) — check the import root / package layout", imp.Module, scriptDir)
-			}
-			findings = append(findings, PreflightFinding{Kind: "import", Detail: detail})
+		switch imp.Status {
+		case "fail":
+			findings = append(findings, PreflightFinding{
+				Kind:   "import",
+				Detail: fmt.Sprintf("%s: %s", imp.Module, imp.Detail),
+			})
+		case "subwarn":
+			subwarns = append(subwarns, imp.Module)
+		case "ok":
+			okCount++
 		}
 	}
+	// Failures that ARRIVED block, cut short or not.
 	if len(findings) > 0 {
 		return fold("imports", findings, p.Scope)
 	}
-	if len(res.Imports) < len(modules) {
-		detail := fmt.Sprintf("checked %d/%d modules, none failed", len(res.Imports), len(modules))
+	if !res.ScanSeen {
+		detail := "probe cut short before the import walk finished"
 		if timedOut {
 			detail = fmt.Sprintf("probe timed out after %s — %s", timeout, detail)
 		}
 		return CheckResult{Name: "imports", Status: "skipped", Detail: detail}
 	}
-	if len(modules) == 0 {
-		return CheckResult{Name: "imports", Status: "skipped", Detail: "no external imports to check"}
+	if res.ScanTruncated {
+		return CheckResult{Name: "imports", Status: "skipped",
+			Detail: fmt.Sprintf("dependency walk truncated (budget/file cap) — %d files scanned, none failed", res.ScanFiles)}
 	}
-	return fold("imports", nil, p.Scope)
+	if len(subwarns) > 0 {
+		return CheckResult{Name: "imports", Status: "warning", Detail: fmt.Sprintf(
+			"external submodules not statically resolvable (may be attached dynamically): %s", strings.Join(subwarns, ", "))}
+	}
+	if okCount == 0 && res.ScanFiles == 0 {
+		return CheckResult{Name: "imports", Status: "skipped", Detail: "nothing to scan"}
+	}
+	detail := fmt.Sprintf("%d file(s) scanned, %d import(s) resolvable", res.ScanFiles, okCount)
+	if p.Scope != "" {
+		detail += " (verified " + p.Scope + ")"
+	}
+	return CheckResult{Name: "imports", Status: "passed", Detail: detail}
 }
 
 // hfCheck folds the probe's Hub verdicts:
@@ -774,7 +758,7 @@ func (p Preflight) importsCheck(modules []string, res probeOutcome, timedOut boo
 //     down beforehand.
 //   - all cached → passed
 //   - huggingface_hub missing / network unknown / cut short → skipped
-func (p Preflight) hfCheck(refs []HFRef, res probeOutcome, timedOut bool, timeout time.Duration) CheckResult {
+func (p Preflight) hfCheck(res probeOutcome, timedOut bool, timeout time.Duration) CheckResult {
 	var findings []PreflightFinding
 	var uncached []HFRef
 	var unknown, nohub, cached int
@@ -805,7 +789,7 @@ func (p Preflight) hfCheck(refs []HFRef, res probeOutcome, timedOut bool, timeou
 	}
 	if nohub > 0 {
 		return CheckResult{Name: "huggingface", Status: "skipped",
-			Detail: fmt.Sprintf("huggingface_hub not installed in env — %d referenced repo(s) not verified", len(refs))}
+			Detail: fmt.Sprintf("huggingface_hub not installed in env — %d referenced repo(s) not verified", res.HFTotal)}
 	}
 	if len(uncached) > 0 {
 		cmds := make([]string, 0, len(uncached))
@@ -821,8 +805,8 @@ func (p Preflight) hfCheck(refs []HFRef, res probeOutcome, timedOut bool, timeou
 			Commands: cmds,
 		}
 	}
-	if len(res.HF) < len(refs) {
-		detail := fmt.Sprintf("checked %d/%d repo(s)", len(res.HF), len(refs))
+	if len(res.HF) < res.HFTotal {
+		detail := fmt.Sprintf("checked %d/%d repo(s)", len(res.HF), res.HFTotal)
 		if timedOut {
 			detail = fmt.Sprintf("probe timed out after %s — %s", timeout, detail)
 		}
