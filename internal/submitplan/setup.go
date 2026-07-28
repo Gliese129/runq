@@ -6,8 +6,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"sort"
-	"strings"
 
 	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/project"
@@ -24,10 +22,13 @@ import (
 // login node — after the target's env_setup, cwd = working_dir, project
 // environment exported. Running it on the daemon machine would download
 // a model into the wrong filesystem and leave the target's cache empty.
-// fsys == nil = local execution (local targets, tests). Output streams
-// to the caller's stdout/stderr — a model pre-download should be
-// watchable.
-func RunSetup(ctx context.Context, proj *project.Config, cfg job.JobConfig, fsys rfs.FS, envSetup string) error {
+// fsys == nil = local execution (local targets, tests). The prelude is
+// THE environment (Codex r2 #3): callers pass the plan's merged env +
+// target env_setup + resolved HOME through utils.EnvPrelude, so setup
+// sees exactly what preflight probed and run.sh will export — .env,
+// submit overrides and HOME included. Output streams to the caller's
+// stdout/stderr — a model pre-download should be watchable.
+func RunSetup(ctx context.Context, proj *project.Config, cfg job.JobConfig, fsys rfs.FS, prelude utils.EnvPrelude) error {
 	if proj == nil || proj.SetupCommand == "" {
 		return nil
 	}
@@ -37,12 +38,9 @@ func RunSetup(ctx context.Context, proj *project.Config, cfg job.JobConfig, fsys
 	}
 
 	if fsys == nil {
-		cmd := exec.CommandContext(ctx, "sh", "-c", rendered)
+		cmd := exec.CommandContext(ctx, "sh", "-c", prelude.Render()+rendered)
 		cmd.Dir = proj.WorkingDir
 		cmd.Env = os.Environ()
-		for k, v := range proj.Environment {
-			cmd.Env = append(cmd.Env, k+"="+v)
-		}
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 
@@ -53,26 +51,14 @@ func RunSetup(ctx context.Context, proj *project.Config, cfg job.JobConfig, fsys
 		return nil
 	}
 
-	// Remote: assemble the same environment run.sh would give the task —
-	// env_setup first (make conda/PATH visible in the non-interactive
-	// shell), then the project environment, then cd + command.
-	var script strings.Builder
-	if s := strings.TrimSpace(envSetup); s != "" {
-		script.WriteString(s + "\n")
-	}
-	keys := make([]string, 0, len(proj.Environment))
-	for k := range proj.Environment {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for _, k := range keys {
-		script.WriteString("export " + k + "=" + utils.ShellQuote(proj.Environment[k]) + "\n")
-	}
-	script.WriteString("cd " + utils.ShellQuote(proj.WorkingDir) + " || exit 1\n")
-	script.WriteString(rendered + "\n")
+	// Remote: same prelude as every other execution surface, then cd +
+	// command on the target's login node.
+	script := prelude.Render() +
+		"cd " + utils.ShellQuote(proj.WorkingDir) + " || exit 1\n" +
+		rendered + "\n"
 
 	fmt.Printf("setup (on target): %s\n", rendered)
-	stream, err := fsys.ExecStream(ctx, "sh", "-c", script.String())
+	stream, err := fsys.ExecStream(ctx, "sh", "-c", script)
 	if err != nil {
 		return fmt.Errorf("setup_command failed to start on target: %w", err)
 	}

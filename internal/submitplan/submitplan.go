@@ -66,6 +66,11 @@ type Plan struct {
 	// Preflight is the full three-state report (failed entries already
 	// aborted Build) — callers print it so skips stay visible.
 	Preflight preflight.Report
+	// Env is the merged JOB-level environment (project environment +
+	// override env + the reserved RUNQ_ENV_FILE) — what setup_command and
+	// the submit prelude export. Per-task rows add their RUNQ_* identity
+	// on top (PlannedTask.Env).
+	Env map[string]string
 }
 
 type PlannedTask struct {
@@ -391,6 +396,7 @@ func Build(ctx context.Context, cfg job.JobConfig, proj *project.Config, d Deps)
 		Tasks:       tasks,
 		SweepKeys:   sweepKeys,
 		Preflight:   pfReport,
+		Env:         cloneEnv(env),
 	}, nil
 }
 

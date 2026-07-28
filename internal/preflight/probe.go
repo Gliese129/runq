@@ -36,9 +36,19 @@ const probeMarker = "##RUNQ_PF##"
 // regardless. Declared contract refs carry repo_type "any": the probe
 // tries the model namespace first, then dataset, and only reports
 // missing when both miss.
-func buildProbeScript(modules []string, refs []HFRef, wandb bool) string {
+//
+// Imports use importlib.util.find_spec, NOT import_module (user-aligned
+// r2): the real-world failure modes are "env didn't activate" and
+// "import root / layout is wrong", not "the verified env's package is
+// broken" — find_spec answers exactly resolvability, executes no module
+// code (so LOCAL modules are safely probed too), and skips the
+// multi-second torch import. sys.path is corrected to the TASK's shape:
+// cwd = working_dir, path[0] = the entry script's directory (that is
+// what `python script.py` does — and precisely where the two import
+// styles, project-root vs relative+package, diverge).
+func buildProbeScript(modules []string, refs []HFRef, wandb bool, scriptDir, workingDir string) string {
 	var b strings.Builder
-	b.WriteString(`import importlib, os, sys
+	b.WriteString(`import importlib.util, os, sys
 
 def emit(kind, key, status, detail=""):
     detail = str(detail).replace("\t", " ").replace("\n", " ")
@@ -47,6 +57,15 @@ def emit(kind, key, status, detail=""):
 emit("env", "home", "info", os.path.expanduser("~"))
 emit("env", "prefix", "info", sys.prefix)
 
+try:
+    os.chdir(` + fmt.Sprintf("%q", workingDir) + `)
+except BaseException:
+    pass
+`)
+	if scriptDir != "" {
+		fmt.Fprintf(&b, "sys.path[0] = %q  # mirror `python script.py`: path[0] is the script's dir\n", scriptDir)
+	}
+	b.WriteString(`
 MODULES = [`)
 	for _, m := range modules {
 		fmt.Fprintf(&b, "%q, ", m)
@@ -54,8 +73,11 @@ MODULES = [`)
 	b.WriteString(`]
 for m in MODULES:
     try:
-        importlib.import_module(m)
-        emit("import", m, "ok")
+        spec = importlib.util.find_spec(m)
+        if spec is not None:
+            emit("import", m, "ok")
+        else:
+            emit("import", m, "fail", "not resolvable on sys.path")
     except BaseException as e:
         emit("import", m, "fail", "%s: %s" % (type(e).__name__, e))
 `)

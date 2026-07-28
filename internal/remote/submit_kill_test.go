@@ -16,6 +16,7 @@ import (
 	"github.com/gliese129/runq/internal/project"
 	"github.com/gliese129/runq/internal/store"
 	"github.com/gliese129/runq/internal/submitplan"
+	"github.com/gliese129/runq/internal/utils"
 )
 
 func newTestBackend(t *testing.T, cfg *config.TargetConfig, run func(ctx context.Context, command string) (string, error)) (*Backend, *project.Config, job.JobConfig) {
@@ -42,7 +43,7 @@ func TestSubmitUnparseableIDLeavesVisibleTask(t *testing.T) {
 
 	cfg := &config.TargetConfig{SubmitTemplate: "submit {{run_sh}}", SubmitIDRegex: `job ([0-9]+)`, KillTemplate: "cancel {{ext_id}}"}
 	runner := func(ctx context.Context, command string) (string, error) {
-		if strings.HasPrefix(command, "submit") {
+		if strings.HasPrefix(schedCmd(command), "submit") {
 			return "GARBAGE no id here", nil // sbatch "succeeded" but no parseable id
 		}
 		return "", nil
@@ -76,9 +77,9 @@ func TestKillFailureLeavesTaskUnkilled(t *testing.T) {
 	cfg := &config.TargetConfig{SubmitTemplate: "submit {{run_sh}}", SubmitIDRegex: `job ([0-9]+)`, KillTemplate: "cancel {{ext_id}}"}
 	runner := func(ctx context.Context, command string) (string, error) {
 		switch {
-		case strings.HasPrefix(command, "submit"):
+		case strings.HasPrefix(schedCmd(command), "submit"):
 			return "job 7", nil
-		case strings.HasPrefix(command, "cancel"):
+		case strings.HasPrefix(schedCmd(command), "cancel"):
 			return "scancel: connection error", fmt.Errorf("exit status 1")
 		}
 		return "", nil
@@ -107,7 +108,7 @@ func TestKillNoExternalIDRefuses(t *testing.T) {
 
 	cfg := &config.TargetConfig{SubmitTemplate: "submit {{run_sh}}", SubmitIDRegex: `job ([0-9]+)`, KillTemplate: "cancel {{ext_id}}"}
 	runner := func(ctx context.Context, command string) (string, error) {
-		if strings.HasPrefix(command, "submit") {
+		if strings.HasPrefix(schedCmd(command), "submit") {
 			return "GARBAGE", nil // id unparseable → task left pending, no external_id
 		}
 		return "", nil
@@ -145,7 +146,7 @@ func TestSubmitTemplateParamNamespace(t *testing.T) {
 	}
 	var captured string
 	runner := func(ctx context.Context, command string) (string, error) {
-		if strings.HasPrefix(command, "qsub") {
+		if strings.HasPrefix(schedCmd(command), "qsub") {
 			captured = command
 			return "job 42", nil
 		}
@@ -172,7 +173,9 @@ func TestSetupCommandFailureAborts(t *testing.T) {
 	cfg := &config.TargetConfig{SubmitTemplate: "submit {{run_sh}}", SubmitIDRegex: `job ([0-9]+)`, KillTemplate: "cancel {{ext_id}}"}
 	submitCalls := 0
 	runner := func(ctx context.Context, command string) (string, error) {
-		submitCalls++
+		if strings.HasPrefix(schedCmd(command), "submit") {
+			submitCalls++ // count CLUSTER submits, not env/HOME probes
+		}
 		return "job 1", nil
 	}
 	b, proj, jobCfg := newTestBackend(t, cfg, runner)
@@ -226,7 +229,7 @@ func TestSchedulerParamsExemptFromCommand(t *testing.T) {
 // form expands $K BEFORE the assignment takes effect (POSIX), so a
 // submit_template referencing $TSUBAME_GROUP would see the old/empty value.
 func TestSubmitEnvPrefixResolvesSameLineReferences(t *testing.T) {
-	prefix := submitEnvPrefix(map[string]string{"TSUBAME_GROUP": "tga-demo", "B": "2"})
+	prefix := utils.EnvPrelude{Env: map[string]string{"TSUBAME_GROUP": "tga-demo", "B": "2"}}.Render()
 	out, err := exec.Command("sh", "-c", prefix+`printf '%s/%s' "$TSUBAME_GROUP" "$B"`).CombinedOutput()
 	if err != nil {
 		t.Fatalf("sh: %v (%s)", err, out)
@@ -450,7 +453,7 @@ func TestListingStatusTemplateBatchesPerPass(t *testing.T) {
 	statCalls, submits := 0, 0
 	runner := func(ctx context.Context, command string) (string, error) {
 		switch {
-		case strings.HasPrefix(command, "qsub"):
+		case strings.HasPrefix(schedCmd(command), "qsub"):
 			submits++
 			return fmt.Sprintf("job %d", 100+submits), nil
 		case command == "qstat-all":

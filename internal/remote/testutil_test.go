@@ -2,6 +2,7 @@ package remote
 
 import (
 	"context"
+	"strings"
 
 	"github.com/gliese129/runq/internal/rfs"
 )
@@ -31,4 +32,14 @@ func (f *testFS) Exec(ctx context.Context, cmd string, args ...string) (stdout, 
 		return []byte(out), nil, 0, nil
 	}
 	return f.LocalFS.Exec(ctx, cmd, args...)
+}
+
+// schedCmd returns the LAST line of a command routed through the fake
+// runner — the scheduler invocation itself. Submit commands now carry
+// the shared env prelude (HOME/env_setup/exports, RQ-76 r2 #2) above
+// the actual qsub/sbatch line, and the runner should match on the
+// command, not the prelude.
+func schedCmd(command string) string {
+	lines := strings.Split(strings.TrimSpace(command), "\n")
+	return lines[len(lines)-1]
 }

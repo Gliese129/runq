@@ -9,6 +9,7 @@ import (
 	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/project"
 	"github.com/gliese129/runq/internal/rfs"
+	"github.com/gliese129/runq/internal/utils"
 )
 
 // Codex r1 #4: with a target FS, setup_command executes THROUGH it (on
@@ -24,7 +25,7 @@ func TestRunSetupOnTargetFS(t *testing.T) {
 		Environment:  map[string]string{"FROM_ENV": "pe"},
 	}
 	err := RunSetup(context.Background(), proj, job.JobConfig{Project: "p"},
-		rfs.NewLocalFS(), "export FROM_SETUP=es")
+		rfs.NewLocalFS(), utils.EnvPrelude{EnvSetup: "export FROM_SETUP=es", Env: proj.Environment})
 	if err != nil {
 		t.Fatalf("RunSetup: %v", err)
 	}
@@ -38,7 +39,7 @@ func TestRunSetupOnTargetFS(t *testing.T) {
 
 	// Non-zero exit must abort with an error.
 	proj.SetupCommand = "false"
-	if err := RunSetup(context.Background(), proj, job.JobConfig{Project: "p"}, rfs.NewLocalFS(), ""); err == nil {
+	if err := RunSetup(context.Background(), proj, job.JobConfig{Project: "p"}, rfs.NewLocalFS(), utils.EnvPrelude{}); err == nil {
 		t.Fatal("failing setup passed silently")
 	} else if !strings.Contains(err.Error(), "setup_command") {
 		t.Fatalf("error lost context: %v", err)

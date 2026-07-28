@@ -8,7 +8,6 @@ import (
 	"os/exec"
 	"path"
 	"regexp"
-	"sort"
 	"strings"
 	"time"
 
@@ -358,11 +357,33 @@ func shellEntry(sampleCmd, workingDir string) string {
 func (p Preflight) probeChecks(ctx context.Context, proj *project.Config, sampleCmd string, report *Report) []CheckResult {
 	contract := proj.Preflight
 
+	// The probe deadline covers DISCOVERY too (Codex r2 #1): serial
+	// remote Stat/ReadFile during the graph walk spends the same budget
+	// as the probe itself; the walk checks the deadline between reads
+	// and truncates instead of overrunning.
+	timeout := p.ProbeTimeout
+	if timeout <= 0 {
+		timeout = 20 * time.Second
+	}
+	cctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
 	// Source discovery follows the code the task runs (Codex r1 #2):
 	// .py entry directly, .sh entry via the python invocations inside it,
-	// then the LOCAL import graph (train → helper → third-party).
-	entrySources, shEntryPath, readErr := p.collectEntrySources(sampleCmd, proj.WorkingDir)
-	modules, scanned := p.walkImportGraph(entrySources, proj.WorkingDir)
+	// then the LOCAL import graph — dotted imports resolve the whole
+	// chain (r2 #1), missing chain links are static layout findings.
+	entrySources, shEntryPath, readErr := p.collectEntrySources(cctx, sampleCmd, proj.WorkingDir)
+	var disc discovery
+	if len(entrySources) > 0 {
+		disc.ScriptDir = path.Dir(entrySources[0].Path)
+	}
+	p.walkImportGraph(cctx, &disc, proj.WorkingDir, entrySources)
+	modules := append(append([]string{}, disc.External...), disc.LocalTop...)
+	localSet := map[string]bool{}
+	for _, m := range disc.LocalTop {
+		localSet[m] = true
+	}
+	scanned := disc.Scanned
 
 	importsSkip := ""
 	switch {
@@ -374,6 +395,13 @@ func (p Preflight) probeChecks(ctx context.Context, proj *project.Config, sample
 		importsSkip = "no python invocation found inside the shell entry — declare preflight.hf / preflight.extra_run in project.yaml to verify what it runs"
 	case len(entrySources) == 0:
 		importsSkip = "no python entry — declare preflight.hf / preflight.extra_run in project.yaml to verify non-python workloads"
+	}
+
+	// Static layout findings are facts regardless of the probe: a dotted
+	// local import whose module file does not exist fails the same way
+	// python would (r2 #1 / user-aligned: layout is a disaster zone).
+	if len(disc.LayoutFindings) > 0 && contract.ImportsOrDefault() {
+		return []CheckResult{fold("imports", disc.LayoutFindings, p.Scope)}
 	}
 
 	// HF refs: best-effort static extraction over EVERY scanned source
@@ -404,13 +432,19 @@ func (p Preflight) probeChecks(ctx context.Context, proj *project.Config, sample
 	extraRun := strings.TrimSpace(contract.ExtraRunOrEmpty())
 	shEntry := shEntryPath
 	// Interpreter: the entry command's python token, else the one the
-	// shell script invokes, else plain "python".
-	interp := pythonInterpreter(sampleCmd)
-	if interp == "python" && shEntry != "" && len(entrySources) > 0 {
+	// shell script invokes. When NEITHER names one (pure-shell entry with
+	// contract checks), the probe picks at runtime — `command -v python3
+	// || command -v python` — instead of hardcoding "python", which does
+	// not exist on python3-only hosts (Codex r2 #4). A command that
+	// EXPLICITLY says `python` keeps it verbatim: probing what the task
+	// runs is the point, and if python is missing the task is broken too.
+	interp, interpFound := pythonInterpreterIn(sampleCmd)
+	if !interpFound && shEntry != "" && len(entrySources) > 0 {
 		if shSrc, err := p.fsys().ReadFile(shEntry); err == nil {
-			interp = pythonInterpreter(string(shSrc))
+			interp, interpFound = pythonInterpreterIn(string(shSrc))
 		}
 	}
+	interpGuessed := !interpFound
 	envDeclared := proj.PythonEnv.Type != ""
 
 	// Malformed contract entries block before any probe runs — a contract
@@ -424,14 +458,7 @@ func (p Preflight) probeChecks(ctx context.Context, proj *project.Config, sample
 		return []CheckResult{{Name: "imports", Status: "skipped", Detail: importsSkip}}
 	}
 
-	timeout := p.ProbeTimeout
-	if timeout <= 0 {
-		timeout = 30 * time.Second
-	}
-	cctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	out, code, runErr, writeErr := p.execProbe(cctx, proj, interp, modules, refs, wandb, extraRun, shEntry, needPython)
+	out, code, runErr, writeErr := p.execProbe(cctx, proj, interp, interpGuessed, modules, refs, wandb, extraRun, shEntry, needPython, disc.ScriptDir)
 	if writeErr != nil {
 		return []CheckResult{
 			{Name: "imports", Status: "skipped", Detail: fmt.Sprintf("cannot write probe file: %v", writeErr)},
@@ -517,7 +544,7 @@ func (p Preflight) probeChecks(ctx context.Context, proj *project.Config, sample
 		if importsSkip != "" {
 			results = append(results, CheckResult{Name: "imports", Status: "skipped", Detail: importsSkip})
 		} else {
-			results = append(results, p.importsCheck(modules, res, timedOut, timeout))
+			results = append(results, p.importsCheck(modules, res, timedOut || disc.Truncated, timeout, localSet, disc.ScriptDir))
 		}
 		if len(refs) > 0 {
 			results = append(results, p.hfCheck(refs, res, timedOut, timeout))
@@ -563,14 +590,15 @@ func (p Preflight) probeChecks(ctx context.Context, proj *project.Config, sample
 // resolution matches the task's world) and runs ONE shell:
 //
 //	[bash -n entry.sh]                      — outside the env (parser only)
+//	env prelude (SAME as run.sh/setup/submit, via utils.EnvPrelude)
 //	activate env → python probe → extra_run — one activation for everything
 //	rm probe
 //
 // Marker lines emitted by the shell itself (pyexit, shellsyntax, extra
 // begin/end) let the parser attribute failures precisely: activation vs
 // interpreter vs the user's custom check.
-func (p Preflight) execProbe(ctx context.Context, proj *project.Config, interp string, modules []string, refs []HFRef, wandb bool, extraRun, shEntry string, needPython bool) (out string, code int, runErr, writeErr error) {
-	script := buildProbeScript(modules, refs, wandb)
+func (p Preflight) execProbe(ctx context.Context, proj *project.Config, interp string, interpGuessed bool, modules []string, refs []HFRef, wandb bool, extraRun, shEntry string, needPython bool, scriptDir string) (out string, code int, runErr, writeErr error) {
+	script := buildProbeScript(modules, refs, wandb, scriptDir, proj.WorkingDir)
 	probePath := path.Join(proj.WorkingDir, fmt.Sprintf(".runq_preflight_%d.py", time.Now().UnixNano()))
 	if p.FS == nil {
 		writeErr = os.WriteFile(probePath, []byte(script), 0o644)
@@ -581,30 +609,30 @@ func (p Preflight) execProbe(ctx context.Context, proj *project.Config, interp s
 		return "", 0, nil, writeErr
 	}
 
-	// SAME ENVIRONMENT AS THE TASK (Codex r1 #3): the probe mirrors
-	// run.sh's environment assembly — target env_setup, the ambient .env
-	// file, then the project/override env exports (which must win). A
-	// probe that checks a DIFFERENT environment than the task runs in
-	// produces false verdicts (wandb creds exported by run.sh, reported
-	// missing by preflight).
-	var envPrefix strings.Builder
-	if setup := strings.TrimSpace(p.EnvSetup); setup != "" {
-		envPrefix.WriteString(setup + "\n")
-	}
-	if envFile := p.Env["RUNQ_ENV_FILE"]; envFile != "" {
-		q := shQuote(envFile)
-		envPrefix.WriteString("if [ -f " + q + " ]; then set -a; . " + q + "; set +a; fi\n")
-	}
-	for _, k := range sortedEnvKeys(p.Env) {
-		if k == "RUNQ_ENV_FILE" {
-			continue
-		}
-		envPrefix.WriteString("export " + k + "=" + shQuote(p.Env[k]) + "\n")
+	// SAME ENVIRONMENT AS THE TASK (Codex r1 #3 / r2 #2): rendered by
+	// utils.EnvPrelude — the one injection point shared with run.sh,
+	// setup_command and the submit command. A probe that checks a
+	// DIFFERENT environment than the task runs in produces false
+	// verdicts (wandb creds exported by run.sh, reported missing here).
+	envPrefix := utils.EnvPrelude{
+		EnvSetup: p.EnvSetup,
+		EnvFile:  p.Env["RUNQ_ENV_FILE"],
+		Env:      p.Env,
+	}.Render()
+
+	// Interpreter: verbatim when the command names one; otherwise pick at
+	// runtime AFTER env activation (conda may provide it) — python3-only
+	// hosts have no `python` (Codex r2 #4).
+	invoke := interp
+	var interpPick string
+	if interpGuessed {
+		interpPick = `RUNQ_PY=$(command -v python3 2>/dev/null || command -v python 2>/dev/null || echo python); `
+		invoke = `"$RUNQ_PY"`
 	}
 
 	// Inner chain: python probe (+ its exit marker), then the extra_run
 	// contract bracketed by markers — all inside ONE env activation.
-	inner := interp + " " + shQuote(probePath) + `; printf '` + probeMarker + `\tpyexit\t-\t%s\n' "$?"`
+	inner := interpPick + invoke + " " + shQuote(probePath) + `; printf '` + probeMarker + `\tpyexit\t-\t%s\n' "$?"`
 	if extraRun != "" {
 		inner += `; printf '` + probeMarker + `\textra\tbegin\t0\n'; { ` + extraRun + `
 } ; printf '` + probeMarker + `\textra\tend\t%s\n' "$?"`
@@ -639,7 +667,7 @@ func (p Preflight) execProbe(ctx context.Context, proj *project.Config, interp s
 	// Group the wrapped chain so cleanup runs regardless of its verdict,
 	// while the probe's own exit code is preserved.
 	full := fmt.Sprintf("%s%s{ %s ; }; rc=$?; rm -f %s; exit $rc",
-		pre, envPrefix.String(), wrapped, shQuote(probePath))
+		pre, envPrefix, wrapped, shQuote(probePath))
 	out, code, runErr = p.runShell(ctx, full)
 	if ctx.Err() != nil {
 		// The shell was killed before its own `rm -f` could run — clean
@@ -659,16 +687,6 @@ func (p Preflight) removeProbe(probePath string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_, _, _, _ = p.FS.Exec(ctx, "rm", "-f", probePath)
-}
-
-// sortedEnvKeys returns map keys sorted for deterministic script output.
-func sortedEnvKeys(m map[string]string) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
 }
 
 // envCheck verifies the resolved sys.prefix against the declared env.
@@ -715,14 +733,19 @@ func (p Preflight) envCheck(proj *project.Config, prefix string) CheckResult {
 
 // importsCheck folds the probe's per-module verdicts. A cut-short probe
 // (timeout) skips rather than passes: unverified is not verified.
-func (p Preflight) importsCheck(modules []string, res probeOutcome, timedOut bool, timeout time.Duration) CheckResult {
+func (p Preflight) importsCheck(modules []string, res probeOutcome, timedOut bool, timeout time.Duration, localSet map[string]bool, scriptDir string) CheckResult {
 	var findings []PreflightFinding
 	for _, imp := range res.Imports {
 		if !imp.OK {
-			findings = append(findings, PreflightFinding{
-				Kind:   "import",
-				Detail: fmt.Sprintf("cannot import %q in env: %s", imp.Module, imp.Detail),
-			})
+			detail := fmt.Sprintf("cannot import %q in env: %s", imp.Module, imp.Detail)
+			if localSet[imp.Module] {
+				// A LOCAL module failing to resolve is a layout problem,
+				// not an env problem (user-aligned r2): sys.path[0] is
+				// the script's dir, and that is where the project-root
+				// vs relative import styles diverge.
+				detail = fmt.Sprintf("local module %q not resolvable in the task's sys.path (script dir %s) — check the import root / package layout", imp.Module, scriptDir)
+			}
+			findings = append(findings, PreflightFinding{Kind: "import", Detail: detail})
 		}
 	}
 	if len(findings) > 0 {
@@ -1027,38 +1050,48 @@ func (p Preflight) extractImports(sampleCmd, workingDir string) (string, []strin
 	if scriptPath == "" || err != nil {
 		return scriptPath, nil, err
 	}
-	return scriptPath, parseImports(src), nil
+	var heads []string
+	seen := map[string]bool{}
+	for _, dotted := range parseImports(src) {
+		h := topLevelModule(dotted)
+		if !seen[h] {
+			seen[h] = true
+			heads = append(heads, h)
+		}
+	}
+	return scriptPath, heads, nil
 }
 
-// parseImports extracts top-level module heads from python source.
+// parseImports extracts top-level imported module paths from python
+// source, KEEPING dots (`from pkg.helper import x` yields "pkg.helper")
+// — the graph walk needs the full chain to verify layout (r2 #1);
+// callers that only care about the pip-installable unit take the head
+// via topLevelModule. Relative imports (`from . import x`) are skipped:
+// they cannot appear in a directly-executed script.
 func parseImports(src []byte) []string {
 	var names []string
 	seen := map[string]bool{}
+	add := func(raw string) {
+		raw = strings.TrimSpace(raw)
+		if i := strings.Index(raw, " as "); i >= 0 {
+			raw = raw[:i]
+		}
+		raw = strings.TrimSpace(raw)
+		if raw == "" || strings.HasPrefix(raw, ".") {
+			return
+		}
+		if !seen[raw] {
+			seen[raw] = true
+			names = append(names, raw)
+		}
+	}
 	for _, m := range topLevelImportRegex.FindAllStringSubmatch(string(src), -1) {
 		if m[1] != "" {
-			// `from X import ...`
-			head := topLevelModule(m[1])
-			if !seen[head] {
-				seen[head] = true
-				names = append(names, head)
-			}
+			add(m[1]) // `from X.Y import ...`
 			continue
 		}
-		// `import X, Y, Z`
-		for _, raw := range strings.Split(m[2], ",") {
-			raw = strings.TrimSpace(raw)
-			if raw == "" {
-				continue
-			}
-			// Strip `as Y` alias.
-			if i := strings.Index(raw, " as "); i >= 0 {
-				raw = raw[:i]
-			}
-			head := topLevelModule(raw)
-			if !seen[head] {
-				seen[head] = true
-				names = append(names, head)
-			}
+		for _, raw := range strings.Split(m[2], ",") { // `import X, Y`
+			add(raw)
 		}
 	}
 	return names
@@ -1081,10 +1114,18 @@ var pythonInterpreterRegex = regexp.MustCompile(`\b(python[\d.]*)\b`)
 // pythonInterpreter returns the interpreter the sample command actually
 // invokes, falling back to "python" when the command doesn't mention one.
 func pythonInterpreter(sampleCmd string) string {
-	if m := pythonInterpreterRegex.FindStringSubmatch(sampleCmd); len(m) > 1 {
-		return m[1]
+	interp, _ := pythonInterpreterIn(sampleCmd)
+	return interp
+}
+
+// pythonInterpreterIn additionally reports whether the text actually
+// NAMED an interpreter — a guessed fallback lets the probe pick python3
+// vs python at runtime instead of hardcoding one (Codex r2 #4).
+func pythonInterpreterIn(text string) (string, bool) {
+	if m := pythonInterpreterRegex.FindStringSubmatch(text); len(m) > 1 {
+		return m[1], true
 	}
-	return "python"
+	return "python", false
 }
 
 // lastLine returns the last non-empty line of a multi-line string,

@@ -198,13 +198,13 @@ func TestImportsCheckCutShort(t *testing.T) {
 	pf := DefaultPreflight()
 	modules := []string{"a", "b", "c"}
 	res := probeOutcome{PythonRan: true, Imports: []probeImport{{Module: "a", OK: true}}}
-	r := pf.importsCheck(modules, res, true, pf.ProbeTimeout)
+	r := pf.importsCheck(modules, res, true, pf.ProbeTimeout, nil, "")
 	if r.Status != "skipped" || !strings.Contains(r.Detail, "1/3") {
 		t.Fatalf("cut-short probe must skip, not pass: %+v", r)
 	}
 	// But a failure that DID arrive still blocks, cut short or not.
 	res.Imports = append(res.Imports, probeImport{Module: "b", OK: false, Detail: "boom"})
-	r = pf.importsCheck(modules, res, true, pf.ProbeTimeout)
+	r = pf.importsCheck(modules, res, true, pf.ProbeTimeout, nil, "")
 	if r.Status != "failed" {
 		t.Fatalf("arrived failure must block: %+v", r)
 	}
@@ -269,7 +269,7 @@ func TestProbeScriptCompiles(t *testing.T) {
 		{[]string{"json", "os"}, nil},
 		{[]string{"json"}, []HFRef{{RepoID: "org/m", RepoType: "model"}}},
 	} {
-		script := buildProbeScript(tc.modules, tc.refs, false)
+		script := buildProbeScript(tc.modules, tc.refs, false, "", ".")
 		dir := t.TempDir()
 		path := dir + "/probe.py"
 		if err := os.WriteFile(path, []byte(script), 0o644); err != nil {

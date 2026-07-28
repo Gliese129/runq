@@ -158,11 +158,11 @@ func TestCollectEntrySources(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	sources, sh, err := (Preflight{}).collectEntrySources("bash run.sh", dir)
+	sources, sh, err := (Preflight{}).collectEntrySources(context.Background(), "bash run.sh", dir)
 	if err != nil || sh == "" || len(sources) != 2 {
 		t.Fatalf("sh entry: sources=%d sh=%q err=%v", len(sources), sh, err)
 	}
-	sources, sh, err = (Preflight{}).collectEntrySources("python3 a.py", dir)
+	sources, sh, err = (Preflight{}).collectEntrySources(context.Background(), "python3 a.py", dir)
 	if err != nil || sh != "" || len(sources) != 1 {
 		t.Fatalf("py entry: sources=%d sh=%q err=%v", len(sources), sh, err)
 	}
