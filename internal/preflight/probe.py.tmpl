@@ -184,12 +184,16 @@ def handle_module_ref(dotted, level, pkg, fpath):
         emit("import", absname, "fail", "not resolvable on sys.path (referenced in %s)%s" % (rel(fpath), hint))
         return absname
     if failed:
+        # `import a.b` / `from a.b import x` IMPORT the module a.b —
+        # a missing chain link is a guaranteed ModuleNotFoundError
+        # (PEP 562 __getattr__ rescues attribute access, not import
+        # statements). Certain for locals and externals alike.
         if is_local(specs[-1]):
             emit("import", failed, "fail",
                  "submodule not found under its package (referenced in %s) - check the package layout" % rel(fpath))
         else:
-            # Externals may attach submodules dynamically: never a hard fail.
-            emit("import", failed, "subwarn", "submodule not statically resolvable")
+            emit("import", failed, "fail",
+                 "parent package resolves but %s does not - python raises ModuleNotFoundError (referenced in %s)" % (failed, rel(fpath)))
         enqueue_spec_chain(absname, specs)
         return absname
     emit("import", absname, "ok")
@@ -214,16 +218,21 @@ def guarded(stmt):
     """try/except around imports = the code handles absence itself."""
     return isinstance(stmt, ast.Try)
 
+# Entry location is DOCTRINE, not detection (user ruling r4): paths
+# resolve from working_dir, period. runq does not follow `cd` — shell
+# is not statically analyzable, and a wrong guess would block a legal
+# task. An entry we cannot locate is emitted as entrymiss (folded to
+# skipped + guidance), NEVER as a failure.
 if ENTRY_MODE == "script":
     p = os.path.abspath(ENTRY)
     if os.path.isfile(p):
         queue.append((p, ""))
     else:
-        emit("import", ENTRY, "fail", "entry script not found: " + ENTRY)
+        emit("entrymiss", "script", "miss", rel(p))
 elif ENTRY_MODE == "module":
     specs, failed = resolve_chain(ENTRY)
     if failed or specs is None:
-        emit("import", failed or ENTRY, "fail", "entry module not resolvable (python -m)")
+        emit("entrymiss", "module", "miss", ENTRY)
     else:
         spec = specs[-1]
         seen_mods.add(ENTRY)
@@ -233,7 +242,7 @@ elif ENTRY_MODE == "module":
             if f:
                 queue.append((f, ENTRY))
             else:
-                emit("import", ENTRY + ".__main__", "fail", "python -m %s: no __main__ module" % ENTRY)
+                emit("entrymiss", "module", "miss", ENTRY + ".__main__")
         else:
             f = spec_py_file(spec)
             if f:

@@ -2,6 +2,7 @@ package preflight
 
 import (
 	"context"
+	"os"
 	"path"
 	"regexp"
 	"strings"
@@ -19,6 +20,19 @@ import (
 
 // moduleEntryRegex catches `python -m pkg.mod` invocations.
 var moduleEntryRegex = regexp.MustCompile(`(?:^|\s)python[\w.]*\s+(?:-[^m]\S*\s+)*-m\s+([A-Za-z_][\w.]*)`)
+
+// writeFileCtx is readFileCtx's twin for probe uploads: a slow SFTP
+// write must not hold preflight past its deadline either (Codex r4).
+func writeFileCtx(ctx context.Context, fsys rfs.FS, p string, data []byte, perm os.FileMode) error {
+	ch := make(chan error, 1)
+	go func() { ch <- fsys.WriteFile(p, data, perm) }()
+	select {
+	case err := <-ch:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
 
 // readFileCtx bounds fsys.ReadFile with ctx: the underlying transport
 // has no cancellation, so the read continues in the background — but

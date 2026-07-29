@@ -569,12 +569,14 @@ func (p Preflight) execProbe(ctx context.Context, proj *project.Config, interp s
 	}
 	script := buildProbeScript(entry.Mode, entry.Val, proj.WorkingDir, contractRefs, wandb, budget, 64)
 	probePath := path.Join(proj.WorkingDir, fmt.Sprintf(".runq_preflight_%d.py", time.Now().UnixNano()))
-	if p.FS == nil {
-		writeErr = os.WriteFile(probePath, []byte(script), 0o644)
-	} else {
-		writeErr = p.FS.WriteFile(probePath, []byte(script), 0o644)
-	}
+	// ctx-bounded like every other transport call (Codex r4): a slow
+	// SFTP write returns the caller at the deadline; the write finishes
+	// in the background and best-effort cleanup handles the file.
+	writeErr = writeFileCtx(ctx, p.fsys(), probePath, []byte(script), 0o644)
 	if writeErr != nil {
+		if ctx.Err() != nil {
+			p.removeProbe(probePath)
+		}
 		return "", 0, nil, writeErr
 	}
 
@@ -704,7 +706,6 @@ func (p Preflight) envCheck(proj *project.Config, prefix string) CheckResult {
 // (timeout) skips rather than passes: unverified is not verified.
 func (p Preflight) importsCheck(res probeOutcome, timedOut bool, timeout time.Duration) CheckResult {
 	var findings []PreflightFinding
-	var subwarns []string
 	okCount := 0
 	for _, imp := range res.Imports {
 		switch imp.Status {
@@ -713,8 +714,6 @@ func (p Preflight) importsCheck(res probeOutcome, timedOut bool, timeout time.Du
 				Kind:   "import",
 				Detail: fmt.Sprintf("%s: %s", imp.Module, imp.Detail),
 			})
-		case "subwarn":
-			subwarns = append(subwarns, imp.Module)
 		case "ok":
 			okCount++
 		}
@@ -734,9 +733,13 @@ func (p Preflight) importsCheck(res probeOutcome, timedOut bool, timeout time.Du
 		return CheckResult{Name: "imports", Status: "skipped",
 			Detail: fmt.Sprintf("dependency walk truncated (budget/file cap) — %d files scanned, none failed", res.ScanFiles)}
 	}
-	if len(subwarns) > 0 {
-		return CheckResult{Name: "imports", Status: "warning", Detail: fmt.Sprintf(
-			"external submodules not statically resolvable (may be attached dynamically): %s", strings.Join(subwarns, ", "))}
+	if res.EntryMiss != "" {
+		// Doctrine (user ruling r4): paths resolve from working_dir and
+		// runq does not follow `cd` — an unlocatable entry is a declared
+		// BOUNDARY (skipped + guidance), never a block. False positives
+		// are bugs; false negatives here have a 30-second user-side fix.
+		return CheckResult{Name: "imports", Status: "skipped", Detail: fmt.Sprintf(
+			"entry %s not found from working_dir — runq resolves paths from working_dir (project.yaml) and does not follow `cd`; write entry paths relative to working_dir, or declare preflight.hf / preflight.extra_run for shell-managed layouts", res.EntryMiss)}
 	}
 	if okCount == 0 && res.ScanFiles == 0 {
 		return CheckResult{Name: "imports", Status: "skipped", Detail: "nothing to scan"}

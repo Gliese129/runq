@@ -136,15 +136,10 @@ func TestR3ExternalDottedVerified(t *testing.T) {
 		"train.py": "import json.definitely_missing_zz\n",
 	}, interp+" train.py")
 	c := r3Imports(t, proj, interp+" train.py")
-	if c.Status == "passed" {
-		t.Fatalf("external bogus submodule passed silently: %+v", c)
-	}
-	if c.Status == "failed" {
-		// json is a module (not a package): its "submodule" cannot exist —
-		// but json has no search locations, so the sub-level miss is the
-		// external branch → warning. Either warning or failed is
-		// acceptable here as long as it is NOT ok; document the actual.
-		t.Logf("external dotted miss reported as failed: %+v", c)
+	// r4 ruling: `import a.b` IMPORTS the module a.b — a chain miss is a
+	// guaranteed ModuleNotFoundError, external or not. Hard fail.
+	if c.Status != "failed" || !strings.Contains(c.Detail, "ModuleNotFoundError") {
+		t.Fatalf("external bogus submodule must hard-fail: %+v", c)
 	}
 }
 

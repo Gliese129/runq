@@ -81,9 +81,10 @@ func buildProbeScript(entryMode, entry, workdir string, contract []HFRef, wandb 
 	).Replace(probeTemplate)
 }
 
-// probeImport is one module's verdict: ok | fail | subwarn (an external
-// package's submodule that is not STATICALLY resolvable — may be
-// attached dynamically, so never a hard fail).
+// probeImport is one module's verdict: ok | fail. Chain misses on
+// import statements are CERTAIN failures for locals and externals
+// alike — `import a.b` imports the module a.b, and PEP 562 __getattr__
+// rescues attribute access, never import statements (Codex r4 ruling).
 type probeImport struct {
 	Module string
 	Status string
@@ -121,6 +122,12 @@ type probeOutcome struct {
 	ScanSeen      bool // the walk finished (its summary marker arrived)
 	ScanFiles     int
 	ScanTruncated bool
+
+	// EntryMiss: the entry could not be located from working_dir (detail
+	// = the missed path/module). DOCTRINE, not detection (user ruling
+	// r4): paths resolve from working_dir, runq does not follow `cd` —
+	// folded to skipped + guidance, NEVER a failure.
+	EntryMiss string
 
 	// HFTotal: how many refs the probe intended to check (discovered +
 	// contract) — lets Go detect a cut-short HF pass without knowing the
@@ -176,6 +183,9 @@ func parseProbeOutput(out string) probeOutcome {
 		case "import":
 			res.PythonRan = true
 			res.Imports = append(res.Imports, probeImport{Module: key, Status: status, Detail: detail})
+		case "entrymiss":
+			res.PythonRan = true
+			res.EntryMiss = detail
 		case "scan":
 			res.PythonRan = true
 			res.ScanSeen = true
