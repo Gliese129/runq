@@ -30,6 +30,28 @@ func Render(template string, params TaskParams) (string, error) {
 // unconsumed-param error nor leak into {{args}} — a walltime is for the
 // scheduler, not the training script.
 func RenderExcluding(template string, params TaskParams, exclude map[string]bool) (string, error) {
+	return RenderWithFlags(template, params, exclude, nil)
+}
+
+// TruthyFlag reports whether a flag-style param value means "the switch
+// is on". Anything else — false/0/no/None/empty — means off.
+func TruthyFlag(v any) bool {
+	switch strings.ToLower(fmt.Sprintf("%v", v)) {
+	case "true", "1", "yes", "y", "on":
+		return true
+	}
+	return false
+}
+
+// RenderWithFlags is RenderExcluding plus store_true semantics:
+// `flagParams` names params declared `style: flag` (argparse store_true
+// switches). In {{args}}, a truthy flag renders as a bare `--name` and a
+// falsy one is OMITTED entirely — `--name=false` is not "off" to
+// argparse, it is the switch firing (feedback group 2: `-sample=false`
+// silently enabled sampling). Explicit {{name}} placeholders are
+// untouched: referencing a flag by name means the template author wants
+// the raw value.
+func RenderWithFlags(template string, params TaskParams, exclude, flagParams map[string]bool) (string, error) {
 	consumed := make(map[string]bool)
 	for name := range exclude {
 		consumed[name] = true
@@ -80,9 +102,15 @@ func RenderExcluding(template string, params TaskParams, exclude map[string]bool
 		)
 	}
 
-	parts := make([]string, len(unconsumed))
-	for i, key := range unconsumed {
-		parts[i] = fmt.Sprintf("--%s=%s", key, formatValue(params[key]))
+	parts := make([]string, 0, len(unconsumed))
+	for _, key := range unconsumed {
+		if flagParams[key] {
+			if TruthyFlag(params[key]) {
+				parts = append(parts, "--"+key)
+			}
+			continue // falsy switch: absence IS the value
+		}
+		parts = append(parts, fmt.Sprintf("--%s=%s", key, formatValue(params[key])))
 	}
 	argsStr := strings.Join(parts, " ")
 

@@ -108,6 +108,19 @@ type TargetConfig struct {
 	// without forcing a central workspace root onto local projects.
 	DoneDir string `yaml:"done_dir,omitempty" json:"done_dir,omitempty"`
 
+	// EnvSetup is a free-text shell fragment injected into run.sh BEFORE
+	// the task command (RQ-76 ①) — the one place to make the python env
+	// reachable on compute nodes, whose batch shells load no ~/.bashrc
+	// (e.g. `source ~/miniconda3/etc/profile.d/conda.sh`). It runs after
+	// runq's HOME restoration (an absolute HOME resolved on the login
+	// node is exported first), so `~` inside it expands correctly even
+	// when the scheduler stripped HOME (--export=NONE). Deliberately ONE
+	// opaque field, not structured conda knobs: environments vary too
+	// much, and the user's own line is the contract. Editing it moves the
+	// target's generation (semantic hash covers every field), so lanes
+	// rebuild and re-resolve.
+	EnvSetup string `yaml:"env_setup,omitempty" json:"env_setup,omitempty"`
+
 	// RunqBin is the ABSOLUTE path of the runq binary on the target
 	// (install-on-*.sh puts it there). When set, run.sh gains compute-node
 	// work that needs runq locally — currently the metrics pyramid build

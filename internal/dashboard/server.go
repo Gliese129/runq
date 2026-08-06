@@ -904,25 +904,25 @@ func (s *Server) handlePreviewSubmit(w http.ResponseWriter, r *http.Request) {
 	// body.target routes the preview to that target's backend (full run.sh
 	// + submit command rendering); default target otherwise. (D11: target
 	// 一律显式进 body，?target= 变体已退役。)
-	var text string
+	var res backend.PreviewResult
 	var err error
 	if body.Target != "" {
 		pt, ok := s.backend.(interface {
-			PreviewSubmitForTarget(ctx context.Context, target string, cfg job.JobConfig, skipPreflight bool) (string, error)
+			PreviewSubmitForTarget(ctx context.Context, target string, cfg job.JobConfig, skipPreflight bool) (backend.PreviewResult, error)
 		})
 		if !ok {
 			writeErr(w, http.StatusBadRequest, backend.CodeBadRequest, "target scoping not supported by this backend")
 			return
 		}
-		text, err = pt.PreviewSubmitForTarget(r.Context(), body.Target, body.Config, body.SkipPreflight)
+		res, err = pt.PreviewSubmitForTarget(r.Context(), body.Target, body.Config, body.SkipPreflight)
 	} else {
-		text, err = s.backend.PreviewSubmit(r.Context(), body.Config, body.SkipPreflight)
+		res, err = s.backend.PreviewSubmit(r.Context(), body.Config, body.SkipPreflight)
 	}
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"preview": text})
+	writeJSON(w, http.StatusOK, res)
 }
 
 func (s *Server) handleGetTask(w http.ResponseWriter, r *http.Request) {

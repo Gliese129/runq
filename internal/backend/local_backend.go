@@ -555,8 +555,8 @@ func (b *LocalBackend) SubmitJob(ctx context.Context, cfg job.JobConfig, opts Su
 }
 
 // PreviewSubmit: local mode has no submit_template to render.
-func (b *LocalBackend) PreviewSubmit(_ context.Context, _ job.JobConfig, _ bool) (string, error) {
-	return "", fmt.Errorf("submit preview in local mode: %w", ErrNotSupported)
+func (b *LocalBackend) PreviewSubmit(_ context.Context, _ job.JobConfig, _ bool) (PreviewResult, error) {
+	return PreviewResult{}, fmt.Errorf("submit preview in local mode: %w", ErrNotSupported)
 }
 
 func (b *LocalBackend) ResolveNote(ctx context.Context, cfg job.JobConfig) (string, error) {
@@ -726,7 +726,7 @@ func (b *LocalBackend) submitJob(ctx context.Context, jobCfg job.JobConfig, skip
 		return "", 0, err
 	}
 
-	if err := submitplan.RunSetup(ctx, proj, jobCfg); err != nil {
+	if err := submitplan.RunSetup(ctx, proj, jobCfg, nil, utils.EnvPrelude{EnvFile: plan.Env["RUNQ_ENV_FILE"], Env: plan.Env}); err != nil {
 		return "", 0, err
 	}
 

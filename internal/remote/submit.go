@@ -58,41 +58,21 @@ func renderSubmitCmd(tmpl string, t submitplan.PlannedTask, plan submitplan.Plan
 	return utils.Render(tmpl, vars)
 }
 
-// submitEnvPrefix turns the project's environment into `export K='v'; `
-// statements prefixed onto the submit command, so $TSUBAME_GROUP-style
-// references in submit_template resolve from project config — not from
-// whatever the login shell happens to export.
-//
-// NOT the `K='v' cmd $K` form: POSIX expands $K on the same command line
-// BEFORE the assignment takes effect, so the reference would see the old
-// (usually empty) value. `export K='v'; cmd $K` runs the assignment as its
-// own command first; the whole string goes through `sh -c`, so nothing
-// leaks into the calling shell.
-func submitEnvPrefix(env map[string]string) string {
-	if len(env) == 0 {
-		return ""
-	}
-	keys := make([]string, 0, len(env))
-	for k := range env {
-		keys = append(keys, k)
-	}
-	sortStrings(keys)
-	var b strings.Builder
-	for _, k := range keys {
-		b.WriteString("export ")
-		b.WriteString(k)
-		b.WriteString("=")
-		b.WriteString(utils.ShellQuote(env[k]))
-		b.WriteString("; ")
-	}
-	return b.String()
-}
-
-func sortStrings(s []string) {
-	for i := 1; i < len(s); i++ {
-		for j := i; j > 0 && s[j] < s[j-1]; j-- {
-			s[j], s[j-1] = s[j-1], s[j]
-		}
+// envPrelude assembles this lane's execution environment through THE
+// single injection point (utils.EnvPrelude, Codex r2 #2): env_setup, the
+// resolved HOME, the ambient .env and the merged env. run.sh, the
+// preflight probe, setup_command and the SUBMIT COMMAND all render
+// through this — a cluster whose qsub/sbatch comes from `module load`
+// (env_setup) gets it on every surface, and export-then-command ordering
+// means $TSUBAME_GROUP-style references in submit_template resolve from
+// project config, not from whatever the login shell happens to export.
+func (b *Backend) envPrelude(env map[string]string) utils.EnvPrelude {
+	home, _ := b.homeDirCached() // "" on failure: prelude omits the export
+	return utils.EnvPrelude{
+		Home:     home,
+		EnvSetup: b.Cfg.EnvSetup,
+		EnvFile:  env["RUNQ_ENV_FILE"],
+		Env:      env,
 	}
 }
 
@@ -111,6 +91,10 @@ func printPreflight(r preflight.Report) {
 			mark = "!"
 		}
 		fmt.Printf("%s %-10s %s\n", mark, c.Name, c.Detail)
+		// Remediation commands (e.g. HF pre-download): copy-paste ready.
+		for _, cmd := range c.Commands {
+			fmt.Printf("             $ %s\n", cmd)
+		}
 	}
 }
 
@@ -151,6 +135,7 @@ func (b *Backend) planDeps(skipPreflight bool) submitplan.Deps {
 		PreflightDisableLocal: b.Cfg.PreflightLocal != nil && !*b.Cfg.PreflightLocal,
 		PreflightScope:        fmt.Sprintf("on %s login node", b.Cfg.Name),
 		PreflightFS:           b.FS,
+		PreflightEnvSetup:     b.Cfg.EnvSetup,
 		SchedulerParams:       config.HPCTemplateParamRefs(b.Cfg.SubmitTemplate),
 	}
 }
@@ -241,7 +226,9 @@ func (b *Backend) Prepare(ctx context.Context, jobCfg job.JobConfig, proj *proje
 
 	// One-shot job setup (e.g. model pre-download on the login node).
 	// Runs before any DB row or cluster submission — failure leaves nothing.
-	if err := submitplan.RunSetup(ctx, proj, jobCfg); err != nil {
+	// The prelude is the SAME environment preflight probed and run.sh will
+	// export (env_setup + .env + merged env + HOME) — Codex r2 #3.
+	if err := submitplan.RunSetup(ctx, proj, jobCfg, b.FS, b.envPrelude(plan.Env)); err != nil {
 		return "", nil, err
 	}
 
@@ -287,7 +274,7 @@ func (b *Backend) Prepare(ctx context.Context, jobCfg job.JobConfig, proj *proje
 		if err != nil {
 			return plan.JobID, rows, fmt.Errorf("render submit_template for %s: %w", t.TaskID, err)
 		}
-		fullCmd := submitEnvPrefix(proj.Environment) + cmd
+		fullCmd := b.envPrelude(plan.Env).Render() + cmd
 
 		// Persist the rendered command next to run.sh. The scheduler-driven
 		// launch path (remote.Launcher) replays this file verbatim, so retries
@@ -359,6 +346,39 @@ func (b *Backend) Submit(ctx context.Context, jobCfg job.JobConfig, proj *projec
 	return jobID, submitted, nil
 }
 
+// homeDirCached resolves the login node's absolute $HOME once per lane
+// (RQ-76 ①). Resolution happens where sshd sets HOME correctly; the value
+// is then baked into run.sh so the COMPUTE node — whose scheduler may
+// strip the environment (--export=NONE) — still expands `~` right.
+// Failure is remembered and non-fatal: run.sh simply skips the export
+// (most schedulers do pass HOME; restoration is belt and suspenders).
+func (b *Backend) homeDirCached() (string, error) {
+	b.homeOnce.Do(func() {
+		fsys := b.FS
+		if fsys == nil {
+			fsys = rfs.NewLocalFS() // tests / legacy local lanes
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		stdout, stderr, code, err := fsys.Exec(ctx, "sh", "-c", `printf %s "$HOME"`)
+		if err != nil {
+			b.homeErr = err
+			return
+		}
+		if code != 0 {
+			b.homeErr = fmt.Errorf("exit %d: %s", code, strings.TrimSpace(string(stderr)))
+			return
+		}
+		home := strings.TrimSpace(string(stdout))
+		if !strings.HasPrefix(home, "/") {
+			b.homeErr = fmt.Errorf("resolved HOME %q is not absolute", home)
+			return
+		}
+		b.homeDir = home
+	})
+	return b.homeDir, b.homeErr
+}
+
 // buildRunScript assembles the wrapper script. The script SKELETON is glue; the
 // security-sensitive part — escaping every env value — is delegated to
 // utils.ShellQuote. The user's command (t.Command, already env-activation
@@ -404,13 +424,14 @@ func (b *Backend) buildRunScript(t submitplan.PlannedTask, plan submitplan.Plan)
 	// so `runq logs` / the dashboard work regardless of how the user's
 	// submit_template routes -o/-e (those keep only scheduler-level noise).
 	fmt.Fprintf(&s, "exec >> %s 2>&1\n", utils.ShellQuote(t.LogPath))
-	if envFile := env["RUNQ_ENV_FILE"]; envFile != "" {
-		q := utils.ShellQuote(envFile)
-		fmt.Fprintf(&s, "if [ -f %s ]; then set -a; . %s; set +a; fi\n", q, q)
-	}
-	for _, k := range sortedKeys(env) {
-		fmt.Fprintf(&s, "export %s=%s\n", k, utils.ShellQuote(env[k]))
-	}
+	// THE environment (utils.EnvPrelude — same injection point as the
+	// preflight probe, setup_command and the submit command): HOME
+	// restored from the login node (RQ-76 ①: batch shells may strip it;
+	// with an absolute HOME exported first every `~` in env_setup / user
+	// code expands natively), then env_setup, then the ambient .env, then
+	// the explicit exports which must win. Placed after the log redirect
+	// so env_setup output lands in the task log.
+	s.WriteString(b.envPrelude(env).Render())
 	fmt.Fprintf(&s, "STATUS_FILE=%s\n", utils.ShellQuote(path.Join(t.TaskDir, statusFileName)))
 	s.WriteString(`_runq_status() { printf '%s\n' "$1" > "$STATUS_FILE.tmp" && mv "$STATUS_FILE.tmp" "$STATUS_FILE"; }` + "\n")
 	// Done marker: written AFTER the terminal status.json, so a marker's

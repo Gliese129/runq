@@ -741,17 +741,17 @@ func (m *MultiBackend) DryRun(ctx context.Context, cfg job.JobConfig) (*DryRunRe
 	return m.defaultBackend().DryRun(ctx, cfg)
 }
 
-func (m *MultiBackend) PreviewSubmit(ctx context.Context, cfg job.JobConfig, skipPreflight bool) (string, error) {
+func (m *MultiBackend) PreviewSubmit(ctx context.Context, cfg job.JobConfig, skipPreflight bool) (PreviewResult, error) {
 	return m.defaultBackend().PreviewSubmit(ctx, cfg, skipPreflight)
 }
 
 // PreviewSubmitForTarget routes submit preview to the named target backend.
 // Used by the API handler to give `submit --dry-run --target <hpc>` access
 // to the HPC backend's full run.sh + submit-command rendering.
-func (m *MultiBackend) PreviewSubmitForTarget(ctx context.Context, target string, cfg job.JobConfig, skipPreflight bool) (string, error) {
+func (m *MultiBackend) PreviewSubmitForTarget(ctx context.Context, target string, cfg job.JobConfig, skipPreflight bool) (PreviewResult, error) {
 	be, err := m.resolve(target)
 	if err != nil {
-		return "", err
+		return PreviewResult{}, err
 	}
 	return be.PreviewSubmit(ctx, cfg, skipPreflight)
 }

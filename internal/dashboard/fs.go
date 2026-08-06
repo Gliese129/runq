@@ -221,6 +221,7 @@ func (s *Server) handleParseScript(w http.ResponseWriter, r *http.Request) {
 			Name:    arg.Name,
 			Type:    arg.Type,
 			Default: def,
+			Style:   arg.Style,
 		})
 	}
 	writeJSON(w, http.StatusOK, out)

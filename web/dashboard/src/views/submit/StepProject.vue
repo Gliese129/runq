@@ -746,7 +746,12 @@ function normalizeType(rawType: string): string {
  *  curation and survives; absent include = never curated. */
 function normalizeParam(a: NonNullable<ProjectConfig['params']>[number]): import('@/types/submit').ProjectParam {
   const type = normalizeType(a.type)
-  const def = a.default || ''
+  // String() coercion is load-bearing: js-yaml parses `default: 42` to a
+  // JS number, and `42 || ''` keeps it a number — the save payload then
+  // fails Go's `ParamDef.Default string` decode (feedback group 2).
+  // "None"/null from old configs means "no default".
+  const rawDef = a.default == null ? '' : String(a.default)
+  const def = rawDef === 'None' ? '' : rawDef
   const values = Array.isArray(a.choices) ? a.choices.map(String) : []
   if (['str', 'file', 'folder'].includes(type) && def && !values.includes(def)) {
     values.unshift(def)
@@ -757,6 +762,7 @@ function normalizeParam(a: NonNullable<ProjectConfig['params']>[number]): import
     min: a.min, max: a.max,
     strict: a.strict || undefined,
     scope: a.scope || undefined,
+    style: a.style || undefined,
   }
 }
 

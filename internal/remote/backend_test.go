@@ -40,7 +40,7 @@ func TestSubmitRefreshKill(t *testing.T) {
 	var calls []string
 	runner := func(ctx context.Context, command string) (string, error) {
 		calls = append(calls, command)
-		if strings.HasPrefix(command, "submit") {
+		if strings.HasPrefix(schedCmd(command), "submit") {
 			out := fmt.Sprintf("job %d", next)
 			next++
 			return out, nil

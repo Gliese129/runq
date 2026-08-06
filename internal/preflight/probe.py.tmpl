@@ -1,0 +1,339 @@
+# runq preflight probe (generated; deleted after one run).
+#
+# Dependency analysis lives HERE, not in Go (Codex r3): reimplementing
+# Python's import system with regexes loses — relative imports, -m
+# entries, namespace packages, submodule-vs-attribute all need the real
+# resolver. This probe runs in the task's activated env with the task's
+# exact sys.path, and asks CPython's OWN machinery:
+#
+#   - ast.parse         → import statements with their relative level
+#   - importlib.util.find_spec (TOP level only: no parent, so nothing
+#     executes; knows builtins/frozen/site-packages)
+#   - PathFinder.find_spec over the parent's submodule_search_locations
+#     (SUB levels: resolves regular AND namespace packages WITHOUT
+#     importing the parent — no project __init__.py ever runs)
+#   - importlib.util.resolve_name → relative import name computation
+#
+# stdlib precedent: modulefinder walks the same graph from bytecode; we
+# scope it down (recurse only into project files, verify externals
+# without entering them) to stay fast and side-effect-free.
+import ast, importlib.machinery, importlib.util, os, re, sys, time
+
+MARK = "__MARK__"
+
+def emit(kind, key, status, detail=""):
+    detail = str(detail).replace("\t", " ").replace("\n", " ")
+    print("\t".join([MARK, kind, key, status, detail]), flush=True)
+
+emit("env", "home", "info", os.path.expanduser("~"))
+emit("env", "prefix", "info", sys.prefix)
+
+WORKDIR = __WORKDIR__
+ENTRY_MODE = __ENTRY_MODE__  # "script" | "module" | ""
+ENTRY = __ENTRY__
+BUDGET = __BUDGET__
+MAXFILES = __MAXFILES__
+DEADLINE = time.monotonic() + BUDGET
+
+try:
+    os.chdir(WORKDIR)
+except BaseException:
+    pass
+
+# sys.path[0] mirrors the real invocation: `python script.py` puts the
+# SCRIPT's dir there; `python -m pkg.mod` puts the cwd there. This is
+# exactly where the project-root vs relative import styles diverge.
+if ENTRY_MODE == "script":
+    sys.path[0] = os.path.dirname(os.path.abspath(ENTRY)) or "."
+else:
+    sys.path[0] = os.getcwd()
+
+REAL_WORK = os.path.realpath(WORKDIR)
+
+def find_top(name):
+    try:
+        return importlib.util.find_spec(name)
+    except BaseException:
+        return None
+
+def find_sub(parent_spec, part):
+    locs = getattr(parent_spec, "submodule_search_locations", None)
+    if locs is None:
+        return None
+    try:
+        return importlib.machinery.PathFinder.find_spec(part, list(locs))
+    except BaseException:
+        return None
+
+def resolve_chain(dotted):
+    """Resolve a.b.c level by level. Returns (specs, failed_prefix)."""
+    parts = dotted.split(".")
+    spec = find_top(parts[0])
+    if spec is None:
+        return None, parts[0]
+    specs = [spec]
+    full = parts[0]
+    for p in parts[1:]:
+        full = full + "." + p
+        nxt = find_sub(spec, p)
+        if nxt is None:
+            return specs, full
+        specs.append(nxt)
+        spec = nxt
+    return specs, ""
+
+def spec_py_file(spec):
+    o = getattr(spec, "origin", None)
+    if o and o.endswith(".py"):
+        return o
+    return None
+
+def is_local(spec):
+    o = getattr(spec, "origin", None)
+    if o and o not in ("built-in", "frozen"):
+        try:
+            return os.path.realpath(o).startswith(REAL_WORK + os.sep)
+        except BaseException:
+            return False
+    for l in list(getattr(spec, "submodule_search_locations", None) or []):
+        try:
+            rl = os.path.realpath(l)
+            if rl == REAL_WORK or rl.startswith(REAL_WORK + os.sep):
+                return True
+        except BaseException:
+            pass
+    return False
+
+def is_pkg(spec):
+    return getattr(spec, "submodule_search_locations", None) is not None
+
+def rel(p):
+    try:
+        return os.path.relpath(p, WORKDIR)
+    except BaseException:
+        return p
+
+# ---- HuggingFace reference extraction (over every scanned file) ----
+HF_PATTERNS = [
+    (re.compile(r'(?:from_pretrained|snapshot_download|hf_hub_download)\(\s*(?:repo_id\s*=\s*)?["\']([^"\'\s]+)["\']'), "model"),
+    (re.compile(r'load_dataset\(\s*(?:path\s*=\s*)?["\']([^"\'\s]+)["\']'), "dataset"),
+]
+HF_ID = re.compile(r"^[A-Za-z0-9][\w.\-]*(?:/[A-Za-z0-9][\w.\-]*)?$")
+hf_refs = {}  # id -> repo_type ("any" from contract supersedes)
+for _rid, _rt in __CONTRACT_REFS__:
+    hf_refs[_rid] = _rt
+
+def scan_hf(text):
+    for pat, rt in HF_PATTERNS:
+        for m in pat.finditer(text):
+            rid = m.group(1)
+            if rid.startswith(("/", ".", "~")) or "{" in rid or "$" in rid:
+                continue
+            if not HF_ID.match(rid):
+                continue
+            if hf_refs.get(rid) != "any":
+                hf_refs.setdefault(rid, rt)
+
+# ---- dependency walk ----
+seen_files = set()
+seen_mods = set()
+queue = []  # (file_path, package_context)  "" = top-level script
+files_scanned = 0
+truncated = False
+
+def enqueue_spec_chain(absname, specs):
+    parts = absname.split(".")
+    for i, spec in enumerate(specs):
+        if not is_local(spec):
+            continue
+        f = spec_py_file(spec)
+        if not f or os.path.realpath(f) in seen_files:
+            continue
+        name_i = ".".join(parts[: i + 1])
+        pkg = name_i if is_pkg(spec) else name_i.rpartition(".")[0]
+        queue.append((f, pkg))
+
+def handle_module_ref(dotted, level, pkg, fpath):
+    if level > 0:
+        if not pkg:
+            emit("import", "." * level + (dotted or ""), "fail",
+                 "relative import in %s, which runs as a top-level script - python raises ImportError here" % rel(fpath))
+            return None
+        try:
+            absname = importlib.util.resolve_name("." * level + (dotted or ""), pkg)
+        except BaseException as e:
+            emit("import", "." * level + (dotted or ""), "fail",
+                 "relative import from package %s does not resolve: %s" % (pkg, e))
+            return None
+    else:
+        absname = dotted
+    if not absname or absname in seen_mods:
+        return absname
+    seen_mods.add(absname)
+    specs, failed = resolve_chain(absname)
+    if specs is None:
+        head = absname.split(".")[0]
+        hint = ""
+        for cand in (os.path.join(WORKDIR, head + ".py"),
+                     os.path.join(WORKDIR, head, "__init__.py")):
+            if os.path.isfile(cand):
+                # The file EXISTS in the project but is not on the task's
+                # sys.path — the classic import-root/layout mistake.
+                hint = " - %s exists but is not on the task's sys.path (path[0]=%s); check the import root / package layout" % (rel(cand), sys.path[0])
+                break
+        emit("import", absname, "fail", "not resolvable on sys.path (referenced in %s)%s" % (rel(fpath), hint))
+        return absname
+    if failed:
+        # `import a.b` / `from a.b import x` IMPORT the module a.b —
+        # a missing chain link is a guaranteed ModuleNotFoundError
+        # (PEP 562 __getattr__ rescues attribute access, not import
+        # statements). Certain for locals and externals alike.
+        if is_local(specs[-1]):
+            emit("import", failed, "fail",
+                 "submodule not found under its package (referenced in %s) - check the package layout" % rel(fpath))
+        else:
+            emit("import", failed, "fail",
+                 "parent package resolves but %s does not - python raises ModuleNotFoundError (referenced in %s)" % (failed, rel(fpath)))
+        enqueue_spec_chain(absname, specs)
+        return absname
+    emit("import", absname, "ok")
+    enqueue_spec_chain(absname, specs)
+    return absname
+
+def maybe_submodule(base, name):
+    """`from base import name`: name may be an attr OR a submodule. If it
+    resolves as a module, verify+recurse; if not, it is presumably an
+    attribute — never a finding."""
+    if not base or base not in seen_mods:
+        return
+    dotted = base + "." + name
+    if dotted in seen_mods:
+        return
+    specs, failed = resolve_chain(dotted)
+    if specs is not None and not failed:
+        seen_mods.add(dotted)
+        enqueue_spec_chain(dotted, specs)
+
+def guarded(stmt):
+    """try/except around imports = the code handles absence itself."""
+    return isinstance(stmt, ast.Try)
+
+# Entry location is DOCTRINE, not detection (user ruling r4): paths
+# resolve from working_dir, period. runq does not follow `cd` — shell
+# is not statically analyzable, and a wrong guess would block a legal
+# task. An entry we cannot locate is emitted as entrymiss (folded to
+# skipped + guidance), NEVER as a failure.
+if ENTRY_MODE == "script":
+    p = os.path.abspath(ENTRY)
+    if os.path.isfile(p):
+        queue.append((p, ""))
+    else:
+        emit("entrymiss", "script", "miss", rel(p))
+elif ENTRY_MODE == "module":
+    specs, failed = resolve_chain(ENTRY)
+    if failed or specs is None:
+        emit("entrymiss", "module", "miss", ENTRY)
+    else:
+        spec = specs[-1]
+        seen_mods.add(ENTRY)
+        if is_pkg(spec):  # python -m pkg runs pkg/__main__.py
+            main = find_sub(spec, "__main__")
+            f = spec_py_file(main) if main else None
+            if f:
+                queue.append((f, ENTRY))
+            else:
+                emit("entrymiss", "module", "miss", ENTRY + ".__main__")
+        else:
+            f = spec_py_file(spec)
+            if f:
+                queue.append((f, ENTRY.rpartition(".")[0]))
+
+while queue:
+    if time.monotonic() > DEADLINE or files_scanned >= MAXFILES:
+        truncated = True
+        break
+    fpath, pkg = queue.pop(0)
+    rp = os.path.realpath(fpath)
+    if rp in seen_files:
+        continue
+    seen_files.add(rp)
+    try:
+        with open(fpath, "r", errors="replace") as fh:
+            text = fh.read()
+    except BaseException:
+        continue
+    files_scanned += 1
+    scan_hf(text)
+    try:
+        tree = ast.parse(text, filename=fpath)
+    except SyntaxError as e:
+        # The task would die on this exact error — a free syntax check.
+        emit("import", rel(fpath), "fail", "SyntaxError: %s (line %s)" % (e.msg, e.lineno))
+        continue
+    for stmt in tree.body:  # TOP-LEVEL statements only (module scope)
+        if guarded(stmt):
+            continue
+        if isinstance(stmt, ast.Import):
+            for alias in stmt.names:
+                handle_module_ref(alias.name, 0, pkg, fpath)
+        elif isinstance(stmt, ast.ImportFrom):
+            base = handle_module_ref(stmt.module or "", stmt.level, pkg, fpath)
+            if base:
+                for alias in stmt.names:
+                    if alias.name != "*":
+                        maybe_submodule(base, alias.name)
+
+emit("scan", "done", str(files_scanned), "truncated" if truncated else "")
+
+__WANDB_SECTION__
+
+HF_REFS = sorted(hf_refs.items())
+if HF_REFS:
+    emit("hftotal", "n", str(len(HF_REFS)))
+    hub = None
+    try:
+        import huggingface_hub as hub
+    except BaseException:
+        for rid, rt in HF_REFS:
+            emit("hf", rt + ":" + rid, "nohub")
+    if hub is not None:
+        # Resolution goes through huggingface_hub itself — the SAME cache
+        # lookup (HF_HOME / HF_HUB_CACHE) and token discovery the task
+        # will use at run time, so the verdict is reproducible.
+        cached = set()
+        try:
+            for repo in hub.scan_cache_dir().repos:
+                cached.add(repo.repo_type + ":" + repo.repo_id)
+        except BaseException:
+            pass
+        api = hub.HfApi()
+
+        def probe_one(rid, rt):
+            try:
+                api.repo_info(rid, repo_type=rt, timeout=3)
+                return "reachable", ""
+            except BaseException as e:
+                name = type(e).__name__
+                first = (str(e).splitlines() or [""])[0]
+                if name == "RepositoryNotFoundError":
+                    return "missing", first or name
+                if name == "GatedRepoError":
+                    return "gated", first or name
+                return "unknown", name
+
+        for rid, rt in HF_REFS:
+            key = rt + ":" + rid
+            types = ["model", "dataset"] if rt == "any" else [rt]
+            if any((t + ":" + rid) in cached for t in types):
+                emit("hf", key, "cached")
+                continue
+            status, detail = "missing", ""
+            for t in types:
+                s, d = probe_one(rid, t)
+                if s != "missing":
+                    status, detail = s, d
+                    break
+                detail = d
+            emit("hf", key, status, detail)
+
+emit("done", "done", "ok")

@@ -270,6 +270,28 @@ export interface JobPlanResponse {
   warnings: string[]
 }
 
+/** One preflight check in the four-state grammar (passed/failed/warning/skipped). */
+export interface PreflightCheck {
+  name: string
+  status: 'passed' | 'failed' | 'warning' | 'skipped'
+  detail?: string
+  /** Ready-made remediation commands (e.g. `huggingface-cli download …`). */
+  commands?: string[]
+}
+
+/** Structured preflight report attached to POST /jobs/preview (RQ-76 ②). */
+export interface PreflightReport {
+  results?: PreflightCheck[]
+  home_dir?: string
+  python_prefix?: string
+}
+
+/** POST /jobs/preview — rendered dry-run text + structured preflight. */
+export interface JobPreviewResponse {
+  preview: string
+  preflight?: PreflightReport
+}
+
 export interface ActionResponse {
   ok: boolean
 }
@@ -296,12 +318,14 @@ export interface ParseResult {
   suggested_command: string
 }
 
-/** Backend parse-script emits ONLY these three fields — choices/min/max
+/** Backend parse-script emits ONLY these fields — choices/min/max
  *  belong to project.ParamDef, not to script parsing. */
 export interface ScriptArg {
   name: string
   type: string
   default?: string
+  /** "flag" = store_true switch (bare --name when true, omitted when false) */
+  style?: string
 }
 
 export interface ProjectSummary {
@@ -357,6 +381,8 @@ export interface ProjectConfig {
     strict?: boolean
     /** "scheduler" = consumed by submit_template only (never by the command) */
     scope?: string
+    /** "flag" = store_true switch: rendered as bare --name / omitted */
+    style?: string
   }>
 }
 

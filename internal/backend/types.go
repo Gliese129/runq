@@ -8,10 +8,21 @@ import (
 
 	"github.com/gliese129/runq/internal/job"
 	"github.com/gliese129/runq/internal/logfile"
+	"github.com/gliese129/runq/internal/preflight"
 )
 
 // View types shared by HTTP responses and CLI --json output.
 // Keep this file free of business logic — only struct definitions.
+
+// PreviewResult is what PreviewSubmit returns: the human-readable dry-run
+// text plus the STRUCTURED preflight report (RQ-76 ②). The structure is
+// what lets the WebUI act on findings — e.g. one-click insertion of an
+// HF pre-download command into the project's setup command — instead of
+// re-parsing the text blob.
+type PreviewResult struct {
+	Preview   string           `json:"preview"`
+	Preflight preflight.Report `json:"preflight"`
+}
 
 type JobSummary struct {
 	ID      string `json:"id"`
@@ -417,6 +428,9 @@ type ScriptArg struct {
 	Name    string  `json:"name"`
 	Type    string  `json:"type"`
 	Default *string `json:"default,omitempty"`
+	// Style "flag" = argparse store_true switch: bare `--name` when true,
+	// omitted when false (never `--name=false`).
+	Style string `json:"style,omitempty"`
 }
 
 // ── Thaw types ──

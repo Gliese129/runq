@@ -16,6 +16,7 @@ export interface ProjectParam {
   values?: string[]       // str: selectable choices; list: items; file/folder: paths
   strict?: boolean        // choices are a contract, not suggestions
   scope?: string          // 'scheduler' = submit_template-only param
+  style?: string          // 'flag' = store_true switch: bare --name / omitted
 }
 
 export interface ParamMeta {
