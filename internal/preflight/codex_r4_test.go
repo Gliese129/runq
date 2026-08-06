@@ -79,7 +79,7 @@ func TestR4SlowWriteFileDeadline(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 	start := time.Now()
-	err := writeFileCtx(ctx, slow, filepath.Join(dir, "probe.py"), []byte("x"), 0o644)
+	err := writeFileCtx(ctx, slow, filepath.Join(dir, "probe.py"), []byte("x"), 0o644, nil)
 	if err == nil {
 		t.Fatal("deadline not enforced")
 	}

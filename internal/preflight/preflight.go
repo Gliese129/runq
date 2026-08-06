@@ -570,13 +570,12 @@ func (p Preflight) execProbe(ctx context.Context, proj *project.Config, interp s
 	script := buildProbeScript(entry.Mode, entry.Val, proj.WorkingDir, contractRefs, wandb, budget, 64)
 	probePath := path.Join(proj.WorkingDir, fmt.Sprintf(".runq_preflight_%d.py", time.Now().UnixNano()))
 	// ctx-bounded like every other transport call (Codex r4): a slow
-	// SFTP write returns the caller at the deadline; the write finishes
-	// in the background and best-effort cleanup handles the file.
-	writeErr = writeFileCtx(ctx, p.fsys(), probePath, []byte(script), 0o644)
+	// SFTP write returns the caller at the deadline. Cleanup is chained
+	// AFTER the background write completes (Codex r5) — removing first
+	// was a no-op race the late write would undo, leaving the probe
+	// file behind.
+	writeErr = writeFileCtx(ctx, p.fsys(), probePath, []byte(script), 0o644, func() { p.removeProbe(probePath) })
 	if writeErr != nil {
-		if ctx.Err() != nil {
-			p.removeProbe(probePath)
-		}
 		return "", 0, nil, writeErr
 	}
 

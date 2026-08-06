@@ -23,13 +23,27 @@ var moduleEntryRegex = regexp.MustCompile(`(?:^|\s)python[\w.]*\s+(?:-[^m]\S*\s+
 
 // writeFileCtx is readFileCtx's twin for probe uploads: a slow SFTP
 // write must not hold preflight past its deadline either (Codex r4).
-func writeFileCtx(ctx context.Context, fsys rfs.FS, p string, data []byte, perm os.FileMode) error {
+//
+// The transport has no cancellation, so at the deadline the write KEEPS
+// RUNNING in the background — which makes an immediate timeout-side
+// cleanup a race, not a cleanup (Codex r5): remove-then-late-write
+// re-materializes the probe file. onLate (if non-nil) runs exactly once
+// after the background write finally finishes, so cleanup is sequenced
+// AFTER the file actually lands. The goroutine lives only as long as
+// the transport call it already wraps — nothing unbounded is added.
+func writeFileCtx(ctx context.Context, fsys rfs.FS, p string, data []byte, perm os.FileMode, onLate func()) error {
 	ch := make(chan error, 1)
 	go func() { ch <- fsys.WriteFile(p, data, perm) }()
 	select {
 	case err := <-ch:
 		return err
 	case <-ctx.Done():
+		if onLate != nil {
+			go func() {
+				<-ch
+				onLate()
+			}()
+		}
 		return ctx.Err()
 	}
 }
