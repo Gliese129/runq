@@ -476,6 +476,16 @@ func (p *Proxy) JobLogSearch(ctx context.Context, jobID, query string) ([]backen
 	return out, nil
 }
 
+// JobActivity — GET /jobs/{id}/activity (RQ2-1 §1): the daemon
+// decimates on the owning side; the proxy just relays the JSON.
+func (p *Proxy) JobActivity(ctx context.Context, jobID string) (*backend.JobActivity, error) {
+	var out backend.JobActivity
+	if err := p.do(ctx, "GET", "/api/v1/jobs/"+url.PathEscape(jobID)+"/activity", nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // ── Actions ─────────────────────────────────────────────────────────────
 
 func (p *Proxy) KillTask(ctx context.Context, taskID string) error {

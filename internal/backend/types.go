@@ -246,6 +246,40 @@ type TaskListOptions struct {
 	Offset int
 }
 
+// ActivityPoint is one activity.tsv row: cumulative bytes/lines at ts
+// (the sidecar appends one row per 60s tick). Lines is nil for legacy
+// 2-column files — the frontend curve and log seek both need real line
+// counts, and bytes cannot honestly stand in for them (the ratio
+// depends on log line width).
+type ActivityPoint struct {
+	TS    int64  `json:"ts"`
+	Bytes int64  `json:"bytes"`
+	Lines *int64 `json:"lines"`
+}
+
+// TaskActivity is one task's decimated activity series.
+type TaskActivity struct {
+	TaskID string `json:"task_id"`
+	Status string `json:"status"`
+	// BucketMin: minutes per point after owning-side decimation (1 =
+	// raw 60s rows). Stride sampling of CUMULATIVE columns is lossless
+	// coarsening — the delta between kept rows equals the sum of the
+	// dropped intervals' deltas exactly, so a burst cannot hide in a
+	// dropped row. (Arbitrary value series lack this property; that is
+	// why task metrics need the pyramid and activity does not.)
+	BucketMin int             `json:"bucket_minutes"`
+	Points    []ActivityPoint `json:"points"`
+}
+
+// JobActivity is the /jobs/{id}/activity response: every task's series
+// plus the job's wall-clock window. JobEnd is nil while the job is
+// live — the frontend draws the axis to now.
+type JobActivity struct {
+	Tasks    []TaskActivity `json:"tasks"`
+	JobStart int64          `json:"job_start"`
+	JobEnd   *int64         `json:"job_end,omitempty"`
+}
+
 // LogMatch is one grep hit from JobLogSearch: which task's log, where, and
 // the matching line (owning-side grep — results travel, files don't).
 type LogMatch struct {

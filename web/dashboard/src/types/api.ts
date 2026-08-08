@@ -410,6 +410,8 @@ export interface ActivityPoint {
 export interface TaskActivity {
   task_id: string
   status: string
+  /** Minutes per point after owning-side decimation (1 = raw 60s rows). */
+  bucket_minutes?: number
   points: ActivityPoint[]
 }
 

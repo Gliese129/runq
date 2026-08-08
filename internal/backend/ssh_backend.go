@@ -1050,6 +1050,13 @@ func (b *SSHBackend) JobLogSearch(ctx context.Context, jobID, query string) ([]L
 	return jobLogSearchViaExec(ctx, b.store, b.backend.FS, jobID, query)
 }
 
+// JobActivity decimates activity.tsv on the owning side — same RQ-44
+// principle as JobLogSearch: results travel, files don't.
+func (b *SSHBackend) JobActivity(ctx context.Context, jobID string) (*JobActivity, error) {
+	b.touchActivity()
+	return jobActivityViaExec(ctx, b.store, b.backend.FS, jobID)
+}
+
 func (b *SSHBackend) RetryTask(ctx context.Context, taskID string) error {
 	b.touchActivity()
 	row, err := b.store.GetTask(ctx, taskID)

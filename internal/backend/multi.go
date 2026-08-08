@@ -648,6 +648,14 @@ func (m *MultiBackend) JobLogSearch(ctx context.Context, jobID, query string) ([
 	return be.JobLogSearch(ctx, jobID, query)
 }
 
+func (m *MultiBackend) JobActivity(ctx context.Context, jobID string) (*JobActivity, error) {
+	be, err := m.resolveJob(ctx, jobID)
+	if err != nil {
+		return nil, err
+	}
+	return be.JobActivity(ctx, jobID)
+}
+
 func (m *MultiBackend) KillTask(ctx context.Context, taskID string) error {
 	be, err := m.resolveTask(ctx, taskID)
 	if err != nil {

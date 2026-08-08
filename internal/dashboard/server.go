@@ -1128,11 +1128,16 @@ func (s *Server) handleTaskMetrics(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleJobActivity returns activity.tsv data for all tasks in a job.
-// The conversion from bytes to lines is deferred to the logfile package
-// once it's implemented (Step 4).
+// handleJobActivity returns every task's activity.tsv series, decimated
+// on the owning side (see backend.JobActivity — cumulative columns make
+// stride sampling lossless, so no index is involved).
 func (s *Server) handleJobActivity(w http.ResponseWriter, r *http.Request) {
-	notImplemented(w, "job activity")
+	act, err := s.backend.JobActivity(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, act)
 }
 
 // handleJobLogSearch searches across all task logs in a job.

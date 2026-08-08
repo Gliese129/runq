@@ -587,3 +587,164 @@ func parseGPUIndices(s string) []int {
 	}
 	return indices
 }
+
+// ── Job activity (RQ2-1 §1) ──────────────────────────────────────────────
+
+// activityMaxPoints bounds the points returned per task. The bound is a
+// resolution floor, not a data loss: activity columns are cumulative,
+// so stride-sampled rows reproduce EXACTLY what full data rebucketed to
+// the coarser interval would show.
+const activityMaxPoints = 2000
+
+// activityBatch bounds paths per sh invocation (command-line budget,
+// mirrors jobLogSearchViaExec).
+const activityBatch = 100
+
+// jobActivityViaExec reads every task's activity.tsv ON THE OWNING SIDE
+// (RQ-44: results travel, files don't): one sh loop counts, decimates
+// with awk, and prefixes each surviving row with its FILENAME — so a
+// two-week run (~20k rows/task) crosses the wire as ~2000 rows instead
+// of the full file. Shipping full files over SFTP just to drop 90% of
+// the rows daemon-side would waste exactly the transfer the decimation
+// exists to save.
+func jobActivityViaExec(ctx context.Context, st *store.Store, fsys rfs.FS, jobID string) (*JobActivity, error) {
+	if fsys == nil {
+		fsys = rfs.NewLocalFS()
+	}
+	job, err := st.GetJob(ctx, jobID)
+	if err != nil {
+		return nil, err
+	}
+	if job == nil {
+		return nil, fmt.Errorf("job %q: %w", jobID, ErrNotFound)
+	}
+	rows, err := st.ListTasks(ctx, store.TaskFilter{JobID: jobID})
+	if err != nil {
+		return nil, err
+	}
+
+	out := &JobActivity{Tasks: make([]TaskActivity, 0, len(rows))}
+	out.JobStart, out.JobEnd = activityWindow(job, rows)
+
+	byPath := make(map[string]int, len(rows)) // activity path → index in out.Tasks
+	paths := make([]string, 0, len(rows))
+	for _, r := range rows {
+		out.Tasks = append(out.Tasks, TaskActivity{
+			TaskID: r.ID, Status: r.Status, BucketMin: 1, Points: []ActivityPoint{},
+		})
+		if r.TaskDir == "" {
+			continue // never started — no workspace, empty points is the answer
+		}
+		p := workspace.ActivityPath(r.TaskDir)
+		byPath[p] = len(out.Tasks) - 1
+		paths = append(paths, p)
+	}
+
+	for start := 0; start < len(paths); start += activityBatch {
+		batch := paths[start:min(start+activityBatch, len(paths))]
+		stdout, err := execActivityBatch(ctx, fsys, batch)
+		if err != nil {
+			return nil, err // transport-level: no fact learned about any file
+		}
+		parseActivityOutput(stdout, byPath, out.Tasks)
+	}
+	return out, nil
+}
+
+// activityWindow derives the job's wall-clock window: start = earliest
+// task start (falling back to job creation), end = latest task finish
+// once the job is terminal, nil while it is live (the frontend draws
+// the axis to now).
+func activityWindow(job *store.JobRow, rows []store.TaskRow) (int64, *int64) {
+	var earliest, end *int64
+	for _, r := range rows {
+		if r.StartedAt != nil {
+			ts := r.StartedAt.Unix()
+			if earliest == nil || ts < *earliest {
+				earliest = &ts
+			}
+		}
+		if r.FinishedAt != nil {
+			ts := r.FinishedAt.Unix()
+			if end == nil || ts > *end {
+				end = &ts
+			}
+		}
+	}
+	start := job.CreatedAt.Unix()
+	if earliest != nil {
+		start = *earliest
+	}
+	if !store.IsTerminalJobStatus(job.Status) {
+		return start, nil
+	}
+	if end == nil && job.FinishedAt != nil {
+		ts := job.FinishedAt.Unix()
+		end = &ts
+	}
+	return start, end
+}
+
+// execActivityBatch runs the count-then-decimate loop for one batch of
+// activity files. Per file: k = ceil(rows/activityMaxPoints); awk keeps
+// row 1, every k-th row, and the last row. A `__k` marker line reports
+// the stride so the caller can label the resolution. Missing files are
+// skipped silently (pending tasks, pre-sidecar runs).
+func execActivityBatch(ctx context.Context, fsys rfs.FS, batch []string) (string, error) {
+	var sb strings.Builder
+	for _, p := range batch {
+		q := utils.ShellQuote(p)
+		fmt.Fprintf(&sb,
+			`if [ -f %s ]; then n=$(wc -l < %s 2>/dev/null || echo 0); k=$(( (n + %d) / %d )); [ "$k" -ge 1 ] || k=1; printf '%%s\t__k\t%%s\n' %s "$k"; awk -v k="$k" 'NR==1 || NR%%k==0 {print FILENAME "\t" $0; l=NR} END {if (NR>0 && NR!=l) print FILENAME "\t" $0}' %s; fi; `,
+			q, q, activityMaxPoints-1, activityMaxPoints, q, q)
+	}
+	stdout, _, _, err := fsys.Exec(ctx, "sh", "-c", sb.String())
+	if err != nil {
+		return "", fmt.Errorf("job activity: %w", err)
+	}
+	// Non-zero exit codes are unremarkable: every file access is guarded
+	// in-script, and a missing file is an answer, not an error.
+	return string(stdout), nil
+}
+
+// parseActivityOutput folds decimated rows back into their tasks.
+// Line grammar: "<path>\t__k\t<stride>" or "<path>\t<ts>\t<bytes>[\t<lines>]".
+// Legacy 2-column rows yield Lines == nil (bytes cannot stand in for
+// line counts). Malformed lines are dropped, not fatal.
+func parseActivityOutput(stdout string, byPath map[string]int, tasks []TaskActivity) {
+	for _, line := range strings.Split(stdout, "\n") {
+		if line == "" {
+			continue
+		}
+		path, rest, ok := strings.Cut(line, "\t")
+		if !ok {
+			continue
+		}
+		idx, ok := byPath[path]
+		if !ok {
+			continue
+		}
+		if kstr, isK := strings.CutPrefix(rest, "__k\t"); isK {
+			if k, err := strconv.Atoi(strings.TrimSpace(kstr)); err == nil && k > 0 {
+				tasks[idx].BucketMin = k // rows are 60s apart → k == minutes/point
+			}
+			continue
+		}
+		f := strings.Split(rest, "\t")
+		if len(f) < 2 {
+			continue
+		}
+		ts, err1 := strconv.ParseInt(strings.TrimSpace(f[0]), 10, 64)
+		bytesV, err2 := strconv.ParseInt(strings.TrimSpace(f[1]), 10, 64)
+		if err1 != nil || err2 != nil {
+			continue
+		}
+		pt := ActivityPoint{TS: ts, Bytes: bytesV}
+		if len(f) >= 3 {
+			if lv, err := strconv.ParseInt(strings.TrimSpace(f[2]), 10, 64); err == nil {
+				pt.Lines = &lv
+			}
+		}
+		tasks[idx].Points = append(tasks[idx].Points, pt)
+	}
+}

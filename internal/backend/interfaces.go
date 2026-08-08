@@ -119,6 +119,13 @@ type Backend interface {
 	// (FS.Exec grep — results travel, files don't). Implementations may
 	// cap the number of matches.
 	JobLogSearch(ctx context.Context, jobID, query string) ([]LogMatch, error)
+
+	// JobActivity returns each task's activity.tsv rows (cumulative
+	// bytes/lines, one per 60s tick), decimated ON THE OWNING SIDE to
+	// ≤ ~2000 points per task — stride sampling of cumulative columns
+	// is lossless coarsening, so no index is needed (RQ2-1 §1). Missing
+	// or unreadable files yield empty points, never errors.
+	JobActivity(ctx context.Context, jobID string) (*JobActivity, error)
 	KillTask(ctx context.Context, taskID string) error
 	RetryTask(ctx context.Context, taskID string) error
 	KillJob(ctx context.Context, jobID string) error

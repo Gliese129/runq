@@ -281,6 +281,10 @@ func (b *LocalBackend) JobLogSearch(ctx context.Context, jobID, query string) ([
 	return jobLogSearchViaExec(ctx, b.store, nil, jobID, query)
 }
 
+func (b *LocalBackend) JobActivity(ctx context.Context, jobID string) (*JobActivity, error) {
+	return jobActivityViaExec(ctx, b.store, nil, jobID)
+}
+
 // ── Capabilities ──────────────────────────────────────────────────────────
 
 func (b *LocalBackend) Capabilities() Capabilities {
