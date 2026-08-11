@@ -156,7 +156,7 @@ def test_successful_save_appends_checkpoint_event(daemon_ctx, monkeypatch):
         "ckpt.pt", "data",
         save_fn=_dummy_save, step=5, is_best=True, size_hint=100,
     )
-    events = _read_jsonl(daemon_ctx.metrics_file)
+    events = _read_jsonl(daemon_ctx.events_file)
     ckpts = [e for e in events if e["type"] == "checkpoint"]
     assert len(ckpts) == 1
     e = ckpts[0]
@@ -171,7 +171,7 @@ def test_step_zero_preserved_in_checkpoint_event(daemon_ctx, monkeypatch):
     """step=0 must be recorded as 0, not auto-replaced or treated as missing."""
     monkeypatch.setattr(shutil, "disk_usage", _disk_usage_seq([1 << 50]))
     runq.safe_save("ckpt.pt", "x", save_fn=_dummy_save, step=0, size_hint=100)
-    events = _read_jsonl(daemon_ctx.metrics_file)
+    events = _read_jsonl(daemon_ctx.events_file)
     ckpts = [e for e in events if e["type"] == "checkpoint"]
     assert ckpts[0]["step"] == 0
 

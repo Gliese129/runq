@@ -109,7 +109,7 @@ def test_step_stripped_when_user_fn_doesnt_declare(daemon_ctx, monkeypatch):
     assert "size_hint" not in received_kwargs[0]
 
     # But SDK should still record step + is_best in the checkpoint event.
-    events = _read_jsonl(daemon_ctx.metrics_file)
+    events = _read_jsonl(daemon_ctx.events_file)
     ckpts = [e for e in events if e["type"] == "checkpoint"]
     assert ckpts[0]["step"] == 5
     assert ckpts[0]["is_best"] is True
@@ -129,7 +129,7 @@ def test_step_forwarded_when_user_fn_declares_it(daemon_ctx, monkeypatch):
 
     assert received_step == [7]
     # SDK also recorded it.
-    events = _read_jsonl(daemon_ctx.metrics_file)
+    events = _read_jsonl(daemon_ctx.events_file)
     assert next(e for e in events if e["type"] == "checkpoint")["step"] == 7
 
 
@@ -160,7 +160,7 @@ def test_size_hint_explicit_skips_walker(daemon_ctx, monkeypatch):
 
     # Pass size_hint explicitly even though data isn't a tensor.
     my_save("ckpt.pt", "x", size_hint=42)
-    events = _read_jsonl(daemon_ctx.metrics_file)
+    events = _read_jsonl(daemon_ctx.events_file)
     assert events[0]["type"] == "checkpoint"
 
 

@@ -27,6 +27,20 @@ func MetricsPath(dir string) string {
 	return path.Join(dir, "metrics.jsonl")
 }
 
+// ResultsPath is the runq.record data plane (three-file contract, RQ2-1):
+// bounded result records ingested into the store in full, one JSON object
+// per line. The SDK derives this path as metrics.jsonl's sibling.
+func ResultsPath(dir string) string {
+	return path.Join(dir, "results.jsonl")
+}
+
+// EventsPath is the lifecycle plane (checkpoint / preempted / loop_break),
+// split out of metrics.jsonl so the metric stream stays pure. Old tasks'
+// mixed metrics.jsonl is still ingested tolerantly — zero migration.
+func EventsPath(dir string) string {
+	return path.Join(dir, "events.jsonl")
+}
+
 // PyramidPath is the multi-resolution metrics index built next to
 // metrics.jsonl by `runq metrics-index build` (pyramid.go, this package).
 func PyramidPath(dir string) string {

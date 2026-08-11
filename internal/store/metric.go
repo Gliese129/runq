@@ -74,9 +74,12 @@ func (s *Store) SetIngestMark(ctx context.Context, taskID string, m IngestMark) 
 	return err
 }
 
-// DeleteTaskMetrics drops a task's summaries and ingest mark — the rebuild
-// path when metrics.jsonl shrank (retry rerun rewrote it), and the retry
-// unfreeze.
+// DeleteTaskMetrics drops a task's ingested SDK-output state — summaries,
+// result records, and every ingest mark — the retry unfreeze ("fresh
+// attempt = fresh ingest"). Terminal passes froze the marks (Final=true);
+// without this reset the new attempt's files would never be read. Result
+// rows must go WITH their mark: result_records has no natural PK, so a
+// mark-only reset would double-insert them on the full re-read.
 //
 // checkpoints are DELIBERATELY kept: they are a TASK-lifetime event log,
 // not a reduction of the current file. Freeze sizing (MaxCheckpointSize)
@@ -85,11 +88,17 @@ func (s *Store) SetIngestMark(ctx context.Context, taskID string, m IngestMark) 
 // file is still on disk. PK (task_id, step) + newer-ts upsert makes
 // re-reads idempotent, so keeping rows costs nothing.
 func (s *Store) DeleteTaskMetrics(ctx context.Context, taskID string) error {
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM metric_summary WHERE task_id = ?`, taskID); err != nil {
-		return err
+	for _, stmt := range []string{
+		`DELETE FROM metric_summary WHERE task_id = ?`,
+		`DELETE FROM metrics_ingest WHERE task_id = ?`,
+		`DELETE FROM result_records WHERE task_id = ?`,
+		`DELETE FROM file_ingest WHERE task_id = ?`,
+	} {
+		if _, err := s.db.ExecContext(ctx, stmt, taskID); err != nil {
+			return err
+		}
 	}
-	_, err := s.db.ExecContext(ctx, `DELETE FROM metrics_ingest WHERE task_id = ?`, taskID)
-	return err
+	return nil
 }
 
 // MetricSummaryRow is one (task, key) streaming reduction.

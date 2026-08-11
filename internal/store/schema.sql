@@ -117,6 +117,40 @@ CREATE TABLE IF NOT EXISTS metrics_ingest (
     final         INTEGER NOT NULL DEFAULT 0   -- 1 = terminal ingest done
 );
 
+-- ── RQ2-1: result records (runq.record data plane) ────────────────────────
+-- Full-fidelity result records emitted by the SDK's `runq.record(metrics,
+-- **axes)` into <task_dir>/results.jsonl and ingested by the incremental
+-- reap. Unlike the unbounded per-step metric stream (summarized above),
+-- result records are BOUNDED facts — one per eval checkpoint, same class
+-- as the checkpoints table — so full rows go in. The ingest cap
+-- (store.MaxResultRecordsPerTask) makes that boundedness enforced, not
+-- assumed. Self-healing cache doctrine holds: results.jsonl on the target
+-- remains the source of truth; these rows rebuild from it.
+CREATE TABLE IF NOT EXISTS result_records (
+    task_id      TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    job_id       TEXT NOT NULL,       -- denormalized for job-level queries
+    ts           INTEGER NOT NULL,    -- Unix timestamp from SDK at record time
+    axes_json    TEXT NOT NULL,       -- JSON object: identity/coordinate keys
+    metrics_json TEXT NOT NULL        -- JSON object: metric name → number
+);
+CREATE INDEX IF NOT EXISTS idx_result_records_job  ON result_records(job_id);
+CREATE INDEX IF NOT EXISTS idx_result_records_task ON result_records(task_id);
+
+-- Incremental ingest marks for the post-split SDK files (results.jsonl /
+-- events.jsonl) — same (size, parsed_offset, final) semantics as
+-- metrics_ingest, generalized to one row per (task, file) so a future
+-- fourth file needs no new table. dropped_count persists the results cap's
+-- overflow tally (feeds the results endpoint's `truncated` flag).
+CREATE TABLE IF NOT EXISTS file_ingest (
+    task_id       TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    file          TEXT NOT NULL,               -- 'results' | 'events'
+    file_size     INTEGER NOT NULL DEFAULT 0,  -- stat size at last pass
+    parsed_offset INTEGER NOT NULL DEFAULT 0,  -- consumed up to here (complete lines only)
+    final         INTEGER NOT NULL DEFAULT 0,  -- 1 = terminal ingest done
+    dropped_count INTEGER NOT NULL DEFAULT 0,  -- results only: rows dropped over the cap
+    PRIMARY KEY (task_id, file)
+);
+
 CREATE TABLE IF NOT EXISTS checkpoints (
     task_id     TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
     job_id      TEXT NOT NULL,
