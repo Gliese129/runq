@@ -282,6 +282,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/v1/jobs/{id}", s.handleGetJob)
 	s.mux.HandleFunc("GET /api/v1/jobs/{id}/metrics", s.handleJobMetrics) // 双模式：无 key → {keys}，有 key → {rows}
 	s.mux.HandleFunc("GET /api/v1/jobs/{id}/activity", s.handleJobActivity)
+	s.mux.HandleFunc("GET /api/v1/jobs/{id}/results", s.handleJobResults)
 	s.mux.HandleFunc("GET /api/v1/jobs/{id}/log/search", s.handleJobLogSearch)
 	s.mux.HandleFunc("GET /api/v1/jobs/{id}/events", s.handleJobEvents) // SSE §6.4（capability: event_stream）
 	s.mux.HandleFunc("POST /api/v1/jobs/{id}/kill", s.handleKillJob)
@@ -1138,6 +1139,17 @@ func (s *Server) handleJobActivity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, act)
+}
+
+// handleJobResults returns the job's runq.record data as the columnar
+// wire (see backend.JobResults — pure SQL over ingested result_records).
+func (s *Server) handleJobResults(w http.ResponseWriter, r *http.Request) {
+	res, err := s.backend.JobResults(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
 }
 
 // handleJobLogSearch searches across all task logs in a job.

@@ -280,6 +280,82 @@ type JobActivity struct {
 	JobEnd   *int64         `json:"job_end,omitempty"`
 }
 
+// ── /jobs/{id}/results wire (RQ2-1 §A: columnar, record-index dimension) ──
+//
+// Every record from runq.record shares ONE dimension: its index in the
+// sorted sequence. All columns are equally long; axes co-occurrence is
+// encoded by the shared index. The backend sorts by (identity, task,
+// primary x) so identity groups AND per-task runs are contiguous ranges,
+// handed to the consumer as slice indices — no client-side scanning.
+
+// JobResults is the GET /jobs/{id}/results response.
+type JobResults struct {
+	// Source describes the record contract, a constant — NOT a file path
+	// (zero path inference; see ResultSource).
+	Source string `json:"source"`
+	// Parsed = records returned; Skipped = records dropped by the ingest
+	// cap (Σ file_ingest.dropped_count over the job's tasks — known loss);
+	// Truncated = Skipped > 0. Malformed lines are warn-logged at ingest
+	// and not counted here.
+	Parsed    int   `json:"parsed"`
+	Skipped   int64 `json:"skipped"`
+	Truncated bool  `json:"truncated"`
+	// UpdatedAt is the newest record's ts (0 when empty).
+	UpdatedAt int64        `json:"updated_at"`
+	N         int          `json:"n"`
+	Schema    ResultSchema `json:"schema"`
+	Cols      ResultCols   `json:"cols"`
+}
+
+// ResultSchema is the "smart parse" product: key classification, group and
+// task ranges, vocab dictionaries. All ranges index into Cols.
+type ResultSchema struct {
+	// Groups are identity runs (model value, task_id fallback) — the
+	// series dimension, contiguous by construction.
+	Groups []ResultRange `json:"groups"`
+	// Tasks are contiguous per-task runs. NOT necessarily one entry per
+	// task: a task that recorded several models is split across identity
+	// groups and contributes one entry per run.
+	Tasks []ResultRange         `json:"tasks"`
+	Axes  map[string]ResultAxis `json:"axes"`
+	// XAxes are the x-candidate axis names in first-appearance order
+	// (first = primary, the sort key). Kept as an array because the Axes
+	// map carries no order.
+	XAxes   []string `json:"x_axes"`
+	Metrics []string `json:"metrics"`
+}
+
+// ResultRange is one contiguous [Offset, Offset+Count) slice of the record
+// sequence. Key carries the identity value for groups; ID the task id for
+// task runs (exactly one of the two is set per usage).
+type ResultRange struct {
+	Key    string `json:"key,omitempty"`
+	ID     string `json:"id,omitempty"`
+	Offset int    `json:"offset"`
+	Count  int    `json:"count"`
+}
+
+// ResultAxis classifies one axis key.
+type ResultAxis struct {
+	Type string `json:"type"` // "num" | "str" | "bool"
+	Role string `json:"role"` // "identity" | "x" | "label"
+	// Vocab dictionary-encodes str axes: the column holds indices into it.
+	Vocab []string `json:"vocab,omitempty"`
+	// Nulled counts values nulled by type conflict (mixed-type axis:
+	// majority type wins, minority values → null) or non-scalar values.
+	// The warning travels WITH the data instead of hiding in a log.
+	Nulled int `json:"nulled,omitempty"`
+}
+
+// ResultCols holds the equally-long columns. Axis columns carry float64 /
+// bool / vocab index (int) / nil per the axis type; metric columns are
+// numbers with nil holes for records that didn't report the metric.
+type ResultCols struct {
+	TS      []int64               `json:"ts"`
+	Axes    map[string][]any      `json:"axes"`
+	Metrics map[string][]*float64 `json:"metrics"`
+}
+
 // LogMatch is one grep hit from JobLogSearch: which task's log, where, and
 // the matching line (owning-side grep — results travel, files don't).
 type LogMatch struct {

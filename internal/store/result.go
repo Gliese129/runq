@@ -168,6 +168,18 @@ func (s *Store) ApplyEventsIngestDelta(ctx context.Context, taskID string,
 	return tx.Commit()
 }
 
+// SumResultsDropped totals the results-cap overflow across a job's tasks —
+// the honest input for the results endpoint's skipped/truncated fields.
+func (s *Store) SumResultsDropped(ctx context.Context, jobID string) (int64, error) {
+	var n int64
+	err := s.db.QueryRowContext(ctx, `
+		SELECT COALESCE(SUM(fi.dropped_count), 0)
+		FROM file_ingest fi
+		JOIN tasks t ON t.id = fi.task_id
+		WHERE t.job_id = ? AND fi.file = ?`, jobID, IngestFileResults).Scan(&n)
+	return n, err
+}
+
 // ListResultRecords returns a job's result records ordered by task then
 // record order — the raw material for the results endpoint's columnar
 // assembly (RQ2-1 c3).

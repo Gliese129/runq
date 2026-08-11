@@ -421,6 +421,53 @@ export interface JobActivityResponse {
   job_end?: number
 }
 
+/** Columnar results wire (RQ2-1 §A): every record shares one dimension —
+ *  its index in the sorted sequence. Ranges below slice into that
+ *  dimension; the D-ticket adapter pivots slices into curves/rows. */
+export interface ResultRange {
+  /** Identity value — groups entries only. */
+  key?: string
+  /** Task id — tasks entries only. A task recording several models is
+   *  split across identity groups: same id may appear in multiple runs. */
+  id?: string
+  offset: number
+  count: number
+}
+
+export interface ResultAxis {
+  type: 'num' | 'str' | 'bool'
+  role: 'identity' | 'x' | 'label'
+  /** str axes are dictionary-encoded: the column holds indices into this. */
+  vocab?: string[]
+  /** Values nulled by mixed-type conflict — the warning travels with the data. */
+  nulled?: number
+}
+
+export interface JobResultsResponse {
+  /** Contract constant ("runq.record(**axes)"), not a path. */
+  source: string
+  parsed: number
+  /** Records dropped by the per-task ingest cap (known loss). */
+  skipped: number
+  truncated: boolean
+  updated_at: number
+  n: number
+  schema: {
+    groups: ResultRange[]
+    tasks: ResultRange[]
+    axes: Record<string, ResultAxis>
+    /** x candidates in first-appearance order; first = primary (sort key). */
+    x_axes: string[]
+    metrics: string[]
+  }
+  cols: {
+    ts: number[]
+    /** Per axis type: number | vocab index | boolean, null = hole. */
+    axes: Record<string, (number | boolean | null)[]>
+    metrics: Record<string, (number | null)[]>
+  }
+}
+
 /** Wire shape (spec §5.4): deliberately no byte offset — jumps go through
  *  log paging / pyramid raw ranges, not grep results. */
 export interface SearchMatch {

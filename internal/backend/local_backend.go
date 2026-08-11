@@ -285,6 +285,12 @@ func (b *LocalBackend) JobActivity(ctx context.Context, jobID string) (*JobActiv
 	return jobActivityViaExec(ctx, b.store, nil, jobID)
 }
 
+// JobResults is pure SQL over ingested result_records (same posture as
+// CompareMetrics: the lifecycle reap keeps the store current locally).
+func (b *LocalBackend) JobResults(ctx context.Context, jobID string) (*JobResults, error) {
+	return jobResultsFromDB(ctx, b.store, jobID)
+}
+
 // ── Capabilities ──────────────────────────────────────────────────────────
 
 func (b *LocalBackend) Capabilities() Capabilities {

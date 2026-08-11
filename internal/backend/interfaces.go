@@ -126,6 +126,12 @@ type Backend interface {
 	// is lossless coarsening, so no index is needed (RQ2-1 §1). Missing
 	// or unreadable files yield empty points, never errors.
 	JobActivity(ctx context.Context, jobID string) (*JobActivity, error)
+
+	// JobResults assembles the job's runq.record data into the columnar
+	// wire (RQ2-1 §A): pure SQL over ingested result_records, zero
+	// filesystem access — archived jobs stay queryable. Poll-model
+	// backends refresh ingest first (EnsureFresh) so the store is current.
+	JobResults(ctx context.Context, jobID string) (*JobResults, error)
 	KillTask(ctx context.Context, taskID string) error
 	RetryTask(ctx context.Context, taskID string) error
 	KillJob(ctx context.Context, jobID string) error

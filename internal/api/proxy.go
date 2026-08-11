@@ -486,6 +486,16 @@ func (p *Proxy) JobActivity(ctx context.Context, jobID string) (*backend.JobActi
 	return &out, nil
 }
 
+// JobResults — GET /jobs/{id}/results (RQ2-1 §A): the daemon assembles
+// the columnar wire from its store; the proxy just relays the JSON.
+func (p *Proxy) JobResults(ctx context.Context, jobID string) (*backend.JobResults, error) {
+	var out backend.JobResults
+	if err := p.do(ctx, "GET", "/api/v1/jobs/"+url.PathEscape(jobID)+"/results", nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // ── Actions ─────────────────────────────────────────────────────────────
 
 func (p *Proxy) KillTask(ctx context.Context, taskID string) error {

@@ -1057,6 +1057,16 @@ func (b *SSHBackend) JobActivity(ctx context.Context, jobID string) (*JobActivit
 	return jobActivityViaExec(ctx, b.store, b.backend.FS, jobID)
 }
 
+// JobResults is pure SQL over ingested result_records; EnsureFresh runs
+// the refresh reap first so results.jsonl deltas on the cluster have
+// landed (same posture as CompareMetrics).
+func (b *SSHBackend) JobResults(ctx context.Context, jobID string) (*JobResults, error) {
+	if err := b.backend.EnsureFresh(ctx, jobID, DefaultReadTTL); err != nil {
+		return nil, err
+	}
+	return jobResultsFromDB(ctx, b.store, jobID)
+}
+
 func (b *SSHBackend) RetryTask(ctx context.Context, taskID string) error {
 	b.touchActivity()
 	row, err := b.store.GetTask(ctx, taskID)
