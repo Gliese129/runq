@@ -408,6 +408,7 @@ func (b *LocalBackend) GetTask(ctx context.Context, taskID string) (*TaskView, e
 		return nil, fmt.Errorf("task %q: %w", taskID, ErrNotFound)
 	}
 	view := BuildTaskView(*task)
+	applyTaskDetail(&view, *task)
 	return &view, nil
 }
 

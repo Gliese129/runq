@@ -96,6 +96,11 @@ export interface TaskView {
   queue?: string
   /** filesystem path to the task's log file — populated by GetTask only */
   log_path?: string
+  /** Execution facts for the task page's Execution KV — detail-only
+   *  (populated by GetTask, absent in list responses). */
+  command?: string
+  working_dir?: string
+  task_dir?: string
 }
 
 /** One metric sample (mirrors backend.MetricPoint). */
@@ -151,6 +156,10 @@ export interface JobDetail {
   wandb?: WandbInfo
   /** raw config as submitted — powers "re-run as template" */
   config?: RawJobConfig
+  /** Job workspace dir — the Data tab's fs/list root. Absolute path on
+   *  job.target's filesystem (pair with that target when browsing);
+   *  absent when the job recorded no task dirs → show the empty state. */
+  data_dir?: string
 }
 
 export interface CompareRow {

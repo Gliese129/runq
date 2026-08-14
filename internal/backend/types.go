@@ -64,6 +64,15 @@ type JobDetail struct {
 	MetricKeys []string        `json:"metric_keys"`
 	Wandb      *WandbInfo      `json:"wandb,omitempty"`
 	Config     json.RawMessage `json:"config,omitempty"` // raw JobConfig (re-run as template)
+	// DataDir is the job's workspace directory (RQ2-1 §F: the Data tab's
+	// fs/list root). ABSOLUTE path with TARGET semantics — it only means
+	// something on the filesystem of job.target; pair it with that target
+	// when browsing. Derived from the recorded task dirs (submit-time
+	// fact, not re-derived config); archive never moves directories, so
+	// it stays valid for archived jobs. Omitted when no task recorded a
+	// dir (pre-L2C jobs, zero-task jobs) — the Data tab shows its empty
+	// state, never an error.
+	DataDir string `json:"data_dir,omitempty"`
 }
 
 type TaskView struct {
@@ -95,6 +104,14 @@ type TaskView struct {
 	// LogPath is the filesystem path to the task's log file. Omitted from
 	// JSON list responses; populated by GetTask for log-streaming endpoints.
 	LogPath string `json:"log_path,omitempty"`
+	// RQ2-1 §G: execution facts for the task page's Execution KV —
+	// detail-only (populated by GetTask, never in list responses; row-level
+	// consumers don't need them and lists stay lean). Straight DTO
+	// exposure of store columns; secrets travel via .env/prelude, never
+	// the command text.
+	Command    string `json:"command,omitempty"`
+	WorkingDir string `json:"working_dir,omitempty"`
+	TaskDir    string `json:"task_dir,omitempty"`
 }
 
 type MetricPoint struct {

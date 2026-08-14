@@ -692,6 +692,7 @@ func (b *SSHBackend) GetTask(ctx context.Context, taskID string) (*TaskView, err
 	}
 	task = b.reconcileTask(ctx, taskID, task)
 	view := BuildTaskView(*task)
+	applyTaskDetail(&view, *task)
 	return &view, nil
 }
 

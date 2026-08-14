@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -97,8 +98,32 @@ func BuildJobDetail(job store.JobRow, tasks []store.TaskRow, metricKeys []string
 		MetricKeys: metricKeys,
 		// Raw config (note template, sweep blocks) — powers "re-run as
 		// template" in the GUI without a second endpoint.
-		Config: json.RawMessage(job.ConfigJSON),
+		Config:  json.RawMessage(job.ConfigJSON),
+		DataDir: jobDataDir(tasks),
 	}
+}
+
+// jobDataDir resolves the job's workspace directory from recorded task
+// dirs (task_dir = <jobRoot>/<taskID>, stamped at submit) — a fact from
+// the ledger, not a re-derivation of root + note slug that could drift
+// from what submit actually did. Empty when no task carries a dir.
+func jobDataDir(tasks []store.TaskRow) string {
+	for _, t := range tasks {
+		if t.TaskDir != "" {
+			// Both lanes join with forward slashes (workspace.TaskDir).
+			return path.Dir(t.TaskDir)
+		}
+	}
+	return ""
+}
+
+// applyTaskDetail adds the detail-only execution facts to a list-shaped
+// TaskView (RQ2-1 §G) — shared by every GetTask implementation so the
+// detail response is uniform across lanes.
+func applyTaskDetail(view *TaskView, task store.TaskRow) {
+	view.Command = task.Command
+	view.WorkingDir = task.WorkingDir
+	view.TaskDir = task.TaskDir
 }
 
 // compareRowsFromDB builds CompareRows from INGESTED metrics — pure SQL,
