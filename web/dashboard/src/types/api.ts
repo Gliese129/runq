@@ -36,7 +36,6 @@ export interface JobSummary {
   target: string
   created_at: number
   tasks: TaskCountGroup
-  eta_seconds?: number
   /** last reconcile from external sources — poll-model backends only */
   refreshed_at?: number
 }
@@ -276,7 +275,6 @@ export interface HealthResponse {
 export interface JobPlanResponse {
   tasks: Record<string, any>[]
   note_resolved: string
-  warnings: string[]
 }
 
 /** One preflight check in the four-state grammar (passed/failed/warning/skipped). */

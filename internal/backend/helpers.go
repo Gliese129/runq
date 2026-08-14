@@ -29,7 +29,6 @@ import (
 
 func BuildJobSummary(job store.JobRow, tasks []store.TaskRow) JobSummary {
 	counts := TaskCountGroup{Total: len(tasks)}
-	var finishedDurations []float64
 	for _, task := range tasks {
 		switch task.Status {
 		case "pending":
@@ -43,24 +42,6 @@ func BuildJobSummary(job store.JobRow, tasks []store.TaskRow) JobSummary {
 		case "failed", "killed":
 			counts.Failed++
 		}
-		if task.StartedAt != nil && task.FinishedAt != nil && task.FinishedAt.After(*task.StartedAt) {
-			finishedDurations = append(finishedDurations, task.FinishedAt.Sub(*task.StartedAt).Seconds())
-		}
-	}
-
-	var eta *int64
-	remaining := counts.Pending + counts.Running
-	if len(finishedDurations) > 0 && remaining > 0 {
-		var total float64
-		for _, d := range finishedDurations {
-			total += d
-		}
-		concurrency := counts.Running
-		if concurrency == 0 {
-			concurrency = 1
-		}
-		sec := int64((total / float64(len(finishedDurations))) * float64(remaining) / float64(concurrency))
-		eta = &sec
 	}
 
 	var refreshedAt *int64
@@ -78,7 +59,6 @@ func BuildJobSummary(job store.JobRow, tasks []store.TaskRow) JobSummary {
 		Archived:    job.ArchivedAt != nil,
 		CreatedAt:   job.CreatedAt.Unix(),
 		Tasks:       counts,
-		ETASec:      eta,
 		RefreshedAt: refreshedAt,
 	}
 }

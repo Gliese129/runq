@@ -51,7 +51,6 @@
   "job.resume": "再開",
   "job.retry": "再試行",
   "job.clone": "ここから新規作成",
-  "job.eta": "残り時間",
   "job.data_as_of": "{time}時点のデータ",
   "job.refresh": "今すぐ更新",
   "job.elapsed": "経過時間",

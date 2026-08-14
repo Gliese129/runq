@@ -286,7 +286,6 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/v1/jobs/{id}/activity", s.handleJobActivity)
 	s.mux.HandleFunc("GET /api/v1/jobs/{id}/results", s.handleJobResults)
 	s.mux.HandleFunc("GET /api/v1/jobs/{id}/log/search", s.handleJobLogSearch)
-	s.mux.HandleFunc("GET /api/v1/jobs/{id}/events", s.handleJobEvents) // SSE §6.4（capability: event_stream）
 	s.mux.HandleFunc("POST /api/v1/jobs/{id}/kill", s.handleKillJob)
 	s.mux.HandleFunc("POST /api/v1/jobs/{id}/pause", s.handlePauseJob)
 	s.mux.HandleFunc("POST /api/v1/jobs/{id}/resume", s.handleResumeJob)
@@ -480,12 +479,11 @@ func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, env)
 }
 
-// handleJobEvents — GET /jobs/{id}/events (spec §6.4, D14): SSE state
-// stream, capability event_stream. Push targets emit live; poll targets
-// emit on cache refresh. Lands with the cache layer + #49.
-func (s *Server) handleJobEvents(w http.ResponseWriter, r *http.Request) {
-	notImplemented(w, "job event stream") // TODO(#49): SSE `state` events
-}
+// (The GET /jobs/{id}/events SSE stub is GONE — rqv2 settled on the
+// poll-honesty model: an exact last-poll timestamp over a "live" stream
+// that silently dies, and HPC poll backends have no push source anyway.
+// The stub represented an abandoned premise, not unfinished work; a
+// future push design would start from a new architecture ticket.)
 
 // handleListProjects — GET /projects?dir=&archived= (spec §5.3, D3).
 // ?dir= absorbs the retired /projects/match; projects are local config,
@@ -859,10 +857,12 @@ func (s *Server) handlePlanJob(w http.ResponseWriter, r *http.Request) {
 		// note 解析失败不应阻塞 plan：降级为原样返回
 		note = body.Config.Note
 	}
+	// No warnings field: it was forever-empty dead wire. Submission-time
+	// findings travel through the preflight report (four-state grammar),
+	// which is a different concept with its own channel.
 	writeJSON(w, http.StatusOK, map[string]any{
 		"tasks":         tasks,
 		"note_resolved": note,
-		"warnings":      []string{}, // TODO(L3): preflight-adjacent warnings
 	})
 }
 

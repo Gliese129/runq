@@ -6,19 +6,6 @@ import (
 	"strings"
 )
 
-// MetricRow maps to one row in the `metrics` table.
-// Populated by the daemon when reading <task_dir>/metrics.jsonl after a task
-// exits (see scheduler reap logic). Step is nullable because user scripts that
-// don't track step (eval-only scripts, single-shot inference) still log metrics.
-type MetricRow struct {
-	TaskID string
-	JobID  string
-	Key    string
-	Value  float64
-	Step   *int64 // nil → SQL NULL
-	TS     int64  // Unix timestamp; daemon preserves the value SDK wrote, doesn't re-stamp
-}
-
 // CheckpointRow maps to one row in the `checkpoints` table.
 // Populated when daemon sees a `type=checkpoint` event in metrics.jsonl
 // (written by @runq.safe_save on the SDK side).

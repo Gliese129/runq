@@ -35,7 +35,6 @@ type JobSummary struct {
 	Archived  bool           `json:"archived"`
 	CreatedAt int64          `json:"created_at"`
 	Tasks     TaskCountGroup `json:"tasks"`
-	ETASec    *int64         `json:"eta_seconds,omitempty"`
 	// RefreshedAt: last reconcile from external sources (poll-model backends
 	// only). Omitted in daemon mode — push state is always current.
 	RefreshedAt *int64 `json:"refreshed_at,omitempty"`

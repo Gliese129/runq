@@ -565,17 +565,16 @@ func (p *Proxy) PreviewSubmit(ctx context.Context, cfg job.JobConfig, skipPrefli
 
 // PlanJob — POST /jobs/plan (D12): cheap local expansion + note resolution
 // in one call. The submit wizard and `runq sweep --dry` consume this.
-func (p *Proxy) PlanJob(ctx context.Context, cfg job.JobConfig) (tasks []job.TaskParams, noteResolved string, warnings []string, err error) {
+func (p *Proxy) PlanJob(ctx context.Context, cfg job.JobConfig) (tasks []job.TaskParams, noteResolved string, err error) {
 	body := submitWireBody{Config: cfg, Target: p.TargetFilter}
 	var resp struct {
 		Tasks        []job.TaskParams `json:"tasks"`
 		NoteResolved string           `json:"note_resolved"`
-		Warnings     []string         `json:"warnings"`
 	}
 	if err := p.do(ctx, "POST", "/api/v1/jobs/plan", body, &resp); err != nil {
-		return nil, "", nil, err
+		return nil, "", err
 	}
-	return resp.Tasks, resp.NoteResolved, resp.Warnings, nil
+	return resp.Tasks, resp.NoteResolved, nil
 }
 
 func (p *Proxy) DryRun(ctx context.Context, cfg job.JobConfig) (*backend.DryRunResult, error) {
@@ -591,7 +590,7 @@ func (p *Proxy) DryRun(ctx context.Context, cfg job.JobConfig) (*backend.DryRunR
 // the daemon owns the store, and the {{version}} family scan must run
 // against it (same path as submit).
 func (p *Proxy) ResolveNote(ctx context.Context, cfg job.JobConfig) (string, error) {
-	_, note, _, err := p.PlanJob(ctx, cfg)
+	_, note, err := p.PlanJob(ctx, cfg)
 	return note, err
 }
 

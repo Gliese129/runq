@@ -25,6 +25,13 @@ func (s *Store) Migrate() error {
 	if err := s.addMissingColumns(ctx); err != nil {
 		return err
 	}
+	// RQ2-1 c6: the legacy raw-point metrics table is vestigial — the
+	// streaming reduction (metric_summary + on-target pyramid) replaced
+	// it and grep confirms zero readers/writers. Dropping is safe on old
+	// DBs (points were never served) and a no-op on new ones.
+	if _, err := s.db.ExecContext(ctx, `DROP TABLE IF EXISTS metrics`); err != nil {
+		return err
+	}
 	return s.reclassifyDoneJobs(ctx)
 }
 

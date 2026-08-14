@@ -66,26 +66,12 @@ CREATE INDEX IF NOT EXISTS idx_jobs_status       ON jobs(status);
 CREATE INDEX IF NOT EXISTS idx_jobs_finished_at  ON jobs(finished_at);
 
 -- ── L2-C: metrics and checkpoints ─────────────────────────────────────────
--- Populated by daemon during `runTask` reap: read <task_dir>/metrics.jsonl,
--- dispatch each event by type (metric / checkpoint / disk_low).
--- Both tables carry job_id as a redundant column to avoid joining on `tasks`
--- when querying by job (e.g. `runq log search --job <id> --key loss`).
-
-CREATE TABLE IF NOT EXISTS metrics (
-    task_id  TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-    job_id   TEXT NOT NULL,                  -- denormalized for fast filtering
-    key      TEXT NOT NULL,                  -- e.g. "loss" or "train/loss"
-    value    REAL,
-    step     INTEGER,                        -- nullable: scripts that don't track step
-    ts       INTEGER NOT NULL,               -- Unix timestamp from SDK at log time
-    PRIMARY KEY (task_id, key, step, ts)
-);
--- NOTE(pyramid pivot): the metrics point table above is LEGACY — the
--- streaming-reduction design stores no raw points (metric_summary below +
--- the on-target metrics.pyr index replace it). Kept so existing DBs open
--- cleanly; drop in the dead-code cleanup batch alongside its indexes.
-CREATE INDEX IF NOT EXISTS idx_metrics_job_key  ON metrics(job_id, key);
-CREATE INDEX IF NOT EXISTS idx_metrics_task_key ON metrics(task_id, key, step);
+-- Populated by daemon during `runTask` reap: read the task's SDK output
+-- files, dispatch each event by type. Tables carry job_id as a redundant
+-- column to avoid joining on `tasks` when querying by job.
+-- (The legacy raw-point `metrics` table is GONE — RQ2-1 c6; migrate.go
+-- drops it from existing DBs. metric_summary + the on-target pyramid
+-- index replaced it in the streaming-reduction design.)
 
 -- Streaming metric summaries: ONE row per (task, key), maintained by the
 -- incremental ingest's on-the-fly reduction — raw points are NOT stored
