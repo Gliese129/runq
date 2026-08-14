@@ -246,6 +246,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/v1/health", s.handleHealth)
 	s.mux.HandleFunc("GET /api/v1/config", s.handleConfig)
 	s.mux.HandleFunc("PUT /api/v1/config", s.handlePutGlobalConfig)
+	s.mux.HandleFunc("GET /api/v1/ui", s.handleGetUIState)
+	s.mux.HandleFunc("PUT /api/v1/ui", s.handlePutUIState)
 	s.mux.HandleFunc("POST /api/v1/clean", s.handleClean)
 
 	// ── §5.2 Targets（含 target 级资源）────────────────────────────────
