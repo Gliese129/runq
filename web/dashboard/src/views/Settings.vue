@@ -254,6 +254,57 @@
         </v-card>
       </div>
 
+      <!-- Appearance levers (RQ2-2): density / surface / accent. State +
+           persistence (ui.json roaming, localStorage fallback) live in
+           useAppearance; these are plain selectors. -->
+      <div class="text-caption text-on-surface-variant mb-2">{{ t('settings.density') }}</div>
+      <div class="d-flex ga-2 mb-5">
+        <v-card
+          v-for="d in densities"
+          :key="d.value"
+          class="pa-3 text-center flex-grow-1 cursor-pointer"
+          :color="appearance.density.value === d.value ? 'primary' : 'surface-variant'"
+          :variant="appearance.density.value === d.value ? 'tonal' : 'flat'"
+          @click="appearance.density.value = d.value"
+        >
+          <v-icon size="20" class="mb-1">{{ d.icon }}</v-icon>
+          <div class="text-caption">{{ d.label }}</div>
+        </v-card>
+      </div>
+
+      <div class="text-caption text-on-surface-variant mb-2">{{ t('settings.surface') }}</div>
+      <div class="d-flex ga-2 mb-5">
+        <v-card
+          v-for="s in surfaces"
+          :key="s.value"
+          class="pa-3 text-center flex-grow-1 cursor-pointer"
+          :color="appearance.surface.value === s.value ? 'primary' : 'surface-variant'"
+          :variant="appearance.surface.value === s.value ? 'tonal' : 'flat'"
+          @click="appearance.surface.value = s.value"
+        >
+          <v-icon size="20" class="mb-1">{{ s.icon }}</v-icon>
+          <div class="text-caption">{{ s.label }}</div>
+        </v-card>
+      </div>
+
+      <div class="text-caption text-on-surface-variant mb-2">{{ t('settings.accent') }}</div>
+      <div class="d-flex ga-2 mb-5">
+        <v-card
+          v-for="(a, hex) in ACCENTS"
+          :key="hex"
+          class="pa-3 text-center flex-grow-1 cursor-pointer"
+          :color="appearance.accent.value === hex ? 'primary' : 'surface-variant'"
+          :variant="appearance.accent.value === hex ? 'tonal' : 'flat'"
+          @click="appearance.accent.value = hex"
+        >
+          <span
+            class="accent-swatch mb-1"
+            :style="{ background: currentTheme === 'dark' ? a.dark : hex }"
+          />
+          <div class="text-caption">{{ a.name }}</div>
+        </v-card>
+      </div>
+
       <!-- Experimental (anime mode tucked away from the default view) -->
       <v-expansion-panels variant="accordion" class="mt-2">
         <v-expansion-panel>
@@ -303,6 +354,7 @@ import { useTheme } from 'vuetify'
 import { useConfigStore } from '@/stores/config'
 import { useSettingsStore } from '@/stores/settings'
 import { useSnackbar } from '@/composables/useSnackbar'
+import { useAppearance, ACCENTS, type Density, type Surface } from '@/composables/useAppearance'
 import { isGenerationConflict } from '@/apis/client'
 import { configApi, type TargetConfig, type TargetGenerationView, type HPCCheckResult } from '@/apis/config'
 import ShellTemplateEditor from '@/components/ShellTemplateEditor.vue'
@@ -635,6 +687,20 @@ const themes = computed(() => [
   { value: 'dark', label: t('settings.theme_dark'), icon: 'mdi-moon-waning-crescent' },
 ])
 
+const appearance = useAppearance()
+
+const densities = computed((): Array<{ value: Density; label: string; icon: string }> => [
+  { value: 'compact', label: t('settings.density_compact'), icon: 'mdi-view-headline' },
+  { value: 'regular', label: t('settings.density_regular'), icon: 'mdi-view-day-outline' },
+  { value: 'comfy', label: t('settings.density_comfy'), icon: 'mdi-view-agenda-outline' },
+])
+
+const surfaces = computed((): Array<{ value: Surface; label: string; icon: string }> => [
+  { value: 'hairline', label: t('settings.surface_hairline'), icon: 'mdi-square-outline' },
+  { value: 'elevated', label: t('settings.surface_elevated'), icon: 'mdi-checkbox-multiple-blank-outline' },
+  { value: 'grid', label: t('settings.surface_grid'), icon: 'mdi-grid' },
+])
+
 const locales = [
   { value: 'en', label: 'English', flag: 'EN' },
   { value: 'ja', label: '日本語', flag: 'JA' },
@@ -735,5 +801,11 @@ onUnmounted(() => {
 .tmpl-display:hover {
   border-color: rgb(var(--v-theme-primary));
   background: rgb(var(--v-theme-surface-variant), 0.35);
+}
+.accent-swatch {
+  display: inline-block;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
 }
 </style>

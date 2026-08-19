@@ -29,6 +29,8 @@
   /* ── typography.css: mono/data sizes (the density lever re-tunes these) ── */
   --data-cell-size: 12px;
   --data-head-size: 11px;
+  --data-td-pad: 5px 10px;
+  --data-th-pad: 6px 10px;
   --data-head-tracking: 0.03em;
   --code-size: 0.85em;
   --terminal-size: 12px;
@@ -138,10 +140,10 @@
   letter-spacing: var(--data-head-tracking);
   color: rgb(var(--v-theme-on-surface-variant));
   border-bottom: var(--border) solid rgb(var(--v-theme-outline-variant));
-  padding: 6px 10px;
+  padding: var(--data-th-pad);
 }
 .data-mono td {
-  padding: 5px 10px;
+  padding: var(--data-td-pad);
   border-bottom: var(--border-hairline) solid rgb(var(--v-theme-outline-variant), 0.5);
   white-space: nowrap;
 }
@@ -381,4 +383,67 @@ code {
   background-size: 200% 100%;
   animation: shimmer var(--shimmer-dur) var(--ease-in-out) infinite;
   border-radius: var(--radius-sm);
+}
+
+/* ═══════ Appearance levers (RQ2-2 — kit ui_kits/runq-dashboard/tweaks.jsx) ═══════
+   Root classes flipped by composables/useAppearance.ts; the accent lever
+   retunes the vuetify theme in JS (compiled RGB triplets can't be
+   overridden from here). 'regular' / 'hairline' ARE the token defaults —
+   their classes exist only so the DOM names the active choice. */
+
+/* ── Density: the data's breathing room (tables + mono rhythm; Vuetify
+   component density stays globally compact via plugin defaults) ── */
+.appearance-density-compact {
+  --data-cell-size: 11px;
+  --data-head-size: 10px;
+  --data-td-pad: 2px 8px;
+  --data-th-pad: 4px 8px;
+}
+.appearance-density-comfy {
+  --data-cell-size: 13px;
+  --data-head-size: 11px;
+  --data-td-pad: 10px 14px;
+  --data-th-pad: 10px 14px;
+}
+
+/* ── Surface: what a "card" means — a hairline plane (default), a floating
+   object, or cells in one continuous grid ── */
+.appearance-surface-elevated .v-card {
+  border-color: transparent !important;
+  border-radius: 12px !important;
+  box-shadow:
+    0 1px 2px rgba(15, 23, 42, 0.06),
+    0 6px 20px rgba(15, 23, 42, 0.07) !important;
+}
+.appearance-surface-elevated .v-main {
+  background: color-mix(
+    in srgb,
+    rgb(var(--v-theme-surface-variant)) 55%,
+    rgb(var(--v-theme-background))
+  );
+}
+.appearance-surface-elevated .data-mono tbody tr:hover {
+  background: rgb(var(--v-theme-primary), 0.05);
+}
+
+.appearance-surface-grid .v-card {
+  border-radius: 0 !important;
+  border: var(--border) solid rgb(var(--v-theme-outline-variant)) !important;
+  box-shadow: none !important;
+}
+.appearance-surface-grid .data-mono td {
+  border-bottom: var(--border) solid rgb(var(--v-theme-outline-variant));
+}
+.appearance-surface-grid .data-mono th {
+  border-bottom: var(--border) solid rgb(var(--v-theme-on-surface-variant));
+}
+.appearance-surface-grid .data-mono tbody tr:nth-child(even) {
+  background: rgb(var(--v-theme-surface-variant), 0.45);
+}
+.appearance-surface-grid .data-mono tbody tr:hover {
+  background: rgb(var(--v-theme-primary), 0.08);
+}
+.appearance-surface-grid .v-btn,
+.appearance-surface-grid .v-field {
+  border-radius: 2px !important;
 }
