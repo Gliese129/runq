@@ -70,12 +70,12 @@ func renderResultsTable(res *backend.JobResults) {
 		primaryX = res.Schema.XAxes[0]
 	}
 
-	// Latest record per group = last index of its range (sorted by primary
-	// x within the group). Global max x defines "caught up".
+	// Latest record per group (see latestIdx: x-based, off-axis records
+	// excluded). Global max x defines "caught up".
 	lastIdx := make([]int, len(res.Schema.Groups))
 	globalMaxX, haveX := 0.0, false
 	for gi, g := range res.Schema.Groups {
-		lastIdx[gi] = g.Offset + g.Count - 1
+		lastIdx[gi] = latestIdx(res, g, primaryX)
 		if primaryX != "" {
 			if x, ok := toFloatCell(res.Cols.Axes[primaryX][lastIdx[gi]]); ok {
 				if !haveX || x > globalMaxX {
@@ -120,6 +120,26 @@ func renderResultsTable(res *backend.JobResults) {
 			fmt.Printf("! axis %q: %d values had conflicting types and were nulled\n", name, ax.Nulled)
 		}
 	}
+}
+
+// latestIdx picks a group's "latest" record. x-based slices operate on
+// the group's x-bearing records only — the wire sorts them into a
+// monotonic prefix, with OFF-AXIS records (no primary x) as the tail —
+// so latest = the last x-bearing record, found by walking back over the
+// null tail. A group with no x-bearing records (or no x axis at all)
+// degrades to sequence order, i.e. its last record (ts-sorted).
+func latestIdx(res *backend.JobResults, g backend.ResultRange, primaryX string) int {
+	last := g.Offset + g.Count - 1
+	if primaryX == "" {
+		return last
+	}
+	col := res.Cols.Axes[primaryX]
+	for i := last; i >= g.Offset; i-- {
+		if _, ok := toFloatCell(col[i]); ok {
+			return i
+		}
+	}
+	return last
 }
 
 // axisCell renders one axis value: vocab lookup for str, plain formats

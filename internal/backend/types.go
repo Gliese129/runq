@@ -303,8 +303,13 @@ type JobActivity struct {
 // encoded by the shared index. The backend sorts by (identity, primary x)
 // — x stays MONOTONIC across an identity group even when the series spans
 // tasks, because every table slice (last / first / aligned-at-x*) is a
-// group-range operation on x order. Groups and per-task runs are handed
-// to the consumer as slice indices — no client-side scanning.
+// group-range operation on x order. Within a group, records carrying the
+// primary x form the monotonic PREFIX; records without it are OFF-AXIS
+// and form the tail, ordered by ts. x-based slices operate on the prefix
+// only (latest = the prefix's last record, NOT the group's) and degrade
+// to ts order when a group has no x-bearing records at all (Codex r2
+// ruling). Groups and per-task runs are handed to the consumer as slice
+// indices — no client-side scanning.
 
 // JobResults is the GET /jobs/{id}/results response.
 type JobResults struct {

@@ -244,6 +244,39 @@ func TestResultsCrossTaskSeriesMonotonicX(t *testing.T) {
 	assertTaskRunsNestInGroups(t, res)
 }
 
+func TestResultsOffAxisTailInvariant(t *testing.T) {
+	// Codex r2 fixture: legal records without the primary x. Within a
+	// group they must form the TAIL (ordered by ts), leaving the
+	// x-bearing records as a monotonic prefix — the shape every x-based
+	// slice (latest/first/aligned) relies on.
+	st := seedResultsStore(t, "t1")
+	insertRecords(t, st, "t1", [][2]string{
+		{`{"model":"a"}`, `{"m":9}`},            // off-axis, ts=100
+		{`{"model":"a","step":200}`, `{"m":2}`}, // ts=101
+		{`{"model":"a","step":100}`, `{"m":1}`}, // ts=102
+	}, 100)
+	// Second off-axis record with an EARLIER ts than the first one,
+	// inserted later — the tail must come out ts-sorted regardless.
+	if err := st.ApplyResultsIngestDelta(context.Background(), "t1", false,
+		[]store.ResultRecordRow{{TaskID: "t1", JobID: "j1", TS: 50,
+			AxesJSON: `{"model":"a"}`, MetricsJSON: `{"m":8}`}},
+		1, store.FileIngestMark{}); err != nil {
+		t.Fatalf("insert off-axis record: %v", err)
+	}
+
+	res, err := jobResultsFromDB(context.Background(), st, "j1")
+	if err != nil {
+		t.Fatalf("jobResultsFromDB: %v", err)
+	}
+	col := res.Cols.Axes["step"]
+	if col[0] != 100.0 || col[1] != 200.0 || col[2] != nil || col[3] != nil {
+		t.Fatalf("step column = %v, want monotonic prefix + null tail", col)
+	}
+	if res.Cols.TS[2] != 50 || res.Cols.TS[3] != 100 {
+		t.Errorf("off-axis tail not ts-ordered: ts = %v", res.Cols.TS)
+	}
+}
+
 func TestResultsTypedIdentityNeverMerges(t *testing.T) {
 	// Codex r1 finding 3: model=1 vs model="1" (and true vs "true") are
 	// distinct series; the display label may repeat but groups must not
