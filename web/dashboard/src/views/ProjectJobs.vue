@@ -4,6 +4,10 @@
     <div class="d-flex align-center justify-space-between mb-4">
       <div class="text-h5 font-weight-bold">{{ project }}</div>
       <div class="d-flex ga-2">
+        <v-btn variant="text" size="small" :to="{ name: 'project-edit', params: { project } }">
+          <v-icon start size="16">mdi-pencil-outline</v-icon>
+          {{ t('projectEdit.edit_project') }}
+        </v-btn>
         <v-btn variant="text" size="small"
           :title="projectArchived ? undefined : t('archive.project_tooltip')"
           @click="toggleProjectArchive"
