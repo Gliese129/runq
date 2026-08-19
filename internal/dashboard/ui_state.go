@@ -37,6 +37,16 @@ const maxUIStateBytes = 64 * 1024
 
 func uiStatePath() string { return filepath.Join(config.ConfigDir(), "ui.json") }
 
+// isJSONObject is the ONE contract both verbs enforce: the document's top
+// level must be a JSON object. GET and PUT sharing it is what makes "GET
+// always yields an object the frontend can merge over" actually hold — a
+// hand-edited file containing a legal array must not leak through GET
+// (Codex r1 finding 4).
+func isJSONObject(b []byte) bool {
+	b = bytes.TrimSpace(b)
+	return len(b) > 0 && b[0] == '{' && json.Valid(b)
+}
+
 func (s *Server) handleGetUIState(w http.ResponseWriter, r *http.Request) {
 	data, err := os.ReadFile(uiStatePath())
 	if err != nil {
@@ -44,10 +54,10 @@ func (s *Server) handleGetUIState(w http.ResponseWriter, r *http.Request) {
 			logger.Warnf("ui state: read %s failed (serving empty state): %v", uiStatePath(), err)
 		}
 		data = []byte("{}")
-	} else if !json.Valid(data) {
-		// A torn/hand-mangled file is preferences lost, not an outage:
-		// serve {} so the UI boots clean; the next PUT heals the file.
-		logger.Warnf("ui state: %s is not valid JSON (serving empty state)", uiStatePath())
+	} else if !isJSONObject(data) {
+		// A torn/hand-mangled/non-object file is preferences lost, not an
+		// outage: serve {} so the UI boots clean; the next PUT heals it.
+		logger.Warnf("ui state: %s is not a JSON object (serving empty state)", uiStatePath())
 		data = []byte("{}")
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -67,10 +77,9 @@ func (s *Server) handlePutUIState(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	trimmed := bytes.TrimSpace(body)
-	// Opaque, but it must be a JSON OBJECT: GET's empty default is {} and
-	// the frontend merges over it — an array or scalar would break every
-	// consumer, so reject it here rather than persist a poison document.
-	if !json.Valid(trimmed) || len(trimmed) == 0 || trimmed[0] != '{' {
+	// Opaque, but it must be a JSON OBJECT (see isJSONObject) — reject
+	// rather than persist a poison document.
+	if !isJSONObject(trimmed) {
 		writeErr(w, http.StatusBadRequest, backend.CodeBadRequest, "body must be a JSON object")
 		return
 	}

@@ -300,9 +300,11 @@ type JobActivity struct {
 //
 // Every record from runq.record shares ONE dimension: its index in the
 // sorted sequence. All columns are equally long; axes co-occurrence is
-// encoded by the shared index. The backend sorts by (identity, task,
-// primary x) so identity groups AND per-task runs are contiguous ranges,
-// handed to the consumer as slice indices — no client-side scanning.
+// encoded by the shared index. The backend sorts by (identity, primary x)
+// — x stays MONOTONIC across an identity group even when the series spans
+// tasks, because every table slice (last / first / aligned-at-x*) is a
+// group-range operation on x order. Groups and per-task runs are handed
+// to the consumer as slice indices — no client-side scanning.
 
 // JobResults is the GET /jobs/{id}/results response.
 type JobResults struct {

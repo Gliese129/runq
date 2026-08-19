@@ -95,6 +95,22 @@ func TestUIStatePutRejectsOversize(t *testing.T) {
 	}
 }
 
+func TestUIStateLegalNonObjectFileServesEmpty(t *testing.T) {
+	// Codex r1 finding 4: a hand-edited file holding a LEGAL JSON array
+	// passes json.Valid but violates the "GET always yields an object"
+	// contract — it must degrade to {} exactly like a corrupt file.
+	server, dir := newUIStateHarness(t)
+	for _, content := range []string{`[1,2,3]`, `"scalar"`, `42`} {
+		if err := os.WriteFile(filepath.Join(dir, "ui.json"), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		rec := doUI(server, "GET", "")
+		if rec.Code != 200 || strings.TrimSpace(rec.Body.String()) != "{}" {
+			t.Errorf("file %q: status=%d body=%q, want 200 {}", content, rec.Code, rec.Body.String())
+		}
+	}
+}
+
 func TestUIStateCorruptFileServesEmpty(t *testing.T) {
 	server, dir := newUIStateHarness(t)
 	if err := os.WriteFile(filepath.Join(dir, "ui.json"), []byte("not json"), 0o600); err != nil {

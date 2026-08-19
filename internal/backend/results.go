@@ -5,7 +5,8 @@ package backend
 // SSHBackend (which runs EnsureFresh first so the store is current).
 //
 // Key classification ("smart parse") doctrine — ZERO path/name inference:
-//   - `model` is the ONLY convention identity key (role=identity). Records
+//   - `model` is the ONLY convention identity key (role=identity), typed —
+//     model=1 and model="1" are distinct series (see identityKey). Records
 //     without it fall back to their task_id — a fact of the write contract,
 //     not a guess (each task then forms its own series: ablation semantics).
 //   - Any other axis whose values are numeric AND vary within at least one
@@ -35,8 +36,9 @@ type resultRec struct {
 	ts       int64
 	axes     map[string]any // float64 | string | bool | (non-scalar → nulled)
 	metrics  map[string]any
-	identity string
-	order    int // ingest order within the query (ties stay stable)
+	identity string // internal TYPED grouping key (see identityKey)
+	label    string // display projection → schema.groups[].key
+	order    int    // ingest order within the query (ties stay stable)
 }
 
 // axisType classifies one JSON value: "num" / "str" / "bool", "" = non-scalar.
@@ -53,18 +55,25 @@ func axisType(v any) string {
 	}
 }
 
-// identityString renders an identity value for grouping and vocab. Numbers
-// use the shortest round-trip form (record(model=3) groups as "3").
-func identityString(v any) string {
+// identityKey builds a record's grouping identity. The INTERNAL key is
+// type-tagged ("s:a" / "n:1" / "b:true", "task:<id>" for the fallback) so
+// legal-but-distinct values like model=1 vs model="1" never merge, and a
+// task-fallback can never collide with an explicit model value. The
+// DISPLAY label is the untyped rendering — two groups may then show the
+// same label, which is honest: they really are different series,
+// distinguishable by their ranges and axis columns.
+func identityKey(v any, taskID string) (internal, label string) {
 	switch t := v.(type) {
 	case string:
-		return t
+		return "s:" + t, t
 	case float64:
-		return strconv.FormatFloat(t, 'g', -1, 64)
+		s := strconv.FormatFloat(t, 'g', -1, 64)
+		return "n:" + s, s
 	case bool:
-		return strconv.FormatBool(t)
-	default:
-		return ""
+		s := strconv.FormatBool(t)
+		return "b:" + s, s
+	default: // absent or non-scalar → per-task series (ablation semantics)
+		return "task:" + taskID, taskID
 	}
 }
 
@@ -93,11 +102,7 @@ func jobResultsFromDB(ctx context.Context, st *store.Store, jobID string) (*JobR
 			continue
 		}
 		rec := &resultRec{taskID: row.TaskID, ts: row.TS, axes: axes, metrics: metrics, order: i}
-		if id := identityString(axes["model"]); id != "" {
-			rec.identity = id
-		} else {
-			rec.identity = row.TaskID
-		}
+		rec.identity, rec.label = identityKey(axes["model"], row.TaskID)
 		recs = append(recs, rec)
 	}
 
@@ -216,14 +221,17 @@ func jobResultsFromDB(ctx context.Context, st *store.Store, jobID string) (*JobR
 		primaryX = xAxes[0]
 	}
 
-	// ---- sort: (identity, task, primary x [nulls last], ts, ingest order) ----
+	// ---- sort: (identity, primary x [nulls last], ts, ingest order) ----
+	// task is deliberately NOT a sort key: within a series the sequence IS
+	// the curve, and every table slice (last / first / aligned-at-x*) is a
+	// group-range operation that needs x monotonic across tasks — a series
+	// resumed in a second task must interleave by x, not cluster by task
+	// (Codex r1 finding 1). Task runs split accordingly; schema.tasks
+	// carries one entry per contiguous run.
 	sort.SliceStable(recs, func(i, j int) bool {
 		a, b := recs[i], recs[j]
 		if a.identity != b.identity {
 			return a.identity < b.identity
-		}
-		if a.taskID != b.taskID {
-			return a.taskID < b.taskID
 		}
 		if primaryX != "" {
 			av, aok := numVal(a, primaryX)
@@ -243,11 +251,15 @@ func jobResultsFromDB(ctx context.Context, st *store.Store, jobID string) (*JobR
 
 	// ---- ranges: identity runs and task runs (scan of the sorted seq) ----
 	for i := range recs {
-		if i == 0 || recs[i].identity != recs[i-1].identity {
-			out.Schema.Groups = append(out.Schema.Groups, ResultRange{Key: recs[i].identity, Offset: i})
+		newGroup := i == 0 || recs[i].identity != recs[i-1].identity
+		if newGroup {
+			out.Schema.Groups = append(out.Schema.Groups, ResultRange{Key: recs[i].label, Offset: i})
 		}
 		out.Schema.Groups[len(out.Schema.Groups)-1].Count++
-		if i == 0 || recs[i].taskID != recs[i-1].taskID {
+		// Task runs NEST inside groups: a run breaks on a group boundary
+		// even when the task id continues (Codex r1 finding 2) — a
+		// per-(group, task) slice must never leak another model's rows.
+		if newGroup || recs[i].taskID != recs[i-1].taskID {
 			out.Schema.Tasks = append(out.Schema.Tasks, ResultRange{ID: recs[i].taskID, Offset: i})
 		}
 		out.Schema.Tasks[len(out.Schema.Tasks)-1].Count++
