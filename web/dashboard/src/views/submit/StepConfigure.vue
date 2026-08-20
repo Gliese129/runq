@@ -231,8 +231,7 @@ import {
   activeValues, linkColor, rowEffect, validateTable, taskCount, newLinkSetId,
   type LinkSet, type ParamRow,
 } from './paramTable'
-import { sweepSummary, buildJobConfig } from './submitFlow'
-import { jobsApi } from '@/apis/jobs'
+import { sweepSummary } from './submitFlow'
 
 const { t } = useI18n()
 const state = inject(SUBMIT_STATE_KEY)!
@@ -425,8 +424,8 @@ function addCustomParam() {
   newParamName.value = ''
 }
 
-/** Custom rows are deletable (project rows are managed by StepProject's
- *  include toggle — deleting them here would just resurrect on next sync). */
+/** Custom rows are deletable (project rows are managed by the project
+ *  editor's include toggle — deleting here would resurrect on next sync). */
 function removeCustomParam(name: string) {
   if (!customNames.has(name)) return
   customNames.delete(name)
@@ -521,24 +520,10 @@ function insertPlaceholder(ph: string) {
   set(get().slice(0, pos) + text + get().slice(pos))
 }
 
-const resolvedNote = ref('')
-let noteTimer: ReturnType<typeof setTimeout> | null = null
-watch(
-  () => [state.note, state.rows, state.linkSets],
-  () => {
-    if (noteTimer) clearTimeout(noteTimer)
-    if (!state.note.includes('{{')) { resolvedNote.value = ''; return }
-    noteTimer = setTimeout(async () => {
-      try {
-        // v1: resolve-note is merged into /jobs/plan (cheap local expansion)
-        const cfg = buildJobConfig(state.projectName, state.note, state.rows, state.linkSets)
-        const res = await jobsApi.plan(cfg)
-        resolvedNote.value = res.note_resolved
-      } catch { resolvedNote.value = '' }
-    }, 500)
-  },
-  { deep: true },
-)
+// Resolved-note preview: the single-screen shell (index.vue) runs the
+// debounced POST /jobs/plan and shares the result — no second fetch here.
+const resolvedNote = computed(() =>
+  state.note.includes('{{') ? state.noteResolved : '')
 
 const formula = computed(() => {
   const summary = sweepSummary(state.rows, state.linkSets)

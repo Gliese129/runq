@@ -489,5 +489,20 @@
   "projectEdit.discard_title": "丢弃未保存的修改？",
   "projectEdit.discard_body": "对该项目的编辑尚未保存。",
   "projectEdit.discard_confirm": "丢弃",
-  "projectEdit.edit_project": "编辑项目"
+  "projectEdit.edit_project": "编辑项目",
+  "submit.choose_project": "选择项目",
+  "submit.submit_n": "提交 {n} 个任务",
+  "submit.target_available": "可用",
+  "submit.target_not_set_up": "未部署",
+  "submit.not_set_up": "{project} 尚未部署在 {target} 上",
+  "submit.not_set_up_hint": "其配置指向 {target} — 迁移请编辑项目",
+  "submit.this_submit": "本次提交",
+  "submit.tasks_word": "任务",
+  "submit.no_sweep_hint": "无扫描 — 默认值 1 个任务",
+  "submit.n_fixed": "{n} 个固定",
+  "submit.n_more": "还有 {n} 条",
+  "submit.pick_project_first": "从上方选择项目开始",
+  "submit.fork_note": "fork of {run}",
+  "submit.unregistered_project": "项目「{name}」尚未注册 — 通过 New project 创建",
+  "projectEdit.edit_project_named": "编辑 {name}"
 }

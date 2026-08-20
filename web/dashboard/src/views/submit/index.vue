@@ -1,92 +1,27 @@
 <template>
   <div>
-    <!-- Header + Step indicators -->
-    <div style="max-width: 960px; margin: 0 auto">
-      <div class="d-flex align-center justify-space-between mb-4">
-        <div>
-          <div class="text-h5 font-weight-bold">{{ t('submit.title') }}</div>
-          <div class="text-body-2 text-on-surface-variant mt-1">{{ t('submit.subtitle') }}</div>
-        </div>
-        <div class="d-flex align-center ga-2">
-          <v-btn
-            v-if="hasSubmitState"
-            size="x-small" variant="text"
-            :title="t('submit.reset_title')"
-            @click="resetSubmitState"
-          >
-            <v-icon start size="12">mdi-restore</v-icon> {{ t('submit.reset') }}
-          </v-btn>
-          <v-btn size="x-small" variant="text" @click="showJobYamlBrowser = true">
-            <v-icon start size="12">mdi-file-import-outline</v-icon> {{ t('submit.import_yaml') }}
-          </v-btn>
-          <FileBrowserDialog
-            v-model="showJobYamlBrowser"
-            mode="script"
-            :file-filter="'.yaml,.yml'"
-            @select="onJobYamlSelected"
-          />
-          <v-chip v-if="step >= 2 && displayTaskCount > 0" variant="tonal" color="primary">
-            {{ t('submit.task_count', { n: displayTaskCount }, displayTaskCount) }}
-          </v-chip>
-        </div>
-      </div>
-
-      <div class="d-flex ga-2 mb-5" role="list">
-        <div v-for="(_, i) in steps" :key="i"
-          class="flex-grow-1 rounded-pill"
-          role="listitem"
-          :aria-current="step === i ? 'step' : undefined"
-          :aria-label="t(stepLabelKeys[i])"
-          :style="{
-            height: '4px',
-            background: step > i
-              ? 'rgb(var(--v-theme-primary))'
-              : step === i
-                ? 'rgb(var(--v-theme-primary), 0.4)'
-                : 'rgb(var(--v-theme-surface-variant))',
-            transition: 'background 0.3s ease',
-          }"
-        />
+    <div class="d-flex align-center justify-space-between mb-4">
+      <div>
+        <div class="text-h5 font-weight-bold">{{ t('submit.title') }}</div>
+        <div class="text-body-2 text-on-surface-variant mt-1">{{ t('submit.subtitle') }}</div>
       </div>
     </div>
 
-    <KeepAlive>
-      <component :is="stepComponents[step]" :key="step" />
-    </KeepAlive>
+    <!-- Identity bar: project → target, submit CTA. No steps — the plan
+         panel answers live while params are shaped. -->
+    <IdentityBar
+      :total="displayTaskCount"
+      :valid="validation.ok"
+      :has-state="hasSubmitState"
+      @select-project="selectProject"
+      @select-target="onSelectTarget"
+      @submit="submit()"
+      @import-yaml="showJobYamlBrowser = true"
+      @reset="resetSubmitState"
+    />
 
-    <!-- Navigation -->
-    <div class="d-flex align-center mt-5 ga-2" style="max-width: 960px; margin: 0 auto">
-      <v-btn v-if="step > 0" variant="text" @click="step--">
-        <v-icon start>mdi-arrow-left</v-icon>
-        {{ t('common.back') }}
-      </v-btn>
-      <v-spacer />
-      <v-btn
-        v-if="step < 2"
-        color="primary"
-        variant="tonal"
-        :disabled="step === 0 && !projectName && !newProject.name.trim()"
-        @click="goNext"
-      >
-        {{ t('common.next') }}
-        <v-icon end>mdi-arrow-right</v-icon>
-      </v-btn>
-      <v-btn
-        v-else-if="step === 2"
-        color="primary"
-        variant="flat"
-        size="large"
-        :loading="submitting"
-        :disabled="dryRunResult.length === 0"
-        @click="submit()"
-      >
-        <v-icon start>mdi-rocket-launch-outline</v-icon>
-        {{ t('submit.submit') }} ({{ t('submit.task_count', { n: dryRunResult.length }, dryRunResult.length) }})
-      </v-btn>
-    </div>
-
-    <!-- Submit error -->
-    <div v-if="submitError && step === 2" class="mt-3" style="max-width: 960px; margin: 0 auto">
+    <!-- Submit error (inline, not a toast — it needs room and actions) -->
+    <div v-if="submitError" class="mb-3">
       <PreflightError
         v-if="isPreflightError"
         :message="submitError"
@@ -102,11 +37,37 @@
         {{ submitError }}
       </v-alert>
     </div>
+
+    <!-- Editor + live plan: one screen, no review step -->
+    <div class="d-flex ga-4 align-start submit-grid">
+      <div class="flex-grow-1 min-w-0">
+        <div v-if="!projectName" class="pa-8 text-center text-on-surface-variant">
+          <v-icon size="36" class="mb-2" style="opacity: 0.5">mdi-folder-open-outline</v-icon>
+          <div class="text-body-1">{{ t('submit.pick_project_first') }}</div>
+        </div>
+        <StepConfigure v-else />
+      </div>
+      <aside class="plan-col flex-shrink-0 d-none d-md-block">
+        <LivePlan />
+      </aside>
+    </div>
+
+    <FileBrowserDialog
+      v-model="showJobYamlBrowser"
+      mode="script"
+      :file-filter="'.yaml,.yml'"
+      @select="onJobYamlSelected"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, provide, reactive, markRaw, onMounted, watch } from 'vue'
+// Submit — one editor screen (RQ2-3 c2, kit ScreensSubmit):
+//   · project + target live in a persistent identity bar (no Project step)
+//   · the plan is a panel beside the params, not a step after them
+// Defining or editing a project is its own page (/projects/:name/edit) —
+// different lifetime, different destination, own URL (c1).
+import { ref, computed, provide, reactive, onMounted, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { jobsApi } from '@/apis/jobs'
@@ -114,41 +75,39 @@ import { projectsApi } from '@/apis/projects'
 import { filesApi } from '@/apis/files'
 import { useSnackbar } from '@/composables/useSnackbar'
 import { usePreferences } from '@/composables/usePreferences'
+import { useConfigStore } from '@/stores/config'
 import { queryClient } from '@/queries/client'
 import { qk } from '@/queries/keys'
-import type { ProjectSummary } from '@/types/api'
+import type { ProjectSummary, ProjectConfig } from '@/types/api'
 
 import PreflightError from '@/components/PreflightError.vue'
 import FileBrowserDialog from '@/components/FileBrowserDialog.vue'
-import StepProject from './StepProject.vue'
+import IdentityBar from './IdentityBar.vue'
+import LivePlan from './LivePlan.vue'
 import StepConfigure from './StepConfigure.vue'
-import StepReview from './StepReview.vue'
 import { SUBMIT_STATE_KEY } from '@/types/submit'
 import { decompile, type ParamRow, type LinkSet } from './paramTable'
 import {
   buildJobConfig as createJobConfig,
-  buildProjectPayload as createProjectPayload,
   dryRunHeaders as createDryRunHeaders,
   sweepSummary as summarizeSweep,
   totalTaskCount as countTotalTasks,
   validateConfigure,
 } from './submitFlow'
-
-const stepComponents = [markRaw(StepProject), markRaw(StepConfigure), markRaw(StepReview)]
+import { normalizeParam, autoIncludeCommonParams, mergeParsedParams, inferScriptPath } from './projectParams'
 
 const { t } = useI18n()
 const router = useRouter()
 const route = useRoute()
 const snack = useSnackbar()
 const prefs = usePreferences()
-
-const steps = ['project', 'configure', 'review']
-// Step indicator labels (a11y): announced with aria-current="step".
-const stepLabelKeys = ['submit.project', 'submit.configure', 'submit.review']
-const step = ref(0)
+const config = useConfigStore()
 
 const projectName = ref(prefs.lastProject.value || '')
 const matchedProjects = ref<ProjectSummary[]>([])
+// newProject holds the SELECTED project's loaded config (param palette,
+// job-name template, setup command for HF suggestions, raw source for
+// read-modify-write saves). Authoring happens on the project-edit page.
 const newProject = reactive({
   name: '',
   workDir: '',
@@ -161,12 +120,10 @@ const newProject = reactive({
   envName: '',
   envText: '',
   jobName: '',
-  creating: false,
-  error: '',
   params: [] as import('@/types/submit').ProjectParam[],
-  dirty: false,
-  source: undefined as import('@/types/api').ProjectConfig | undefined,
+  source: undefined as ProjectConfig | undefined,
 })
+const target = ref(config.currentTarget)
 const note = ref('')
 const jobName = ref('') // per-submit override; '' = project default
 
@@ -182,26 +139,28 @@ const preflightEnabled = ref(true)
 
 // ── Computed ──
 
+const validation = computed(() => validateConfigure(rows.value, linkSets.value))
 const totalTaskCount = computed(() => countTotalTasks(rows.value, linkSets.value))
 
+// The local count answers per keystroke; the server plan replaces it as
+// soon as it lands (and is the authority the CTA quotes). No project =
+// nothing to submit — a phantom "1 task" would just be noise.
 const displayTaskCount = computed(() => {
-  if (step.value === 2 && !dryRunLoading.value) return dryRunResult.value.length
+  if (!projectName.value || !validation.value.ok) return 0
+  if (!dryRunLoading.value && dryRunResult.value.length > 0) return dryRunResult.value.length
   return totalTaskCount.value
 })
 
 const sweepSummary = computed(() => summarizeSweep(rows.value, linkSets.value))
-
-const dryRunHeaders = computed(() => {
-  return createDryRunHeaders(dryRunResult.value, newProject.params)
-})
+const dryRunHeaders = computed(() => createDryRunHeaders(dryRunResult.value, newProject.params))
 
 // ── Provide ──
 
 provide(SUBMIT_STATE_KEY, reactive({
-  step,
   projectName,
   matchedProjects,
   newProject,
+  target,
   note,
   jobName,
   rows,
@@ -219,75 +178,81 @@ provide(SUBMIT_STATE_KEY, reactive({
   prefs,
 }))
 
-// ── Actions ──
+// ── Project selection (the identity bar's job) ──
 
-function buildProjectPayload() {
-  // Pass the fetched config as merge base — unedited fields survive.
-  return createProjectPayload(newProject, newProject.source)
-}
-
-async function saveProject(): Promise<boolean> {
-  newProject.error = ''
-  newProject.creating = true
+async function selectProject(name: string, preserveRows = false) {
+  projectName.value = name
+  prefs.lastProject.value = name
+  if (!preserveRows) {
+    rows.value = []
+    linkSets.value = []
+  }
   try {
-    const payload = buildProjectPayload()
-    const targetName = newProject.name.trim()
-    const selectedName = projectName.value.trim()
-    const selectedExists = selectedName && matchedProjects.value.some(p => p.name === selectedName)
-    if (selectedExists && targetName !== selectedName) {
-      newProject.error = t('submit.use_rename')
-      return false
-    }
-    const isNew = !matchedProjects.value.some(p => p.name === targetName)
-    if (isNew) {
-      await projectsApi.create(payload)
-      matchedProjects.value.push({
-        name: targetName,
-        work_dir: newProject.workDir,
-        job_count: 0,
-      })
-      snack.success(t('submit.project_registered', { name: targetName }))
-    } else {
-      await projectsApi.update(targetName, payload)
-    }
-    projectName.value = targetName
-    prefs.lastProject.value = projectName.value
-    return true
-  } catch (e: any) {
-    newProject.error = e?.message || t('common.error')
-    return false
-  } finally {
-    newProject.creating = false
+    const cfg = await projectsApi.get(name)
+    applyProjectConfig(cfg)
+    // The project's pinned target is where it submits (registry fact).
+    target.value = cfg.target || config.currentTarget
+    await refreshParamsFromProject(cfg)
+  } catch {
+    newProject.source = undefined
   }
 }
 
-async function goNext() {
-  if (step.value === 0) {
-    if (!projectName.value && !newProject.name.trim()) return
-    // Save only when something was actually edited (or when creating a new
-    // project). Selecting an existing project and clicking Next must be
-    // side-effect free — no silent project rewrites.
-    if (!projectName.value || newProject.dirty) {
-      const ok = await saveProject()
-      if (!ok) return
-      newProject.dirty = false
-    }
+function applyProjectConfig(cfg: ProjectConfig) {
+  newProject.source = cfg
+  newProject.name = cfg.project_name
+  newProject.workDir = cfg.working_dir
+  newProject.cmd = cfg.command_template
+  newProject.setupCmd = cfg.setup_command || ''
+  newProject.envText = Object.entries(cfg.environment || {}).map(([k, v]) => `${k}=${v}`).join('\n')
+  newProject.jobName = cfg.job_name || ''
+  newProject.gpus = cfg.defaults?.gpus_per_task ?? 1
+  newProject.maxRetry = cfg.defaults?.max_retry ?? 0
+  newProject.envType = cfg.python_env?.type || ''
+  newProject.envPath = cfg.python_env?.path || ''
+  newProject.envName = cfg.python_env?.name || ''
+  const rawParams = cfg.params || []
+  newProject.params = rawParams.map(p => normalizeParam(p))
+  if (!rawParams.some(p => p.include !== undefined)) autoIncludeCommonParams(newProject.params)
+}
+
+async function refreshParamsFromProject(cfg: ProjectConfig) {
+  const path = inferScriptPath(cfg)
+  if (!path) return
+  try {
+    const result = await filesApi.parseScript(path, { silent: true }, target.value)
+    newProject.params = mergeParsedParams(newProject.params, result.args || [])
+  } catch {
+    // Keep persisted project.yaml params when script parsing is unavailable.
   }
-  if (step.value === 1) {
-    const validation = validateConfigure(rows.value, linkSets.value)
-    if (!validation.ok) {
-      snack.error(validation.message)
-      return
-    }
-    // Plan (merged dry-run + resolve-note) before entering review
-    prefs.lastProject.value = projectName.value
-    dryRunLoading.value = true
+}
+
+function onSelectTarget(name: string) {
+  target.value = name
+}
+
+// ── Live plan: debounced server expansion (merged dry-run + note resolve) ──
+
+let planTimer: ReturnType<typeof setTimeout> | null = null
+watch([rows, linkSets, note, jobName, projectName, target], () => {
+  if (planTimer) clearTimeout(planTimer)
+  if (!projectName.value) {
+    dryRunResult.value = []
+    noteResolved.value = ''
+    return
+  }
+  if (!validation.value.ok) {
+    dryRunResult.value = []
     dryRunError.value = ''
-    step.value = 2
+    return
+  }
+  dryRunLoading.value = true
+  planTimer = setTimeout(async () => {
     try {
-      const plan = await jobsApi.plan(buildJobConfig())
+      const plan = await jobsApi.plan(buildJobConfig(), target.value)
       dryRunResult.value = plan.tasks
       noteResolved.value = plan.note_resolved
+      dryRunError.value = ''
     } catch (e: any) {
       dryRunResult.value = []
       noteResolved.value = ''
@@ -295,10 +260,8 @@ async function goNext() {
     } finally {
       dryRunLoading.value = false
     }
-    return
-  }
-  step.value++
-}
+  }, 500)
+}, { deep: true })
 
 function buildJobConfig() {
   const cfg = createJobConfig(projectName.value, note.value, rows.value, linkSets.value)
@@ -307,37 +270,44 @@ function buildJobConfig() {
   return cfg
 }
 
-// ── Re-run as template (?fromJob=<id>) ──
-// Loads the source job's raw config: note keeps its {{...}} template form
-// (so {{version}} keeps incrementing), sweep blocks decompile into the flat
-// row/link-set model. Lands on the configure step, ready to tweak & submit.
+// ── Entry points ──
+// ?fromJob=<id>: re-run as template — the source job's raw config loads
+// with note in {{...}} form, sweep blocks decompiled into rows/link-sets.
+// ?fork=<run>: pre-fill the note so the lineage is recorded.
 onMounted(async () => {
-  const fromJob = route.query.fromJob
-  if (typeof fromJob !== 'string' || !fromJob) {
-    restoreDraft()
-    return
-  }
   try {
-    const detail = await jobsApi.get(fromJob)
-    if (!detail.config) {
-      snack.warn(t('submit.no_source_config'))
-      return
+    matchedProjects.value = await projectsApi.list()
+  } catch { matchedProjects.value = [] }
+
+  const fromJob = route.query.fromJob
+  const fork = typeof route.query.fork === 'string' ? route.query.fork : ''
+
+  if (typeof fromJob === 'string' && fromJob) {
+    try {
+      const detail = await jobsApi.get(fromJob)
+      if (!detail.config) {
+        snack.warn(t('submit.no_source_config'))
+      } else {
+        note.value = detail.config.note || ''
+        jobName.value = detail.config.name || ''
+        const { rows: r, linkSets: ls } = decompile(detail.config)
+        rows.value = r
+        linkSets.value = ls
+        await selectProject(detail.config.project || detail.job.project, true)
+      }
+    } catch (e: any) {
+      snack.error(e?.message || t('submit.load_job_failed'))
     }
-    projectName.value = detail.config.project || detail.job.project
-    note.value = detail.config.note || ''
-    jobName.value = detail.config.name || ''
-    const { rows: r, linkSets: ls } = decompile(detail.config)
-    rows.value = r
-    linkSets.value = ls
-    step.value = 1
-  } catch (e: any) {
-    snack.error(e?.message || t('submit.load_job_failed'))
+  } else if (restoreDraft()) {
+    if (projectName.value) await selectProject(projectName.value, true)
+  } else if (projectName.value) {
+    await selectProject(projectName.value)
   }
+
+  if (fork && !note.value) note.value = t('submit.fork_note', { run: fork })
 })
 
-// ── Import an existing job.yaml from the SERVER's filesystem: same path
-// as re-run-from-template — note keeps its {{...}} form, sweep blocks
-// decompile into the flat model.
+// ── Import an existing job.yaml from the SERVER's filesystem ──
 const showJobYamlBrowser = ref(false)
 
 async function onJobYamlSelected(path: string) {
@@ -350,17 +320,20 @@ async function onJobYamlSelected(path: string) {
     if (!cfg || typeof cfg !== 'object' || (!cfg.sweep && !cfg.fixed_params)) {
       throw new Error('not a job.yaml (no sweep/fixed_params)')
     }
-    if (cfg.project) projectName.value = String(cfg.project)
     note.value = cfg.note || ''
     jobName.value = cfg.name || ''
     const { rows: r, linkSets: ls } = decompile(cfg)
     rows.value = r
     linkSets.value = ls
-    step.value = 1
-    snack.success(`Imported ${name} (${r.length} params)`)
-    if (cfg.project && !matchedProjects.value.some(p => p.name === cfg.project)) {
-      snack.warn(`Project "${cfg.project}" is not registered yet — register it in step 1 or import its project.yaml`)
+    if (cfg.project) {
+      if (matchedProjects.value.some(p => p.name === cfg.project)) {
+        await selectProject(String(cfg.project), true)
+      } else {
+        projectName.value = String(cfg.project)
+        snack.warn(t('submit.unregistered_project', { name: cfg.project }))
+      }
     }
+    snack.success(`Imported ${name} (${r.length} params)`)
   } catch (err: any) {
     snack.error(`Import failed: ${err?.message ?? err}`)
   }
@@ -368,15 +341,9 @@ async function onJobYamlSelected(path: string) {
 
 const submitError = ref('')
 
-// Stale errors are misinformation: leaving the review step (Back, edits)
-// clears the previous submit/preflight error immediately.
-watch(step, () => { submitError.value = '' })
-
-// ── Draft insurance: the wizard state survives accidental navigation,
-// reloads and crashes. Saved (debounced) to localStorage; restored on
-// mount when meaningful; cleared after a successful submit.
+// ── Draft insurance: survives accidental navigation, reloads, crashes ──
 let draftTimer: ReturnType<typeof setTimeout> | null = null
-watch([projectName, note, jobName, rows, linkSets, step], () => {
+watch([projectName, note, jobName, rows, linkSets], () => {
   if (draftTimer) clearTimeout(draftTimer)
   draftTimer = setTimeout(() => {
     if (rows.value.length === 0 && !note.value) return
@@ -386,21 +353,16 @@ watch([projectName, note, jobName, rows, linkSets, step], () => {
       jobName: jobName.value,
       rows: JSON.parse(JSON.stringify(rows.value)),
       linkSets: JSON.parse(JSON.stringify(linkSets.value)),
-      step: step.value,
       ts: Date.now(),
     }
   }, 800)
 }, { deep: true })
 
-// Anything worth resetting? (also gates the header button)
 const hasSubmitState = computed(() =>
-  step.value > 0 || rows.value.length > 0 || !!note.value || !!jobName.value.trim())
+  rows.value.length > 0 || !!note.value || !!jobName.value.trim())
 
-// Full reset: wizard back to a blank step 0 AND the draft cache cleared —
-// restore-on-mount must not resurrect what the user just discarded. The
-// project SELECTION survives (it's a pointer, not unsaved work).
 function resetSubmitState() {
-  if (draftTimer) clearTimeout(draftTimer) // a queued save would re-create the draft
+  if (draftTimer) clearTimeout(draftTimer)
   prefs.submitDraft.value = null
   note.value = ''
   jobName.value = ''
@@ -409,7 +371,9 @@ function resetSubmitState() {
   dryRunResult.value = []
   dryRunError.value = ''
   submitError.value = ''
-  step.value = 0
+  // The project SELECTION survives (it's a pointer, not unsaved work) —
+  // re-seed its declared params into a fresh table.
+  if (newProject.source) applyProjectConfig(newProject.source)
   snack.info(t('submit.state_cleared'))
 }
 
@@ -421,12 +385,12 @@ function restoreDraft(): boolean {
   jobName.value = d.jobName || ''
   rows.value = d.rows
   linkSets.value = Array.isArray(d.linkSets) ? d.linkSets : []
-  step.value = Math.min(d.step ?? 1, 1) // never restore into review (dry-run is stale)
   snack.info(t('submit.draft_restored'), t('submit.discard'), resetSubmitState)
   return true
 }
 
-const isPreflightError = computed(() => submitError.value.includes('preflight') || submitError.value.includes('- import:') || submitError.value.includes('- pip_check:'))
+const isPreflightError = computed(() =>
+  submitError.value.includes('preflight') || submitError.value.includes('- import:') || submitError.value.includes('- pip_check:'))
 
 async function submit(forceSkipPreflight = false) {
   submitting.value = true
@@ -435,15 +399,14 @@ async function submit(forceSkipPreflight = false) {
     const res = await jobsApi.submit(buildJobConfig(), {
       preflightEnabled: preflightEnabled.value,
       forceSkipPreflight,
+      target: target.value,
       timeoutMs: 50000,
-      // errors render in-page (submitError below) — a global snackbar on
-      // top of that was double reporting
+      // errors render in-page (submitError) — a global snackbar on top of
+      // that was double reporting
       silent: true,
     })
     snack.success(t('submit.success'))
-    prefs.submitDraft.value = null // submitted — the draft has served its purpose
-    // The new job must appear in every list immediately (prefix match
-    // covers global + archived + project-scoped variants).
+    prefs.submitDraft.value = null
     queryClient.invalidateQueries({ queryKey: qk.jobs })
     router.push({ name: 'job-detail', params: { project: projectName.value, jobId: res.job_id } })
   } catch (e: any) {
@@ -453,3 +416,8 @@ async function submit(forceSkipPreflight = false) {
   }
 }
 </script>
+
+<style scoped>
+.min-w-0 { min-width: 0; }
+.plan-col { width: 320px; }
+</style>

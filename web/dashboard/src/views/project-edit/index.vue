@@ -323,9 +323,10 @@ import { usePreferences } from '@/composables/usePreferences'
 import { useConfirm } from '@/composables/useConfirm'
 import { useSnackbar } from '@/composables/useSnackbar'
 import { useConfigStore } from '@/stores/config'
-import type { FSEntry, ParseResult, ProjectConfig } from '@/types/api'
+import type { FSEntry, ProjectConfig } from '@/types/api'
 import type { ProjectParam } from '@/types/submit'
 import { buildProjectPayload } from '../submit/submitFlow'
+import { normalizeParam, autoIncludeCommonParams, mergeParsedParams as mergeParams, inferScriptPath } from '../submit/projectParams'
 import ParamEditorDialog from './ParamEditorDialog.vue'
 import FileBrowserDialog from '@/components/FileBrowserDialog.vue'
 import ShellTemplateEditor from '@/components/ShellTemplateEditor.vue'
@@ -504,7 +505,7 @@ function applyProjectConfig(cfg: ProjectConfig) {
   form.error = ''
   const rawParams = cfg.params || []
   form.params = rawParams.map(p => normalizeParam(p))
-  if (!rawParams.some(p => p.include !== undefined)) autoIncludeCommonParams()
+  if (!rawParams.some(p => p.include !== undefined)) autoIncludeCommonParams(form.params)
   markClean()
 }
 
@@ -514,41 +515,11 @@ async function refreshParamsFromProject(cfg: ProjectConfig) {
   scriptPath.value = path
   try {
     const result = await filesApi.parseScript(path, { silent: true })
-    mergeParsedParams(result.args || [])
+    form.params = mergeParams(form.params, result.args || [])
     markClean()
   } catch {
     // Keep persisted project.yaml params when script parsing is unavailable.
   }
-}
-
-function mergeParsedParams(args: ParseResult['args']) {
-  const existing = new Map(form.params.map(p => [p.name, p]))
-  const merged: ProjectParam[] = []
-  for (const arg of args || []) {
-    const discovered = normalizeParam(arg)
-    const saved = existing.get(discovered.name)
-    if (!saved) { merged.push(discovered); continue }
-    existing.delete(discovered.name)
-    merged.push({
-      ...discovered,
-      ...saved,
-      values: saved.values?.length ? [...saved.values] : discovered.values ? [...discovered.values] : undefined,
-      min: saved.min ?? discovered.min,
-      max: saved.max ?? discovered.max,
-    })
-  }
-  for (const saved of existing.values()) merged.push(saved)
-  form.params = merged
-}
-
-function inferScriptPath(cfg: ProjectConfig): string {
-  const cmd = cfg.command_template || ''
-  const match = cmd.match(/(?:^|\s)([^\s"'`]+\.py)(?:\s|$)/)
-  if (!match) return ''
-  const script = match[1]
-  if (script.startsWith('/')) return script
-  const base = (cfg.working_dir || '').replace(/\/+$/, '')
-  return base ? `${base}/${script}` : script
 }
 
 // ── Save / exit ──
@@ -708,7 +679,7 @@ async function onScriptPicked(entry: FSEntry) {
       }
     }
     form.params = (result.args || []).map(a => normalizeParam(a))
-    autoIncludeCommonParams()
+    autoIncludeCommonParams(form.params)
     const bits = [`${form.params.length} params`]
     if (result.detected_env) bits.push(`${result.detected_env} detected`)
     detectedSummary.value = bits.join(' · ')
@@ -746,7 +717,7 @@ watch(() => form.workDir, dir => {
   }, 400)
 }, { immediate: true })
 
-// ── Params helpers (shared vocabulary with StepProject until c2 retires it) ──
+// ── Params helpers ──
 const showParamEditor = ref(false)
 const includedParams = computed(() => form.params.filter(p => p.include))
 
@@ -779,53 +750,6 @@ watch(() => form.envType, async type => {
   }
 })
 
-const paramTypes = ['int', 'float', 'str', 'bool', 'file', 'folder', 'list']
-const COMMON_PARAMS = new Set([
-  'epoch', 'epochs', 'num_epochs', 'n_epochs', 'max_epochs',
-  'lr', 'learning_rate', 'learning-rate',
-  'bs', 'batch_size', 'batch-size',
-  'seed', 'num_workers', 'device', 'output', 'output_dir',
-])
-
-function autoIncludeCommonParams() {
-  if (form.params.length <= 5) return
-  for (const p of form.params) p.include = COMMON_PARAMS.has(p.name.toLowerCase())
-  if (!form.params.some(p => p.include)) {
-    for (let i = 0; i < Math.min(5, form.params.length); i++) form.params[i].include = true
-  }
-}
-
-function normalizeType(rawType: string): string {
-  const lower = (rawType || '').toLowerCase()
-  if (lower === 'str' || lower === 'string') return 'str'
-  if (lower === 'int' || lower === 'integer') return 'int'
-  if (lower === 'float' || lower === 'number') return 'float'
-  if (lower === 'bool' || lower === 'boolean') return 'bool'
-  if (lower === 'file') return 'file'
-  if (lower === 'folder' || lower === 'dir' || lower === 'directory') return 'folder'
-  if (lower === 'path') return 'file'
-  if (lower === 'list' || lower === 'array') return 'list'
-  if (paramTypes.includes(lower)) return lower
-  return 'str'
-}
-
-function normalizeParam(a: NonNullable<ProjectConfig['params']>[number]): ProjectParam {
-  const type = normalizeType(a.type)
-  const rawDef = a.default == null ? '' : String(a.default)
-  const def = rawDef === 'None' ? '' : rawDef
-  const values = Array.isArray(a.choices) ? a.choices.map(String) : []
-  if (['str', 'file', 'folder'].includes(type) && def && !values.includes(def)) {
-    values.unshift(def)
-  }
-  return {
-    name: a.name, type, default: def, include: a.include ?? true,
-    values: values.length > 0 ? values : undefined,
-    min: a.min, max: a.max,
-    strict: a.strict || undefined,
-    scope: a.scope || undefined,
-    style: a.style || undefined,
-  }
-}
 </script>
 
 <style scoped>

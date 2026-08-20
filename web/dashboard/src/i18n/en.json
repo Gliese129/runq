@@ -489,5 +489,20 @@
   "projectEdit.discard_title": "Discard unsaved changes?",
   "projectEdit.discard_body": "Your edits to this project have not been saved.",
   "projectEdit.discard_confirm": "Discard",
-  "projectEdit.edit_project": "Edit project"
+  "projectEdit.edit_project": "Edit project",
+  "submit.choose_project": "Choose a project",
+  "submit.submit_n": "Submit {n} task | Submit {n} tasks",
+  "submit.target_available": "available",
+  "submit.target_not_set_up": "not set up",
+  "submit.not_set_up": "{project} is not set up on {target}",
+  "submit.not_set_up_hint": "its config pins {target} — edit the project to move it",
+  "submit.this_submit": "This submit",
+  "submit.tasks_word": "task | tasks",
+  "submit.no_sweep_hint": "no sweep — 1 task from defaults",
+  "submit.n_fixed": "{n} fixed",
+  "submit.n_more": "{n} more",
+  "submit.pick_project_first": "Pick a project in the bar above to start",
+  "submit.fork_note": "fork of {run}",
+  "submit.unregistered_project": "Project \"{name}\" is not registered yet — create it via New project",
+  "projectEdit.edit_project_named": "Edit {name}"
 }

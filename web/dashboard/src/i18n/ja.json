@@ -489,5 +489,20 @@
   "projectEdit.discard_title": "未保存の変更を破棄しますか？",
   "projectEdit.discard_body": "このプロジェクトへの編集は保存されていません。",
   "projectEdit.discard_confirm": "破棄",
-  "projectEdit.edit_project": "プロジェクトを編集"
+  "projectEdit.edit_project": "プロジェクトを編集",
+  "submit.choose_project": "プロジェクトを選択",
+  "submit.submit_n": "{n} タスクを送信",
+  "submit.target_available": "利用可能",
+  "submit.target_not_set_up": "未セットアップ",
+  "submit.not_set_up": "{project} は {target} 上にセットアップされていません",
+  "submit.not_set_up_hint": "設定は {target} を指しています — 移すにはプロジェクトを編集",
+  "submit.this_submit": "この送信",
+  "submit.tasks_word": "タスク",
+  "submit.no_sweep_hint": "スイープなし — デフォルトで 1 タスク",
+  "submit.n_fixed": "固定 {n}",
+  "submit.n_more": "残り {n} 件",
+  "submit.pick_project_first": "上のバーからプロジェクトを選んで開始",
+  "submit.fork_note": "fork of {run}",
+  "submit.unregistered_project": "プロジェクト「{name}」は未登録です — New project から作成してください",
+  "projectEdit.edit_project_named": "{name} を編集"
 }
