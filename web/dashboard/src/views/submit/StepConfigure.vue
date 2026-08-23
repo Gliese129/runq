@@ -97,7 +97,11 @@
 
         <!-- values -->
         <div class="flex-grow-1 min-w-0 px-2">
+          <!-- glob param: candidates resolve from the pattern; picking among
+               them is a per-submit choice (RQ2-3) -->
+          <GlobParamRow v-if="row.glob" :row="row" />
           <ParamValueEditor
+            v-else
             v-model="row.values"
             :type="row.type || 'str'"
             :placeholder="t('submit.type_value_enter')"
@@ -224,6 +228,7 @@
 import { ref, computed, reactive, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import ParamValueEditor from '@/components/ParamValueEditor.vue'
+import GlobParamRow from './GlobParamRow.vue'
 import { usePreferences } from '@/composables/usePreferences'
 import { SUBMIT_STATE_KEY } from '@/types/submit'
 import { inject } from 'vue'
@@ -258,12 +263,13 @@ watch(
         existing.type = p.type || existing.type
         existing.default = p.default || ''
         existing.scope = p.scope
+        existing.glob = p.glob
         next.push(existing)
       } else {
         const meta: ParamRow['meta'] = {}
         if (p.min != null) meta.min = p.min
         if (p.max != null) meta.max = p.max
-        next.push({ name: p.name, type: p.type || 'str', default: p.default || '', values: [], meta, scope: p.scope })
+        next.push({ name: p.name, type: p.type || 'str', default: p.default || '', values: [], meta, scope: p.scope, glob: p.glob })
       }
       byName.delete(p.name)
     }

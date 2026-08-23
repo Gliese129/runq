@@ -22,6 +22,9 @@ export interface ParamRow {
   /** ghost value used when values is empty ('' = no default → unset) */
   default: string
   values: string[]
+  /** path PATTERN this row's candidate values resolve from (RQ2-3). Set =
+   *  the row renders the glob picker instead of a free value editor. */
+  glob?: string
   meta?: { min?: number; max?: number; step?: number }
   /** 'scheduler' = consumed by the HPC submit_template, not the command */
   scope?: string
