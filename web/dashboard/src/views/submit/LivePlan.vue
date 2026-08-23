@@ -10,26 +10,12 @@
           <v-progress-circular v-if="state.dryRunLoading" indeterminate size="12" width="2" color="primary" />
         </div>
         <code class="text-caption text-on-surface-variant" style="word-break: break-word">
-          {{ state.sweepSummary || t('submit.no_sweep_hint') }}
+          {{ state.sweepSummary || t('submit.no_sweep_hint') }} · {{ t('submit.n_fixed', { n: fixedCount }) }}
         </code>
         <div v-if="resolvedNote" class="text-caption text-on-surface-variant text-truncate font-mono mt-1" :title="resolvedNote">
           → {{ resolvedNote }}
         </div>
       </div>
-
-      <!-- Preflight toggle rides the plan: it's part of "what submitting does" -->
-      <button
-        type="button" class="preflight-row d-flex align-center ga-2 px-4 py-2 border-b w-100"
-        role="switch" :aria-checked="state.preflightEnabled"
-        @click="state.preflightEnabled = !state.preflightEnabled"
-      >
-        <StatusDot :status="state.preflightEnabled ? 'success' : 'pending'" kind="task" :size="6" />
-        <span class="text-caption text-on-surface-variant">
-          {{ t('submit.preflight') }} {{ state.preflightEnabled ? t('common.on') : t('common.off') }}
-        </span>
-        <v-spacer />
-        <span class="text-caption text-on-surface-variant font-mono">{{ t('submit.n_fixed', { n: fixedCount }) }}</span>
-      </button>
 
       <!-- First combinations -->
       <div v-if="state.dryRunError" class="pa-4 text-caption text-error">{{ state.dryRunError }}</div>
@@ -55,12 +41,22 @@
       <div v-else class="pa-4 text-body-2 text-on-surface-variant">
         {{ t('submit.no_tasks_hint') }}
       </div>
+
+      <!-- Preflight: contract + one-submit skip + on-demand results
+           (RQ2-3 c5). Shares this panel's previewSubmit fetch. -->
+      <div class="border-t">
+        <PreflightPanel
+          :report="previewPreflight"
+          :loading="previewLoading"
+          :error="previewError"
+          @run="fetchPreview"
+        />
+      </div>
     </v-card>
 
     <!-- Rendered submit preview — the GUI face of `--dry-run` (capability
          submit_preview). Fetch on expand: it runs the real submit code
-         path incl. preflight probes, too heavy per keystroke. The preflight
-         panel proper lands with the RQ2-3 preflight commit. -->
+         path incl. preflight probes, too heavy per keystroke. -->
     <v-card v-if="config.caps.submit_preview" class="pa-0 mt-3">
       <div
         class="d-flex align-center ga-2 px-4 py-3 cursor-pointer"
@@ -82,52 +78,27 @@
       </div>
     </v-card>
 
-    <!-- Preflight suggestions with ready-made commands (HF pre-download):
-         warnings never block, but the fix is one click away. -->
-    <v-card
-      v-for="c in previewSuggestions" :key="c.name"
-      variant="tonal" :color="c.status === 'failed' ? 'error' : 'warning'" class="mt-3 pa-3"
-    >
-      <div class="d-flex align-center ga-2 mb-1">
-        <v-icon size="16">mdi-cloud-download-outline</v-icon>
-        <span class="text-body-2 font-weight-medium">{{ t('submit.preflight_suggestion', { name: c.name }) }}</span>
-      </div>
-      <div class="text-caption mb-2" style="word-break: break-word">{{ c.detail }}</div>
-      <div v-for="(cmd, i) in c.commands" :key="i" class="text-caption pl-2 font-mono">$ {{ cmd }}</div>
-      <div class="d-flex align-center ga-2 mt-2">
-        <v-btn
-          size="x-small" variant="tonal" :disabled="setupCmdAdded"
-          :loading="setupCmdSaving" @click="appendToSetupCommand(c.commands || [])"
-        >
-          <v-icon start size="12">mdi-playlist-plus</v-icon>
-          {{ setupCmdAdded ? t('submit.added_to_setup') : t('submit.add_to_setup') }}
-        </v-btn>
-        <span class="text-caption text-on-surface-variant">{{ t('submit.add_to_setup_hint') }}</span>
-      </div>
-    </v-card>
   </div>
 </template>
 
 <script setup lang="ts">
-// LivePlan (RQ2-3 c2, kit ScreensSubmit) — the Review step as a persistent
-// panel: sweep shaping is a loop, not a phase. Counts and the first
-// combinations answer while the user edits; the rendered preview and HF
-// suggestions (ex-StepReview, capability-gated) ride below.
+// LivePlan (RQ2-3 c2/c5, kit ScreensSubmit) — the Review step as a
+// persistent panel: sweep shaping is a loop, not a phase. Counts and the
+// first combinations answer while the user edits; PreflightPanel (contract
+// + on-demand checks) and the capability-gated rendered preview share one
+// previewSubmit fetch below.
 import { computed, inject, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import StatusDot from '@/components/StatusDot.vue'
+import PreflightPanel from './PreflightPanel.vue'
 import { SUBMIT_STATE_KEY } from '@/types/submit'
 import type { PreflightReport } from '@/types/api'
-import { sweptParamNames as computeSwept, fixedParamPreview, buildJobConfig, buildProjectPayload } from './submitFlow'
+import { sweptParamNames as computeSwept, fixedParamPreview, buildJobConfig } from './submitFlow'
 import { jobsApi } from '@/apis/jobs'
-import { projectsApi } from '@/apis/projects'
-import { useSnackbar } from '@/composables/useSnackbar'
 import { useConfigStore } from '@/stores/config'
 
 const { t } = useI18n()
 const state = inject(SUBMIT_STATE_KEY)!
 const config = useConfigStore()
-const snack = useSnackbar()
 
 const total = computed(() => state.displayTaskCount)
 const swept = computed(() => computeSwept(state.rows, state.linkSets))
@@ -148,9 +119,6 @@ const previewText = ref('')
 const previewPreflight = ref<PreflightReport | null>(null)
 const previewLoading = ref(false)
 const previewError = ref('')
-const setupCmdSaving = ref(false)
-const setupCmdAdded = ref(false)
-
 function togglePreview() {
   previewOpen.value = !previewOpen.value
   if (previewOpen.value) void fetchPreview()
@@ -163,7 +131,6 @@ watch(() => state.dryRunResult, () => {
   previewText.value = ''
   previewPreflight.value = null
   previewError.value = ''
-  setupCmdAdded.value = false
 })
 
 async function fetchPreview() {
@@ -171,8 +138,6 @@ async function fetchPreview() {
   previewError.value = ''
   previewText.value = ''
   previewPreflight.value = null
-  setupCmdAdded.value = false
-  setupCmdSaving.value = false
   try {
     const cfg = buildJobConfig(state.projectName, state.note, state.rows, state.linkSets)
     if (state.jobName.trim()) cfg.name = state.jobName.trim()
@@ -186,32 +151,6 @@ async function fetchPreview() {
   }
 }
 
-const previewSuggestions = computed(() =>
-  (previewPreflight.value?.results ?? []).filter(c => c.commands?.length))
-
-/** Append suggested commands to the project's setup command and save —
- *  setup runs once per submission on the login node, exactly where a
- *  `huggingface-cli download` belongs. */
-async function appendToSetupCommand(cmds: string[]) {
-  const fresh = cmds.filter(c => !state.newProject.setupCmd.includes(c))
-  if (fresh.length === 0) {
-    setupCmdAdded.value = true
-    return
-  }
-  setupCmdSaving.value = true
-  try {
-    const prev = state.newProject.setupCmd.trim()
-    state.newProject.setupCmd = [prev, ...fresh].filter(Boolean).join('\n')
-    const name = state.projectName || state.newProject.name.trim()
-    await projectsApi.update(name, buildProjectPayload(state.newProject, state.newProject.source))
-    setupCmdAdded.value = true
-    snack.success(t('submit.added_to_setup_done', { name }))
-  } catch (e: any) {
-    snack.error(e?.message || t('common.error'))
-  } finally {
-    setupCmdSaving.value = false
-  }
-}
 </script>
 
 <style scoped>
@@ -220,13 +159,7 @@ async function appendToSetupCommand(cmds: string[]) {
 .border-b { border-bottom: 0.5px solid rgb(var(--v-theme-outline-variant)); }
 .plan-panel { position: sticky; top: 72px; }
 .plan-table { max-height: 340px; }
-.preflight-row {
-  background: transparent;
-  border: none;
-  cursor: pointer;
-  text-align: left;
-}
-.preflight-row:hover { background: rgb(var(--v-theme-surface-variant), 0.3); }
+.border-t { border-top: 0.5px solid rgb(var(--v-theme-outline-variant)); }
 .preview-pre {
   background: rgb(var(--v-theme-surface-variant), 0.4);
   overflow-x: auto;

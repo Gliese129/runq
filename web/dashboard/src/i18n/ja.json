@@ -525,5 +525,10 @@
   "submit.glob_group_name": "選択に名前を付ける",
   "submit.glob_save_group": "{n} 件を保存",
   "submit.glob_group_saved": "選択「{name}」を保存しました",
-  "submit.glob_group_partial": "「{name}」: {n} 件のパスが存在せずスキップしました"
+  "submit.glob_group_partial": "「{name}」: {n} 件のパスが存在せずスキップしました",
+  "submit.pf_skip_once": "今回はスキップ",
+  "submit.pf_skipped_once": "今回の送信ではスキップ",
+  "submit.pf_run_checks": "チェック実行",
+  "submit.pf_contract": "契約",
+  "submit.pf_contract_disabled": "プロジェクトの preflight.enabled で無効化"
 }

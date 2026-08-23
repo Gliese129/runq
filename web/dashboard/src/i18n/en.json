@@ -525,5 +525,10 @@
   "submit.glob_group_name": "name this selection",
   "submit.glob_save_group": "Save {n}",
   "submit.glob_group_saved": "Saved selection \"{name}\"",
-  "submit.glob_group_partial": "\"{name}\": {n} path(s) no longer exist and were skipped"
+  "submit.glob_group_partial": "\"{name}\": {n} path(s) no longer exist and were skipped",
+  "submit.pf_skip_once": "skip this submit",
+  "submit.pf_skipped_once": "skipped for this submit",
+  "submit.pf_run_checks": "Run checks",
+  "submit.pf_contract": "contract",
+  "submit.pf_contract_disabled": "disabled by project preflight.enabled"
 }

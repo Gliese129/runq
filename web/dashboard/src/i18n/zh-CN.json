@@ -525,5 +525,10 @@
   "submit.glob_group_name": "为这次选择命名",
   "submit.glob_save_group": "保存 {n} 项",
   "submit.glob_group_saved": "已保存选择「{name}」",
-  "submit.glob_group_partial": "「{name}」：{n} 个路径已不存在，已跳过"
+  "submit.glob_group_partial": "「{name}」：{n} 个路径已不存在，已跳过",
+  "submit.pf_skip_once": "本次跳过",
+  "submit.pf_skipped_once": "本次提交已跳过",
+  "submit.pf_run_checks": "运行检查",
+  "submit.pf_contract": "契约",
+  "submit.pf_contract_disabled": "已被项目 preflight.enabled 关闭"
 }

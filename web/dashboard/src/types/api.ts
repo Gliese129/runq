@@ -375,6 +375,16 @@ export interface ProjectConfig {
     tags?: string[]
     mode?: string
   }
+  /** Submit-time checks (contract): declared entries are verified on every
+   *  submit; failures block before anything is queued. */
+  preflight?: {
+    enabled?: boolean
+    imports?: boolean
+    wandb?: boolean
+    /** HF repos to verify — "{{param.NAME}}" entries expand against the sweep */
+    hf?: string[]
+    extra_run?: string
+  }
   params?: Array<{
     name: string
     type: string
