@@ -17,6 +17,7 @@ export interface ProjectParam {
   strict?: boolean        // choices are a contract, not suggestions
   scope?: string          // 'scheduler' = submit_template-only param
   style?: string          // 'flag' = store_true switch: bare --name / omitted
+  glob?: string           // path pattern; matches become candidate values
 }
 
 export interface ParamMeta {

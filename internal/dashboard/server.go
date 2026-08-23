@@ -264,6 +264,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/v1/targets/{name}/gpus", s.handleTargetGPUs)
 	s.mux.HandleFunc("GET /api/v1/targets/{name}/fs/list", s.handleFSList)
 	s.mux.HandleFunc("GET /api/v1/targets/{name}/fs/read", s.handleFSRead)
+	s.mux.HandleFunc("GET /api/v1/targets/{name}/fs/glob", s.handleFSGlob)
 	s.mux.HandleFunc("POST /api/v1/targets/{name}/fs/parse-script", s.handleParseScript)
 	s.mux.HandleFunc("GET /api/v1/targets/{name}/python-envs", s.handlePythonEnvs)
 

@@ -50,6 +50,7 @@ export function normalizeParam(a: NonNullable<ProjectConfig['params']>[number]):
     strict: a.strict || undefined,
     scope: a.scope || undefined,
     style: a.style || undefined,
+    glob: a.glob || undefined,
   }
 }
 

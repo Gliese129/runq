@@ -221,6 +221,14 @@ type ParamDef struct {
 	// value outside Choices is a submit-time error (enforced in
 	// submitplan.Build — one point, both CLI and GUI).
 	Strict bool `yaml:"strict,omitempty" json:"strict,omitempty"`
+	// Glob is a path PATTERN whose matches are this param's candidate values
+	// (file/folder params: checkpoint dirs, data shards). The pattern is all
+	// that is stored — "which of today's matches do I want" is a per-submit
+	// choice made in the GUI, never persisted here, so project.yaml never
+	// carries a stale file list. Resolution happens on the owning side via
+	// GET /targets/{name}/fs/glob; a submitted job records the concrete
+	// values it expanded to, which is what makes a re-run reproducible.
+	Glob string `yaml:"glob,omitempty" json:"glob,omitempty"`
 	// Style "flag" marks store_true-style switches (auto-annotated by the
 	// argparse scan): the renderer emits a bare `--name` when the value is
 	// truthy and OMITS the flag entirely otherwise — `--name=false` would

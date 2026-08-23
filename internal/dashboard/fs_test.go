@@ -92,3 +92,89 @@ func TestFSListAllowsOutsideHome(t *testing.T) {
 		t.Fatalf("outside-home listing should work (soft protection): %+v", items)
 	}
 }
+
+// globVia hits the v1 per-target fs/glob route (RQ2-3). Same
+// LocalFS-fallback story as listVia.
+func globVia(t *testing.T, s *Server, root, pattern string, extra string) (items []backend.FSEntry, truncated bool, status int) {
+	t.Helper()
+	q := "path=" + url.QueryEscape(root) + "&pattern=" + url.QueryEscape(pattern) + extra
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/targets/local/fs/glob?"+q, nil)
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		return nil, false, rec.Code
+	}
+	var out struct {
+		Items     []backend.FSEntry `json:"items"`
+		Truncated bool              `json:"truncated"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	return out.Items, out.Truncated, rec.Code
+}
+
+func TestFSGlobResolvesPattern(t *testing.T) {
+	root := t.TempDir()
+	ckpts := filepath.Join(root, "checkpoints")
+	if err := os.MkdirAll(ckpts, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"ckpt-1000.pt", "ckpt-2000.pt", "notes.txt"} {
+		if err := os.WriteFile(filepath.Join(ckpts, name), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s := NewServerWithAssets(backend.NewUnavailableBackend(nil), &config.GlobalConfig{}, "")
+
+	items, truncated, _ := globVia(t, s, root, "checkpoints/ckpt-*.pt", "")
+	if len(items) != 2 {
+		t.Fatalf("matches = %d, want 2: %+v", len(items), items)
+	}
+	if items[0].Name != "ckpt-1000.pt" || items[0].Path != filepath.Join(ckpts, "ckpt-1000.pt") {
+		t.Errorf("entry shape: %+v", items[0])
+	}
+	if items[0].Size == 0 || items[0].IsDir {
+		t.Errorf("size/is_dir not filled: %+v", items[0])
+	}
+	if truncated {
+		t.Error("truncated on a 2-match resolution")
+	}
+}
+
+// Zero matches is a 200 with an empty list — "nothing there yet" is what
+// the picker shows; blocking an empty sweep is the submit path's job.
+func TestFSGlobNoMatchIsEmptyOK(t *testing.T) {
+	s := NewServerWithAssets(backend.NewUnavailableBackend(nil), &config.GlobalConfig{}, "")
+	items, _, status := globVia(t, s, t.TempDir(), "*.pt", "")
+	if status != http.StatusOK || len(items) != 0 {
+		t.Fatalf("status=%d items=%v", status, items)
+	}
+}
+
+func TestFSGlobTruncationIsReported(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"a.pt", "b.pt", "c.pt"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s := NewServerWithAssets(backend.NewUnavailableBackend(nil), &config.GlobalConfig{}, "")
+	items, truncated, _ := globVia(t, s, root, "*.pt", "&limit=2")
+	if len(items) != 2 || !truncated {
+		t.Fatalf("items=%d truncated=%v, want 2/true", len(items), truncated)
+	}
+}
+
+func TestFSGlobRejectsBadInput(t *testing.T) {
+	s := NewServerWithAssets(backend.NewUnavailableBackend(nil), &config.GlobalConfig{}, "")
+	if _, _, status := globVia(t, s, t.TempDir(), "", ""); status != http.StatusBadRequest {
+		t.Errorf("empty pattern: status = %d, want 400", status)
+	}
+	if _, _, status := globVia(t, s, t.TempDir(), "*.pt", "&limit=0"); status != http.StatusBadRequest {
+		t.Errorf("limit=0: status = %d, want 400", status)
+	}
+	if _, _, status := globVia(t, s, t.TempDir(), "*.pt", "&limit=abc"); status != http.StatusBadRequest {
+		t.Errorf("limit=abc: status = %d, want 400", status)
+	}
+}

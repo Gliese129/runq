@@ -390,6 +390,10 @@ export interface ProjectConfig {
     scope?: string
     /** "flag" = store_true switch: rendered as bare --name / omitted */
     style?: string
+    /** path PATTERN whose matches are this param's candidate values
+     *  (file/folder params). Only the pattern is stored — which of today's
+     *  matches a submit uses is chosen in the UI, never persisted here. */
+    glob?: string
   }>
 }
 
