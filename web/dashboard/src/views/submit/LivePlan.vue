@@ -158,6 +158,9 @@ async function fetchPreview() {
 .w-100 { width: 100%; }
 .border-b { border-bottom: 0.5px solid rgb(var(--v-theme-outline-variant)); }
 .plan-panel { position: sticky; top: 72px; }
+@media (max-width: 959px) {
+  .plan-panel { position: static; }
+}
 .plan-table { max-height: 340px; }
 .border-t { border-top: 0.5px solid rgb(var(--v-theme-outline-variant)); }
 .preview-pre {

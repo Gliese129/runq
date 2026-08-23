@@ -47,7 +47,10 @@
         </div>
         <StepConfigure v-else />
       </div>
-      <aside class="plan-col flex-shrink-0 d-none d-md-block">
+      <!-- Below md the plan STACKS under the editor instead of vanishing:
+           hiding it turned "persistent review panel" into review-less
+           submits on tablets (Codex r1 F4). -->
+      <aside class="plan-col flex-shrink-0">
         <LivePlan />
       </aside>
     </div>
@@ -56,6 +59,7 @@
       v-model="showJobYamlBrowser"
       mode="script"
       :file-filter="'.yaml,.yml'"
+      :target="target"
       @select="onJobYamlSelected"
     />
   </div>
@@ -315,7 +319,7 @@ async function onJobYamlSelected(path: string) {
   const name = path.split(/[\\/]/).pop() || path
   try {
     const YAML = await import('js-yaml')
-    const { content } = await filesApi.read(path)
+    const { content } = await filesApi.read(path, target.value)
     const cfg = YAML.load(content) as any
     if (!cfg || typeof cfg !== 'object' || (!cfg.sweep && !cfg.fixed_params)) {
       throw new Error('not a job.yaml (no sweep/fixed_params)')
@@ -419,5 +423,9 @@ async function submit(forceSkipPreflight = false) {
 
 <style scoped>
 .min-w-0 { min-width: 0; }
+.submit-grid { flex-wrap: wrap; }
 .plan-col { width: 320px; }
+@media (max-width: 959px) {
+  .plan-col { width: 100%; }
+}
 </style>

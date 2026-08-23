@@ -25,6 +25,9 @@ export interface ParamRow {
   /** path PATTERN this row's candidate values resolve from (RQ2-3). Set =
    *  the row renders the glob picker instead of a free value editor. */
   glob?: string
+  /** glob rows only: the last resolution's outcome. 'error' blocks submit
+   *  regardless of stale values (Codex r1 F2); absent = not resolved yet. */
+  globState?: 'pending' | 'ok' | 'error'
   meta?: { min?: number; max?: number; step?: number }
   /** 'scheduler' = consumed by the HPC submit_template, not the command */
   scope?: string
@@ -129,7 +132,47 @@ export type TableValidation =
   | { ok: true }
   | { ok: false; message: string; rowName?: string }
 
+/** ProjectParam → a fresh ParamRow. THE one mapping (Codex r1 F6): the
+ *  row sync and the hidden-param re-add path both build rows from a
+ *  declared param, and a field forgotten in one of two copies (glob, scope)
+ *  silently downgraded the row. */
+export function rowFromProjectParam(p: {
+  name: string
+  type?: string
+  default?: string
+  min?: number
+  max?: number
+  scope?: string
+  glob?: string
+}): ParamRow {
+  const meta: ParamRow['meta'] = {}
+  if (p.min != null) meta.min = p.min
+  if (p.max != null) meta.max = p.max
+  return {
+    name: p.name,
+    type: p.type || 'str',
+    default: p.default || '',
+    values: [],
+    meta,
+    scope: p.scope,
+    glob: p.glob,
+  }
+}
+
 export function validateTable(rows: ParamRow[], linkSets: LinkSet[]): TableValidation {
+  // glob rows: the wire only ever carries explicit values, so nothing
+  // downstream can re-resolve a pattern — an empty or failed resolution
+  // MUST stop here or the param is silently omitted from every task
+  // (Codex r1 F2; the "0 匹配必须阻断" ruling lives at this gate now).
+  for (const row of rows) {
+    if (!row.glob) continue
+    if (row.globState === 'error') {
+      return { ok: false, message: `"${row.name}": pattern resolution failed — rescan before submitting`, rowName: row.name }
+    }
+    if (activeValues(row).length === 0) {
+      return { ok: false, message: `"${row.name}": no files selected from its pattern — select at least one`, rowName: row.name }
+    }
+  }
   // typed values
   for (const row of rows) {
     const bad = activeValues(row).find(v => !validateTypedValue(v, row.type))

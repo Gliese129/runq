@@ -76,6 +76,21 @@
             />
             <v-btn v-if="!isCreating" size="small" variant="text" @click="renameDialog = true">{{ t('submit.rename') }}</v-btn>
           </div>
+          <!-- The target is part of a project's identity: it decides whose
+               filesystem every fact on this page comes from. -->
+          <v-select
+            v-if="isCreating"
+            v-model="createTarget"
+            :items="config.targets.map(tgt => tgt.name)"
+            :label="t('projectEdit.home_target')"
+            :hint="t('projectEdit.home_target_hint')"
+            persistent-hint
+            variant="outlined" density="compact" class="mt-3"
+          />
+          <div v-else class="d-flex align-center ga-1 mt-2 text-caption text-on-surface-variant">
+            <v-icon size="12">mdi-server</v-icon>
+            {{ t('projectEdit.home_target') }}: <code>{{ homeTarget }}</code>
+          </div>
         </section>
 
         <!-- ── Source ── -->
@@ -290,6 +305,7 @@
       :mode="workDirEditMode ? 'directory' : 'script'"
       :file-filter="'.py,.sh,.yaml,.yml'"
       :initial-dir="form.workDir"
+      :target="homeTarget"
       @select="onBrowserSelect"
     />
 
@@ -343,6 +359,16 @@ const snack = useSnackbar()
 const config = useConfigStore()
 
 const isCreating = computed(() => !props.project)
+
+// The filesystem all facts come from (Codex r1 F3): an edited project's
+// HOME target (its config pins it), never the browser's current default —
+// script parse, .env detection, conda envs and the file browser must read
+// the machine the project lives on. Create mode picks explicitly.
+const createTarget = ref('')
+const homeTarget = computed(() =>
+  isCreating.value
+    ? (createTarget.value || config.currentTarget)
+    : (source.value?.target || config.currentTarget))
 const redirectTo = computed(() => (route.query.redirect === 'submit' ? 'submit' : 'project'))
 
 // ── Form state (same shape buildProjectPayload consumes) ──
@@ -478,7 +504,10 @@ onBeforeRouteLeave(async () => {
 
 // ── Load (edit mode) ──
 onMounted(async () => {
-  if (!props.project) return
+  if (!props.project) {
+    createTarget.value = config.currentTarget
+    return
+  }
   try {
     const cfg = await projectsApi.get(props.project)
     applyProjectConfig(cfg)
@@ -514,7 +543,7 @@ async function refreshParamsFromProject(cfg: ProjectConfig) {
   if (!path) return
   scriptPath.value = path
   try {
-    const result = await filesApi.parseScript(path, { silent: true })
+    const result = await filesApi.parseScript(path, { silent: true }, homeTarget.value)
     form.params = mergeParams(form.params, result.args || [])
     markClean()
   } catch {
@@ -541,6 +570,7 @@ async function save() {
   saving.value = true
   try {
     const payload = buildProjectPayload(form, source.value)
+    if (isCreating.value) payload.target = homeTarget.value
     const name = form.name.trim()
     if (isCreating.value) {
       await projectsApi.create(payload)
@@ -631,7 +661,7 @@ function onBrowserSelect(path: string) {
 async function importProjectYaml(path: string, name: string) {
   showFileBrowser.value = false
   try {
-    const { content } = await filesApi.read(path)
+    const { content } = await filesApi.read(path, homeTarget.value)
     const parsed = YAML.load(content) as any
     if (!parsed || typeof parsed !== 'object' || !parsed.project_name) {
       throw new Error('not a project.yaml (missing project_name)')
@@ -665,7 +695,7 @@ async function onScriptPicked(entry: FSEntry) {
   form.cmd = isShell ? `bash ${entry.name} {{args}}` : `python ${entry.name} {{args}}`
 
   try {
-    const result = await filesApi.parseScript(entry.path)
+    const result = await filesApi.parseScript(entry.path, undefined, homeTarget.value)
     if (result.suggested_command) form.cmd = result.suggested_command
     if (result.detected_env) {
       const [type, detail] = result.detected_env.split(':', 2)
@@ -700,11 +730,11 @@ watch(() => form.workDir, dir => {
   if (!dir) return
   dotenvTimer = setTimeout(async () => {
     try {
-      const entries = await filesApi.list(dir)
+      const entries = await filesApi.list(dir, homeTarget.value)
       const hit = entries.find(e => !e.is_dir && e.name === '.env')
       if (!hit) return
       dotenv.found = true
-      const { content } = await filesApi.read(hit.path)
+      const { content } = await filesApi.read(hit.path, homeTarget.value)
       dotenv.keys = content
         .split('\n')
         .map(l => l.trim())
@@ -738,13 +768,13 @@ const envTypes = [
 ]
 const condaEnvs = ref<string[]>([])
 const condaEnvsLoading = ref(false)
-let condaEnvsLoaded = false
-watch(() => form.envType, async type => {
-  if (type === 'conda' && !condaEnvsLoaded) {
+let condaEnvsLoadedFor = '' // conda envs are per-MACHINE facts
+watch([() => form.envType, homeTarget], async ([type, tgt]) => {
+  if (type === 'conda' && condaEnvsLoadedFor !== tgt) {
     condaEnvsLoading.value = true
     try {
-      condaEnvs.value = await envApi.listCondaEnvs()
-      condaEnvsLoaded = true
+      condaEnvs.value = await envApi.listCondaEnvs(tgt as string)
+      condaEnvsLoadedFor = tgt as string
     } catch { condaEnvs.value = [] }
     finally { condaEnvsLoading.value = false }
   }

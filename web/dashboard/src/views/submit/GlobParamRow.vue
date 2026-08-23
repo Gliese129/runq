@@ -111,6 +111,7 @@ import { computed, inject, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { filesApi } from '@/apis/files'
 import { useParamGroups } from '@/composables/useParamGroups'
+import { mergeGlobSelection } from './globSelection'
 import { useSnackbar } from '@/composables/useSnackbar'
 import { SUBMIT_STATE_KEY } from '@/types/submit'
 import type { ParamRow } from './paramTable'
@@ -156,27 +157,27 @@ function selectNone() {
 async function resolve() {
   if (!props.row.glob) return
   resolving.value = true
+  props.row.globState = 'pending'
   error.value = ''
-  const before = new Set(candidates.value.map(c => c.path))
-  const selected = new Set(props.row.values)
+  const before = candidates.value.map(c => c.path)
   try {
     const res = await filesApi.glob(state.newProject.workDir || '', props.row.glob, { target: state.target })
     candidates.value = res.items
     truncated.value = res.truncated
-    const paths = res.items.map(c => c.path)
-    // Selection carries across a rescan: keep what is still there, and adopt
-    // what is NEW (a pattern means "these files" — a checkpoint that appeared
-    // since the last scan belongs to the sweep unless the user says
-    // otherwise). Fresh row (nothing selected yet) = select all.
-    const next = selected.size === 0 && before.size === 0
-      ? paths
-      : paths.filter(p => selected.has(p) || !before.has(p))
-    missing.value = [...selected].filter(p => !paths.includes(p))
+    // Fresh row → all; hydrated snapshot (?fromJob / draft) → keep the
+    // frozen subset; rescan → keep + adopt new (see globSelection.ts).
+    const { next, missing: gone } = mergeGlobSelection(
+      before, [...props.row.values], res.items.map(c => c.path))
+    missing.value = gone
     props.row.values.splice(0, props.row.values.length, ...next)
+    props.row.globState = 'ok'
   } catch (e: any) {
     error.value = e?.message || t('common.error')
     candidates.value = []
     truncated.value = false
+    // Stale values must not ride into a submit the resolver can't vouch
+    // for — the error state gates validateTable (Codex r1 F2).
+    props.row.globState = 'error'
   } finally {
     resolving.value = false
   }

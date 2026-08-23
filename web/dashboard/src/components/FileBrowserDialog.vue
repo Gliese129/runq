@@ -144,10 +144,15 @@ const props = withDefaults(defineProps<{
   mode?: BrowseMode
   initialDir?: string
   fileFilter?: string  // e.g. '.py' — only show files matching this extension
+  /** Filesystem to browse. Facts must come from the machine they live on
+   *  (Codex r1 F3) — a remote project browsed against the default target
+   *  would show another machine's tree. Absent = current target. */
+  target?: string
 }>(), {
   mode: 'script',
   initialDir: '',
   fileFilter: '.py,.sh',
+  target: undefined,
 })
 
 const emit = defineEmits<{
@@ -206,7 +211,7 @@ async function loadDir(path: string) {
   currentDir.value = path
   pathInput.value = path ? path + '/' : ''
   try {
-    const res = await filesApi.list(path)
+    const res = await filesApi.list(path, props.target)
     // Stale-response guard: rapid navigation can land an older dir's
     // listing after a newer one — drop it if we already moved on.
     if (currentDir.value !== path) return

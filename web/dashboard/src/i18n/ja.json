@@ -530,5 +530,7 @@
   "submit.pf_skipped_once": "今回の送信ではスキップ",
   "submit.pf_run_checks": "チェック実行",
   "submit.pf_contract": "契約",
-  "submit.pf_contract_disabled": "プロジェクトの preflight.enabled で無効化"
+  "submit.pf_contract_disabled": "プロジェクトの preflight.enabled で無効化",
+  "projectEdit.home_target": "ターゲット",
+  "projectEdit.home_target_hint": "このプロジェクトが存在するマシン — このページの事実（スクリプト・.env・環境）はすべてそこから読まれます"
 }

@@ -530,5 +530,7 @@
   "submit.pf_skipped_once": "本次提交已跳过",
   "submit.pf_run_checks": "运行检查",
   "submit.pf_contract": "契约",
-  "submit.pf_contract_disabled": "已被项目 preflight.enabled 关闭"
+  "submit.pf_contract_disabled": "已被项目 preflight.enabled 关闭",
+  "projectEdit.home_target": "目标机器",
+  "projectEdit.home_target_hint": "项目所在的机器 — 本页所有事实（脚本、.env、环境）都从它读取"
 }

@@ -234,6 +234,7 @@ import { SUBMIT_STATE_KEY } from '@/types/submit'
 import { inject } from 'vue'
 import {
   activeValues, linkColor, rowEffect, validateTable, taskCount, newLinkSetId,
+  rowFromProjectParam,
   type LinkSet, type ParamRow,
 } from './paramTable'
 import { sweepSummary } from './submitFlow'
@@ -266,10 +267,7 @@ watch(
         existing.glob = p.glob
         next.push(existing)
       } else {
-        const meta: ParamRow['meta'] = {}
-        if (p.min != null) meta.min = p.min
-        if (p.max != null) meta.max = p.max
-        next.push({ name: p.name, type: p.type || 'str', default: p.default || '', values: [], meta, scope: p.scope, glob: p.glob })
+        next.push(rowFromProjectParam(p))
       }
       byName.delete(p.name)
     }
@@ -419,14 +417,9 @@ function addCustomParam() {
   // If it's a known (but unchecked) project param, inherit its definition.
   const def = (state.newProject.params || []).find(p => p.name === name)
   customNames.add(name)
-  if (def) {
-    const meta: import('./paramTable').ParamRow['meta'] = {}
-    if (def.min != null) meta.min = def.min
-    if (def.max != null) meta.max = def.max
-    state.rows.push({ name, type: def.type || 'str', default: def.default || '', values: [], meta })
-  } else {
-    state.rows.push({ name, type: 'str', default: '', values: [] })
-  }
+  // Inherit the FULL definition — glob/scope included (Codex r1 F6: the
+  // partial copy downgraded a re-added glob param to a free-text row).
+  state.rows.push(def ? rowFromProjectParam(def) : rowFromProjectParam({ name }))
   newParamName.value = ''
 }
 

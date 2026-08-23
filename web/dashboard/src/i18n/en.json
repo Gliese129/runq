@@ -530,5 +530,7 @@
   "submit.pf_skipped_once": "skipped for this submit",
   "submit.pf_run_checks": "Run checks",
   "submit.pf_contract": "contract",
-  "submit.pf_contract_disabled": "disabled by project preflight.enabled"
+  "submit.pf_contract_disabled": "disabled by project preflight.enabled",
+  "projectEdit.home_target": "Target",
+  "projectEdit.home_target_hint": "The machine this project lives on — every fact on this page (script, .env, environments) is read from it"
 }
