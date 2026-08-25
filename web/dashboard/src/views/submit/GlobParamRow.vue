@@ -154,14 +154,23 @@ function selectNone() {
   props.row.values.splice(0, props.row.values.length)
 }
 
+// Monotonic scan id: reload/draft-restore mounts a scan while the target
+// is still settling, so overlapping resolves are ROUTINE, not a corner
+// case — and responses may land out of order. Only the LATEST scan may
+// write anything (candidates, values, globState); a stale response that
+// lands late is discarded wholesale (Codex r2).
+let resolveSeq = 0
+
 async function resolve() {
   if (!props.row.glob) return
+  const seq = ++resolveSeq
   resolving.value = true
   props.row.globState = 'pending'
   error.value = ''
   const before = candidates.value.map(c => c.path)
   try {
     const res = await filesApi.glob(state.newProject.workDir || '', props.row.glob, { target: state.target })
+    if (seq !== resolveSeq) return // a newer scan owns the outcome
     candidates.value = res.items
     truncated.value = res.truncated
     // Fresh row → all; hydrated snapshot (?fromJob / draft) → keep the
@@ -172,6 +181,7 @@ async function resolve() {
     props.row.values.splice(0, props.row.values.length, ...next)
     props.row.globState = 'ok'
   } catch (e: any) {
+    if (seq !== resolveSeq) return
     error.value = e?.message || t('common.error')
     candidates.value = []
     truncated.value = false
@@ -179,7 +189,7 @@ async function resolve() {
     // for — the error state gates validateTable (Codex r1 F2).
     props.row.globState = 'error'
   } finally {
-    resolving.value = false
+    if (seq === resolveSeq) resolving.value = false
   }
 }
 
