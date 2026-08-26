@@ -1,8 +1,10 @@
 <template>
   <div>
+    <!-- Indent is inline padding — Vuetify's px-* utilities are !important
+         and would flatten the hierarchy, so the row only uses pr-2. -->
     <div
-      class="tree-row d-flex align-center ga-1 px-2"
-      :style="{ paddingLeft: `${8 + depth * 16}px` }"
+      class="tree-row d-flex align-center ga-1 pr-2"
+      :style="{ paddingLeft: `${8 + depth * 20}px` }"
       :role="entry.is_dir ? 'button' : undefined"
       :tabindex="entry.is_dir ? 0 : undefined"
       :aria-expanded="entry.is_dir ? open : undefined"
@@ -26,18 +28,24 @@
         <v-icon size="12">mdi-content-copy</v-icon>
       </v-btn>
     </div>
-    <div v-if="loadError" class="text-caption text-error" :style="{ paddingLeft: `${28 + depth * 16}px` }">
+    <div v-if="loadError" class="text-caption text-error" :style="{ paddingLeft: `${28 + depth * 20}px` }">
       {{ loadError }}
     </div>
-    <template v-if="open && children">
-      <div v-if="children.length === 0" class="text-caption text-on-surface-variant py-1" :style="{ paddingLeft: `${28 + depth * 16}px` }">
+    <!-- Children carry a vertical guide at the parent's icon column — the
+         indent alone reads flat on long sibling runs. -->
+    <div
+      v-if="open && children"
+      class="tree-children"
+      :style="{ '--guide-left': `${15 + depth * 20}px` }"
+    >
+      <div v-if="children.length === 0" class="text-caption text-on-surface-variant py-1" :style="{ paddingLeft: `${28 + depth * 20}px` }">
         {{ t('data.empty_dir') }}
       </div>
       <DataTreeNode
         v-for="c in children" :key="c.path"
         :entry="c" :target="target" :depth="depth + 1"
       />
-    </template>
+    </div>
   </div>
 </template>
 
@@ -111,4 +119,16 @@ function fmtSize(n: number): string {
 }
 .tree-row[role='button'] { cursor: pointer; }
 .tree-row:hover { background: rgb(var(--v-theme-surface-variant), 0.4); }
+.tree-children {
+  position: relative;
+}
+.tree-children::before {
+  content: '';
+  position: absolute;
+  left: var(--guide-left);
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: rgb(var(--v-theme-outline-variant));
+}
 </style>
