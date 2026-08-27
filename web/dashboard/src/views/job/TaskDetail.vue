@@ -198,18 +198,27 @@
       <!-- Path + seek state + paging/follow controls -->
       <div class="d-flex align-center ga-2 px-3 py-2 border-b flex-wrap">
         <code v-if="task.log_path" class="text-caption text-on-surface-variant text-truncate">{{ task.log_path }}</code>
-        <template v-if="seekIndex >= 0">
-          <v-chip size="x-small" variant="tonal" color="primary">
-            {{ t('activity.jumped_line', { n: seekLine.toLocaleString() }) }}
-          </v-chip>
-          <span
-            class="text-caption text-primary cursor-pointer"
-            role="button" tabindex="0"
-            @click="backToTail"
-            @keydown.enter="backToTail"
-          >{{ t('activity.back_to_tail') }}</span>
-        </template>
+        <v-chip v-if="seekIndex >= 0" size="x-small" variant="tonal" color="primary">
+          {{ t('activity.jumped_line', { n: seekLine.toLocaleString() }) }}
+        </v-chip>
+        <!-- One resume affordance covers both pause reasons (seek, scroll-up). -->
+        <span
+          v-if="seekIndex >= 0 || (isActive && streamState === 'ready')"
+          class="text-caption text-primary cursor-pointer"
+          role="button" tabindex="0"
+          @click="backToTail"
+          @keydown.enter="backToTail"
+        >{{ t('activity.back_to_tail') }}</span>
         <v-spacer />
+        <!-- No follow switch: intent is read from behavior — a live task
+             follows, scrolling up pauses, reaching the bottom (or "back to
+             tail") resumes. The chip only REPORTS the state. -->
+        <v-chip v-if="streamState === 'following'" size="x-small" variant="tonal" color="primary">
+          <span class="follow-dot mr-1" />{{ t('log.following') }}
+        </v-chip>
+        <v-chip v-else-if="streamState === 'reconnecting'" size="x-small" variant="tonal" color="warning">
+          {{ t('log.reconnecting') }}
+        </v-chip>
         <v-chip v-if="totalBytes > 0" size="x-small" variant="tonal">{{ formatBytes(totalBytes) }}</v-chip>
         <v-btn
           v-if="canLoadEarlier"
@@ -229,14 +238,6 @@
         >
           {{ t('log.load_more') }}
         </v-btn>
-        <v-switch
-          v-model="following"
-          density="compact"
-          hide-details
-          inline
-          :color="streamState === 'reconnecting' ? 'warning' : 'primary'"
-          :label="streamState === 'reconnecting' ? t('log.reconnecting') : t('log.follow')"
-        />
       </div>
 
       <!-- Ring-buffer notice: memory released, server file complete.
@@ -523,6 +524,33 @@ async function onSeek(cell: ActivityCell & { index: number }) {
   }
   streamState.value = 'ready'
 }
+
+// ── Stick-to-tail (no follow switch): intent is read from behavior.
+// Scrolling away while following pauses the stream; scrolling back to
+// the bottom re-arms it — but only when the buffer actually ends at the
+// file's tail (after a seek it usually doesn't; "back to tail" covers
+// that). Hysteresis (60px away / 8px re-stick) absorbs virtualizer
+// measurement jitter. Content growth alone fires no scroll event, so
+// appends never self-pause.
+watch(logContainer, (el, _prev, onCleanup) => {
+  if (!el) return
+  const onScroll = () => {
+    const gap = el.scrollHeight - el.scrollTop - el.clientHeight
+    if (streamState.value === 'following' || streamState.value === 'reconnecting') {
+      if (gap > 60) following.value = false
+    } else if (
+      isActive.value &&
+      streamState.value === 'ready' &&
+      endOffset.value >= totalBytes.value &&
+      gap < 8
+    ) {
+      seekIndex.value = -1
+      following.value = true
+    }
+  }
+  el.addEventListener('scroll', onScroll, { passive: true })
+  onCleanup(() => el.removeEventListener('scroll', onScroll))
+}, { immediate: true })
 
 async function backToTail() {
   seekIndex.value = -1
@@ -1041,6 +1069,19 @@ onUnmounted(() => {
   flex-shrink: 0;
   color: rgb(var(--v-theme-on-surface-variant));
   font-size: 12px;
+}
+
+/* Live-tail indicator: a breathing dot, the "recording" idiom. */
+.follow-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: rgb(var(--v-theme-primary));
+  display: inline-block;
+  animation: follow-pulse 2s ease-in-out infinite;
+}
+@keyframes follow-pulse {
+  50% { opacity: 0.3; }
 }
 
 /* RQ-74: verbatim scheduler output — monospace, wrapped, no reflow of the

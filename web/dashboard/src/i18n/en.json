@@ -579,5 +579,6 @@
   "activity.hint": "Drag to zoom · scroll to scale · click to jump",
   "activity.samples_per_point": "{n} samples per point at this zoom",
   "activity.jumped_line": "jumped to line {n}",
-  "activity.back_to_tail": "back to tail"
+  "activity.back_to_tail": "back to tail",
+  "log.following": "following"
 }

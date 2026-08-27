@@ -579,5 +579,6 @@
   "activity.hint": "ドラッグでズーム · スクロールで調整 · クリックでジャンプ",
   "activity.samples_per_point": "このズームでは 1 点あたり {n} サンプル",
   "activity.jumped_line": "{n} 行目へジャンプしました",
-  "activity.back_to_tail": "末尾に戻る"
+  "activity.back_to_tail": "末尾に戻る",
+  "log.following": "追従中"
 }

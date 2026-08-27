@@ -579,5 +579,6 @@
   "activity.hint": "拖拽缩放 · 滚轮调整 · 点击跳转",
   "activity.samples_per_point": "当前缩放下每点 {n} 个采样",
   "activity.jumped_line": "已跳到第 {n} 行",
-  "activity.back_to_tail": "回到末尾"
+  "activity.back_to_tail": "回到末尾",
+  "log.following": "跟随中"
 }
