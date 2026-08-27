@@ -604,5 +604,9 @@
   "target.remove_confirm": "Remove target \"{name}\" from config.yaml?",
   "settings.targets_moved_title": "Compute targets",
   "settings.targets_moved_hint": "Per-target config (SSH, scheduler commands, checks) lives on its own page now.",
-  "submit.target_pinned_hint": "Pinned by the project config — cross-target projects are not supported yet"
+  "submit.target_pinned_hint": "Pinned by the project config — cross-target projects are not supported yet",
+  "groups.new_group": "New group",
+  "groups.ungrouped": "Ungrouped",
+  "groups.dissolve": "Dissolve group",
+  "groups.group_menu": "Group actions"
 }

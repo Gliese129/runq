@@ -604,5 +604,9 @@
   "target.remove_confirm": "config.yaml からターゲット \"{name}\" を削除しますか？",
   "settings.targets_moved_title": "計算ターゲット",
   "settings.targets_moved_hint": "ターゲットごとの設定（SSH・スケジューラコマンド・チェック）は専用ページに移動しました。",
-  "submit.target_pinned_hint": "プロジェクト設定で固定——クロスターゲットのプロジェクトは未対応です"
+  "submit.target_pinned_hint": "プロジェクト設定で固定——クロスターゲットのプロジェクトは未対応です",
+  "groups.new_group": "新しいグループ",
+  "groups.ungrouped": "未分類",
+  "groups.dissolve": "グループを解散",
+  "groups.group_menu": "グループ操作"
 }

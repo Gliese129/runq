@@ -604,5 +604,9 @@
   "target.remove_confirm": "从 config.yaml 移除目标 \"{name}\"？",
   "settings.targets_moved_title": "计算目标",
   "settings.targets_moved_hint": "每个目标的配置（SSH、调度器命令、检查）现在有独立页面。",
-  "submit.target_pinned_hint": "由 project 配置钉定——暂不支持跨 target 的 project"
+  "submit.target_pinned_hint": "由 project 配置钉定——暂不支持跨 target 的 project",
+  "groups.new_group": "新建分组",
+  "groups.ungrouped": "未分组",
+  "groups.dissolve": "解散分组",
+  "groups.group_menu": "分组操作"
 }
