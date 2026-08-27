@@ -1,5 +1,4 @@
-import axios from 'axios'
-import { api, API_BASE } from './client'
+import { api } from './client'
 import type { LogPage } from '@/types/api'
 
 export interface UtilsLogSession {
@@ -13,14 +12,14 @@ export interface UtilsLogReadOptions {
 }
 
 export const utilsApi = {
-  /** Upload raw log content, get a session ID back. */
-  uploadLog: async (body: string | Blob): Promise<UtilsLogSession> => {
-    const res = await axios.post<UtilsLogSession>(`${API_BASE}/log-sessions`, body, {
-      headers: { 'Content-Type': 'application/octet-stream' },
-      timeout: 60000,
-    })
-    return res.data
-  },
+  /** Upload raw log content, get a session ID back. Goes through the
+   *  shared client — the raw-axios version bypassed its error
+   *  normalization, so a failed upload surfaced nothing (RQ2-4 ⑦). */
+  uploadLog: (body: string | Blob): Promise<UtilsLogSession> =>
+    api.post<UtilsLogSession>('/log-sessions', body, {
+      contentType: 'application/octet-stream',
+      timeoutMs: 60000,
+    }),
 
   /** Read a page of ANSI-stripped lines (same shape as task log). */
   readLog: (id: string, opts: UtilsLogReadOptions = {}) => {
