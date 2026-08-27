@@ -14,6 +14,7 @@ const routes: RouteRecordRaw[] = [
       { path: 'projects/:project', name: 'project', component: () => import('../views/ProjectJobs.vue'), props: true },
       { path: 'projects/:project/:jobId', name: 'job-detail', component: () => import('../views/job/index.vue'), props: true },
       { path: 'projects/:project/:jobId/:taskId', name: 'task-detail', component: () => import('../views/job/TaskDetail.vue'), props: true },
+      { path: 'targets/:name?', name: 'target', component: () => import('../views/target/index.vue'), props: true },
       { path: 'submit', name: 'submit', component: () => import('../views/submit/index.vue') },
       { path: 'utils/log-viewer', name: 'log-viewer', component: () => import('../views/utils/LogViewer.vue') },
       { path: 'settings', name: 'settings', component: () => import('../views/Settings.vue') },

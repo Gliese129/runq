@@ -318,6 +318,12 @@ const navItems = computed(() => [
     icon: 'mdi-plus-circle-outline',
     to: { name: 'submit' },
   },
+  {
+    name: 'target',
+    label: t('nav.targets'),
+    icon: 'mdi-server-outline',
+    to: { name: 'target' },
+  },
 ])
 
 function isActive(name: string): boolean {
