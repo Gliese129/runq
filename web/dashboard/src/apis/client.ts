@@ -42,6 +42,8 @@ export interface RequestOptions {
   signal?: AbortSignal
   /** config generation to send as If-Match (RQ-75 CAS writes) */
   ifMatch?: string
+  /** override the JSON default for raw-body endpoints (e.g. log upload) */
+  contentType?: string
 }
 
 async function request<T>(method: string, path: string, body?: unknown, opts?: RequestOptions): Promise<T> {
@@ -52,7 +54,10 @@ async function request<T>(method: string, path: string, body?: unknown, opts?: R
       data: body,
       timeout: opts?.timeoutMs,
       signal: opts?.signal,
-      headers: opts?.ifMatch ? { 'If-Match': opts.ifMatch } : undefined,
+      headers: {
+        ...(opts?.ifMatch ? { 'If-Match': opts.ifMatch } : {}),
+        ...(opts?.contentType ? { 'Content-Type': opts.contentType } : {}),
+      },
     })
     onApiSuccess()
     return res.data

@@ -66,26 +66,12 @@ CREATE INDEX IF NOT EXISTS idx_jobs_status       ON jobs(status);
 CREATE INDEX IF NOT EXISTS idx_jobs_finished_at  ON jobs(finished_at);
 
 -- ── L2-C: metrics and checkpoints ─────────────────────────────────────────
--- Populated by daemon during `runTask` reap: read <task_dir>/metrics.jsonl,
--- dispatch each event by type (metric / checkpoint / disk_low).
--- Both tables carry job_id as a redundant column to avoid joining on `tasks`
--- when querying by job (e.g. `runq log search --job <id> --key loss`).
-
-CREATE TABLE IF NOT EXISTS metrics (
-    task_id  TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-    job_id   TEXT NOT NULL,                  -- denormalized for fast filtering
-    key      TEXT NOT NULL,                  -- e.g. "loss" or "train/loss"
-    value    REAL,
-    step     INTEGER,                        -- nullable: scripts that don't track step
-    ts       INTEGER NOT NULL,               -- Unix timestamp from SDK at log time
-    PRIMARY KEY (task_id, key, step, ts)
-);
--- NOTE(pyramid pivot): the metrics point table above is LEGACY — the
--- streaming-reduction design stores no raw points (metric_summary below +
--- the on-target metrics.pyr index replace it). Kept so existing DBs open
--- cleanly; drop in the dead-code cleanup batch alongside its indexes.
-CREATE INDEX IF NOT EXISTS idx_metrics_job_key  ON metrics(job_id, key);
-CREATE INDEX IF NOT EXISTS idx_metrics_task_key ON metrics(task_id, key, step);
+-- Populated by daemon during `runTask` reap: read the task's SDK output
+-- files, dispatch each event by type. Tables carry job_id as a redundant
+-- column to avoid joining on `tasks` when querying by job.
+-- (The legacy raw-point `metrics` table is GONE — RQ2-1 c6; migrate.go
+-- drops it from existing DBs. metric_summary + the on-target pyramid
+-- index replaced it in the streaming-reduction design.)
 
 -- Streaming metric summaries: ONE row per (task, key), maintained by the
 -- incremental ingest's on-the-fly reduction — raw points are NOT stored
@@ -115,6 +101,40 @@ CREATE TABLE IF NOT EXISTS metrics_ingest (
     file_size     INTEGER NOT NULL DEFAULT 0,  -- stat size at last pass
     parsed_offset INTEGER NOT NULL DEFAULT 0,  -- consumed up to here (complete lines only)
     final         INTEGER NOT NULL DEFAULT 0   -- 1 = terminal ingest done
+);
+
+-- ── RQ2-1: result records (runq.record data plane) ────────────────────────
+-- Full-fidelity result records emitted by the SDK's `runq.record(metrics,
+-- **axes)` into <task_dir>/results.jsonl and ingested by the incremental
+-- reap. Unlike the unbounded per-step metric stream (summarized above),
+-- result records are BOUNDED facts — one per eval checkpoint, same class
+-- as the checkpoints table — so full rows go in. The ingest cap
+-- (store.MaxResultRecordsPerTask) makes that boundedness enforced, not
+-- assumed. Self-healing cache doctrine holds: results.jsonl on the target
+-- remains the source of truth; these rows rebuild from it.
+CREATE TABLE IF NOT EXISTS result_records (
+    task_id      TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    job_id       TEXT NOT NULL,       -- denormalized for job-level queries
+    ts           INTEGER NOT NULL,    -- Unix timestamp from SDK at record time
+    axes_json    TEXT NOT NULL,       -- JSON object: identity/coordinate keys
+    metrics_json TEXT NOT NULL        -- JSON object: metric name → number
+);
+CREATE INDEX IF NOT EXISTS idx_result_records_job  ON result_records(job_id);
+CREATE INDEX IF NOT EXISTS idx_result_records_task ON result_records(task_id);
+
+-- Incremental ingest marks for the post-split SDK files (results.jsonl /
+-- events.jsonl) — same (size, parsed_offset, final) semantics as
+-- metrics_ingest, generalized to one row per (task, file) so a future
+-- fourth file needs no new table. dropped_count persists the results cap's
+-- overflow tally (feeds the results endpoint's `truncated` flag).
+CREATE TABLE IF NOT EXISTS file_ingest (
+    task_id       TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    file          TEXT NOT NULL,               -- 'results' | 'events'
+    file_size     INTEGER NOT NULL DEFAULT 0,  -- stat size at last pass
+    parsed_offset INTEGER NOT NULL DEFAULT 0,  -- consumed up to here (complete lines only)
+    final         INTEGER NOT NULL DEFAULT 0,  -- 1 = terminal ingest done
+    dropped_count INTEGER NOT NULL DEFAULT 0,  -- results only: rows dropped over the cap
+    PRIMARY KEY (task_id, file)
 );
 
 CREATE TABLE IF NOT EXISTS checkpoints (

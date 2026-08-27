@@ -11,21 +11,25 @@
 //   job:  pending | running | paused | done | failed | partial | killed
 //         (terminal split mirrors store.TerminalJobStatus on the backend)
 //
-// Palette (user-chosen: the CI convention — read a job row like a CI
-// pipeline):
+// Mirrors the design kit's components/status/statusGrammar.js one-to-one —
+// same states, same icons, same semantics; only the color channel differs
+// (rgb(var(--v-theme-*)) here, var(--*) there). If the two drift, THIS app
+// is authoritative on which states exist, the kit on their values.
+//
+// Palette (the CI convention — read a job row like a CI pipeline):
 //   success/done = success — green means "it worked"
 //   failed       = error   — red means "it broke"
-//   running      = info    — blue + spin means "alive right now"
-//   pending      = slate grey (raw hex, NOT a vuetify semantic color —
-//                  waiting is the absence of an outcome, it earns no voice)
+//   running      = info    — blue + spin means "alive right now" (info, NOT
+//                  primary — a status must not collide with chrome)
+//   pending      = neutral — slate-400 theme role; waiting is the absence
+//                  of an outcome, it earns no voice
 //   killed       = warning — a human decision, distinct from failure red
 //   partial      = warning — mixed outcome, needs a human look
 //   paused       = warning — human intervention; killed/partial/paused all
 //                  share amber and are separated by icon (stop/alert/pause)
 //
 // Running is a solid dot like everything else — the spin alone separates
-// live from terminal; hollow is reserved (unused) should two states share
-// both color and motion.
+// live from terminal; hollow is reserved for states with no verdict at all.
 
 export interface StatusStyle {
   /** color for vuetify components (theme name or css color) */
@@ -42,7 +46,8 @@ export interface StatusStyle {
   hollow?: boolean
 }
 
-const SLATE = '#94A3B8' // slate-400: pending + unknown, outside the theme
+const SLATE = 'rgb(var(--v-theme-neutral))' // slate-400 (theme role since RQ2-2)
+const SLATE_DEEP = '#64748B' // slate-500: unknown's darker slate (progress bars)
 const GREEN = 'rgb(var(--v-theme-success))'
 const RED = 'rgb(var(--v-theme-error))'
 const AMBER = 'rgb(var(--v-theme-warning))'
@@ -52,14 +57,14 @@ const BLUE = 'rgb(var(--v-theme-info))'
 export const TRACK_CSS = 'rgba(148, 163, 184, 0.25)'
 
 const UNKNOWN: StatusStyle = {
-  color: SLATE,
+  color: 'neutral',
   css: SLATE,
   icon: 'mdi-help-circle-outline',
   variant: 'outlined',
 }
 
 export const taskStatusStyles: Record<string, StatusStyle> = {
-  pending: { color: SLATE, css: SLATE, icon: 'mdi-clock-outline', variant: 'outlined' },
+  pending: { color: 'neutral', css: SLATE, icon: 'mdi-clock-outline', variant: 'outlined' },
   running: { color: 'info', css: BLUE, icon: 'mdi-loading', variant: 'outlined', animated: true },
   success: { color: 'success', css: GREEN, icon: 'mdi-check', variant: 'tonal' },
   failed: { color: 'error', css: RED, icon: 'mdi-alert-circle', variant: 'tonal' },
@@ -70,8 +75,8 @@ export const taskStatusStyles: Record<string, StatusStyle> = {
   // both waiting and failure); darker slate separates it from pending in
   // progress bars, where hollow can't render.
   unknown: {
-    color: SLATE,
-    css: '#64748B',
+    color: 'neutral',
+    css: SLATE_DEEP,
     icon: 'mdi-help-circle-outline',
     variant: 'outlined',
     hollow: true,
@@ -88,7 +93,7 @@ export const taskStatusStyles: Record<string, StatusStyle> = {
 }
 
 export const jobStatusStyles: Record<string, StatusStyle> = {
-  pending: { color: SLATE, css: SLATE, icon: 'mdi-clock-outline', variant: 'outlined' },
+  pending: { color: 'neutral', css: SLATE, icon: 'mdi-clock-outline', variant: 'outlined' },
   running: { color: 'info', css: BLUE, icon: 'mdi-loading', variant: 'outlined', animated: true },
   done: { color: 'success', css: GREEN, icon: 'mdi-flag-checkered', variant: 'tonal' },
   failed: { color: 'error', css: RED, icon: 'mdi-alert-circle', variant: 'tonal' },

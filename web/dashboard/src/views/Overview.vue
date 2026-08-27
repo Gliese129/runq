@@ -33,83 +33,142 @@
       </v-card>
     </template>
 
-    <!-- Metric row -->
-    <v-row v-if="!jobsLoading" dense class="mb-4">
-      <v-col v-for="m in metrics" :key="m.key" cols="6" sm="3">
-        <!-- These cards are filter toggles — VCard adds no keyboard support
-             of its own, so role/tabindex/keydown are explicit here. -->
-        <v-card
-          class="pa-3 cursor-pointer row-focus"
-          :class="{ 'border-primary': activeFilter === m.key }"
+    <!-- ── Needs attention (RQ2-4 ⑤, kit ScreensA): the only block on
+         this page allowed alarm colour, and the only one that disappears
+         when there is nothing to say. Acknowledging is not deleting —
+         the ack is stored against a SIGNATURE of the reported state, so
+         a seen row stays quiet until the situation changes. ── -->
+    <v-card v-if="!jobsLoading && (openAttention.length > 0 || ackedCount > 0)" class="mb-4 pa-0">
+      <div class="d-flex align-baseline ga-2 px-4 pt-3 pb-2">
+        <span class="text-subtitle-2">{{ t('overview.attn_title') }}</span>
+        <span class="text-caption text-on-surface-variant">{{ t('overview.attn_window') }}</span>
+        <v-spacer />
+        <span
+          v-if="ackedCount > 0"
+          class="text-caption text-on-surface-variant cursor-pointer attn-show-acked"
           role="button" tabindex="0"
-          :aria-pressed="activeFilter === m.key"
-          @click="toggleFilter(m.key)"
-          @keydown.enter="toggleFilter(m.key)"
-          @keydown.space.prevent="toggleFilter(m.key)"
+          @click="unackAll"
+          @keydown.enter="unackAll"
+        >{{ t('overview.attn_show_acked', { n: ackedCount }) }}</span>
+      </div>
+      <div v-if="openAttention.length === 0" class="px-4 py-2 text-body-2 text-on-surface-variant attn-row-border">
+        {{ t('overview.attn_clear') }}
+      </div>
+      <div
+        v-for="a in openAttention" :key="a.key"
+        class="attn-row d-flex align-center ga-2 px-4 py-2 attn-row-border"
+      >
+        <v-icon size="14" :color="a.tone" class="flex-shrink-0">{{ a.icon }}</v-icon>
+        <span
+          class="text-body-2 cursor-pointer flex-shrink-0"
+          role="link" tabindex="0"
+          @click="openJob(a.job.project, a.job.id)"
+          @keydown.enter="openJob(a.job.project, a.job.id)"
+        >{{ t(a.textKey, a.textParams) }}</span>
+        <span class="text-caption text-on-surface-variant font-mono text-truncate flex-grow-1">{{ a.job.note }}</span>
+        <v-btn
+          icon size="x-small" variant="text" density="comfortable"
+          class="attn-ack flex-shrink-0"
+          :title="t('overview.attn_ack_tip')"
+          :aria-label="t('overview.attn_ack_tip')"
+          @click="ack(a.key, a.sig)"
         >
-          <div class="d-flex align-center justify-space-between">
-            <div>
-              <div class="text-caption text-on-surface-variant">{{ m.label }}</div>
-              <div class="text-h5 font-weight-medium">{{ m.value }}</div>
-            </div>
-            <StatusDot :status="m.status" :size="10" />
-          </div>
-        </v-card>
-      </v-col>
-    </v-row>
-
-    <!-- GPU bars (always visible in daemon mode) -->
-    <v-card v-if="config.caps.gpu_map && gpus.length > 0" class="mb-4 pa-3">
-      <div class="text-caption text-on-surface-variant mb-2">{{ t('nav.gpu') }}</div>
-      <div class="d-flex flex-column ga-1">
-        <GPUBar v-for="g in gpus" :key="g.index" :slot="g" />
+          <v-icon size="13">mdi-check</v-icon>
+        </v-btn>
+        <v-icon size="14" color="on-surface-variant" class="flex-shrink-0">mdi-chevron-right</v-icon>
       </div>
     </v-card>
 
-    <!-- Active filter: show matching jobs -->
-    <v-card v-if="activeFilter" class="mb-4 pa-3">
-      <div class="d-flex align-center justify-space-between mb-2">
-        <div class="d-flex align-center ga-2">
-          <StatusDot
-            :status="activeFilter === 'done' ? 'done' : activeFilter"
-            :kind="activeFilter === 'done' ? 'job' : 'task'"
-            :size="14"
-          />
-          <span class="text-body-2 font-weight-medium">{{ t('overview.n_jobs', { n: filteredJobs.length }) }}</span>
-        </div>
-        <v-btn size="x-small" variant="text" @click="activeFilter = ''">
-          <v-icon size="14">mdi-close</v-icon> {{ t('common.clear') }}
-        </v-btn>
+    <!-- ── Targets × job status: where the work actually is, and the
+         page's filter control (click a number to filter the list below).
+         Daemon targets carry a free/total GPU chip; scheduler targets
+         have no such visibility and honestly show none. ── -->
+    <v-card v-if="!jobsLoading && matrix.rows.length > 0" class="mb-4 pa-0">
+      <div class="d-flex align-baseline ga-2 px-4 pt-3 pb-2">
+        <span class="text-subtitle-2">{{ t('overview.targets_title') }}</span>
+        <span class="text-caption text-on-surface-variant">{{ t('overview.targets_hint') }}</span>
       </div>
       <div class="overflow-x-auto">
         <table class="data-mono" style="width: 100%">
-          <thead><tr><th>ID</th><th>{{ t('table.project') }}</th><th>{{ t('table.note') }}</th><th>{{ t('table.tasks') }}</th><th>{{ t('table.created') }}</th></tr></thead>
+          <thead>
+            <tr>
+              <th>{{ t('overview.target_col') }}</th>
+              <th v-for="s in matrix.statusCols" :key="s" class="text-right">
+                <span class="d-inline-flex align-center ga-1">
+                  <StatusDot :status="s" kind="job" :size="6" />{{ t('status.job.' + s) }}
+                </span>
+              </th>
+              <th class="text-right">{{ t('overview.jobs_col') }}</th>
+            </tr>
+          </thead>
           <tbody>
-            <tr
-              v-for="j in filteredJobs.slice(0, 20)"
-              :key="j.id"
-              class="cursor-pointer"
-              tabindex="0"
-              role="link"
-              :aria-label="t('a11y.open_job', { id: j.id.slice(0, 8) })"
-              @click="openJob(j.project, j.id)"
-              @keydown.enter="openJob(j.project, j.id)"
-              @keydown.space.prevent="openJob(j.project, j.id)"
-            >
-              <td><code>{{ j.id.slice(0, 8) }}</code></td>
-              <td>{{ j.project }}</td>
-              <td class="text-on-surface-variant">{{ j.note || '—' }}</td>
-              <td>{{ j.tasks.completed }}/{{ j.tasks.total }}</td>
-              <td class="text-on-surface-variant">{{ relativeTime(j.created_at) }}</td>
+            <tr v-for="r in matrix.rows" :key="r.name">
+              <td>
+                <span class="d-inline-flex align-center ga-2">
+                  <button
+                    type="button" class="cell-btn font-weight-medium"
+                    :class="{ 'text-primary': filter.target === r.name && !filter.status }"
+                    @click="filter = toggleCell(filter, r.name, '')"
+                  >{{ r.name }}</button>
+                  <v-chip v-if="r.gpus" size="x-small" variant="tonal" label :title="t('overview.gpu_chip_tip')">
+                    {{ r.gpus.free }}/{{ r.gpus.total }} GPU
+                  </v-chip>
+                  <span v-else-if="r.scheduler" class="text-caption text-on-surface-variant">{{ r.scheduler }}</span>
+                </span>
+              </td>
+              <td v-for="s in matrix.statusCols" :key="s" class="text-right">
+                <button
+                  v-if="r.counts[s]"
+                  type="button" class="cell-btn font-weight-medium"
+                  :class="cellClass(r.name, s)"
+                  @click="filter = toggleCell(filter, r.name, s)"
+                >{{ r.counts[s] }}</button>
+                <span v-else class="text-on-surface-variant">0</span>
+              </td>
+              <td class="text-right">
+                <button
+                  type="button" class="cell-btn font-weight-medium"
+                  :class="{ 'text-primary': filter.target === r.name && !filter.status }"
+                  @click="filter = toggleCell(filter, r.name, '')"
+                >{{ r.total }}</button>
+              </td>
+            </tr>
+            <!-- The whole cluster on one line, same click semantics -->
+            <tr v-if="matrix.rows.length > 1" class="grand-row">
+              <td class="text-on-surface-variant">{{ t('overview.all_targets') }}</td>
+              <td v-for="s in matrix.statusCols" :key="s" class="text-right">
+                <button
+                  v-if="matrix.grand[s]"
+                  type="button" class="cell-btn font-weight-medium"
+                  :class="cellClass('', s)"
+                  @click="filter = toggleCell(filter, '', s)"
+                >{{ matrix.grand[s] }}</button>
+                <span v-else class="text-on-surface-variant">0</span>
+              </td>
+              <td class="text-right font-weight-medium">{{ jobList.length }}</td>
             </tr>
           </tbody>
         </table>
       </div>
     </v-card>
 
-    <!-- Recent jobs table -->
-    <div v-if="!activeFilter && recentJobs.length > 0" class="mb-4">
-      <div class="text-subtitle-2 mb-2">{{ t('overview.recent') }}</div>
+    <!-- Recent jobs table (filtered by the matrix selection) -->
+    <div v-if="!jobsLoading && recentJobs.length > 0" class="mb-4">
+      <div class="d-flex align-center ga-2 mb-2">
+        <span class="text-subtitle-2">
+          {{ hasFilter ? t('overview.n_jobs', { n: filteredJobs.length }) : t('overview.recent') }}
+        </span>
+        <v-chip
+          v-if="filter.target" size="small" variant="tonal" color="primary" closable
+          @click:close="filter = { ...filter, target: '' }"
+        >{{ filter.target }}</v-chip>
+        <v-chip
+          v-if="filter.status" size="small" variant="tonal" color="primary" closable
+          @click:close="filter = { ...filter, status: '' }"
+        >
+          <StatusDot :status="filter.status" kind="job" :size="6" class="mr-1" />{{ t('status.job.' + filter.status) }}
+        </v-chip>
+      </div>
       <v-card class="pa-0">
         <div class="overflow-x-auto">
           <table class="data-mono" style="width: 100%">
@@ -146,7 +205,7 @@
     </div>
 
     <!-- Empty state -->
-    <v-card v-if="jobList.length === 0 && !jobsLoading && !activeFilter" class="pa-8 text-center">
+    <v-card v-if="jobList.length === 0 && !jobsLoading" class="pa-8 text-center">
       <v-icon size="40" color="primary" class="mb-3" style="opacity: 0.4">mdi-rocket-launch-outline</v-icon>
       <div class="text-h6 mb-1">{{ t('overview.no_projects') }}</div>
       <div class="text-body-2 text-on-surface-variant mb-4">{{ t('overview.no_projects_hint') }}</div>
@@ -206,11 +265,14 @@ import { useConfigStore } from '@/stores/config'
 import { useConnection } from '@/composables/useConnection'
 import { useJobsListQuery } from '@/queries/useJobQueries'
 import { useGpuQuery } from '@/queries/useGpuQuery'
-import GPUBar from '@/components/GPUBar.vue'
 import StatusDot from '@/components/StatusDot.vue'
 import SegmentedProgress from '@/components/SegmentedProgress.vue'
 import { useSnackbar } from '@/composables/useSnackbar'
 import { relativeTime } from '@/utils/relativeTime'
+import {
+  attentionItems, splitAcked, targetMatrix, toggleCell, applyFilter,
+  type MatrixFilter,
+} from './overviewView'
 
 const { t } = useI18n()
 const router = useRouter()
@@ -239,26 +301,6 @@ async function unarchiveProject(name: string) {
     snack.success(t('archive.project_back'))
   } catch (e: any) { snack.error(e?.message || t('common.error')) }
 }
-const activeFilter = ref('')
-
-const totals = computed(() => {
-  const acc = { running: 0, pending: 0, failed: 0, completed: 0 }
-  for (const j of jobList.value) {
-    acc.running += j.tasks.running
-    acc.pending += j.tasks.pending
-    acc.failed += j.tasks.failed
-    acc.completed += j.tasks.completed
-  }
-  return acc
-})
-
-const metrics = computed(() => [
-  { key: 'running', label: t('overview.running'), value: totals.value.running, status: 'running' },
-  { key: 'pending', label: t('overview.pending'), value: totals.value.pending, status: 'pending' },
-  { key: 'failed', label: t('overview.failed'), value: totals.value.failed, status: 'failed' },
-  { key: 'done', label: t('overview.completed'), value: totals.value.completed, status: 'success' },
-])
-
 function retryConnection() {
   jobsQuery.refetch()
   gpuQuery.refetch()
@@ -268,28 +310,75 @@ function openJob(project: string, id: string) {
   router.push({ name: 'job-detail', params: { project, jobId: id } })
 }
 
-const filteredJobs = computed(() => {
-  if (!activeFilter.value) return []
-  return jobList.value.filter(j => {
-    if (activeFilter.value === 'running') return j.tasks.running > 0
-    if (activeFilter.value === 'pending') return j.tasks.pending > 0
-    if (activeFilter.value === 'failed') return j.tasks.failed > 0
-    if (activeFilter.value === 'done') return j.status === 'done'
-    return false
-  })
-})
-
-const recentJobs = computed(() =>
-  [...jobList.value].sort((a, b) => b.created_at - a.created_at).slice(0, 10)
-)
-
-function toggleFilter(status: string) {
-  activeFilter.value = activeFilter.value === status ? '' : status
+// ── Needs attention (RQ2-4 ⑤): acks live in localStorage keyed by job,
+// valued by the state SIGNATURE — a changed situation reopens the row. ──
+const ACK_KEY = 'runq-acked'
+const acked = ref<Record<string, string>>(readAcked())
+function readAcked(): Record<string, string> {
+  try {
+    const raw = JSON.parse(localStorage.getItem(ACK_KEY) || '{}')
+    return typeof raw === 'object' && raw !== null ? raw : {}
+  } catch {
+    return {}
+  }
 }
+function ack(key: string, sig: string) {
+  acked.value = { ...acked.value, [key]: sig }
+  localStorage.setItem(ACK_KEY, JSON.stringify(acked.value))
+}
+function unackAll() {
+  acked.value = {}
+  localStorage.removeItem(ACK_KEY)
+}
+
+// `now` re-evaluates with every poll (jobList is in the dependency
+// chain), which is exactly the cadence the 24h window needs.
+const attention = computed(() => attentionItems(jobList.value, Math.floor(Date.now() / 1000)))
+const openAttention = computed(() => splitAcked(attention.value, acked.value).open)
+const ackedCount = computed(() => splitAcked(attention.value, acked.value).ackedCount)
+
+// ── Targets × status matrix + the one two-axis filter ──
+const matrix = computed(() => targetMatrix(jobList.value, config.targets, gpus.value))
+const filter = ref<MatrixFilter>({ target: '', status: '' })
+const hasFilter = computed(() => !!filter.value.target || !!filter.value.status)
+
+function cellClass(target: string, status: string): string {
+  const on = filter.value.target === target && filter.value.status === status
+  return on ? 'text-primary cell-on' : ''
+}
+
+const filteredJobs = computed(() => applyFilter(jobList.value, filter.value))
+/** Filtered → everything that matches; unfiltered → the newest 10. */
+const recentJobs = computed(() =>
+  hasFilter.value ? filteredJobs.value : filteredJobs.value.slice(0, 10))
 </script>
 
 <style scoped>
-.border-primary {
-  border: 1.5px solid rgb(var(--v-theme-primary)) !important;
+.font-mono { font-family: var(--font-mono); }
+.text-right { text-align: right; }
+
+/* Needs attention: the ack affordance appears on hover — a row you are
+   not looking at should not advertise a dismiss button. */
+.attn-row-border { border-top: 0.5px solid rgb(var(--v-theme-outline-variant), 0.6); }
+.attn-ack { opacity: 0; transition: opacity 0.15s ease; }
+.attn-row:hover .attn-ack,
+.attn-ack:focus-visible { opacity: 1; }
+.attn-show-acked {
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
 }
+
+/* Matrix cells are buttons — keep the mono table look. */
+.cell-btn {
+  background: none;
+  border: none;
+  padding: 1px 4px;
+  border-radius: 4px;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+.cell-btn:hover { background: rgb(var(--v-theme-surface-variant), 0.5); }
+.cell-on { background: rgb(var(--v-theme-primary), 0.1); }
+.grand-row td { border-top: 1px solid rgb(var(--v-theme-outline-variant)); }
 </style>

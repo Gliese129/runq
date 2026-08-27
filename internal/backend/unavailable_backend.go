@@ -89,6 +89,14 @@ func (b *UnavailableBackend) JobLogSearch(ctx context.Context, jobID, query stri
 	return nil, b.wrap()
 }
 
+func (b *UnavailableBackend) JobActivity(ctx context.Context, jobID string) (*JobActivity, error) {
+	return nil, b.wrap()
+}
+
+func (b *UnavailableBackend) JobResults(ctx context.Context, jobID string) (*JobResults, error) {
+	return nil, b.wrap()
+}
+
 func (b *UnavailableBackend) KillTask(ctx context.Context, taskID string) error {
 	return b.wrap()
 }

@@ -134,6 +134,25 @@ function getJobVisibleCols(jobId: string): string[] | null {
   return jobVisibleCols.value[jobId] || null
 }
 
+// --- Results table: row label template per PROJECT (the same sweep axes
+// recur across a project's jobs, so the template follows the project) ---
+
+const resultLabelTemplates = ref<Record<string, string>>(load('result-labels', {}))
+
+watch(resultLabelTemplates, (v) => save('result-labels', v), { deep: true })
+
+function setResultLabelTemplate(project: string, tpl: string) {
+  resultLabelTemplates.value[project] = tpl
+  const entries = Object.entries(resultLabelTemplates.value)
+  if (entries.length > 50) {
+    resultLabelTemplates.value = Object.fromEntries(entries.slice(-50))
+  }
+}
+
+function getResultLabelTemplate(project: string): string {
+  return resultLabelTemplates.value[project] || ''
+}
+
 export function usePreferences() {
   return {
     recentScripts,
@@ -153,5 +172,7 @@ export function usePreferences() {
     showHiddenFiles,
     setJobVisibleCols,
     getJobVisibleCols,
+    setResultLabelTemplate,
+    getResultLabelTemplate,
   }
 }

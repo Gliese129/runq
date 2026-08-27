@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   compile, decompile, taskCount, validateTable, rowEffect, inferType, newLinkSetId,
+  rowFromProjectParam,
   type ParamRow, type LinkSet,
 } from './paramTable'
 
@@ -179,5 +180,50 @@ describe('decompile (re-run job as template)', () => {
     const b = decompile({ sweep: [{ method: 'list', parameters: { p: [1, 2], q: [3, 4] } as any }] })
     const ids = [...a.linkSets, ...b.linkSets].map(s => s.id).concat(newLinkSetId())
     expect(new Set(ids).size).toBe(ids.length)
+  })
+})
+
+const globRow = (over: any = {}) => ({
+  name: 'ckpt', type: 'file', default: '', values: ['a.pt'],
+  glob: 'ckpt-*.pt', globState: 'ok', ...over,
+}) as any
+
+describe('validateTable — glob rows (Codex r1 F2)', () => {
+  it('passes with a healthy selection', () => {
+    expect(validateTable([globRow()], []).ok).toBe(true)
+  })
+
+  it('blocks an empty selection (0 matches, or user picked None)', () => {
+    const v = validateTable([globRow({ values: [] })], [])
+    expect(v.ok).toBe(false)
+    if (!v.ok) expect(v.message).toContain('no files selected')
+  })
+
+  it('blocks a failed resolution even when stale values remain', () => {
+    const v = validateTable([globRow({ globState: 'error' })], [])
+    expect(v.ok).toBe(false)
+    if (!v.ok) expect(v.message).toContain('resolution failed')
+  })
+
+  it('does not touch non-glob rows with empty values', () => {
+    expect(validateTable([{ name: 'lr', type: 'float', default: '0.1', values: [] } as any], []).ok).toBe(true)
+  })
+})
+
+describe('rowFromProjectParam (Codex r1 F6)', () => {
+  it('carries the FULL definition — glob and scope included', () => {
+    const row = rowFromProjectParam({
+      name: 'ckpt', type: 'file', default: '', min: 1, max: 9,
+      scope: 'scheduler', glob: 'ckpt-*.pt',
+    })
+    expect(row.glob).toBe('ckpt-*.pt')
+    expect(row.scope).toBe('scheduler')
+    expect(row.meta).toEqual({ min: 1, max: 9 })
+  })
+
+  it('defaults bare names to a free str row', () => {
+    const row = rowFromProjectParam({ name: 'x' })
+    expect(row.type).toBe('str')
+    expect(row.glob).toBeUndefined()
   })
 })

@@ -32,9 +32,11 @@ from ._loop import log_group, loop
 from ._manifest import best_checkpoint, latest_checkpoint
 from ._policies import convergence, patience, threshold
 from ._range import is_preempted, range
+from ._record import record
 from ._report import Decision, early_stop, report
 from ._safe_save import safe_save
 from ._transport import TransportError
+from . import utils
 
 __all__ = [  # noqa: RUF022
     # Init + context
@@ -51,6 +53,8 @@ __all__ = [  # noqa: RUF022
     # Metrics
     "log_metric",
     "log_group",
+    # Results (bounded facts, stored in full — see _record.py)
+    "record",
     # Early stop
     "report",
     "early_stop",

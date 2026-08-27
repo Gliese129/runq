@@ -20,16 +20,21 @@ const mdiSvgByName: IconSet = {
 // Dark:  full B-style
 // ──────────────────────────────────────────────
 
+// Color values are ported from the design kit (tokens/colors.css, Claude
+// Design "runq Design System") — the kit is authoritative on token VALUES,
+// this app on which roles exist (kit readme "What actually transfers").
+
 const light = {
   dark: false,
   colors: {
-    primary: '#1E40AF',         // Blue 800 — nav, links, active
-    'primary-darken-1': '#1E3A8A',
-    secondary: '#3B82F6',       // Blue 500 — lighter accent
+    primary: '#1A3FA8',         // Blue 800, nudged ~3° toward indigo — nav, links, active
+    'primary-darken-1': '#182F7E',
+    secondary: '#3674EE',       // Blue 500 — lighter accent
     error: '#DC2626',           // Red 600
     warning: '#D97706',         // Amber 600
     success: '#16A34A',         // Green 600
     info: '#0891B2',            // Cyan 600 — must stay distinct from primary (pending vs done)
+    neutral: '#94A3B8',         // Slate 400 — pending/waiting (statusGrammar); low visual weight
     surface: '#FFFFFF',
     'surface-variant': '#F1F5F9', // Slate 100
     background: '#F8FAFC',       // Slate 50
@@ -43,13 +48,14 @@ const light = {
 const dark = {
   dark: true,
   colors: {
-    primary: '#60A5FA',         // Blue 400
-    'primary-darken-1': '#3B82F6',
-    secondary: '#93C5FD',       // Blue 300
+    primary: '#5B9CF7',         // Blue 400, cooler than stock Tailwind
+    'primary-darken-1': '#3674EE',
+    secondary: '#8FBFFD',       // Blue 300
     error: '#F87171',           // Red 400
     warning: '#FBBF24',         // Amber 400
     success: '#4ADE80',         // Green 400
-    info: '#22D3EE',            // Cyan 400 — must stay distinct from primary (pending vs done)
+    info: '#2DD4BF',            // Cyan 400 shifted toward teal — dark-theme separation from primary
+    neutral: '#94A3B8',         // Slate 400 — consistent across themes
     surface: '#0F172A',         // Slate 900
     'surface-variant': '#1E293B', // Slate 800
     background: '#020617',       // Slate 950

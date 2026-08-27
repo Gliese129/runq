@@ -18,6 +18,20 @@ export const filesApi = {
   parseScript: (path: string, opts?: RequestOptions, target?: string) =>
     api.post<ParseResult>(`/targets/${targetOf(target)}/fs/parse-script`, { path }, opts),
 
+  /**
+   * Resolve a path pattern on the TARGET (RQ2-3). Owning-side walk: the
+   * browser would otherwise pay one round trip per directory, which over
+   * SFTP is the difference between one call and hundreds.
+   * Zero matches is a normal empty result, not an error.
+   */
+  glob: (root: string, pattern: string, opts?: { limit?: number; target?: string }) => {
+    const params = new URLSearchParams({ path: root, pattern })
+    if (opts?.limit) params.set('limit', String(opts.limit))
+    return api.get<{ items: FSEntry[]; truncated: boolean }>(
+      `/targets/${targetOf(opts?.target)}/fs/glob?${params}`,
+    )
+  },
+
   /** Read a text file from the TARGET's filesystem (size-capped). */
   read: (path: string, target?: string) => {
     const params = new URLSearchParams({ path })

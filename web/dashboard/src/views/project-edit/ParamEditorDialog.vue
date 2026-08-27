@@ -156,23 +156,38 @@
                 <template v-else-if="p.type === 'file' || p.type === 'folder'">
                   <!-- No values yet → open file browser directly -->
                   <v-btn
-                    v-if="!(p.values || []).length"
+                    v-if="!(p.values || []).length && !p.glob"
                     size="x-small" variant="tonal" class="text-none"
                     @click="openBrowseFor(p)"
                   >
                     <v-icon start size="12">mdi-folder-search-outline</v-icon> {{ t('common.browse') }}
                   </v-btn>
-                  <!-- Has values → popover with list + browse button -->
+                  <!-- Has a pattern or explicit values → popover -->
                   <v-menu v-else :close-on-content-click="false" location="bottom end">
                     <template #activator="{ props: menu }">
-                      <v-btn v-bind="menu" size="x-small" variant="tonal" class="text-none">
-                        {{ p.type === 'file'
-                          ? t('submit.n_files', { n: p.values!.length }, p.values!.length)
-                          : t('submit.n_folders', { n: p.values!.length }, p.values!.length) }}
+                      <v-btn v-bind="menu" size="x-small" variant="tonal" class="text-none" :color="p.glob ? 'primary' : undefined">
+                        <v-icon v-if="p.glob" start size="12">mdi-flash-outline</v-icon>
+                        {{ p.glob
+                          ? t('submit.glob_pattern_set')
+                          : p.type === 'file'
+                            ? t('submit.n_files', { n: p.values!.length }, p.values!.length)
+                            : t('submit.n_folders', { n: p.values!.length }, p.values!.length) }}
                         <v-icon end size="12">mdi-chevron-down</v-icon>
                       </v-btn>
                     </template>
-                    <v-card class="pa-3" style="min-width: 280px; max-width: 400px">
+                    <v-card class="pa-3" style="min-width: 300px; max-width: 420px">
+                      <!-- Pattern: the values come from the filesystem, live.
+                           Only the PATTERN is stored — which matches a submit
+                           uses is picked at submit time (RQ2-3). -->
+                      <div class="text-caption text-on-surface-variant mb-1">{{ t('submit.glob_pattern') }}</div>
+                      <v-text-field
+                        v-model="p.glob"
+                        placeholder="checkpoints/ckpt-*.pt"
+                        density="compact" variant="outlined" hide-details clearable
+                        class="mb-1" style="font-family: var(--font-mono); font-size: 12px"
+                        @update:model-value="autoInclude(p)"
+                      />
+                      <div class="text-caption text-on-surface-variant mb-3">{{ t('submit.glob_pattern_hint') }}</div>
                       <div class="text-caption text-on-surface-variant mb-2">{{ t('submit.selectable_paths') }}</div>
                       <div class="d-flex flex-wrap ga-1 mb-2">
                         <v-chip v-for="(val, i) in p.values" :key="i" size="small" closable variant="tonal" @click:close="p.values!.splice(i, 1)">
@@ -412,6 +427,7 @@ async function parseImportFile(file: File) {
         default: String(p.default ?? ''), include: p.include !== false,
         min: p.min, max: p.max,
         values: values.map(String),
+        glob: p.glob ? String(p.glob) : undefined,
       }
     }).filter((p: ProjectParam) => p.name)
   } catch (e: any) { snack.error(t('submit.parse_error', { msg: e.message })) }

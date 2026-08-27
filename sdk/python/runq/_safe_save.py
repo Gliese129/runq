@@ -37,8 +37,9 @@ Manifest + cleanup
 ------------------
 NOT in step 3. step 5 adds ``keep_last_n`` / ``keep_best`` cleanup with
 a manifest-scoped delete (only files runq created). For now, every
-successful save just appends a ``checkpoint`` event to metrics.jsonl
-and leaves the file alone.
+successful save just appends a ``checkpoint`` event to events.jsonl
+(the lifecycle plane of the three-file contract — see
+:mod:`runq._events`) and leaves the file alone.
 """
 from __future__ import annotations
 

@@ -692,6 +692,7 @@ func (b *SSHBackend) GetTask(ctx context.Context, taskID string) (*TaskView, err
 	}
 	task = b.reconcileTask(ctx, taskID, task)
 	view := BuildTaskView(*task)
+	applyTaskDetail(&view, *task)
 	return &view, nil
 }
 
@@ -1048,6 +1049,23 @@ func (b *SSHBackend) TaskLogFollow(ctx context.Context, taskID string, offset in
 func (b *SSHBackend) JobLogSearch(ctx context.Context, jobID, query string) ([]LogMatch, error) {
 	b.touchActivity()
 	return jobLogSearchViaExec(ctx, b.store, b.backend.FS, jobID, query)
+}
+
+// JobActivity decimates activity.tsv on the owning side — same RQ-44
+// principle as JobLogSearch: results travel, files don't.
+func (b *SSHBackend) JobActivity(ctx context.Context, jobID string) (*JobActivity, error) {
+	b.touchActivity()
+	return jobActivityViaExec(ctx, b.store, b.backend.FS, jobID)
+}
+
+// JobResults is pure SQL over ingested result_records; EnsureFresh runs
+// the refresh reap first so results.jsonl deltas on the cluster have
+// landed (same posture as CompareMetrics).
+func (b *SSHBackend) JobResults(ctx context.Context, jobID string) (*JobResults, error) {
+	if err := b.backend.EnsureFresh(ctx, jobID, DefaultReadTTL); err != nil {
+		return nil, err
+	}
+	return jobResultsFromDB(ctx, b.store, jobID)
 }
 
 func (b *SSHBackend) RetryTask(ctx context.Context, taskID string) error {

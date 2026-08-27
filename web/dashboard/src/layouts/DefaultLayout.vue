@@ -82,16 +82,28 @@
           class="text-caption text-on-surface-variant px-2 mb-1 d-flex align-center justify-space-between"
         >
           {{ t('overview.projects') }}
-          <v-btn
-            icon
-            size="x-small"
-            variant="text"
-            :aria-label="t('common.refresh')"
-            :title="t('common.refresh')"
-            @click="refreshShellData"
-          >
-            <v-icon size="12">mdi-refresh</v-icon>
-          </v-btn>
+          <span class="d-flex">
+            <v-btn
+              icon
+              size="x-small"
+              variant="text"
+              :aria-label="t('groups.new_group')"
+              :title="t('groups.new_group')"
+              @click="onCreateGroup"
+            >
+              <v-icon size="12">mdi-folder-plus-outline</v-icon>
+            </v-btn>
+            <v-btn
+              icon
+              size="x-small"
+              variant="text"
+              :aria-label="t('common.refresh')"
+              :title="t('common.refresh')"
+              @click="refreshShellData"
+            >
+              <v-icon size="12">mdi-refresh</v-icon>
+            </v-btn>
+          </span>
         </div>
         <v-tooltip v-else :text="t('overview.projects')" location="end">
           <template #activator="{ props: tp }">
@@ -101,28 +113,135 @@
           </template>
         </v-tooltip>
 
-        <v-list-item
-          v-for="proj in projects.visible"
-          :key="proj.name"
-          :to="{ name: 'project', params: { project: proj.name } }"
-          :active="projects.selected === proj.name"
-          :aria-label="proj.name"
-          density="compact"
-          rounded="lg"
-          class="mb-1"
-          color="primary"
-          @click="projects.select(proj.name)"
-        >
-          <template #prepend>
-            <div class="status-dot mr-2" :style="{ background: projectColor(proj.name) }" />
+        <!-- Grouped view (RQ2-4 ④, kit groups.jsx): a webUI-only lens —
+             drag a project onto a group header to assign it. Collapsed
+             rail keeps the flat list (groups need labels to mean much). -->
+        <template v-if="!collapsed">
+          <template v-for="g in groupedProjects.groups" :key="g.name">
+            <div
+              class="group-head d-flex align-center ga-1 px-2 rounded"
+              :class="{ 'group-head--over': dragOverGroup === g.name }"
+              role="button" tabindex="0"
+              :aria-expanded="!g.collapsed"
+              @click="groupsCtl.toggleCollapsed(g.name)"
+              @keydown.enter="groupsCtl.toggleCollapsed(g.name)"
+              @dragover.prevent="dragOverGroup = g.name"
+              @dragleave="dragOverGroup = dragOverGroup === g.name ? '' : dragOverGroup"
+              @drop.prevent="onDropOnGroup(g.name)"
+            >
+              <v-icon size="13">{{ g.collapsed ? 'mdi-chevron-right' : 'mdi-chevron-down' }}</v-icon>
+              <template v-if="renamingGroup === g.name">
+                <input
+                  ref="renameInput"
+                  v-model="renameValue"
+                  class="rename-input"
+                  @click.stop
+                  @keydown.enter="commitRename(g.name)"
+                  @keydown.esc="renamingGroup = ''"
+                  @blur="commitRename(g.name)"
+                >
+              </template>
+              <span v-else class="text-caption font-weight-medium flex-grow-1 text-truncate">{{ g.name }}</span>
+              <!-- Ruling: the badge is job_count only. -->
+              <span class="text-caption text-on-surface-variant">{{ g.jobCount }}</span>
+              <v-menu location="bottom end">
+                <template #activator="{ props: menuProps }">
+                  <v-btn
+                    icon size="x-small" variant="text" density="comfortable"
+                    :aria-label="t('groups.group_menu')"
+                    v-bind="menuProps" @click.stop
+                  >
+                    <v-icon size="12">mdi-dots-horizontal</v-icon>
+                  </v-btn>
+                </template>
+                <v-list density="compact">
+                  <v-list-item @click="startRename(g.name)">
+                    <v-list-item-title class="text-body-2">{{ t('submit.rename') }}</v-list-item-title>
+                  </v-list-item>
+                  <v-list-item @click="groupsCtl.remove(g.name)">
+                    <v-list-item-title class="text-body-2">{{ t('groups.dissolve') }}</v-list-item-title>
+                  </v-list-item>
+                </v-list>
+              </v-menu>
+            </div>
+            <template v-if="!g.collapsed">
+              <v-list-item
+                v-for="proj in g.members"
+                :key="proj.name"
+                :to="{ name: 'project', params: { project: proj.name } }"
+                :active="projects.selected === proj.name"
+                :aria-label="proj.name"
+                density="compact"
+                rounded="lg"
+                class="mb-1 ml-3 project-row"
+                color="primary"
+                draggable="true"
+                @dragstart="onDragStart(proj.name, $event)"
+                @click="projects.select(proj.name)"
+              >
+                <template #prepend>
+                  <div class="status-dot mr-2" :style="{ background: projectColor(proj.name) }" />
+                </template>
+                <v-list-item-title class="text-body-2">{{ proj.name }}</v-list-item-title>
+                <template #append>
+                  <span class="text-caption text-on-surface-variant">{{ proj.job_count }}</span>
+                </template>
+              </v-list-item>
+            </template>
           </template>
-          <v-list-item-title v-if="!collapsed" class="text-body-2">{{
-            proj.name
-          }}</v-list-item-title>
-          <template v-if="!collapsed" #append>
-            <span class="text-caption text-on-surface-variant">{{ proj.job_count }}</span>
-          </template>
-        </v-list-item>
+
+          <!-- Ungrouped tail — also the drop zone for "take it out". -->
+          <div
+            v-if="groupedProjects.groups.length > 0 && groupedProjects.ungrouped.length > 0"
+            class="text-caption text-on-surface-variant px-2 mt-1"
+            :class="{ 'group-head--over rounded': dragOverGroup === UNGROUPED_ZONE }"
+            @dragover.prevent="dragOverGroup = UNGROUPED_ZONE"
+            @dragleave="dragOverGroup = dragOverGroup === UNGROUPED_ZONE ? '' : dragOverGroup"
+            @drop.prevent="onDropOnGroup('')"
+          >{{ t('groups.ungrouped') }}</div>
+          <v-list-item
+            v-for="proj in groupedProjects.ungrouped"
+            :key="proj.name"
+            :to="{ name: 'project', params: { project: proj.name } }"
+            :active="projects.selected === proj.name"
+            :aria-label="proj.name"
+            density="compact"
+            rounded="lg"
+            class="mb-1 project-row"
+            color="primary"
+            draggable="true"
+            @dragstart="onDragStart(proj.name, $event)"
+            @click="projects.select(proj.name)"
+          >
+            <template #prepend>
+              <div class="status-dot mr-2" :style="{ background: projectColor(proj.name) }" />
+            </template>
+            <v-list-item-title class="text-body-2">{{ proj.name }}</v-list-item-title>
+            <template #append>
+              <span class="text-caption text-on-surface-variant">{{ proj.job_count }}</span>
+            </template>
+          </v-list-item>
+        </template>
+
+        <!-- Collapsed rail: flat dots, no group chrome. -->
+        <template v-else>
+          <v-list-item
+            v-for="proj in projects.visible"
+            :key="proj.name"
+            :to="{ name: 'project', params: { project: proj.name } }"
+            :active="projects.selected === proj.name"
+            :aria-label="proj.name"
+            density="compact"
+            rounded="lg"
+            class="mb-1"
+            color="primary"
+            @click="projects.select(proj.name)"
+          >
+            <template #prepend>
+              <div class="status-dot mr-2" :style="{ background: projectColor(proj.name) }" />
+            </template>
+          </v-list-item>
+        </template>
 
         <div
           v-if="projects.visible.length === 0 && !projects.loading && !collapsed"
@@ -135,16 +254,23 @@
       <template #append>
         <v-divider />
         <div class="pa-2">
-          <v-list-item
-            :to="{ name: 'settings' }"
-            :active="isActive('settings')"
-            :title="collapsed ? '' : t('nav.settings')"
-            :aria-label="t('nav.settings')"
-            prepend-icon="mdi-cog-outline"
-            density="compact"
+          <!-- Same control shape as Dark mode / Collapse below — a
+               v-list-item here had its own prepend spacer and icon nudge,
+               so the footer trio never lined up. -->
+          <v-btn
+            block
+            variant="text"
+            density="comfortable"
             rounded="lg"
-            color="primary"
-          />
+            class="nav-btn mb-1"
+            :class="collapsed ? 'justify-center' : 'justify-start px-3'"
+            prepend-icon="mdi-cog-outline"
+            :color="isActive('settings') ? 'primary' : undefined"
+            :aria-label="t('nav.settings')"
+            :to="{ name: 'settings' }"
+          >
+            <span v-if="!collapsed" class="text-body-2">{{ t('nav.settings') }}</span>
+          </v-btn>
           <v-btn
             block
             variant="text"
@@ -268,6 +394,8 @@ import { useConfigStore } from '@/stores/config'
 import { useSettingsStore } from '@/stores/settings'
 import { useProjectStore } from '@/stores/projects'
 import { useConnection } from '@/composables/useConnection'
+import { useProjectGroups } from '@/composables/useProjectGroups'
+import { groupProjects } from '@/composables/projectGroups'
 import { useGpuQuery } from '@/queries/useGpuQuery'
 import { qk } from '@/queries/keys'
 import RunqLogo from '@/components/RunqLogo.vue'
@@ -287,6 +415,51 @@ const { freeCount: gpuFree, totalCount: gpuTotal } = useGpuQuery()
 
 const drawerOpen = ref(!mobile.value)
 const collapsed = ref(localStorage.getItem('runq-sidebar-collapsed') === 'true')
+
+// ── Project groups (RQ2-4 ④): webUI-only lens over the flat list.
+// Seed from work_dir parents once projects load and nothing was stored. ──
+const groupsCtl = useProjectGroups()
+const UNGROUPED_ZONE = '__ungrouped__' // drag-over marker, never a group name
+const dragOverGroup = ref('')
+const renamingGroup = ref('')
+const renameValue = ref('')
+const renameInput = ref<HTMLInputElement[]>()
+
+watch(() => projects.visible, (list) => {
+  if (list.length > 0) groupsCtl.seedIfEmpty(list)
+}, { immediate: true })
+
+const groupedProjects = computed(() => groupProjects(projects.visible, groupsCtl.state.value))
+
+// dataTransfer.getData is unreadable during dragover on some engines —
+// track the dragged project ourselves; drop reads this, not the transfer.
+const lastDragged = ref('')
+
+function onDragStart(project: string, e: DragEvent) {
+  lastDragged.value = project
+  e.dataTransfer?.setData('text/plain', project)
+  if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move'
+}
+function onDropOnGroup(group: string) {
+  dragOverGroup.value = ''
+  if (lastDragged.value) void groupsCtl.assign(lastDragged.value, group)
+  lastDragged.value = ''
+}
+
+async function onCreateGroup() {
+  await groupsCtl.create()
+}
+
+function startRename(group: string) {
+  renamingGroup.value = group
+  renameValue.value = group
+  requestAnimationFrame(() => renameInput.value?.[0]?.focus())
+}
+function commitRename(from: string) {
+  const to = renameValue.value
+  renamingGroup.value = ''
+  if (to.trim() && to !== from) void groupsCtl.rename(from, to)
+}
 
 // Temporary drawers must not cover the dashboard on first load or after an
 // iPad orientation change. Permanent desktop navigation remains open.
@@ -317,6 +490,12 @@ const navItems = computed(() => [
     label: t('nav.submit'),
     icon: 'mdi-plus-circle-outline',
     to: { name: 'submit' },
+  },
+  {
+    name: 'target',
+    label: t('nav.targets'),
+    icon: 'mdi-server-outline',
+    to: { name: 'target' },
   },
 ])
 
@@ -373,6 +552,7 @@ function refreshShellData() {
 }
 
 onMounted(async () => {
+  void groupsCtl.load() // roaming ui.json copy — local cache already applied
   try {
     if (!config.loaded) await config.fetchConfig()
     projects.fetch()
@@ -395,6 +575,30 @@ onMounted(async () => {
   position: relative;
   left: -8px;
 }
+/* Project group rows (RQ2-4 ④) */
+.group-head {
+  min-height: 26px;
+  cursor: pointer;
+  user-select: none;
+}
+.group-head:hover { background: rgb(var(--v-theme-surface-variant), 0.4); }
+.group-head--over {
+  background: rgb(var(--v-theme-primary), 0.12);
+  outline: 1px dashed rgb(var(--v-theme-primary), 0.5);
+}
+.rename-input {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  font-family: inherit;
+  border: 1px solid rgb(var(--v-theme-primary));
+  border-radius: 4px;
+  padding: 1px 4px;
+  background: rgb(var(--v-theme-surface));
+  color: rgb(var(--v-theme-on-surface));
+  outline: none;
+}
+
 /* RQ-74: reconnect banner — amber, never red: the daemon being briefly away
    is a degraded state, not a failure verdict. */
 .reconnect-banner {

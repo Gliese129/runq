@@ -130,15 +130,12 @@ func runSweep(cmd *cobra.Command, args []string) error {
 			if !ok {
 				return backend.ErrNotSupported
 			}
-			tasks, noteResolved, warnings, err := p.PlanJob(cmd.Context(), jobCfg)
+			tasks, noteResolved, err := p.PlanJob(cmd.Context(), jobCfg)
 			if err != nil {
 				return err
 			}
 			if noteResolved != "" {
 				fmt.Printf("Note: %s\n", noteResolved)
-			}
-			for _, warn := range warnings {
-				fmt.Fprintf(os.Stderr, "warning: %s\n", warn)
 			}
 			return printTaskTable(tasks, method)
 		})

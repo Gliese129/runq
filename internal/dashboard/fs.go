@@ -9,6 +9,7 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -132,6 +133,66 @@ func (s *Server) handleFSList(w http.ResponseWriter, r *http.Request) {
 	stale := false
 	env.RefreshedAt, env.Stale = &now, &stale
 	writeJSON(w, http.StatusOK, env)
+}
+
+// Glob resolution bounds. The default keeps a careless `**` from filling a
+// picker with thousands of chips; the max is the hard ceiling a caller may
+// ask for. Truncation is REPORTED (see the response's truncated flag) — a
+// partial list presented as complete would silently shrink a sweep.
+const (
+	defaultGlobLimit = 500
+	maxGlobLimit     = 2000
+)
+
+type fsGlobResponse struct {
+	Items     []backend.FSEntry `json:"items"`
+	Truncated bool              `json:"truncated"`
+}
+
+// handleFSGlob resolves a path pattern ON THE OWNING SIDE (RQ2-3): the
+// browser would need one round trip per directory to walk a tree itself,
+// which over SFTP is the difference between one call and hundreds.
+//
+// Pattern semantics live in rfs.Glob. Zero matches is a legitimate 200 with
+// an empty list — "nothing there yet" is information the picker shows, not
+// an error; blocking on an empty sweep is the SUBMIT path's job.
+func (s *Server) handleFSGlob(w http.ResponseWriter, r *http.Request) {
+	fsys, err := s.targetFS(r.PathValue("name"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	pattern := r.URL.Query().Get("pattern")
+	if strings.TrimSpace(pattern) == "" {
+		writeErr(w, http.StatusBadRequest, backend.CodeBadRequest, "pattern parameter required")
+		return
+	}
+	root := cleanPath(fsys, r.URL.Query().Get("path"))
+	limit := defaultGlobLimit
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		n, convErr := strconv.Atoi(raw)
+		if convErr != nil || n <= 0 {
+			writeErr(w, http.StatusBadRequest, backend.CodeBadRequest, "limit must be a positive integer")
+			return
+		}
+		limit = min(n, maxGlobLimit)
+	}
+
+	matches, truncated, err := rfs.Glob(fsys, root, pattern, limit)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, backend.CodeBadRequest, err.Error())
+		return
+	}
+	items := make([]backend.FSEntry, 0, len(matches))
+	for _, m := range matches {
+		items = append(items, backend.FSEntry{
+			Name:  path.Base(m.Path),
+			Path:  m.Path,
+			IsDir: m.IsDir,
+			Size:  m.Size,
+		})
+	}
+	writeJSON(w, http.StatusOK, fsGlobResponse{Items: items, Truncated: truncated})
 }
 
 // handleFSRead returns a text file's content (size-capped). Generic on

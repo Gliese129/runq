@@ -1,7 +1,8 @@
 import { api, type RequestOptions } from './client'
 import type {
   CompareRow, JobActivityResponse, JobConfigPayload, JobDetail, JobLogSearchResponse,
-  JobPlanResponse, JobPreviewResponse, JobSubmitResponse, JobSummary, MessageResponse, RefreshReceipt,
+  JobPlanResponse, JobPreviewResponse, JobResultsResponse, JobSubmitResponse, JobSummary,
+  MessageResponse, RefreshReceipt,
 } from '@/types/api'
 
 export interface SubmitJobOptions extends RequestOptions {
@@ -78,6 +79,10 @@ export const jobsApi = {
    *  D22: the receipt always says whether the refresh actually happened. */
   refresh: (jobId: string) =>
     api.post<RefreshReceipt>(`/jobs/${encodeURIComponent(jobId)}/refresh`),
+
+  /** RQ2-1 §A: columnar results wire — full runq.record ingest. */
+  results: (jobId: string, opts?: RequestOptions) =>
+    api.get<JobResultsResponse>(`/jobs/${encodeURIComponent(jobId)}/results`, opts),
 
   /** P6: fetch activity.tsv data for all tasks in a job (501 until implemented). */
   activity: (jobId: string) =>

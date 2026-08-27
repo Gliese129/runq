@@ -4,6 +4,10 @@
     <div class="d-flex align-center justify-space-between mb-4">
       <div class="text-h5 font-weight-bold">{{ project }}</div>
       <div class="d-flex ga-2">
+        <v-btn variant="text" size="small" :to="{ name: 'project-edit', params: { project } }">
+          <v-icon start size="16">mdi-pencil-outline</v-icon>
+          {{ t('projectEdit.edit_project') }}
+        </v-btn>
         <v-btn variant="text" size="small"
           :title="projectArchived ? undefined : t('archive.project_tooltip')"
           @click="toggleProjectArchive"
@@ -72,7 +76,6 @@
                   {{ t('table.tasks') }} {{ sortIcon('tasks') }}
                 </button>
               </th>
-              <th>{{ t('job.eta') }}</th>
               <th :aria-sort="ariaSort('created_at')">
                 <button type="button" class="th-sort-btn" @click="toggleSort('created_at')">
                   {{ t('table.created') }} {{ sortIcon('created_at') }}
@@ -102,7 +105,6 @@
                   <span v-if="j.tasks.failed > 0" class="text-error">· {{ t('job.n_failed', { n: j.tasks.failed }) }}</span>
                 </div>
               </td>
-              <td class="text-on-surface-variant">{{ j.eta_seconds ? formatDuration(j.eta_seconds) : '—' }}</td>
               <td class="text-on-surface-variant">{{ relativeTime(j.created_at) }}</td>
             </tr>
           </tbody>
@@ -163,7 +165,7 @@ import { useJobsListQuery, useArchivedJobsQuery, useProjectJobsQuery, useJobActi
 import StatusDot from '@/components/StatusDot.vue'
 import SegmentedProgress from '@/components/SegmentedProgress.vue'
 import type { JobSummary } from '@/types/api'
-import { relativeTime, formatDuration } from '@/utils/relativeTime'
+import { relativeTime } from '@/utils/relativeTime'
 
 const props = defineProps<{ project: string }>()
 const { t } = useI18n()

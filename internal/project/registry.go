@@ -48,7 +48,26 @@ func NewRegistry(db *sql.DB) *Registry {
 // inserts into the database. The directory must exist and be writable —
 // project.yaml is the source of truth, so a failed write blocks registration.
 // Returns an error if a project with the same name already exists.
+// reservedProjectNames are names the dashboard's projects namespace cannot
+// address: /projects/new is the creation route, and vue-router ranks static
+// segments above params, so a project literally named "new" would have no
+// URL. Enforced at BOTH naming entrances (Add covers the API and `runq
+// project add`; Rename covers renames) — a frontend comment is not a
+// contract (Codex RQ2-3 r1). An existing project that predates this rule
+// can still be renamed AWAY (only the new name is validated).
+var reservedProjectNames = map[string]bool{"new": true}
+
+func validateProjectName(name string) error {
+	if reservedProjectNames[name] {
+		return fmt.Errorf("project name %q is reserved (dashboard route namespace)", name)
+	}
+	return nil
+}
+
 func (r *Registry) Add(ctx context.Context, cfg Config) error {
+	if err := validateProjectName(cfg.ProjectName); err != nil {
+		return err
+	}
 	var existing int
 	err := r.db.QueryRowContext(ctx, `SELECT 1 FROM projects WHERE name = ?`, cfg.ProjectName).Scan(&existing)
 	if err == nil {
@@ -236,6 +255,9 @@ func (r *Registry) Match(ctx context.Context, dir string) ([]Config, error) {
 func (r *Registry) Rename(ctx context.Context, oldName, newName string) error {
 	if oldName == newName {
 		return nil
+	}
+	if err := validateProjectName(newName); err != nil {
+		return err
 	}
 	// Check new name doesn't already exist
 	var existing int

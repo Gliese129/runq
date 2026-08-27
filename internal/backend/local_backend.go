@@ -281,6 +281,16 @@ func (b *LocalBackend) JobLogSearch(ctx context.Context, jobID, query string) ([
 	return jobLogSearchViaExec(ctx, b.store, nil, jobID, query)
 }
 
+func (b *LocalBackend) JobActivity(ctx context.Context, jobID string) (*JobActivity, error) {
+	return jobActivityViaExec(ctx, b.store, nil, jobID)
+}
+
+// JobResults is pure SQL over ingested result_records (same posture as
+// CompareMetrics: the lifecycle reap keeps the store current locally).
+func (b *LocalBackend) JobResults(ctx context.Context, jobID string) (*JobResults, error) {
+	return jobResultsFromDB(ctx, b.store, jobID)
+}
+
 // ── Capabilities ──────────────────────────────────────────────────────────
 
 func (b *LocalBackend) Capabilities() Capabilities {
@@ -398,6 +408,7 @@ func (b *LocalBackend) GetTask(ctx context.Context, taskID string) (*TaskView, e
 		return nil, fmt.Errorf("task %q: %w", taskID, ErrNotFound)
 	}
 	view := BuildTaskView(*task)
+	applyTaskDetail(&view, *task)
 	return &view, nil
 }
 

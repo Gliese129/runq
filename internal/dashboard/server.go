@@ -246,6 +246,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/v1/health", s.handleHealth)
 	s.mux.HandleFunc("GET /api/v1/config", s.handleConfig)
 	s.mux.HandleFunc("PUT /api/v1/config", s.handlePutGlobalConfig)
+	s.mux.HandleFunc("GET /api/v1/ui", s.handleGetUIState)
+	s.mux.HandleFunc("PUT /api/v1/ui", s.handlePutUIState)
 	s.mux.HandleFunc("POST /api/v1/clean", s.handleClean)
 
 	// ── §5.2 Targets（含 target 级资源）────────────────────────────────
@@ -262,6 +264,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/v1/targets/{name}/gpus", s.handleTargetGPUs)
 	s.mux.HandleFunc("GET /api/v1/targets/{name}/fs/list", s.handleFSList)
 	s.mux.HandleFunc("GET /api/v1/targets/{name}/fs/read", s.handleFSRead)
+	s.mux.HandleFunc("GET /api/v1/targets/{name}/fs/glob", s.handleFSGlob)
 	s.mux.HandleFunc("POST /api/v1/targets/{name}/fs/parse-script", s.handleParseScript)
 	s.mux.HandleFunc("GET /api/v1/targets/{name}/python-envs", s.handlePythonEnvs)
 
@@ -282,8 +285,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/v1/jobs/{id}", s.handleGetJob)
 	s.mux.HandleFunc("GET /api/v1/jobs/{id}/metrics", s.handleJobMetrics) // 双模式：无 key → {keys}，有 key → {rows}
 	s.mux.HandleFunc("GET /api/v1/jobs/{id}/activity", s.handleJobActivity)
+	s.mux.HandleFunc("GET /api/v1/jobs/{id}/results", s.handleJobResults)
 	s.mux.HandleFunc("GET /api/v1/jobs/{id}/log/search", s.handleJobLogSearch)
-	s.mux.HandleFunc("GET /api/v1/jobs/{id}/events", s.handleJobEvents) // SSE §6.4（capability: event_stream）
 	s.mux.HandleFunc("POST /api/v1/jobs/{id}/kill", s.handleKillJob)
 	s.mux.HandleFunc("POST /api/v1/jobs/{id}/pause", s.handlePauseJob)
 	s.mux.HandleFunc("POST /api/v1/jobs/{id}/resume", s.handleResumeJob)
@@ -477,12 +480,11 @@ func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, env)
 }
 
-// handleJobEvents — GET /jobs/{id}/events (spec §6.4, D14): SSE state
-// stream, capability event_stream. Push targets emit live; poll targets
-// emit on cache refresh. Lands with the cache layer + #49.
-func (s *Server) handleJobEvents(w http.ResponseWriter, r *http.Request) {
-	notImplemented(w, "job event stream") // TODO(#49): SSE `state` events
-}
+// (The GET /jobs/{id}/events SSE stub is GONE — rqv2 settled on the
+// poll-honesty model: an exact last-poll timestamp over a "live" stream
+// that silently dies, and HPC poll backends have no push source anyway.
+// The stub represented an abandoned premise, not unfinished work; a
+// future push design would start from a new architecture ticket.)
 
 // handleListProjects — GET /projects?dir=&archived= (spec §5.3, D3).
 // ?dir= absorbs the retired /projects/match; projects are local config,
@@ -856,10 +858,12 @@ func (s *Server) handlePlanJob(w http.ResponseWriter, r *http.Request) {
 		// note 解析失败不应阻塞 plan：降级为原样返回
 		note = body.Config.Note
 	}
+	// No warnings field: it was forever-empty dead wire. Submission-time
+	// findings travel through the preflight report (four-state grammar),
+	// which is a different concept with its own channel.
 	writeJSON(w, http.StatusOK, map[string]any{
 		"tasks":         tasks,
 		"note_resolved": note,
-		"warnings":      []string{}, // TODO(L3): preflight-adjacent warnings
 	})
 }
 
@@ -1128,11 +1132,27 @@ func (s *Server) handleTaskMetrics(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleJobActivity returns activity.tsv data for all tasks in a job.
-// The conversion from bytes to lines is deferred to the logfile package
-// once it's implemented (Step 4).
+// handleJobActivity returns every task's activity.tsv series, decimated
+// on the owning side (see backend.JobActivity — cumulative columns make
+// stride sampling lossless, so no index is involved).
 func (s *Server) handleJobActivity(w http.ResponseWriter, r *http.Request) {
-	notImplemented(w, "job activity")
+	act, err := s.backend.JobActivity(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, act)
+}
+
+// handleJobResults returns the job's runq.record data as the columnar
+// wire (see backend.JobResults — pure SQL over ingested result_records).
+func (s *Server) handleJobResults(w http.ResponseWriter, r *http.Request) {
+	res, err := s.backend.JobResults(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
 }
 
 // handleJobLogSearch searches across all task logs in a job.

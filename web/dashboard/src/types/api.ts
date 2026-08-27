@@ -36,7 +36,6 @@ export interface JobSummary {
   target: string
   created_at: number
   tasks: TaskCountGroup
-  eta_seconds?: number
   /** last reconcile from external sources — poll-model backends only */
   refreshed_at?: number
 }
@@ -96,6 +95,11 @@ export interface TaskView {
   queue?: string
   /** filesystem path to the task's log file — populated by GetTask only */
   log_path?: string
+  /** Execution facts for the task page's Execution KV — detail-only
+   *  (populated by GetTask, absent in list responses). */
+  command?: string
+  working_dir?: string
+  task_dir?: string
 }
 
 /** One metric sample (mirrors backend.MetricPoint). */
@@ -151,6 +155,10 @@ export interface JobDetail {
   wandb?: WandbInfo
   /** raw config as submitted — powers "re-run as template" */
   config?: RawJobConfig
+  /** Job workspace dir — the Data tab's fs/list root. Absolute path on
+   *  job.target's filesystem (pair with that target when browsing);
+   *  absent when the job recorded no task dirs → show the empty state. */
+  data_dir?: string
 }
 
 export interface CompareRow {
@@ -267,7 +275,6 @@ export interface HealthResponse {
 export interface JobPlanResponse {
   tasks: Record<string, any>[]
   note_resolved: string
-  warnings: string[]
 }
 
 /** One preflight check in the four-state grammar (passed/failed/warning/skipped). */
@@ -368,6 +375,16 @@ export interface ProjectConfig {
     tags?: string[]
     mode?: string
   }
+  /** Submit-time checks (contract): declared entries are verified on every
+   *  submit; failures block before anything is queued. */
+  preflight?: {
+    enabled?: boolean
+    imports?: boolean
+    wandb?: boolean
+    /** HF repos to verify — "{{param.NAME}}" entries expand against the sweep */
+    hf?: string[]
+    extra_run?: string
+  }
   params?: Array<{
     name: string
     type: string
@@ -383,6 +400,10 @@ export interface ProjectConfig {
     scope?: string
     /** "flag" = store_true switch: rendered as bare --name / omitted */
     style?: string
+    /** path PATTERN whose matches are this param's candidate values
+     *  (file/folder params). Only the pattern is stored — which of today's
+     *  matches a submit uses is chosen in the UI, never persisted here. */
+    glob?: string
   }>
 }
 
@@ -410,6 +431,8 @@ export interface ActivityPoint {
 export interface TaskActivity {
   task_id: string
   status: string
+  /** Minutes per point after owning-side decimation (1 = raw 60s rows). */
+  bucket_minutes?: number
   points: ActivityPoint[]
 }
 
@@ -417,6 +440,53 @@ export interface JobActivityResponse {
   tasks: TaskActivity[]
   job_start?: number
   job_end?: number
+}
+
+/** Columnar results wire (RQ2-1 §A): every record shares one dimension —
+ *  its index in the sorted sequence. Ranges below slice into that
+ *  dimension; the D-ticket adapter pivots slices into curves/rows. */
+export interface ResultRange {
+  /** Identity value — groups entries only. */
+  key?: string
+  /** Task id — tasks entries only. A task recording several models is
+   *  split across identity groups: same id may appear in multiple runs. */
+  id?: string
+  offset: number
+  count: number
+}
+
+export interface ResultAxis {
+  type: 'num' | 'str' | 'bool'
+  role: 'identity' | 'x' | 'label'
+  /** str axes are dictionary-encoded: the column holds indices into this. */
+  vocab?: string[]
+  /** Values nulled by mixed-type conflict — the warning travels with the data. */
+  nulled?: number
+}
+
+export interface JobResultsResponse {
+  /** Contract constant ("runq.record(**axes)"), not a path. */
+  source: string
+  parsed: number
+  /** Records dropped by the per-task ingest cap (known loss). */
+  skipped: number
+  truncated: boolean
+  updated_at: number
+  n: number
+  schema: {
+    groups: ResultRange[]
+    tasks: ResultRange[]
+    axes: Record<string, ResultAxis>
+    /** x candidates in first-appearance order; first = primary (sort key). */
+    x_axes: string[]
+    metrics: string[]
+  }
+  cols: {
+    ts: number[]
+    /** Per axis type: number | vocab index | boolean, null = hole. */
+    axes: Record<string, (number | boolean | null)[]>
+    metrics: Record<string, (number | null)[]>
+  }
 }
 
 /** Wire shape (spec §5.4): deliberately no byte offset — jumps go through

@@ -219,6 +219,9 @@ func (s *Server) SetForwardStopper(fn func(name string) error) { s.forwardStoppe
 // CLI's job, this endpoint only handles the live daemon state.
 func (s *Server) handleDisconnectTarget(w http.ResponseWriter, r *http.Request) {
 	if s.forwardStopper == nil {
+		// Intentional degradation (RQ2-1 c6 closure): a server wired
+		// without forward support (tests, embedded uses) reports 501
+		// rather than pretending — not a stub awaiting implementation.
 		notImplemented(w, "remote CLI forward")
 		return
 	}
@@ -235,6 +238,7 @@ func (s *Server) handleDisconnectTarget(w http.ResponseWriter, r *http.Request) 
 // added moments ago gets its lane built on the spot — no restart case left.
 func (s *Server) handleConnectTarget(w http.ResponseWriter, r *http.Request) {
 	if s.forwardStarter == nil {
+		// Intentional degradation — see handleDisconnectTarget.
 		notImplemented(w, "remote CLI forward")
 		return
 	}
@@ -255,6 +259,8 @@ func (s *Server) handleRefreshTarget(w http.ResponseWriter, r *http.Request) {
 		ForceRefreshTarget(context.Context, string) (*backend.RefreshReceipt, error)
 	})
 	if !ok {
+		// Intentional degradation (RQ2-1 c6 closure): push-model backends
+		// have no refresh concept — 501 is the honest answer, not a gap.
 		notImplemented(w, "target refresh")
 		return
 	}

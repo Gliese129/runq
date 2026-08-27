@@ -38,148 +38,21 @@
       </div>
     </v-card>
 
-    <!-- HPC cluster templates: every field is always rendered (schema-driven),
-         whether or not it exists in the file yet -->
+    <!-- Per-target config (scheduler templates, SSH, generations) moved to
+         the Target page (RQ2-4 ③) — different owner, different blast
+         radius than dashboard preferences. -->
     <v-card class="mb-4 pa-5">
-      <div class="d-flex align-center justify-space-between mb-1">
-        <div class="d-flex align-center ga-3">
-          <div class="text-subtitle-2">{{ t('settings.hpc_title') }}</div>
-          <v-select
-            v-model="selectedTarget"
-            :items="targetNames"
-            density="compact" variant="outlined" hide-details
-            class="font-mono" style="min-width: 160px"
-          />
+      <div class="d-flex align-center ga-3">
+        <v-icon size="18" color="primary">mdi-server-outline</v-icon>
+        <div class="flex-grow-1">
+          <div class="text-subtitle-2">{{ t('settings.targets_moved_title') }}</div>
+          <div class="text-caption text-on-surface-variant">{{ t('settings.targets_moved_hint') }}</div>
         </div>
-        <div class="d-flex ga-2">
-          <v-btn size="x-small" variant="tonal" :disabled="!selectedTarget" @click="checkHPC">
-            <v-icon start size="12">mdi-stethoscope</v-icon> {{ t('settings.hpc_check') }}
-          </v-btn>
-          <v-btn size="x-small" variant="tonal" color="primary" :loading="savingHPC" :disabled="!selectedTarget" @click="saveHPC">{{ t('common.save') }}</v-btn>
-        </div>
-      </div>
-      <div class="text-caption text-on-surface-variant mb-3">
-        {{ t('settings.hpc_rewrite_note') }}
-      </div>
-
-      <!-- RQ-75: previous generations of THIS target still tracking tasks -->
-      <div
-        v-for="g in retiringOfSelected" :key="g.generation"
-        class="d-flex align-center ga-2 rounded pa-2 mb-3"
-        style="background: rgb(var(--v-theme-surface-variant), 0.25)"
-      >
-        <v-icon size="14" color="warning">mdi-history</v-icon>
-        <span class="text-caption">
-          {{ t('settings.gen_retiring_row', { n: g.unfinished }) }}
-        </span>
-        <code class="text-caption text-on-surface-variant">{{ g.generation.slice(0, 8) }}</code>
-        <span class="text-caption text-on-surface-variant ml-auto">{{ genDate(g.retired_at) }}</span>
-      </div>
-
-      <!-- Presets: same starter templates as `hpc init --scheduler` -->
-      <div v-if="presetNames.length > 0" class="d-flex align-center flex-wrap ga-1 mb-4">
-        <span class="text-caption text-on-surface-variant mr-1">{{ t('settings.hpc_preset_label') }}</span>
-        <v-chip
-          v-for="name in presetNames" :key="name"
-          size="x-small" variant="outlined" class="cursor-pointer font-mono"
-          @click="loadPreset(name)"
-        >{{ name }}</v-chip>
-      </div>
-
-      <!-- Natural-language label + literal yaml key (Check results and CLI
-           users reference the key — it must stay visible) -->
-      <template v-for="f in hpcFields" :key="f.key">
-        <div class="d-flex align-baseline ga-2 mb-1">
-          <span class="text-body-2 font-weight-medium">{{ t(f.labelKey) }}</span>
-          <code class="text-caption text-on-surface-variant">{{ f.key }}</code>
-        </div>
-        <v-text-field
-          v-if="f.key === 'submit_id_regex'"
-          v-model="hpcForm[f.key] as string"
-          :placeholder="f.placeholder"
-          density="compact" variant="outlined"
-          class="font-mono mb-3"
-          :hint="t('settings.hpc_regex_hint')"
-          persistent-hint
-        />
-        <template v-else>
-          <div class="tmpl-display rounded pa-2 mb-1 cursor-pointer d-flex align-center ga-2" @click="openEditor(f.key)">
-            <span class="font-mono flex-grow-1 text-body-2" :class="{ 'opacity-50 font-italic': !hpcForm[f.key] }" style="word-break: break-all">
-              {{ hpcForm[f.key] || t('settings.tmpl_not_set') }}
-            </span>
-            <v-icon size="14" color="on-surface-variant" class="flex-shrink-0">mdi-pencil-outline</v-icon>
-          </div>
-          <div class="text-caption text-on-surface-variant mb-3">{{ t(f.hintKey) }}</div>
-        </template>
-      </template>
-
-      <!-- status_parser: list of pipeline stages -->
-      <div class="d-flex align-baseline ga-2 mb-1">
-        <span class="text-body-2 font-weight-medium">{{ t('settings.hpc_f_parser') }}</span>
-        <code class="text-caption text-on-surface-variant">status_parser</code>
-      </div>
-      <div class="text-caption text-on-surface-variant mb-2">{{ t('settings.hpc_f_parser_hint') }}</div>
-      <div v-for="(stage, i) in hpcParser" :key="i" class="d-flex ga-2 mb-1 align-center">
-        <div class="tmpl-display rounded pa-2 cursor-pointer d-flex align-center ga-2 flex-grow-1" @click="openStageEditor(i)">
-          <span class="font-mono flex-grow-1 text-body-2" :class="{ 'opacity-50': !stage }" style="word-break: break-all">
-            {{ stage || `stage ${i + 1}` }}
-          </span>
-          <v-icon size="14" color="on-surface-variant" class="flex-shrink-0">mdi-pencil-outline</v-icon>
-        </div>
-        <v-btn icon size="x-small" variant="text" :aria-label="t('common.delete')" :title="t('common.delete')" @click="hpcParser.splice(i, 1)">
-          <v-icon size="14">mdi-close</v-icon>
+        <v-btn size="small" variant="tonal" color="primary" :to="{ name: 'target' }">
+          {{ t('nav.targets') }}
         </v-btn>
       </div>
-      <v-btn size="x-small" variant="text" color="primary" class="mb-3" @click="hpcParser.push(''); openStageEditor(hpcParser.length - 1)">
-        <v-icon start size="12">mdi-plus</v-icon> {{ t('settings.hpc_add_stage') }}
-      </v-btn>
-
-      <ShellTemplateEditor
-        v-model="editorOpen"
-        :value="editorValue"
-        :title="editorTitle"
-        :placeholders="editorPlaceholders"
-        :hint="editorHint"
-        @apply="onEditorApply"
-      />
-
-      <!-- Check results: same three-state grammar as preflight -->
-      <div v-if="hpcResults.length > 0" class="mt-2">
-        <div v-for="r in hpcResults" :key="r.name" class="d-flex align-start ga-2 py-1" style="font-size: 12px">
-          <v-icon size="14" :color="r.status === 'ok' ? 'success' : r.status === 'fail' ? 'error' : 'grey'">
-            {{ r.status === 'ok' ? 'mdi-check' : r.status === 'fail' ? 'mdi-alert-circle' : 'mdi-minus' }}
-          </v-icon>
-          <code class="flex-shrink-0" style="width: 140px">{{ r.name }}</code>
-          <span class="text-on-surface-variant font-mono" style="word-break: break-all">{{ r.detail }}</span>
-        </div>
-      </div>
     </v-card>
-
-    <!-- RQ-75: archived targets — removed from config.yaml, shown collapsed.
-         Still-retiring entries keep tracking their in-flight tasks. -->
-    <v-expansion-panels v-if="archivedGenerations.length > 0" variant="accordion" class="mb-4">
-      <v-expansion-panel>
-        <v-expansion-panel-title class="text-caption text-on-surface-variant">
-          <v-icon size="14" start>mdi-archive-outline</v-icon>
-          {{ t('settings.gen_archived_title', { n: archivedGenerations.length }) }}
-        </v-expansion-panel-title>
-        <v-expansion-panel-text>
-          <div
-            v-for="g in archivedGenerations" :key="g.target + g.generation"
-            class="d-flex align-center ga-2 py-1" style="font-size: 12px"
-          >
-            <v-icon size="14" :color="g.done_at ? 'grey' : 'warning'">
-              {{ g.done_at ? 'mdi-check' : 'mdi-progress-clock' }}
-            </v-icon>
-            <code>{{ genLabel(g) }}</code>
-            <span class="text-on-surface-variant">
-              {{ g.done_at ? t('settings.gen_done') : t('settings.gen_tracking', { n: g.unfinished }) }}
-            </span>
-            <span class="text-on-surface-variant ml-auto">{{ genDate(g.retired_at) }}</span>
-          </div>
-        </v-expansion-panel-text>
-      </v-expansion-panel>
-    </v-expansion-panels>
 
     <!-- Webhook -->
     <v-card class="mb-4 pa-5">
@@ -254,6 +127,57 @@
         </v-card>
       </div>
 
+      <!-- Appearance levers (RQ2-2): density / surface / accent. State +
+           persistence (ui.json roaming, localStorage fallback) live in
+           useAppearance; these are plain selectors. -->
+      <div class="text-caption text-on-surface-variant mb-2">{{ t('settings.density') }}</div>
+      <div class="d-flex ga-2 mb-5">
+        <v-card
+          v-for="d in densities"
+          :key="d.value"
+          class="pa-3 text-center flex-grow-1 cursor-pointer"
+          :color="appearance.density.value === d.value ? 'primary' : 'surface-variant'"
+          :variant="appearance.density.value === d.value ? 'tonal' : 'flat'"
+          @click="appearance.density.value = d.value"
+        >
+          <v-icon size="20" class="mb-1">{{ d.icon }}</v-icon>
+          <div class="text-caption">{{ d.label }}</div>
+        </v-card>
+      </div>
+
+      <div class="text-caption text-on-surface-variant mb-2">{{ t('settings.surface') }}</div>
+      <div class="d-flex ga-2 mb-5">
+        <v-card
+          v-for="s in surfaces"
+          :key="s.value"
+          class="pa-3 text-center flex-grow-1 cursor-pointer"
+          :color="appearance.surface.value === s.value ? 'primary' : 'surface-variant'"
+          :variant="appearance.surface.value === s.value ? 'tonal' : 'flat'"
+          @click="appearance.surface.value = s.value"
+        >
+          <v-icon size="20" class="mb-1">{{ s.icon }}</v-icon>
+          <div class="text-caption">{{ s.label }}</div>
+        </v-card>
+      </div>
+
+      <div class="text-caption text-on-surface-variant mb-2">{{ t('settings.accent') }}</div>
+      <div class="d-flex ga-2 mb-5">
+        <v-card
+          v-for="(a, hex) in ACCENTS"
+          :key="hex"
+          class="pa-3 text-center flex-grow-1 cursor-pointer"
+          :color="appearance.accent.value === hex ? 'primary' : 'surface-variant'"
+          :variant="appearance.accent.value === hex ? 'tonal' : 'flat'"
+          @click="appearance.accent.value = hex"
+        >
+          <span
+            class="accent-swatch mb-1"
+            :style="{ background: currentTheme === 'dark' ? a.dark : hex }"
+          />
+          <div class="text-caption">{{ a.name }}</div>
+        </v-card>
+      </div>
+
       <!-- Experimental (anime mode tucked away from the default view) -->
       <v-expansion-panels variant="accordion" class="mt-2">
         <v-expansion-panel>
@@ -284,7 +208,7 @@
     <ConfigConflictDialog
       v-model="conflictOpen"
       :fields="conflictFields"
-      :saving="savingGlobal || savingHPC"
+      :saving="savingGlobal"
       @use-disk="conflictUseDisk"
       @use-mine="conflictUseMine"
     />
@@ -303,9 +227,9 @@ import { useTheme } from 'vuetify'
 import { useConfigStore } from '@/stores/config'
 import { useSettingsStore } from '@/stores/settings'
 import { useSnackbar } from '@/composables/useSnackbar'
+import { useAppearance, ACCENTS, type Density, type Surface } from '@/composables/useAppearance'
 import { isGenerationConflict } from '@/apis/client'
-import { configApi, type TargetConfig, type TargetGenerationView, type HPCCheckResult } from '@/apis/config'
-import ShellTemplateEditor from '@/components/ShellTemplateEditor.vue'
+import { configApi } from '@/apis/config'
 import ConfigConflictDialog, { type ConflictField } from '@/components/ConfigConflictDialog.vue'
 import DaemonLogPanel from '@/components/DaemonLogPanel.vue'
 
@@ -347,239 +271,53 @@ function syncGlobal() {
   globalDataPath.value = config.dataPath
 }
 
-// ── Target scheduler templates (v1: /hpc-config* is retired — templates
-// live on the selected target; read-modify-write preserves unknown fields) ──
-type HPCFieldKey = 'submit_template' | 'submit_id_regex' | 'status_template' | 'kill_template'
-
-const targetItems = ref<TargetConfig[]>([])
-const targetNames = computed(() => targetItems.value.map(x => x.name))
-const selectedTarget = ref('')
+// ── config.yaml generation (RQ-75 If-Match): still needed here — the
+// GLOBAL card writes the same file the Target page does. Per-target
+// forms and their conflict/merge flow live on the Target page (RQ2-4 ③). ──
 /** config.yaml semantic hash the form was loaded from (RQ-75 If-Match). */
 const configGeneration = ref('')
 
-/** Populate the form from the selected target's stored config. */
-function populateForm(name: string) {
-  const item = targetItems.value.find(x => x.name === name)
-  hpcResults.value = []
-  hpcForm.value = {
-    submit_template: (item?.submit_template as string) || '',
-    submit_id_regex: (item?.submit_id_regex as string) || '',
-    status_template: (item?.status_template as string) || '',
-    kill_template: (item?.kill_template as string) || '',
-  }
-  hpcParser.value = [...((item?.status_parser as string[]) || [])]
-}
-watch(selectedTarget, populateForm)
-const hpcFields: { key: HPCFieldKey; labelKey: string; hintKey: string; placeholder: string }[] = [
-  { key: 'submit_template', labelKey: 'settings.hpc_f_submit', hintKey: 'settings.hpc_f_submit_hint', placeholder: 'sbatch --gpus={{gpus}} {{run_sh}}' },
-  { key: 'submit_id_regex', labelKey: 'settings.hpc_f_regex', hintKey: 'settings.hpc_regex_hint', placeholder: 'Submitted batch job ([0-9]+)' },
-  { key: 'status_template', labelKey: 'settings.hpc_f_status', hintKey: 'settings.hpc_f_status_hint', placeholder: 'sacct -n -X -j {{ext_id}} -o State' },
-  { key: 'kill_template', labelKey: 'settings.hpc_f_kill', hintKey: 'settings.hpc_f_kill_hint', placeholder: 'scancel {{ext_id}}' },
-]
-const hpcForm = ref<Record<HPCFieldKey, string>>({
-  submit_template: '', submit_id_regex: '', status_template: '', kill_template: '',
-})
-const hpcParser = ref<string[]>([])
-const hpcPlaceholders = ref<Record<string, string[]>>({})
-const hpcResults = ref<HPCCheckResult[]>([])
-const savingHPC = ref(false)
-
-function placeholdersFor(key: string): string[] {
-  const base = hpcPlaceholders.value[key] ?? []
-  return key === 'submit_template' ? [...base, 'param.*'] : base
-}
-
-// ── Shell editor dialog (one instance, retargeted per field/stage) ──
-const editorOpen = ref(false)
-const editorTitle = ref('')
-const editorValue = ref('')
-const editorPlaceholders = ref<string[]>([])
-const editorHint = ref('')
-let editorTarget: { kind: 'field'; key: HPCFieldKey } | { kind: 'stage'; index: number } | null = null
-
-function openEditor(key: HPCFieldKey) {
-  editorTarget = { kind: 'field', key }
-  editorTitle.value = key
-  editorValue.value = hpcForm.value[key]
-  editorPlaceholders.value = placeholdersFor(key)
-  editorHint.value = hpcFields.find(x => x.key === key)?.placeholder ?? ''
-  editorOpen.value = true
-}
-
-function openStageEditor(index: number) {
-  editorTarget = { kind: 'stage', index }
-  editorTitle.value = `status_parser[${index}]`
-  editorValue.value = hpcParser.value[index] ?? ''
-  editorPlaceholders.value = placeholdersFor('status_parser')
-  editorHint.value = ''
-  editorOpen.value = true
-}
-
-function onEditorApply(value: string) {
-  if (!editorTarget) return
-  if (editorTarget.kind === 'field') hpcForm.value[editorTarget.key] = value
-  else hpcParser.value[editorTarget.index] = value
-  editorTarget = null
-}
-
-// ── Presets (same source as `runq target config add --preset`) ──
-const presetNames = ref<string[]>([])
-const presetMap = ref<Record<string, TargetConfig>>({})
-
-function loadPreset(name: string) {
-  const p = presetMap.value[name]
-  if (!p) return
-  hpcForm.value = {
-    submit_template: (p.submit_template as string) || '',
-    submit_id_regex: (p.submit_id_regex as string) || '',
-    status_template: (p.status_template as string) || '',
-    kill_template: (p.kill_template as string) || '',
-  }
-  hpcParser.value = [...((p.status_parser as string[]) || [])]
-  hpcResults.value = []
-  snack.info(t('settings.hpc_preset_loaded', { name }))
-}
-
-/** Merge form fields over the stored TargetConfig — unknown fields survive. */
-function collectTarget(): TargetConfig {
-  const base = targetItems.value.find(x => x.name === selectedTarget.value) ?? { name: selectedTarget.value }
-  return {
-    ...base,
-    name: selectedTarget.value,
-    submit_template: hpcForm.value.submit_template,
-    submit_id_regex: hpcForm.value.submit_id_regex,
-    status_template: hpcForm.value.status_template || undefined,
-    status_parser: hpcParser.value.filter(s => s.trim()),
-    kill_template: hpcForm.value.kill_template,
-  }
-}
-
-async function checkHPC() {
-  if (!selectedTarget.value) return
-  try {
-    const res = await configApi.checkTarget(selectedTarget.value, collectTarget())
-    hpcResults.value = res.results
-  } catch (e: any) {
-    snack.error(e?.message || t('common.error'))
-  }
-}
-
-async function saveHPC() {
-  if (!selectedTarget.value) return
-  savingHPC.value = true
-  try {
-    await configApi.putTarget(selectedTarget.value, collectTarget(), configGeneration.value)
-    await reloadTargets()
-    populateForm(selectedTarget.value)
-    await checkHPC()
-    snack.success(t('settings.hpc_saved'))
-  } catch (e: any) {
-    if (isGenerationConflict(e)) {
-      await openConflict('hpc')
-      return
-    }
-    snack.error(e?.message || t('common.error'))
-  } finally {
-    savingHPC.value = false
-  }
-}
-
 async function reloadTargets() {
   const res = await configApi.listTargets()
-  targetItems.value = res.items ?? []
-  hpcPlaceholders.value = res.placeholders ?? {}
   configGeneration.value = res.config_generation ?? ''
-  targetGenerations.value = res.generations ?? []
-}
-
-// ── RQ-75: retired/retiring lane generations ──
-const targetGenerations = ref<TargetGenerationView[]>([])
-/** Same-name retiring generations: sub-rows of the SELECTED active target. */
-const retiringOfSelected = computed(() =>
-  targetGenerations.value.filter(
-    g => !g.done_at && g.target === selectedTarget.value && targetNames.value.includes(g.target),
-  ),
-)
-/** Generations of REMOVED targets: the collapsed archived section. */
-const archivedGenerations = computed(() =>
-  targetGenerations.value.filter(g => !targetNames.value.includes(g.target)),
-)
-function genLabel(g: TargetGenerationView): string {
-  return `${g.target}-${g.generation.slice(0, 8)}`
-}
-function genDate(unix: number): string {
-  return new Date(unix * 1000).toLocaleString()
 }
 
 // ── Dirty state (RQ-75): the form diverges from what was loaded ──
-const HPC_KEYS: HPCFieldKey[] = ['submit_template', 'submit_id_regex', 'status_template', 'kill_template']
-const hpcDirty = computed(() => {
-  if (!selectedTarget.value) return false
-  const item = targetItems.value.find(x => x.name === selectedTarget.value)
-  const fieldChanged = HPC_KEYS.some(k => hpcForm.value[k] !== (((item?.[k] as string) ?? '') || ''))
-  const parserChanged =
-    JSON.stringify(hpcParser.value) !== JSON.stringify((item?.status_parser as string[]) ?? [])
-  return fieldChanged || parserChanged
-})
-const anyDirty = computed(() => globalDirty.value || hpcDirty.value)
+const anyDirty = computed(() => globalDirty.value)
 
 // ── Generation conflict resolution (RQ-75): human arbitrates ──
 const conflictOpen = ref(false)
 const conflictFields = ref<ConflictField[]>([])
-let conflictKind: 'global' | 'hpc' = 'hpc'
 
-/**
- * Build the conflict dialog from FRESH disk state. targetItems /
- * configGeneration are refreshed here (safe: the form fields are separate
- * refs), so "keep mine" retries against the current generation and merges
- * unknown fields over the disk version — the other writer's untouched
- * edits survive.
- */
-async function openConflict(kind: 'global' | 'hpc') {
-  conflictKind = kind
+/** Build the conflict dialog from FRESH disk state — "keep mine" retries
+ *  against the current generation. */
+async function openConflict(_kind: 'global') {
   try {
-    if (kind === 'global') await config.fetchConfig()
+    await config.fetchConfig()
     await reloadTargets()
   } catch {
     snack.error(t('common.error'))
     return
   }
-  if (kind === 'global') {
-    conflictFields.value = (
-      [
-        { key: 'default_target', disk: config.defaultTarget, mine: globalDefaultTarget.value },
-        { key: 'data_path', disk: config.dataPath, mine: globalDataPath.value },
-      ] as ConflictField[]
-    ).filter(f => f.disk !== f.mine)
-  } else {
-    const item = targetItems.value.find(x => x.name === selectedTarget.value)
-    const rows: ConflictField[] = HPC_KEYS.map(k => ({
-      key: k,
-      disk: ((item?.[k] as string) ?? '') || '',
-      mine: hpcForm.value[k],
-    }))
-    rows.push({
-      key: 'status_parser',
-      disk: ((item?.status_parser as string[]) ?? []).join('\n'),
-      mine: hpcParser.value.filter(s => s.trim()).join('\n'),
-    })
-    conflictFields.value = rows.filter(f => f.disk !== f.mine)
-  }
+  conflictFields.value = (
+    [
+      { key: 'default_target', disk: config.defaultTarget, mine: globalDefaultTarget.value },
+      { key: 'data_path', disk: config.dataPath, mine: globalDataPath.value },
+    ] as ConflictField[]
+  ).filter(f => f.disk !== f.mine)
   conflictOpen.value = true
 }
 
 /** Adopt the disk version: drop my edits, reload the form. */
 function conflictUseDisk() {
   conflictOpen.value = false
-  if (conflictKind === 'global') syncGlobal()
-  else populateForm(selectedTarget.value)
+  syncGlobal()
 }
 
 /** Keep my edits: retry the save against the fresh generation. */
 async function conflictUseMine() {
   conflictOpen.value = false
-  if (conflictKind === 'global') await saveGlobal()
-  else await saveHPC()
+  await saveGlobal()
 }
 
 // ── Disk watch on window focus (RQ-75): clean form follows the file;
@@ -593,12 +331,9 @@ async function onWindowFocus() {
       snack.info(t('settings.config_changed_on_disk'))
       return
     }
-    targetItems.value = res.items ?? []
-    hpcPlaceholders.value = res.placeholders ?? {}
     configGeneration.value = gen
     await config.fetchConfig()
     syncGlobal()
-    populateForm(selectedTarget.value)
   } catch {
     /* unreachable — the health banner owns connectivity reporting */
   }
@@ -633,6 +368,20 @@ const availableEvents = computed(() => [
 const themes = computed(() => [
   { value: 'light', label: t('settings.theme_light'), icon: 'mdi-white-balance-sunny' },
   { value: 'dark', label: t('settings.theme_dark'), icon: 'mdi-moon-waning-crescent' },
+])
+
+const appearance = useAppearance()
+
+const densities = computed((): Array<{ value: Density; label: string; icon: string }> => [
+  { value: 'compact', label: t('settings.density_compact'), icon: 'mdi-view-headline' },
+  { value: 'regular', label: t('settings.density_regular'), icon: 'mdi-view-day-outline' },
+  { value: 'comfy', label: t('settings.density_comfy'), icon: 'mdi-view-agenda-outline' },
+])
+
+const surfaces = computed((): Array<{ value: Surface; label: string; icon: string }> => [
+  { value: 'hairline', label: t('settings.surface_hairline'), icon: 'mdi-square-outline' },
+  { value: 'elevated', label: t('settings.surface_elevated'), icon: 'mdi-checkbox-multiple-blank-outline' },
+  { value: 'grid', label: t('settings.surface_grid'), icon: 'mdi-grid' },
 ])
 
 const locales = [
@@ -702,20 +451,8 @@ onMounted(async () => {
   syncGlobal()
 
   try {
-    const presets = await configApi.targetPresets()
-    presetNames.value = presets.names ?? []
-    presetMap.value = presets.presets ?? {}
-  } catch { /* presets unavailable */ }
-
-  try {
-    await reloadTargets()
-    // Preselect the default target (watch populates the form).
-    if (!selectedTarget.value) {
-      selectedTarget.value = targetNames.value.includes(config.defaultTarget)
-        ? config.defaultTarget
-        : (targetNames.value[0] ?? '')
-    }
-  } catch { /* endpoint unavailable — leave schema-rendered empty fields */ }
+    await reloadTargets() // config_generation for the global card's If-Match
+  } catch { /* endpoint unavailable */ }
 })
 
 onUnmounted(() => {
@@ -735,5 +472,11 @@ onUnmounted(() => {
 .tmpl-display:hover {
   border-color: rgb(var(--v-theme-primary));
   background: rgb(var(--v-theme-surface-variant), 0.35);
+}
+.accent-swatch {
+  display: inline-block;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
 }
 </style>

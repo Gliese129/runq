@@ -68,7 +68,8 @@ def test_range_writes_loop_break_event(clean_env, tmp_path, monkeypatch):
         runq.report({"loss": 0.5}, step=i)
         # Break should fire after this iter.
 
-    events = _read_events(tmp_path / "runq_metrics.jsonl")
+    # loop_break is a lifecycle event → events.jsonl (three-file contract).
+    events = _read_events(tmp_path / "runq_events.jsonl")
     breaks = [e for e in events if e["type"] == "loop_break"]
     assert len(breaks) == 1
     assert breaks[0]["name"] == "range"
@@ -95,7 +96,7 @@ def test_range_name_default_is_range(clean_env, tmp_path, monkeypatch):
     for i in runq.range(3):
         runq.report({"x": 1.0}, step=i)
 
-    events = _read_events(tmp_path / "runq_metrics.jsonl")
+    events = _read_events(tmp_path / "runq_events.jsonl")
     breaks = [e for e in events if e["type"] == "loop_break"]
     assert breaks[0]["name"] == "range"
 
@@ -157,7 +158,8 @@ def test_range_stops_on_preempted_flag(clean_env, tmp_path, monkeypatch):
     # iter 0, 1, 2 run; flag set at 2; next check at 3 exits
     assert seen == [0, 1, 2]
 
-    events = _read_events(tmp_path / "runq_metrics.jsonl")
+    # preempted is a lifecycle event → events.jsonl (three-file contract).
+    events = _read_events(tmp_path / "runq_events.jsonl")
     preempts = [e for e in events if e["type"] == "preempted"]
     assert len(preempts) == 1
     assert preempts[0]["step"] == 3

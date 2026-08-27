@@ -47,6 +47,7 @@ function makeRouter() {
     routes: [
       { path: '/', name: 'overview', component: { template: '<div/>' } },
       { path: '/submit', name: 'submit', component: { template: '<div/>' } },
+      { path: '/projects/:project/edit', name: 'project-edit', component: { template: '<div/>' }, props: true },
       { path: '/projects/:project', name: 'project', component: { template: '<div/>' }, props: true },
       { path: '/projects/:project/:jobId', name: 'job-detail', component: { template: '<div/>' }, props: true },
     ],

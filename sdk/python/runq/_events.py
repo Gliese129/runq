@@ -1,6 +1,16 @@
-"""Metric / event emission to metrics.jsonl.
+"""Event emission — the SDK's jsonl writers and the three-file routing.
 
-JSONL contract (matches what the daemon's ``ReapTaskOutputs`` expects):
+Three-file contract (RQ2-1): each event stream has its own file so the
+semantics split at the API boundary and downstream never disambiguates:
+
+- ``metrics.jsonl`` — pure per-step metric stream (``report`` /
+  ``log_metric``); unbounded, summarized on ingest (+ pyramid).
+- ``events.jsonl`` — lifecycle plane: ``checkpoint`` / ``preempted`` /
+  ``loop_break`` and future lifecycle types.
+- ``results.jsonl`` — ``runq.record`` data plane; bounded facts,
+  ingested in full (see :mod:`runq._record`).
+
+JSONL contract for metric events (matches daemon-side reap):
 
     {"type":"metric","key":"loss","value":0.42,"step":100,"ts":1700000000}
 
@@ -34,35 +44,55 @@ from ._context import get_ctx
 from ._prefix import apply_prefix
 
 
-def _append_event(event: dict) -> None:
-    """Atomically append one JSON line to the metrics file.
+def _append_jsonl_line(path, obj: dict, kind: str) -> None:
+    """Atomically append one JSON line to ``path``.
 
     Best-effort by design: if writing fails (read-only fs, dir gone),
     print a warning to stderr and continue. Crashing the user's training
     run because we couldn't log a number is the wrong trade.
     """
-    ctx = get_ctx()
-    if ctx.metrics_file is None:
-        # Shouldn't happen post-context() — context() always sets a path
+    if path is None:
+        # Shouldn't happen post-context() — context() always sets the paths
         # (cwd in manual mode). Defensive guard; warn so users notice if
-        # metrics are being silently discarded.
+        # data is being silently discarded.
         warnings.warn(
-            "runq: metrics_file is not set — metric event discarded. "
-            "Call runq.context() before logging metrics.",
-            stacklevel=3,
+            f"runq: {kind} file is not set — event discarded. "
+            "Call runq.context() before logging.",
+            stacklevel=4,
         )
         return
     try:
         # Append-and-flush per event. Slight overhead but guarantees
         # tail -f gives a live view in daemon mode (Codex review #1).
-        with open(ctx.metrics_file, "a", encoding="utf-8") as f:
-            f.write(json.dumps(event, separators=(",", ":")) + "\n")
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(obj, separators=(",", ":")) + "\n")
             f.flush()
     except OSError as e:
         print(
-            f"runq: failed to append event to {ctx.metrics_file}: {e}",
+            f"runq: failed to append event to {path}: {e}",
             file=sys.stderr,
         )
+
+
+def _append_event(event: dict) -> None:
+    """Route one SDK event to its file by type (three-file contract).
+
+    ``metric`` → metrics.jsonl; every other type (``checkpoint`` /
+    ``preempted`` / ``loop_break`` and future lifecycle events) →
+    events.jsonl. Result records never come through here — ``record``
+    writes via :func:`_append_result`.
+    """
+    ctx = get_ctx()
+    if event.get("type") == "metric":
+        _append_jsonl_line(ctx.metrics_file, event, "metrics")
+    else:
+        _append_jsonl_line(ctx.events_file, event, "events")
+
+
+def _append_result(record: dict) -> None:
+    """Append one ``runq.record`` result record to results.jsonl."""
+    ctx = get_ctx()
+    _append_jsonl_line(ctx.results_file, record, "results")
 
 
 def log_metric(key: str, value: float, step: int | None = None) -> None:

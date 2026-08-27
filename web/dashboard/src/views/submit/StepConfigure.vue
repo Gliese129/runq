@@ -97,7 +97,11 @@
 
         <!-- values -->
         <div class="flex-grow-1 min-w-0 px-2">
+          <!-- glob param: candidates resolve from the pattern; picking among
+               them is a per-submit choice (RQ2-3) -->
+          <GlobParamRow v-if="row.glob" :row="row" />
           <ParamValueEditor
+            v-else
             v-model="row.values"
             :type="row.type || 'str'"
             :placeholder="t('submit.type_value_enter')"
@@ -224,15 +228,16 @@
 import { ref, computed, reactive, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import ParamValueEditor from '@/components/ParamValueEditor.vue'
+import GlobParamRow from './GlobParamRow.vue'
 import { usePreferences } from '@/composables/usePreferences'
 import { SUBMIT_STATE_KEY } from '@/types/submit'
 import { inject } from 'vue'
 import {
   activeValues, linkColor, rowEffect, validateTable, taskCount, newLinkSetId,
+  rowFromProjectParam,
   type LinkSet, type ParamRow,
 } from './paramTable'
-import { sweepSummary, buildJobConfig } from './submitFlow'
-import { jobsApi } from '@/apis/jobs'
+import { sweepSummary } from './submitFlow'
 
 const { t } = useI18n()
 const state = inject(SUBMIT_STATE_KEY)!
@@ -259,12 +264,10 @@ watch(
         existing.type = p.type || existing.type
         existing.default = p.default || ''
         existing.scope = p.scope
+        existing.glob = p.glob
         next.push(existing)
       } else {
-        const meta: ParamRow['meta'] = {}
-        if (p.min != null) meta.min = p.min
-        if (p.max != null) meta.max = p.max
-        next.push({ name: p.name, type: p.type || 'str', default: p.default || '', values: [], meta, scope: p.scope })
+        next.push(rowFromProjectParam(p))
       }
       byName.delete(p.name)
     }
@@ -414,19 +417,14 @@ function addCustomParam() {
   // If it's a known (but unchecked) project param, inherit its definition.
   const def = (state.newProject.params || []).find(p => p.name === name)
   customNames.add(name)
-  if (def) {
-    const meta: import('./paramTable').ParamRow['meta'] = {}
-    if (def.min != null) meta.min = def.min
-    if (def.max != null) meta.max = def.max
-    state.rows.push({ name, type: def.type || 'str', default: def.default || '', values: [], meta })
-  } else {
-    state.rows.push({ name, type: 'str', default: '', values: [] })
-  }
+  // Inherit the FULL definition — glob/scope included (Codex r1 F6: the
+  // partial copy downgraded a re-added glob param to a free-text row).
+  state.rows.push(def ? rowFromProjectParam(def) : rowFromProjectParam({ name }))
   newParamName.value = ''
 }
 
-/** Custom rows are deletable (project rows are managed by StepProject's
- *  include toggle — deleting them here would just resurrect on next sync). */
+/** Custom rows are deletable (project rows are managed by the project
+ *  editor's include toggle — deleting here would resurrect on next sync). */
 function removeCustomParam(name: string) {
   if (!customNames.has(name)) return
   customNames.delete(name)
@@ -521,24 +519,10 @@ function insertPlaceholder(ph: string) {
   set(get().slice(0, pos) + text + get().slice(pos))
 }
 
-const resolvedNote = ref('')
-let noteTimer: ReturnType<typeof setTimeout> | null = null
-watch(
-  () => [state.note, state.rows, state.linkSets],
-  () => {
-    if (noteTimer) clearTimeout(noteTimer)
-    if (!state.note.includes('{{')) { resolvedNote.value = ''; return }
-    noteTimer = setTimeout(async () => {
-      try {
-        // v1: resolve-note is merged into /jobs/plan (cheap local expansion)
-        const cfg = buildJobConfig(state.projectName, state.note, state.rows, state.linkSets)
-        const res = await jobsApi.plan(cfg)
-        resolvedNote.value = res.note_resolved
-      } catch { resolvedNote.value = '' }
-    }, 500)
-  },
-  { deep: true },
-)
+// Resolved-note preview: the single-screen shell (index.vue) runs the
+// debounced POST /jobs/plan and shares the result — no second fetch here.
+const resolvedNote = computed(() =>
+  state.note.includes('{{') ? state.noteResolved : '')
 
 const formula = computed(() => {
   const summary = sweepSummary(state.rows, state.linkSets)

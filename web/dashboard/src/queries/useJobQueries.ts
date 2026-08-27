@@ -56,6 +56,24 @@ export function useJobDetailQuery(jobId: MaybeRefOrGetter<string>) {
   })
 }
 
+/** Columnar results wire (RQ2-1 §A) for the Results tab. Fetch is gated
+ *  on tab visibility (`enabled`) — the ingest walks every task's
+ *  results.jsonl, too heavy to pay while the user watches the task list.
+ *  Polls while the job is live (results only advance with running tasks),
+ *  at a slower cadence than the detail poll. */
+export function useJobResultsQuery(
+  jobId: MaybeRefOrGetter<string>,
+  enabled: MaybeRefOrGetter<boolean>,
+  active: MaybeRefOrGetter<boolean>,
+) {
+  return useQuery({
+    queryKey: computed(() => qk.results(toValue(jobId))),
+    queryFn: ({ signal }) => jobsApi.results(toValue(jobId), { silent: true, signal }),
+    enabled: computed(() => toValue(enabled)),
+    refetchInterval: computed(() => (toValue(active) ? 10_000 : false)),
+  })
+}
+
 /** Ranked rows for the leaderboard. Key change re-fetches automatically —
  *  this replaces the metric_keys watch that fired a /compare per poll. */
 export function useCompareQuery(

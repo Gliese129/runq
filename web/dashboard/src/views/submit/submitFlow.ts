@@ -161,6 +161,7 @@ export function buildProjectPayload(project: SubmitProjectDraft, base?: ProjectC
         strict: p.strict || undefined,
         scope: p.scope || undefined,
         style: p.style || undefined,
+        glob: p.glob || undefined,
       }
     })
   }

@@ -2,23 +2,104 @@
    runq Design System
    Style A (Flat Professional) + B (Terminal Data)
 
+   Token values are ported from the design kit (styles.css + tokens/*.css,
+   Claude Design "runq Design System") as plain CSS custom properties — no
+   build step. vuetify.ts mirrors the color roles. If the kit and this file
+   disagree on a token VALUE, the kit wins; on structure/selectors, the app
+   wins (kit readme "What actually transfers"). Deliberate app-side
+   overrides are marked inline.
+
    Utility classes come from Vuetify (d-flex, ga-2, text-caption, ...).
    Tailwind was removed on purpose — it only ever supplied .font-mono,
    while its mb-* / px-* duplicates of Vuetify's spacing scale created
    ambiguity about which framework a class resolved to. Do not re-add.
    ═══════════════════════════════════════════ */
 
+/* ═══════ Design tokens (kit: tokens/*.css) ═══════
+   Only tokens with a consumer in this app are ported; the kit's spacing
+   scale duplicates Vuetify's 4px utilities and its layout maxes live in
+   v-container props, so neither is mirrored here. */
+:root {
+  /* ── fonts.css: families only. Webfonts are deliberately NOT loaded from
+     the kit's CDN — the dashboard must render on air-gapped lab networks,
+     so the stacks fall through locally-installed faces. ── */
+  --font-sans: 'Roboto', 'Helvetica Neue', Helvetica, Arial, system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', 'SF Mono', 'Fira Code', 'Cascadia Code', ui-monospace, monospace;
+
+  /* ── typography.css: mono/data sizes (the density lever re-tunes these) ── */
+  --data-cell-size: 12px;
+  --data-head-size: 11px;
+  --data-td-pad: 5px 10px;
+  --data-th-pad: 6px 10px;
+  --data-head-tracking: 0.03em;
+  --code-size: 0.85em;
+  --terminal-size: 12px;
+  --terminal-lh: 1.6;
+
+  /* ── shape.css ── */
+  --radius-sm: 4px;
+  --radius: 6px; /* THE card radius — between Vuetify sm=4 and lg=8 */
+  --radius-lg: 8px;
+  --radius-full: 50%;
+  --border-hairline: 0.5px;
+  --border: 1px;
+  --border-active: 1.5px;
+
+  /* ── motion.css ── */
+  --dur-fast: 0.15s;
+  --dur-base: 0.2s;
+  --ease: ease;
+  --ease-in-out: ease-in-out;
+  --transition: all var(--dur-fast) var(--ease);
+  --pulse-dur: 2s;
+  --spin-dur: 1.6s;
+  --shimmer-dur: 1.5s;
+  --dur-stagger: 30ms;
+
+  /* ── spacing.css: component sizing consumed here ── */
+  --status-dot: 8px;
+
+  /* ── colors.css: terminal palette (Style B — dark even in light mode) ── */
+  --terminal-bg: #0f172a; /* slate-900 */
+  --terminal-fg: #e2e8f0; /* slate-200 */
+  --terminal-green: #4ade80;
+  --terminal-red: #f87171;
+  --terminal-yellow: #fbbf24;
+  --terminal-blue: #5b9cf7; /* blue-400 (kit-nudged ramp) */
+  /* APP OVERRIDE — slate-400, not the kit's slate-500: #64748B on #0F172A
+     is ~3.7:1, below WCAG AA. Flagged for kit backport. */
+  --terminal-dim: #94a3b8;
+
+  /* ── colors.css: deterministic project accents (oklch L=0.55 C=0.18) —
+     every project color has identical lightness/chroma. Consumed by the
+     project-grouping views (D ticket). ── */
+  --project-1: oklch(0.55 0.18 260); /* blue */
+  --project-2: oklch(0.55 0.18 150); /* green */
+  --project-3: oklch(0.55 0.18 70); /* amber */
+  --project-4: oklch(0.55 0.18 25); /* red */
+  --project-5: oklch(0.55 0.18 305); /* violet */
+  --project-6: oklch(0.55 0.18 195); /* teal */
+  --project-7: oklch(0.55 0.18 345); /* pink */
+  --project-8: oklch(0.55 0.18 115); /* lime */
+}
+
+/* Terminal ground goes a step deeper than dark surface (slate-900), so the
+   block still reads as a distinct object in dark mode (kit colors.css). */
+.v-theme--dark {
+  --terminal-bg: #0b1120;
+}
+
 /* ── .font-mono (ex-Tailwind, the one utility we actually used) ── */
 .font-mono {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--font-mono);
 }
 
 /* ── Global card radius: 6px (between Vuetify sm=4 and default=8) ── */
 .v-card {
-  border-radius: 6px !important;
+  border-radius: var(--radius) !important;
 }
 .v-card--border {
-  border-width: 0.5px !important;
+  border-width: var(--border-hairline) !important;
 }
 
 /* ── Kill Material Design elevation everywhere ── */
@@ -38,29 +119,32 @@
 }
 
 /* ── Transitions: fast, consistent ── */
-.v-btn, .v-chip, .v-card, .v-list-item {
-  transition: all 0.15s ease !important;
+.v-btn,
+.v-chip,
+.v-card,
+.v-list-item {
+  transition: var(--transition) !important;
 }
 
 /* ═══════ Style B: Terminal / Data elements ═══════ */
 
 /* Monospace data table — use on any table with class "data-mono" */
 .data-mono {
-  font-family: 'JetBrains Mono', 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
-  font-size: 12px;
+  font-family: var(--font-mono);
+  font-size: var(--data-cell-size);
 }
 .data-mono th {
-  font-size: 11px;
+  font-size: var(--data-head-size);
   font-weight: 500;
   text-transform: uppercase;
-  letter-spacing: 0.03em;
+  letter-spacing: var(--data-head-tracking);
   color: rgb(var(--v-theme-on-surface-variant));
-  border-bottom: 1px solid rgb(var(--v-theme-outline-variant));
-  padding: 6px 10px;
+  border-bottom: var(--border) solid rgb(var(--v-theme-outline-variant));
+  padding: var(--data-th-pad);
 }
 .data-mono td {
-  padding: 5px 10px;
-  border-bottom: 0.5px solid rgb(var(--v-theme-outline-variant), 0.5);
+  padding: var(--data-td-pad);
+  border-bottom: var(--border-hairline) solid rgb(var(--v-theme-outline-variant), 0.5);
   white-space: nowrap;
 }
 .data-mono tbody tr:hover {
@@ -71,6 +155,53 @@
   outline: 2px solid rgb(var(--v-theme-primary));
   outline-offset: -2px;
   background: rgb(var(--v-theme-surface-variant), 0.4);
+}
+
+/* Staggered data entry (kit base.css) — apply .data-enter on a container,
+   children fade up one after another. Capped at 10 children so a long
+   table never feels slow; the rest appear instantly. */
+@keyframes runq-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.data-enter > * {
+  animation: runq-fade-in var(--dur-base) var(--ease) both;
+}
+.data-enter > *:nth-child(1) {
+  animation-delay: 0ms;
+}
+.data-enter > *:nth-child(2) {
+  animation-delay: var(--dur-stagger);
+}
+.data-enter > *:nth-child(3) {
+  animation-delay: calc(var(--dur-stagger) * 2);
+}
+.data-enter > *:nth-child(4) {
+  animation-delay: calc(var(--dur-stagger) * 3);
+}
+.data-enter > *:nth-child(5) {
+  animation-delay: calc(var(--dur-stagger) * 4);
+}
+.data-enter > *:nth-child(6) {
+  animation-delay: calc(var(--dur-stagger) * 5);
+}
+.data-enter > *:nth-child(7) {
+  animation-delay: calc(var(--dur-stagger) * 6);
+}
+.data-enter > *:nth-child(8) {
+  animation-delay: calc(var(--dur-stagger) * 7);
+}
+.data-enter > *:nth-child(9) {
+  animation-delay: calc(var(--dur-stagger) * 8);
+}
+.data-enter > *:nth-child(10) {
+  animation-delay: calc(var(--dur-stagger) * 9);
 }
 
 /* Sortable column headers: the th keeps its columnheader role (aria-sort
@@ -118,80 +249,115 @@ th[aria-sort='none'] .th-sort-btn:focus-visible::after {
    <StatusDot>. Do not add per-status color rules here (philosophy U3). */
 .status-dot {
   display: inline-block;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
+  width: var(--status-dot);
+  height: var(--status-dot);
+  border-radius: var(--radius-full);
   flex-shrink: 0;
 }
 
-/* Pulsing animation for active states (running / cancelling) */
+/* Pulsing animation for active states (running / cancelling).
+   Kit motion: opacity + a whisper of scale so it reads as breathing
+   rather than blinking. */
 @keyframes status-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.5; }
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.6;
+    transform: scale(1.08);
+  }
 }
 .status-dot--pulse {
-  animation: status-pulse 2s ease-in-out infinite;
+  animation: status-pulse var(--pulse-dur) cubic-bezier(0.4, 0, 0.2, 1) infinite;
 }
 
 /* Spinning icon for active states inside status badges */
 @keyframes icon-spin {
-  to { transform: rotate(360deg); }
+  to {
+    transform: rotate(360deg);
+  }
 }
 .icon-spin {
-  animation: icon-spin 1.6s linear infinite;
+  animation: icon-spin var(--spin-dur) linear infinite;
 }
 
 /* Respect the OS "reduce motion" preference: stop decorative animation
-   (status pulse, spinners' decorative variant, skeleton shimmer) and cut
-   UI transitions to imperceptible. Durations stay >0 so transitionend /
-   animationend listeners (Vuetify overlays) still fire. */
+   (status pulse, spinners' decorative variant, skeleton shimmer, entry
+   stagger) and cut UI transitions to imperceptible. Durations stay >0 so
+   transitionend / animationend listeners (Vuetify overlays) still fire. */
 @media (prefers-reduced-motion: reduce) {
   .status-dot--pulse,
   .icon-spin,
   .skeleton,
+  .data-enter > *,
   .v-skeleton-loader__bone::after {
     animation: none !important;
   }
-  .v-btn, .v-chip, .v-card, .v-list-item,
-  .quick-item, .row-line, .row-check, .row-delete,
-  .script-drop, .tmpl-display, .log-search-bar {
+  .v-btn,
+  .v-chip,
+  .v-card,
+  .v-list-item,
+  .quick-item,
+  .row-line,
+  .row-check,
+  .row-delete,
+  .script-drop,
+  .tmpl-display,
+  .log-search-bar {
     transition-duration: 0.01ms !important;
   }
 }
 
 /* Terminal block — dark bg even in light mode */
 .terminal-block {
-  background: #0F172A;
-  color: #E2E8F0;
-  font-family: 'JetBrains Mono', 'SF Mono', monospace;
-  font-size: 12px;
-  line-height: 1.6;
+  background: var(--terminal-bg);
+  color: var(--terminal-fg);
+  font-family: var(--font-mono);
+  font-size: var(--terminal-size);
+  line-height: var(--terminal-lh);
   padding: 12px 16px;
-  border-radius: 6px;
+  border-radius: var(--radius);
   overflow-x: auto;
   white-space: pre-wrap;
   word-break: break-all;
 }
-.terminal-block .t-green  { color: #4ADE80; }
-.terminal-block .t-red    { color: #F87171; }
-.terminal-block .t-yellow { color: #FBBF24; }
-.terminal-block .t-blue   { color: #60A5FA; }
-/* Slate-400, not 500: #64748B on #0F172A was ~3.7:1 — below WCAG AA. */
-.terminal-block .t-dim    { color: #94A3B8; }
+.terminal-block .t-green {
+  color: var(--terminal-green);
+}
+.terminal-block .t-red {
+  color: var(--terminal-red);
+}
+.terminal-block .t-yellow {
+  color: var(--terminal-yellow);
+}
+.terminal-block .t-blue {
+  color: var(--terminal-blue);
+}
+.terminal-block .t-dim {
+  color: var(--terminal-dim);
+}
 
 /* ═══════ Monospace for values/paths/IDs globally ═══════ */
 code {
-  font-family: 'JetBrains Mono', 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
-  font-size: 0.85em;
+  font-family: var(--font-mono);
+  font-size: var(--code-size);
 }
 
 /* Route transitions removed on purpose (RQ-49): mode="out-in" could
    stall the swap and keep the OLD page under the NEW URL for seconds. */
 
 /* ═══════ Utility ═══════ */
-.cursor-pointer { cursor: pointer; }
-.cursor-grab { cursor: grab; }
-.cursor-grab:active { cursor: grabbing; }
+.cursor-pointer {
+  cursor: pointer;
+}
+.cursor-grab {
+  cursor: grab;
+}
+.cursor-grab:active {
+  cursor: grabbing;
+}
 
 /* Nav rail active indicator */
 .v-navigation-drawer .v-btn--active {
@@ -200,8 +366,12 @@ code {
 
 /* ═══════ Skeleton loading ═══════ */
 @keyframes shimmer {
-  0% { background-position: -200% 0; }
-  100% { background-position: 200% 0; }
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
 }
 .skeleton {
   background: linear-gradient(
@@ -211,6 +381,69 @@ code {
     rgb(var(--v-theme-surface-variant)) 75%
   );
   background-size: 200% 100%;
-  animation: shimmer 1.5s ease-in-out infinite;
-  border-radius: 4px;
+  animation: shimmer var(--shimmer-dur) var(--ease-in-out) infinite;
+  border-radius: var(--radius-sm);
+}
+
+/* ═══════ Appearance levers (RQ2-2 — kit ui_kits/runq-dashboard/tweaks.jsx) ═══════
+   Root classes flipped by composables/useAppearance.ts; the accent lever
+   retunes the vuetify theme in JS (compiled RGB triplets can't be
+   overridden from here). 'regular' / 'hairline' ARE the token defaults —
+   their classes exist only so the DOM names the active choice. */
+
+/* ── Density: the data's breathing room (tables + mono rhythm; Vuetify
+   component density stays globally compact via plugin defaults) ── */
+.appearance-density-compact {
+  --data-cell-size: 11px;
+  --data-head-size: 10px;
+  --data-td-pad: 2px 8px;
+  --data-th-pad: 4px 8px;
+}
+.appearance-density-comfy {
+  --data-cell-size: 13px;
+  --data-head-size: 11px;
+  --data-td-pad: 10px 14px;
+  --data-th-pad: 10px 14px;
+}
+
+/* ── Surface: what a "card" means — a hairline plane (default), a floating
+   object, or cells in one continuous grid ── */
+.appearance-surface-elevated .v-card {
+  border-color: transparent !important;
+  border-radius: 12px !important;
+  box-shadow:
+    0 1px 2px rgba(15, 23, 42, 0.06),
+    0 6px 20px rgba(15, 23, 42, 0.07) !important;
+}
+.appearance-surface-elevated .v-main {
+  background: color-mix(
+    in srgb,
+    rgb(var(--v-theme-surface-variant)) 55%,
+    rgb(var(--v-theme-background))
+  );
+}
+.appearance-surface-elevated .data-mono tbody tr:hover {
+  background: rgb(var(--v-theme-primary), 0.05);
+}
+
+.appearance-surface-grid .v-card {
+  border-radius: 0 !important;
+  border: var(--border) solid rgb(var(--v-theme-outline-variant)) !important;
+  box-shadow: none !important;
+}
+.appearance-surface-grid .data-mono td {
+  border-bottom: var(--border) solid rgb(var(--v-theme-outline-variant));
+}
+.appearance-surface-grid .data-mono th {
+  border-bottom: var(--border) solid rgb(var(--v-theme-on-surface-variant));
+}
+.appearance-surface-grid .data-mono tbody tr:nth-child(even) {
+  background: rgb(var(--v-theme-surface-variant), 0.45);
+}
+.appearance-surface-grid .data-mono tbody tr:hover {
+  background: rgb(var(--v-theme-primary), 0.08);
+}
+.appearance-surface-grid .v-btn,
+.appearance-surface-grid .v-field {
+  border-radius: 2px !important;
 }

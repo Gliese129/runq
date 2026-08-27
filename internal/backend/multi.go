@@ -323,19 +323,52 @@ func (m *MultiBackend) resolveTask(ctx context.Context, taskID string) (Backend,
 	return m.resolve(t.Target)
 }
 
-// defaultBackend returns the default target's backend.
+// defaultBackend returns the default target's backend. During a config
+// reconcile the default can be momentarily unrouted: the removed loop
+// unroutes the old default BEFORE the added loop builds (and
+// SetDefaultTarget installs) its replacement, and an SSH lane build
+// keeps that window open for seconds. Readers must degrade, never
+// panic (Codex RQ2-4 F3): fall back to any live lane (deterministic:
+// smallest name); nil only when no lane exists at all — callers below
+// turn that into an error or a zero value.
 func (m *MultiBackend) defaultBackend() Backend {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.targets[m.defaultTarget]
+	if be, ok := m.targets[m.defaultTarget]; ok {
+		return be
+	}
+	fallback := ""
+	for name := range m.targets {
+		if fallback == "" || name < fallback {
+			fallback = name
+		}
+	}
+	if fallback == "" {
+		return nil
+	}
+	return m.targets[fallback]
+}
+
+// defaultBackendE is defaultBackend for error-returning paths: the
+// reconcile gap becomes a retryable error instead of a nil-call panic.
+func (m *MultiBackend) defaultBackendE() (Backend, error) {
+	if be := m.defaultBackend(); be != nil {
+		return be, nil
+	}
+	return nil, fmt.Errorf("no target lane available (config reconcile in progress) — retry")
 }
 
 // ── Backend interface ──────────────────────────────────────────────────────
 
 // Capabilities returns the default target's capabilities. Individual target
 // capabilities can differ; consumers that care should query per-target.
+// In the reconcile gap (no lane routable) it reports zero capabilities —
+// a briefly degraded UI beats a 500 for a config that DID apply.
 func (m *MultiBackend) Capabilities() Capabilities {
-	return m.defaultBackend().Capabilities()
+	if be := m.defaultBackend(); be != nil {
+		return be.Capabilities()
+	}
+	return Capabilities{}
 }
 
 // PerTargetCapabilities exposes each target's own capability set — the
@@ -648,6 +681,22 @@ func (m *MultiBackend) JobLogSearch(ctx context.Context, jobID, query string) ([
 	return be.JobLogSearch(ctx, jobID, query)
 }
 
+func (m *MultiBackend) JobActivity(ctx context.Context, jobID string) (*JobActivity, error) {
+	be, err := m.resolveJob(ctx, jobID)
+	if err != nil {
+		return nil, err
+	}
+	return be.JobActivity(ctx, jobID)
+}
+
+func (m *MultiBackend) JobResults(ctx context.Context, jobID string) (*JobResults, error) {
+	be, err := m.resolveJob(ctx, jobID)
+	if err != nil {
+		return nil, err
+	}
+	return be.JobResults(ctx, jobID)
+}
+
 func (m *MultiBackend) KillTask(ctx context.Context, taskID string) error {
 	be, err := m.resolveTask(ctx, taskID)
 	if err != nil {
@@ -738,11 +787,19 @@ func (m *MultiBackend) SubmitJob(ctx context.Context, cfg job.JobConfig, opts Su
 }
 
 func (m *MultiBackend) DryRun(ctx context.Context, cfg job.JobConfig) (*DryRunResult, error) {
-	return m.defaultBackend().DryRun(ctx, cfg)
+	be, err := m.defaultBackendE()
+	if err != nil {
+		return nil, err
+	}
+	return be.DryRun(ctx, cfg)
 }
 
 func (m *MultiBackend) PreviewSubmit(ctx context.Context, cfg job.JobConfig, skipPreflight bool) (PreviewResult, error) {
-	return m.defaultBackend().PreviewSubmit(ctx, cfg, skipPreflight)
+	be, err := m.defaultBackendE()
+	if err != nil {
+		return PreviewResult{}, err
+	}
+	return be.PreviewSubmit(ctx, cfg, skipPreflight)
 }
 
 // PreviewSubmitForTarget routes submit preview to the named target backend.
@@ -794,15 +851,27 @@ func (m *MultiBackend) UnarchiveJob(ctx context.Context, jobID string) error {
 }
 
 func (m *MultiBackend) ArchiveProject(ctx context.Context, name string) error {
-	return m.defaultBackend().ArchiveProject(ctx, name)
+	be, err := m.defaultBackendE()
+	if err != nil {
+		return err
+	}
+	return be.ArchiveProject(ctx, name)
 }
 
 func (m *MultiBackend) UnarchiveProject(ctx context.Context, name string) error {
-	return m.defaultBackend().UnarchiveProject(ctx, name)
+	be, err := m.defaultBackendE()
+	if err != nil {
+		return err
+	}
+	return be.UnarchiveProject(ctx, name)
 }
 
 func (m *MultiBackend) ResolveNote(ctx context.Context, cfg job.JobConfig) (string, error) {
-	return m.defaultBackend().ResolveNote(ctx, cfg)
+	be, err := m.defaultBackendE()
+	if err != nil {
+		return "", err
+	}
+	return be.ResolveNote(ctx, cfg)
 }
 
 // orphanDetector is the optional per-target capability of scanning for
@@ -841,21 +910,37 @@ func (m *MultiBackend) Clean(ctx context.Context, opts CleanOptions) (*CleanResu
 }
 
 func (m *MultiBackend) ThawTasks(ctx context.Context, owner int, force bool) (*ThawResponse, error) {
-	return m.defaultBackend().ThawTasks(ctx, owner, force)
+	be, err := m.defaultBackendE()
+	if err != nil {
+		return nil, err
+	}
+	return be.ThawTasks(ctx, owner, force)
 }
 
 // ── Project operations (global, not per-target) ────────────────────────────
 
 func (m *MultiBackend) GetProject(ctx context.Context, name string) (*project.Config, error) {
-	return m.defaultBackend().GetProject(ctx, name)
+	be, err := m.defaultBackendE()
+	if err != nil {
+		return nil, err
+	}
+	return be.GetProject(ctx, name)
 }
 
 func (m *MultiBackend) ListProjects(ctx context.Context) ([]ProjectSummary, error) {
-	return m.defaultBackend().ListProjects(ctx)
+	be, err := m.defaultBackendE()
+	if err != nil {
+		return nil, err
+	}
+	return be.ListProjects(ctx)
 }
 
 func (m *MultiBackend) MatchProjects(ctx context.Context, dir string) ([]ProjectSummary, error) {
-	return m.defaultBackend().MatchProjects(ctx, dir)
+	be, err := m.defaultBackendE()
+	if err != nil {
+		return nil, err
+	}
+	return be.MatchProjects(ctx, dir)
 }
 
 func (m *MultiBackend) CreateProject(ctx context.Context, cfg project.Config) error {
@@ -865,15 +950,27 @@ func (m *MultiBackend) CreateProject(ctx context.Context, cfg project.Config) er
 	if cfg.Target == "" {
 		cfg.Target = m.defaultName()
 	}
-	return m.defaultBackend().CreateProject(ctx, cfg)
+	be, err := m.defaultBackendE()
+	if err != nil {
+		return err
+	}
+	return be.CreateProject(ctx, cfg)
 }
 
 func (m *MultiBackend) UpdateProject(ctx context.Context, cfg project.Config) error {
-	return m.defaultBackend().UpdateProject(ctx, cfg)
+	be, err := m.defaultBackendE()
+	if err != nil {
+		return err
+	}
+	return be.UpdateProject(ctx, cfg)
 }
 
 func (m *MultiBackend) RenameProject(ctx context.Context, oldName, newName string) error {
-	return m.defaultBackend().RenameProject(ctx, oldName, newName)
+	be, err := m.defaultBackendE()
+	if err != nil {
+		return err
+	}
+	return be.RenameProject(ctx, oldName, newName)
 }
 
 // compile-time interface check

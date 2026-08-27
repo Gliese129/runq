@@ -17,6 +17,7 @@ export interface ProjectParam {
   strict?: boolean        // choices are a contract, not suggestions
   scope?: string          // 'scheduler' = submit_template-only param
   style?: string          // 'flag' = store_true switch: bare --name / omitted
+  glob?: string           // path pattern; matches become candidate values
 }
 
 export interface ParamMeta {
@@ -26,9 +27,12 @@ export interface ParamMeta {
 }
 
 export interface SubmitState {
-  step: number
   projectName: string
   matchedProjects: ProjectSummary[]
+  // The SELECTED project's loaded config: param palette, job-name template,
+  // setup command (HF suggestion append target), and the raw source for
+  // read-modify-write saves. Project AUTHORING lives on the project-edit
+  // page (RQ2-3 c1) — the submit flow never creates projects.
   newProject: {
     name: string
     workDir: string
@@ -41,18 +45,13 @@ export interface SubmitState {
     envName: string
     envText: string        // KEY=VALUE per line — project environment
     jobName: string        // job_name template — scheduler job name default
-    creating: boolean
-    error: string
     params: ProjectParam[]
-    // True once the user actually edited project config in this session.
-    // goNext only saves the project when dirty (or when creating) — selecting
-    // an existing project and clicking Next is side-effect free.
-    dirty: boolean
-    // The project.Config as fetched (select mode) — buildProjectPayload
-    // read-modify-writes over it so fields the form doesn't edit
-    // (target/env_file/timeout/resume/wandb) survive a save.
+    // The project.Config as fetched — buildProjectPayload read-modify-writes
+    // over it so fields the form doesn't edit survive a save.
     source?: ProjectConfig
   }
+  /** compute target this submit goes to (identity bar pill) */
+  target: string
   note: string
   // Per-submit scheduler job name override; '' = use the project's
   // job_name template (or the rq-{{task_id}} default).

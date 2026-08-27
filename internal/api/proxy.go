@@ -476,6 +476,26 @@ func (p *Proxy) JobLogSearch(ctx context.Context, jobID, query string) ([]backen
 	return out, nil
 }
 
+// JobActivity — GET /jobs/{id}/activity (RQ2-1 §1): the daemon
+// decimates on the owning side; the proxy just relays the JSON.
+func (p *Proxy) JobActivity(ctx context.Context, jobID string) (*backend.JobActivity, error) {
+	var out backend.JobActivity
+	if err := p.do(ctx, "GET", "/api/v1/jobs/"+url.PathEscape(jobID)+"/activity", nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// JobResults — GET /jobs/{id}/results (RQ2-1 §A): the daemon assembles
+// the columnar wire from its store; the proxy just relays the JSON.
+func (p *Proxy) JobResults(ctx context.Context, jobID string) (*backend.JobResults, error) {
+	var out backend.JobResults
+	if err := p.do(ctx, "GET", "/api/v1/jobs/"+url.PathEscape(jobID)+"/results", nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // ── Actions ─────────────────────────────────────────────────────────────
 
 func (p *Proxy) KillTask(ctx context.Context, taskID string) error {
@@ -545,17 +565,16 @@ func (p *Proxy) PreviewSubmit(ctx context.Context, cfg job.JobConfig, skipPrefli
 
 // PlanJob — POST /jobs/plan (D12): cheap local expansion + note resolution
 // in one call. The submit wizard and `runq sweep --dry` consume this.
-func (p *Proxy) PlanJob(ctx context.Context, cfg job.JobConfig) (tasks []job.TaskParams, noteResolved string, warnings []string, err error) {
+func (p *Proxy) PlanJob(ctx context.Context, cfg job.JobConfig) (tasks []job.TaskParams, noteResolved string, err error) {
 	body := submitWireBody{Config: cfg, Target: p.TargetFilter}
 	var resp struct {
 		Tasks        []job.TaskParams `json:"tasks"`
 		NoteResolved string           `json:"note_resolved"`
-		Warnings     []string         `json:"warnings"`
 	}
 	if err := p.do(ctx, "POST", "/api/v1/jobs/plan", body, &resp); err != nil {
-		return nil, "", nil, err
+		return nil, "", err
 	}
-	return resp.Tasks, resp.NoteResolved, resp.Warnings, nil
+	return resp.Tasks, resp.NoteResolved, nil
 }
 
 func (p *Proxy) DryRun(ctx context.Context, cfg job.JobConfig) (*backend.DryRunResult, error) {
@@ -571,7 +590,7 @@ func (p *Proxy) DryRun(ctx context.Context, cfg job.JobConfig) (*backend.DryRunR
 // the daemon owns the store, and the {{version}} family scan must run
 // against it (same path as submit).
 func (p *Proxy) ResolveNote(ctx context.Context, cfg job.JobConfig) (string, error) {
-	_, note, _, err := p.PlanJob(ctx, cfg)
+	_, note, err := p.PlanJob(ctx, cfg)
 	return note, err
 }
 

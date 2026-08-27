@@ -29,8 +29,10 @@ SHA-256 of task_id, mod 2^32.
 | `_safe_save.py` | Atomic checkpoint writes + ENOSPC freeze flow + decorator form |
 | `_manifest.py` | Checkpoint manifest for `keep_last_n` / `keep_best` cleanup |
 | `_report.py` | `runq.report()` — early-stop evaluation with pluggable policies |
+| `_record.py` | `runq.record(metrics, **axes)` — result records → `results.jsonl` (full ingest, feeds `runq results`) |
 | `_policies.py` | Built-in policies: `patience`, `threshold`, `convergence` |
-| `_events.py` | `log_metric()` + jsonl event appender |
+| `_events.py` | `log_metric()` + three-file jsonl routing (`metric` → metrics.jsonl, lifecycle → events.jsonl) |
+| `utils.py` | `runq.utils.atomic_write()` — tmp + fsync + rename context manager |
 | `_transport.py` | httpx Unix socket client for daemon communication |
 | `_sync.py` | `sync_now()` — push metrics to daemon on demand |
 

@@ -67,6 +67,12 @@ class Context:
     task_dir: Path | None = None
     checkpoint_dir: Path | None = None
     metrics_file: Path | None = None
+    # Three-file contract (RQ2-1): results.jsonl (runq.record data plane)
+    # and events.jsonl (lifecycle plane) live NEXT TO metrics.jsonl. Both
+    # are derived from metrics_file rather than env-injected, so an older
+    # daemon that only sets RUNQ_METRICS_FILE still yields correct paths.
+    results_file: Path | None = None
+    events_file: Path | None = None
 
     # daemon-only fields
     socket_path: str | None = None
@@ -283,6 +289,8 @@ def context() -> Context:
         task_dir: Path | None = None
         checkpoint_dir: Path | None = None
         metrics_file: Path | None = Path.cwd() / "runq_metrics.jsonl"
+        results_file: Path | None = Path.cwd() / "runq_results.jsonl"
+        events_file: Path | None = Path.cwd() / "runq_events.jsonl"
         local_params = Path.cwd() / "params.json"
         params = _load_params(local_params) if local_params.exists() else {}
     else:
@@ -295,6 +303,10 @@ def context() -> Context:
         metrics_file = (
             Path(env["RUNQ_METRICS_FILE"]) if env.get("RUNQ_METRICS_FILE") else None
         )
+        # Siblings of metrics.jsonl (see Context field comment). The daemon's
+        # reap reads the same fixed names via workspace.ResultsPath/EventsPath.
+        results_file = metrics_file.with_name("results.jsonl") if metrics_file else None
+        events_file = metrics_file.with_name("events.jsonl") if metrics_file else None
         params_file = env.get("RUNQ_PARAMS_FILE")
         params = _load_params(Path(params_file)) if params_file else {}
 
@@ -306,6 +318,8 @@ def context() -> Context:
         task_dir=task_dir,
         checkpoint_dir=checkpoint_dir,
         metrics_file=metrics_file,
+        results_file=results_file,
+        events_file=events_file,
         socket_path=env.get("RUNQ_SOCKET_PATH"),
         safety_factor_percent=_int_env("RUNQ_SAFETY_FACTOR_PERCENT", 110),
         safety_extra_gb=_int_env("RUNQ_SAFETY_EXTRA_GB", 0),

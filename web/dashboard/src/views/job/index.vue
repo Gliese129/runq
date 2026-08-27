@@ -19,6 +19,18 @@
       @rerun="router.push({ name: 'submit', query: { fromJob: props.jobId } })"
     />
 
+    <!-- Tab strip (RQ2-4 ②, kit ScreensJob): tasks | results | data.
+         Deep-linkable via ?tab= — a results URL pasted in the lab chat
+         must land on the results. -->
+    <v-tabs v-model="tab" density="compact" class="mb-3" color="primary">
+      <v-tab value="tasks" size="small">
+        {{ t('job.tab_tasks') }} ({{ detail.tasks.length }})
+      </v-tab>
+      <v-tab value="results" size="small">{{ t('job.tab_results') }}</v-tab>
+      <v-tab value="data" size="small">{{ t('job.tab_data') }}</v-tab>
+    </v-tabs>
+
+    <template v-if="tab === 'tasks'">
     <!-- Filter bar -->
     <div class="d-flex align-center ga-2 mb-3 flex-wrap">
       <!-- role=button + aria-pressed: VChip is a focusable span and already
@@ -59,6 +71,21 @@
         <v-icon end size="14">mdi-open-in-new</v-icon>
       </v-btn>
     </div>
+    </template>
+
+    <JobResultsCard
+      v-else-if="tab === 'results'"
+      :res="resultsQuery.data.value ?? null"
+      :loading="resultsQuery.isFetching.value"
+      :error="resultsQuery.error.value ? String((resultsQuery.error.value as any)?.message ?? resultsQuery.error.value) : ''"
+      :project="props.project"
+    />
+
+    <JobDataCard
+      v-else
+      :data-dir="detail.data_dir"
+      :target="detail.job.target"
+    />
   </div>
 
   <div v-else class="d-flex justify-center pa-12">
@@ -71,23 +98,26 @@
 
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRouter, useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { useConfigStore } from '@/stores/config'
 import { usePreferences } from '@/composables/usePreferences'
 import { useSnackbar } from '@/composables/useSnackbar'
 import { useConfirm } from '@/composables/useConfirm'
 import { useCancelling } from '@/composables/useCancelling'
-import { useJobDetailQuery, useCompareQuery, useJobActions } from '@/queries/useJobQueries'
+import { useJobDetailQuery, useCompareQuery, useJobResultsQuery, useJobActions } from '@/queries/useJobQueries'
 import { useTaskActions } from '@/queries/useTaskQueries'
 import { useGenerationRerun } from '@/composables/useGenerationRerun'
 import GenerationRerunDialog from '@/components/GenerationRerunDialog.vue'
 import JobHeader from './JobHeader.vue'
 import TaskTable from './TaskTable.vue'
+import JobResultsCard from './JobResultsCard.vue'
+import JobDataCard from './JobDataCard.vue'
 import StatusDot from '@/components/StatusDot.vue'
 
 const props = defineProps<{ project: string; jobId: string }>()
 const router = useRouter()
+const route = useRoute()
 const config = useConfigStore()
 const prefs = usePreferences()
 const snack = useSnackbar()
@@ -107,6 +137,14 @@ const { cancelling, prune, displayStatus } = useCancelling()
 // Clear transient cancelling entries as fresh polls land.
 watch(() => detail.value?.tasks, (tasks) => { if (tasks) prune(tasks) })
 
+// ── Tabs (RQ2-4 ②): ?tab= is the shareable truth; replace (not push) so
+// tab flips don't pollute back-button history. ──
+const TABS = new Set(['tasks', 'results', 'data'])
+const tab = ref(TABS.has(String(route.query.tab)) ? String(route.query.tab) : 'tasks')
+watch(tab, (v) => {
+  router.replace({ query: { ...route.query, tab: v === 'tasks' ? undefined : v } })
+})
+
 const statusFilter = ref(prefs.lastStatusFilter.value)
 
 // Task-level filter — the "done" option matches success tasks, so it uses
@@ -125,6 +163,14 @@ const isActiveJob = computed(() => {
   const s = detail.value?.job.status
   return s === 'running' || s === 'pending' || s === 'paused'
 })
+
+// Results wire is fetched only while its tab shows (heavy ingest), live
+// while the job runs.
+const resultsQuery = useJobResultsQuery(
+  () => props.jobId,
+  () => tab.value === 'results',
+  () => isActiveJob.value,
+)
 
 // Detect swept params: params that differ across tasks
 const sweptParams = computed(() => {
