@@ -492,10 +492,6 @@
   "projectEdit.edit_project": "编辑项目",
   "submit.choose_project": "选择项目",
   "submit.submit_n": "提交 {n} 个任务",
-  "submit.target_available": "可用",
-  "submit.target_not_set_up": "未部署",
-  "submit.not_set_up": "{project} 尚未部署在 {target} 上",
-  "submit.not_set_up_hint": "其配置指向 {target} — 迁移请编辑项目",
   "submit.this_submit": "本次提交",
   "submit.tasks_word": "任务",
   "submit.no_sweep_hint": "无扫描 — 默认值 1 个任务",
@@ -607,5 +603,6 @@
   "target.remove_hint": "已在此运行的作业保留历史;新提交不再能选择它。",
   "target.remove_confirm": "从 config.yaml 移除目标 \"{name}\"？",
   "settings.targets_moved_title": "计算目标",
-  "settings.targets_moved_hint": "每个目标的配置（SSH、调度器命令、检查）现在有独立页面。"
+  "settings.targets_moved_hint": "每个目标的配置（SSH、调度器命令、检查）现在有独立页面。",
+  "submit.target_pinned_hint": "由 project 配置钉定——暂不支持跨 target 的 project"
 }

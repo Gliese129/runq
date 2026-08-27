@@ -14,7 +14,6 @@
       :valid="validation.ok"
       :has-state="hasSubmitState"
       @select-project="selectProject"
-      @select-target="onSelectTarget"
       @submit="submit()"
       @import-yaml="showJobYamlBrowser = true"
       @reset="resetSubmitState"
@@ -229,10 +228,6 @@ async function refreshParamsFromProject(cfg: ProjectConfig) {
   } catch {
     // Keep persisted project.yaml params when script parsing is unavailable.
   }
-}
-
-function onSelectTarget(name: string) {
-  target.value = name
 }
 
 // ── Live plan: debounced server expansion (merged dry-run + note resolve) ──

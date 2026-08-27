@@ -39,32 +39,16 @@
 
       <v-icon size="14" color="on-surface-variant">mdi-arrow-right</v-icon>
 
-      <!-- Target pill: available / not set up ONLY (registry fact — the
-           project config pins its target). No drift / sync states: the
-           placement model is Phase 2. -->
-      <v-menu location="bottom start">
-        <template #activator="{ props: menuProps }">
-          <button type="button" class="pill d-flex align-center ga-2" :class="{ 'pill--error': notSetUp }" v-bind="menuProps">
-            <v-icon size="15" color="on-surface-variant">mdi-server</v-icon>
-            <span class="text-body-2 font-weight-medium">{{ state.target }}</span>
-            <v-icon size="13" color="on-surface-variant">mdi-chevron-down</v-icon>
-          </button>
-        </template>
-        <v-list density="compact" min-width="240">
-          <v-list-item
-            v-for="tgt in config.targets" :key="tgt.name"
-            :active="tgt.name === state.target"
-            color="primary"
-            @click="$emit('select-target', tgt.name)"
-          >
-            <v-list-item-title class="text-body-2">{{ tgt.name }}</v-list-item-title>
-            <v-list-item-subtitle class="text-caption">{{ tgt.type === 'remote' ? tgt.scheduler || 'remote' : 'daemon' }}</v-list-item-subtitle>
-            <template #append>
-              <span class="text-caption text-on-surface-variant">{{ availabilityLabel(tgt.name) }}</span>
-            </template>
-          </v-list-item>
-        </v-list>
-      </v-menu>
+      <!-- Target pill: READ-ONLY. A project's config pins its target
+           (registry fact) and cross-target projects are unsupported —
+           offering a picker here was a choice that could only ever be
+           wrong. The pill states the pin; changing it means editing the
+           project (create-time) or config.yaml. -->
+      <span class="pill pill--static d-flex align-center ga-2" :title="t('submit.target_pinned_hint')">
+        <v-icon size="15" color="on-surface-variant">mdi-server</v-icon>
+        <span class="text-body-2 font-weight-medium">{{ state.target }}</span>
+        <v-icon size="12" color="on-surface-variant">mdi-lock-outline</v-icon>
+      </span>
 
       <v-spacer />
 
@@ -77,7 +61,7 @@
       <v-btn
         color="primary" variant="flat"
         :loading="state.submitting"
-        :disabled="!state.projectName || notSetUp || total === 0 || !valid"
+        :disabled="!state.projectName || total === 0 || !valid"
         @click="$emit('submit')"
       >
         <v-icon start size="16">mdi-rocket-launch-outline</v-icon>
@@ -85,35 +69,24 @@
       </v-btn>
     </div>
 
-    <!-- Placement truth at the moment it matters — before the run. The
-         project's configured target is the registry fact; submitting
-         elsewhere would run against a working_dir that isn't there. -->
-    <div v-if="notSetUp" class="d-flex align-center ga-2 px-4 py-2 notsetup-band">
-      <v-icon size="14" color="error">mdi-alert-circle-outline</v-icon>
-      <span class="text-body-2">{{ t('submit.not_set_up', { project: state.projectName, target: state.target }) }}</span>
-      <span class="text-caption text-on-surface-variant">
-        {{ t('submit.not_set_up_hint', { target: projectTarget }) }}
-      </span>
-    </div>
   </v-card>
 </template>
 
 <script setup lang="ts">
 // IdentityBar (RQ2-3 c2, kit ScreensSubmit) — project + target live in a
 // persistent bar instead of a wizard step; the CTA carries the task count.
-// Placement is DOWNGRADED by ruling: available / not-set-up only, no
-// Deploy/Sync actions (Phase 2 owns the placement model).
+// The target pill is READ-ONLY by ruling: cross-target projects are
+// unsupported, so the project's pinned target is a fact, not a choice
+// (Phase 2 owns the placement model).
 import { computed, inject } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
-import { useConfigStore } from '@/stores/config'
 import { usePreferences } from '@/composables/usePreferences'
 import { SUBMIT_STATE_KEY } from '@/types/submit'
 
 defineProps<{ total: number; valid: boolean; hasState: boolean }>()
 defineEmits<{
   (e: 'select-project', name: string): void
-  (e: 'select-target', name: string): void
   (e: 'submit'): void
   (e: 'import-yaml'): void
   (e: 'reset'): void
@@ -121,7 +94,6 @@ defineEmits<{
 
 const { t } = useI18n()
 const router = useRouter()
-const config = useConfigStore()
 const prefs = usePreferences()
 const state = inject(SUBMIT_STATE_KEY)!
 
@@ -134,19 +106,6 @@ const sortedProjects = computed(() => {
   })
 })
 
-// The registry fact: a project's config pins the target it submits to.
-// Empty = never pinned (pre-multi-target configs) → treat as at home on
-// the default target, not as an error.
-const projectTarget = computed(() =>
-  state.newProject.source?.target || config.currentTarget)
-
-const notSetUp = computed(() =>
-  !!state.projectName && !!state.target && state.target !== projectTarget.value)
-
-function availabilityLabel(target: string): string {
-  if (!state.projectName) return ''
-  return target === projectTarget.value ? t('submit.target_available') : t('submit.target_not_set_up')
-}
 </script>
 
 <style scoped>
@@ -161,9 +120,7 @@ function availabilityLabel(target: string): string {
   transition: var(--transition);
 }
 .pill:hover { border-color: rgb(var(--v-theme-primary)); }
-.pill--error { border-color: rgb(var(--v-theme-error), 0.55); }
-.notsetup-band {
-  border-top: 0.5px solid rgb(var(--v-theme-outline-variant));
-  background: rgb(var(--v-theme-error), 0.08);
-}
+/* Read-only pill: no hover affordance — it is a fact, not a control. */
+.pill--static { cursor: default; }
+.pill--static:hover { border-color: rgb(var(--v-theme-outline-variant)); }
 </style>

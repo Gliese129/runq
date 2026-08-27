@@ -492,10 +492,6 @@
   "projectEdit.edit_project": "プロジェクトを編集",
   "submit.choose_project": "プロジェクトを選択",
   "submit.submit_n": "{n} タスクを送信",
-  "submit.target_available": "利用可能",
-  "submit.target_not_set_up": "未セットアップ",
-  "submit.not_set_up": "{project} は {target} 上にセットアップされていません",
-  "submit.not_set_up_hint": "設定は {target} を指しています — 移すにはプロジェクトを編集",
   "submit.this_submit": "この送信",
   "submit.tasks_word": "タスク",
   "submit.no_sweep_hint": "スイープなし — デフォルトで 1 タスク",
@@ -607,5 +603,6 @@
   "target.remove_hint": "ここで実行されたジョブは履歴を保持します。新規投入では選択できなくなります。",
   "target.remove_confirm": "config.yaml からターゲット \"{name}\" を削除しますか？",
   "settings.targets_moved_title": "計算ターゲット",
-  "settings.targets_moved_hint": "ターゲットごとの設定（SSH・スケジューラコマンド・チェック）は専用ページに移動しました。"
+  "settings.targets_moved_hint": "ターゲットごとの設定（SSH・スケジューラコマンド・チェック）は専用ページに移動しました。",
+  "submit.target_pinned_hint": "プロジェクト設定で固定——クロスターゲットのプロジェクトは未対応です"
 }

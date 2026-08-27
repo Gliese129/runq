@@ -492,10 +492,6 @@
   "projectEdit.edit_project": "Edit project",
   "submit.choose_project": "Choose a project",
   "submit.submit_n": "Submit {n} task | Submit {n} tasks",
-  "submit.target_available": "available",
-  "submit.target_not_set_up": "not set up",
-  "submit.not_set_up": "{project} is not set up on {target}",
-  "submit.not_set_up_hint": "its config pins {target} — edit the project to move it",
   "submit.this_submit": "This submit",
   "submit.tasks_word": "task | tasks",
   "submit.no_sweep_hint": "no sweep — 1 task from defaults",
@@ -607,5 +603,6 @@
   "target.remove_hint": "Jobs placed here keep their history; new submits can no longer choose it.",
   "target.remove_confirm": "Remove target \"{name}\" from config.yaml?",
   "settings.targets_moved_title": "Compute targets",
-  "settings.targets_moved_hint": "Per-target config (SSH, scheduler commands, checks) lives on its own page now."
+  "settings.targets_moved_hint": "Per-target config (SSH, scheduler commands, checks) lives on its own page now.",
+  "submit.target_pinned_hint": "Pinned by the project config — cross-target projects are not supported yet"
 }
