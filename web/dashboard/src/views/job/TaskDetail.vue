@@ -59,6 +59,17 @@
           <div class="text-body-2 font-weight-medium">{{ task.gpus || '—' }}</div>
         </v-col>
       </v-row>
+      <!-- Params ARE the identity of a task — above the fold on both tabs;
+           swept ones (the job's axes) carry the accent. -->
+      <div class="d-flex ga-1 flex-wrap mt-3">
+        <v-chip
+          v-for="(val, key) in task.params" :key="key"
+          size="x-small"
+          :variant="sweptParams.has(String(key)) ? 'tonal' : 'outlined'"
+          :color="sweptParams.has(String(key)) ? 'secondary' : undefined"
+          class="font-mono"
+        >{{ key }} = {{ val }}</v-chip>
+      </div>
       <!-- HPC-specific stats (poll-model only) -->
       <v-row v-if="task.external_id" dense class="mt-1">
         <v-col cols="6" sm="3">
@@ -95,141 +106,183 @@
       <pre class="failure-detail text-caption">{{ task.failure_detail }}</pre>
     </v-card>
 
-    <!-- Parameters / Metrics / Log -->
-    <v-expansion-panels v-model="openPanels" multiple>
-      <v-expansion-panel value="params">
-        <v-expansion-panel-title>
-          <span class="text-subtitle-2">{{ t('submit.parameters') }}</span>
-          <v-chip size="x-small" variant="tonal" class="ml-2">{{
-            Object.keys(task.params || {}).length
-          }}</v-chip>
-        </v-expansion-panel-title>
-        <v-expansion-panel-text>
-          <div class="overflow-x-auto">
-            <table class="data-mono" style="width: 100%">
-              <thead>
-                <tr>
-                  <th>{{ t('table.name') }}</th>
-                  <th>{{ t('table.value') }}</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="(val, key) in task.params" :key="key">
-                  <td class="font-weight-medium">{{ key }}</td>
-                  <td>{{ val }}</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </v-expansion-panel-text>
-      </v-expansion-panel>
+    <!-- Run | Log tabs (RQ2-4 ①, kit ScreensTask): one task is a real
+         destination — curves + identity on Run, the density curve + full
+         log surface on Log. Deep-linkable via ?tab=. -->
+    <v-tabs v-model="tab" density="compact" class="mb-3" color="primary">
+      <v-tab value="run" size="small">{{ t('task.tab_run') }}</v-tab>
+      <v-tab value="log" size="small">{{ t('task.tab_log') }}</v-tab>
+    </v-tabs>
 
-      <v-expansion-panel v-if="task.status !== 'pending'" value="metrics">
-        <v-expansion-panel-title>
-          <span class="text-subtitle-2 d-flex align-center ga-1">
-            <v-icon size="16">mdi-chart-line</v-icon> {{ t('task.metrics') }}
-          </span>
+    <!-- ── Run tab ── -->
+    <div v-if="tab === 'run'" class="run-grid">
+      <v-card class="pa-0">
+        <div class="d-flex align-center ga-1 px-3 py-2 border-b">
+          <v-icon size="16">mdi-chart-line</v-icon>
+          <span class="text-subtitle-2">{{ t('task.metrics') }}</span>
           <v-spacer />
           <v-btn
             v-if="task.wandb_run_id"
             size="x-small"
             variant="text"
-            class="mr-2"
             :href="wandbRunURL(task.wandb_run_id)"
             target="_blank"
-            @click.stop
           >
             <v-icon start size="14">mdi-open-in-new</v-icon> W&B
           </v-btn>
-        </v-expansion-panel-title>
-        <v-expansion-panel-text>
+        </div>
+        <div class="pa-3">
           <MetricsChart :points="metricPoints" />
-        </v-expansion-panel-text>
-      </v-expansion-panel>
+        </div>
+      </v-card>
 
-      <v-expansion-panel value="log" class="log-panel">
-        <v-expansion-panel-title>
-          <span class="text-subtitle-2">{{ t('log.title') }}</span>
-          <v-chip v-if="totalBytes > 0" size="x-small" variant="tonal" class="ml-2">{{
-            formatBytes(totalBytes)
-          }}</v-chip>
-          <v-spacer />
-          <div class="d-flex align-center ga-1 mr-2" @click.stop>
-            <v-btn
-              v-if="canLoadEarlier"
-              size="x-small"
-              variant="text"
-              :loading="loadingEarlier"
-              @click="loadEarlier"
-            >
-              {{ t('log.load_earlier') }}
-            </v-btn>
-            <v-btn
-              v-if="!following && endOffset < totalBytes"
-              size="x-small"
-              variant="text"
-              :loading="loadingMore"
-              @click="loadMore"
-            >
-              {{ t('log.load_more') }}
-            </v-btn>
-            <v-switch
-              v-model="following"
-              density="compact"
-              hide-details
-              inline
-              :color="streamState === 'reconnecting' ? 'warning' : 'primary'"
-              :label="streamState === 'reconnecting' ? t('log.reconnecting') : t('log.follow')"
-            />
-          </div>
-        </v-expansion-panel-title>
-        <v-expansion-panel-text>
-          <!-- Ring-buffer notice: memory released, server file complete.
-               "Reload from start" is the interim recovery path until the
-               open-at-tail / scroll-up backfill work (RQ-22) lands. -->
+      <v-card class="pa-4">
+        <!-- Parameters: swept vs fixed is a property of the JOB — a param
+             is an axis only if sibling tasks disagree about it. -->
+        <div class="text-subtitle-2 mb-2">{{ t('submit.parameters') }}</div>
+        <div class="param-list mb-2">
           <div
-            v-if="trimmedLines > 0"
-            class="d-flex align-center text-caption text-on-surface-variant px-2 pb-1"
+            v-for="(val, key) in task.params" :key="key"
+            class="param-row font-mono"
+            :class="{ 'param-swept': sweptParams.has(String(key)) }"
           >
-            <v-icon size="12" class="mr-1">mdi-history</v-icon
-            >{{ t('log.trimmed', { n: trimmedLines }) }}
-            <v-btn
-              size="x-small"
-              variant="text"
-              color="primary"
-              class="ml-2"
-              @click="reloadFromStart"
-            >
-              {{ t('log.reload_start') }}
-            </v-btn>
+            <span class="param-key">{{ key }}</span>
+            <span class="param-val" :class="{ 'text-secondary font-weight-bold': sweptParams.has(String(key)) }">{{ val }}</span>
           </div>
-          <div class="d-flex flex-wrap">
-            <!-- Log content (virtualized shared surface, incl. search bar) -->
-            <LogSurfaceView
-              :surface="surface"
-              :items="renderItems"
-              :log-loading="logLoading"
-              :line-number-base="lineNumberBase"
-              :empty-text="task.status === 'pending' ? t('task.waiting_start') : t('log.no_output')"
-            />
-            <!-- Side panel -->
-            <LogSidePanel
-              :toggles="logStore.processors"
-              :motif-groups="pipelineResult.motifGroups"
-              :hidden-group-ids="effectiveHidden"
-              :rules="logStore.preDrainRules"
-              @toggle-processor="logStore.toggleProcessor"
-              @toggle-cluster="toggleGroup"
-              @scroll-to-group="scrollToGroup"
-              @toggle-rule="logStore.toggleRule"
-              @add-rule="logStore.addRule"
-              @update-rule="logStore.updateRule"
-              @remove-rule="logStore.removeRule"
-            />
+        </div>
+        <div class="d-flex align-center ga-3 text-caption text-on-surface-variant mb-4">
+          <span class="d-inline-flex align-center ga-1"><span class="legend-box legend-swept" />{{ t('task.swept') }}</span>
+          <span class="d-inline-flex align-center ga-1"><span class="legend-box legend-fixed" />{{ t('task.fixed_for_job') }}</span>
+        </div>
+
+        <template v-if="latestMetrics.length">
+          <div class="text-subtitle-2 mb-2">
+            {{ t('task.latest_metrics') }}
+            <span class="text-caption text-on-surface-variant ml-1">{{ t('job.step') }} {{ task.current_step ?? '—' }}</span>
           </div>
-        </v-expansion-panel-text>
-      </v-expansion-panel>
-    </v-expansion-panels>
+          <div class="param-list mb-4">
+            <div v-for="[k, v] in latestMetrics" :key="k" class="param-row font-mono">
+              <span class="param-key">{{ k }}</span>
+              <span class="param-val">{{ v }}</span>
+            </div>
+          </div>
+        </template>
+
+        <div class="text-subtitle-2 mb-2">{{ t('task.execution') }}</div>
+        <div class="kv-row"><span class="kv-key">{{ t('task.exec_job') }}</span><code>{{ props.jobId.slice(0, 10) }}</code></div>
+        <div v-if="jobTarget" class="kv-row"><span class="kv-key">{{ t('task.exec_target') }}</span><code>{{ jobTarget }}</code></div>
+        <div v-if="task.command" class="kv-row"><span class="kv-key">{{ t('task.exec_command') }}</span><code>{{ task.command }}</code></div>
+        <div v-if="task.working_dir" class="kv-row"><span class="kv-key">{{ t('task.exec_working_dir') }}</span><code>{{ task.working_dir }}</code></div>
+        <div v-if="task.task_dir" class="kv-row"><span class="kv-key">{{ t('task.exec_task_dir') }}</span><code>{{ task.task_dir }}</code></div>
+        <div class="kv-row"><span class="kv-key">{{ t('job.exit_code') }}</span><code>{{ task.exit_code ?? '—' }}</code></div>
+        <div class="kv-row">
+          <span class="kv-key">{{ t('job.elapsed') }}</span>
+          <code>{{ task.elapsed_seconds ? formatDuration(task.elapsed_seconds) : '—' }}</code>
+        </div>
+      </v-card>
+    </div>
+
+    <!-- ── Log tab ── -->
+    <v-card v-else class="pa-0">
+      <!-- Density curve: shape → jump. Hidden until two samples exist
+           (recordActivity samples every 60s). -->
+      <div v-if="activityPoints.length >= 2" class="px-3 py-2 border-b">
+        <TaskActivityCurve
+          :points="activityPoints"
+          :bucket-minutes="activityBucketMinutes"
+          :seek-at="seekIndex"
+          @seek="onSeek"
+        />
+      </div>
+
+      <!-- Path + seek state + paging/follow controls -->
+      <div class="d-flex align-center ga-2 px-3 py-2 border-b flex-wrap">
+        <code v-if="task.log_path" class="text-caption text-on-surface-variant text-truncate">{{ task.log_path }}</code>
+        <template v-if="seekIndex >= 0">
+          <v-chip size="x-small" variant="tonal" color="primary">
+            {{ t('activity.jumped_line', { n: seekLine.toLocaleString() }) }}
+          </v-chip>
+          <span
+            class="text-caption text-primary cursor-pointer"
+            role="button" tabindex="0"
+            @click="backToTail"
+            @keydown.enter="backToTail"
+          >{{ t('activity.back_to_tail') }}</span>
+        </template>
+        <v-spacer />
+        <v-chip v-if="totalBytes > 0" size="x-small" variant="tonal">{{ formatBytes(totalBytes) }}</v-chip>
+        <v-btn
+          v-if="canLoadEarlier"
+          size="x-small"
+          variant="text"
+          :loading="loadingEarlier"
+          @click="loadEarlier"
+        >
+          {{ t('log.load_earlier') }}
+        </v-btn>
+        <v-btn
+          v-if="!following && endOffset < totalBytes"
+          size="x-small"
+          variant="text"
+          :loading="loadingMore"
+          @click="loadMore"
+        >
+          {{ t('log.load_more') }}
+        </v-btn>
+        <v-switch
+          v-model="following"
+          density="compact"
+          hide-details
+          inline
+          :color="streamState === 'reconnecting' ? 'warning' : 'primary'"
+          :label="streamState === 'reconnecting' ? t('log.reconnecting') : t('log.follow')"
+        />
+      </div>
+
+      <!-- Ring-buffer notice: memory released, server file complete.
+           "Reload from start" is the interim recovery path until the
+           open-at-tail / scroll-up backfill work (RQ-22) lands. -->
+      <div
+        v-if="trimmedLines > 0"
+        class="d-flex align-center text-caption text-on-surface-variant px-2 py-1"
+      >
+        <v-icon size="12" class="mr-1">mdi-history</v-icon
+        >{{ t('log.trimmed', { n: trimmedLines }) }}
+        <v-btn
+          size="x-small"
+          variant="text"
+          color="primary"
+          class="ml-2"
+          @click="reloadFromStart"
+        >
+          {{ t('log.reload_start') }}
+        </v-btn>
+      </div>
+      <div class="d-flex flex-wrap">
+        <!-- Log content (virtualized shared surface, incl. search bar) -->
+        <LogSurfaceView
+          :surface="surface"
+          :items="renderItems"
+          :log-loading="logLoading"
+          :line-number-base="lineNumberBase"
+          :empty-text="task.status === 'pending' ? t('task.waiting_start') : t('log.no_output')"
+        />
+        <!-- Side panel -->
+        <LogSidePanel
+          :toggles="logStore.processors"
+          :motif-groups="pipelineResult.motifGroups"
+          :hidden-group-ids="effectiveHidden"
+          :rules="logStore.preDrainRules"
+          @toggle-processor="logStore.toggleProcessor"
+          @toggle-cluster="toggleGroup"
+          @scroll-to-group="scrollToGroup"
+          @toggle-rule="logStore.toggleRule"
+          @add-rule="logStore.addRule"
+          @update-rule="logStore.updateRule"
+          @remove-rule="logStore.removeRule"
+        />
+      </div>
+    </v-card>
   </div>
 
   <!-- 404: stale link / cleaned task — a spinner forever was the old bug -->
@@ -258,6 +311,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { tasksApi, DEFAULT_LOG_MAX_BYTES } from '@/apis/tasks'
 import { jobsApi } from '@/apis/jobs'
@@ -271,16 +325,20 @@ import GenerationRerunDialog from '@/components/GenerationRerunDialog.vue'
 import { useConfigStore } from '@/stores/config'
 import { useLogViewerStore } from '@/stores/logViewer'
 import MetricsChart from '@/components/MetricsChart.vue'
+import TaskActivityCurve from './TaskActivityCurve.vue'
+import type { ActivityCell } from './activityMath'
 import TaskStatusBadge from '@/components/TaskStatusBadge.vue'
 import LogSidePanel from '@/components/LogSidePanel.vue'
 import LogSurfaceView from '@/components/LogSurfaceView.vue'
-import type { LogPage } from '@/types/api'
+import type { ActivityPoint, JobDetail, LogPage } from '@/types/api'
 import { trimLogBuffer } from '@/utils/log/buffer'
 import { applyPage as applyCursorPage } from '@/utils/log/cursor'
 import { useLogSurface } from '@/composables/useLogSurface'
 import { formatDuration } from '@/utils/relativeTime'
 
 const props = defineProps<{ project: string; jobId: string; taskId: string }>()
+const route = useRoute()
+const router = useRouter()
 const snack = useSnackbar()
 const config = useConfigStore()
 const logStore = useLogViewerStore()
@@ -367,22 +425,117 @@ const logLoading = ref(false)
 const loadingMore = ref(false)
 const logContainer = ref<HTMLElement>()
 
-const openPanels = ref(['params', 'metrics', 'log'])
+// ── Tabs (RQ2-4 ①): ?tab= is the shareable truth; replace keeps the
+// back button pointing at the job page, not at tab flips. ──
+const tab = ref(route.query.tab === 'log' ? 'log' : 'run')
+watch(tab, (v) => {
+  router.replace({ query: { ...route.query, tab: v === 'run' ? undefined : v } })
+})
 
-// W&B link: fetch base_url from job detail to avoid hardcoding wandb.ai.
-const wandbBaseUrl = ref('https://wandb.ai')
-async function fetchWandbInfo() {
+// ── Job context: one fetch serves W&B base_url, the target for the
+// Execution KV, and the sibling tasks that define swept-vs-fixed. ──
+const jobDetail = ref<JobDetail | null>(null)
+async function fetchJobContext() {
   try {
-    const detail = await jobsApi.get(props.jobId)
-    if (detail.wandb?.base_url) {
-      wandbBaseUrl.value = detail.wandb.base_url
-    }
+    jobDetail.value = await jobsApi.get(props.jobId, { silent: true })
   } catch {
     /* best effort */
   }
 }
+const jobTarget = computed(() => jobDetail.value?.job.target ?? '')
+
+// Swept vs fixed is a property of the JOB, not the task: a param is an
+// axis only if sibling tasks disagree about it.
+const sweptParams = computed(() => {
+  const s = new Set<string>()
+  const siblings = jobDetail.value?.tasks ?? []
+  if (siblings.length < 2 || !task.value) return s
+  for (const k of Object.keys(task.value.params || {})) {
+    if (new Set(siblings.map(sb => String((sb.params || {})[k]))).size > 1) s.add(k)
+  }
+  return s
+})
+
+const latestMetrics = computed(() => Object.entries(task.value?.metrics ?? {}))
+
 function wandbRunURL(runId: string): string {
-  return `${wandbBaseUrl.value}/runs/${runId}`
+  return `${jobDetail.value?.wandb?.base_url ?? 'https://wandb.ai'}/runs/${runId}`
+}
+
+// ── Log activity (activity.tsv, cumulative columns): fetched when the
+// Log tab first shows; while the task is live it re-fetches at the
+// sampling interval (60s) — faster would poll ahead of the data. ──
+const activityPoints = ref<ActivityPoint[]>([])
+const activityBucketMinutes = ref(1)
+let activityTimer: ReturnType<typeof setInterval> | null = null
+async function fetchActivity() {
+  try {
+    const res = await jobsApi.activity(props.jobId)
+    const mine = res.tasks.find(a => a.task_id === props.taskId)
+    activityPoints.value = mine?.points ?? []
+    activityBucketMinutes.value = mine?.bucket_minutes || 1
+  } catch {
+    /* endpoint optional — the curve simply stays hidden */
+  }
+}
+watch([tab, isActive], ([tv, active]) => {
+  if (tv === 'log') {
+    void fetchActivity()
+    if (active && !activityTimer) activityTimer = setInterval(fetchActivity, 60_000)
+  }
+  if ((tv !== 'log' || !active) && activityTimer) {
+    clearInterval(activityTimer)
+    activityTimer = null
+  }
+}, { immediate: true })
+
+// ── Click-seek: the curve hands over the sample's CUMULATIVE position —
+// activity.tsv counts complete lines, so cumBytes is a line boundary and
+// cumLines is the absolute number of the first line after it. ──
+const seekIndex = ref(-1)
+const seekLine = ref(0)
+async function onSeek(cell: ActivityCell & { index: number }) {
+  if (seekIndex.value === cell.index) {
+    // toggle off, kit behavior
+    void backToTail()
+    return
+  }
+  streamState.value = 'loading' // closes SSE; re-entry only via ready
+  logLoading.value = true
+  try {
+    const page = await tasksApi.log(props.taskId, {
+      offset: cell.cumBytes,
+      maxBytes: DEFAULT_LOG_MAX_BYTES,
+    })
+    trimmedLines.value = 0
+    logLines.value = (page.lines ?? []).slice()
+    firstOffset.value = page.offset
+    endOffset.value = page.next_offset
+    totalBytes.value = page.size
+    tailPartial.value = !!page.partial
+    startLine.value = cell.cumLines
+    seekIndex.value = cell.index
+    seekLine.value = cell.cumLines + 1
+  } catch {
+    snack.error(t('common.error'))
+  } finally {
+    logLoading.value = false
+  }
+  streamState.value = 'ready'
+}
+
+async function backToTail() {
+  seekIndex.value = -1
+  logLoading.value = true
+  try {
+    await reloadTail()
+  } catch {
+    /* ignore */
+  } finally {
+    logLoading.value = false
+  }
+  streamState.value = 'ready'
+  if (isActive.value) following.value = true
 }
 
 // ── Shared log surface (pipeline, fold state, search) — see useLogSurface.
@@ -813,7 +966,7 @@ function waitForTask(): Promise<void> {
 }
 
 onMounted(async () => {
-  fetchWandbInfo() // fire-and-forget — best effort, doesn't block render
+  fetchJobContext() // fire-and-forget — best effort, doesn't block render
   await waitForTask()
   if (notFound.value) return
   logLoading.value = true
@@ -837,14 +990,57 @@ onUnmounted(() => {
     clearTimeout(reconnectTimer)
     reconnectTimer = null
   }
+  if (activityTimer) {
+    clearInterval(activityTimer)
+    activityTimer = null
+  }
 })
 </script>
 
 <style scoped>
-/* Log wants a full-bleed terminal block — strip the panel-text padding.
-   The log surface itself (lines, folds, search) lives in LogSurfaceView. */
-.log-panel :deep(.v-expansion-panel-text__wrapper) {
-  padding: 0;
+.font-mono { font-family: var(--font-mono); }
+.border-b { border-bottom: 0.5px solid rgb(var(--v-theme-outline-variant)); }
+.cursor-pointer { cursor: pointer; }
+
+/* Run tab: chart takes the room, the identity column stays readable. */
+.run-grid {
+  display: grid;
+  grid-template-columns: minmax(320px, 1.5fr) minmax(260px, 320px);
+  gap: 12px;
+  align-items: start;
+}
+@media (max-width: 959px) {
+  .run-grid { grid-template-columns: 1fr; }
+}
+
+.param-list { display: grid; gap: 2px; }
+.param-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 6px;
+  border-radius: 4px;
+  font-size: 13px;
+}
+.param-swept { background: rgb(var(--v-theme-secondary), 0.1); }
+.param-key { flex: 1; color: rgb(var(--v-theme-on-surface-variant)); }
+.param-val { word-break: break-all; }
+.legend-box { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
+.legend-swept { background: rgb(var(--v-theme-secondary), 0.4); }
+.legend-fixed { border: 1px solid rgb(var(--v-theme-outline-variant)); }
+
+.kv-row {
+  display: flex;
+  gap: 10px;
+  padding: 3px 0;
+  font-size: 13px;
+}
+.kv-row code { word-break: break-all; }
+.kv-key {
+  width: 100px;
+  flex-shrink: 0;
+  color: rgb(var(--v-theme-on-surface-variant));
+  font-size: 12px;
 }
 
 /* RQ-74: verbatim scheduler output — monospace, wrapped, no reflow of the
