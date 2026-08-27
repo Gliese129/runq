@@ -608,5 +608,21 @@
   "groups.new_group": "新建分组",
   "groups.ungrouped": "未分组",
   "groups.dissolve": "解散分组",
-  "groups.group_menu": "分组操作"
+  "groups.group_menu": "分组操作",
+  "overview.attn_title": "需要关注",
+  "overview.attn_window": "最近 24 小时",
+  "overview.attn_clear": "没有需要处理的事项。",
+  "overview.attn_show_acked": "{n} 条已确认——显示",
+  "overview.attn_ack_tip": "确认——在情况变化前隐藏此条",
+  "overview.attn_all_failed": "{project} · 全部 {total} 个任务失败",
+  "overview.attn_all_failed_unknown": "{project} · 全部 {total} 个任务失败,{unknown} 个未定",
+  "overview.attn_some_failed": "{project} · {total} 个任务中 {failed} 个失败",
+  "overview.attn_some_failed_unknown": "{project} · {total} 个任务中 {failed} 个失败,{unknown} 个未定",
+  "overview.attn_unknown": "{project} · {unknown} 个结果未定——等待对账",
+  "overview.targets_title": "计算目标",
+  "overview.targets_hint": "按状态统计作业——点数字过滤",
+  "overview.target_col": "目标",
+  "overview.jobs_col": "作业",
+  "overview.all_targets": "全部目标",
+  "overview.gpu_chip_tip": "该 daemon 的空闲 / 总 GPU 数"
 }

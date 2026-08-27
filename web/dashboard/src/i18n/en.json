@@ -608,5 +608,21 @@
   "groups.new_group": "New group",
   "groups.ungrouped": "Ungrouped",
   "groups.dissolve": "Dissolve group",
-  "groups.group_menu": "Group actions"
+  "groups.group_menu": "Group actions",
+  "overview.attn_title": "Needs attention",
+  "overview.attn_window": "last 24 hours",
+  "overview.attn_clear": "Nothing left to act on.",
+  "overview.attn_show_acked": "{n} acknowledged — show",
+  "overview.attn_ack_tip": "Acknowledge — hides this until the situation changes",
+  "overview.attn_all_failed": "{project} · all {total} tasks failed",
+  "overview.attn_all_failed_unknown": "{project} · all {total} tasks failed, {unknown} unresolved",
+  "overview.attn_some_failed": "{project} · {failed} of {total} tasks failed",
+  "overview.attn_some_failed_unknown": "{project} · {failed} of {total} tasks failed, {unknown} unresolved",
+  "overview.attn_unknown": "{project} · {unknown} unresolved — reconcile pending",
+  "overview.targets_title": "Targets",
+  "overview.targets_hint": "jobs by status — click a number to filter",
+  "overview.target_col": "Target",
+  "overview.jobs_col": "Jobs",
+  "overview.all_targets": "All targets",
+  "overview.gpu_chip_tip": "free / total GPUs on this daemon"
 }

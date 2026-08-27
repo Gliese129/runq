@@ -254,16 +254,23 @@
       <template #append>
         <v-divider />
         <div class="pa-2">
-          <v-list-item
-            :to="{ name: 'settings' }"
-            :active="isActive('settings')"
-            :title="collapsed ? '' : t('nav.settings')"
-            :aria-label="t('nav.settings')"
-            prepend-icon="mdi-cog-outline"
-            density="compact"
+          <!-- Same control shape as Dark mode / Collapse below — a
+               v-list-item here had its own prepend spacer and icon nudge,
+               so the footer trio never lined up. -->
+          <v-btn
+            block
+            variant="text"
+            density="comfortable"
             rounded="lg"
-            color="primary"
-          />
+            class="nav-btn mb-1"
+            :class="collapsed ? 'justify-center' : 'justify-start px-3'"
+            prepend-icon="mdi-cog-outline"
+            :color="isActive('settings') ? 'primary' : undefined"
+            :aria-label="t('nav.settings')"
+            :to="{ name: 'settings' }"
+          >
+            <span v-if="!collapsed" class="text-body-2">{{ t('nav.settings') }}</span>
+          </v-btn>
           <v-btn
             block
             variant="text"

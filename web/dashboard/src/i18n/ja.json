@@ -608,5 +608,21 @@
   "groups.new_group": "新しいグループ",
   "groups.ungrouped": "未分類",
   "groups.dissolve": "グループを解散",
-  "groups.group_menu": "グループ操作"
+  "groups.group_menu": "グループ操作",
+  "overview.attn_title": "要対応",
+  "overview.attn_window": "過去 24 時間",
+  "overview.attn_clear": "対応が必要な項目はありません。",
+  "overview.attn_show_acked": "{n} 件確認済み——表示",
+  "overview.attn_ack_tip": "確認——状況が変わるまで非表示にします",
+  "overview.attn_all_failed": "{project} · 全 {total} タスクが失敗",
+  "overview.attn_all_failed_unknown": "{project} · 全 {total} タスクが失敗,{unknown} 件未確定",
+  "overview.attn_some_failed": "{project} · {total} タスク中 {failed} 件が失敗",
+  "overview.attn_some_failed_unknown": "{project} · {total} タスク中 {failed} 件が失敗,{unknown} 件未確定",
+  "overview.attn_unknown": "{project} · {unknown} 件が未確定——リコンサイル待ち",
+  "overview.targets_title": "ターゲット",
+  "overview.targets_hint": "ステータス別のジョブ数——数字をクリックで絞り込み",
+  "overview.target_col": "ターゲット",
+  "overview.jobs_col": "ジョブ",
+  "overview.all_targets": "全ターゲット",
+  "overview.gpu_chip_tip": "この daemon の空き / 総 GPU 数"
 }
