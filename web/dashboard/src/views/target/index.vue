@@ -261,6 +261,7 @@ import { configApi, type TargetConfig, type TargetGenerationView, type HPCCheckR
 import { useConfigStore } from '@/stores/config'
 import ShellTemplateEditor from '@/components/ShellTemplateEditor.vue'
 import ConfigConflictDialog, { type ConflictField } from '@/components/ConfigConflictDialog.vue'
+import { canonicalTarget, canonicalValue } from './targetConfig'
 
 const props = defineProps<{ name?: string }>()
 const route = useRoute()
@@ -351,7 +352,13 @@ function populateForm() {
     maxInflight: (item?.max_inflight as number) || 0,
   }
 }
-watch([activeCfg, creating], populateForm, { immediate: true })
+// Repopulate on SELECTION change only — never on content refresh. A
+// watch on activeCfg's content clobbered the form when openConflict()
+// reloaded targetItems, wiping the user's edits before arbitration
+// (Codex F2). Content-refresh paths that legitimately want the form to
+// follow the file (save success, conflictUseDisk, clean focus-watch)
+// all call populateForm() explicitly.
+watch([activeName, creating], populateForm, { immediate: true })
 
 /** Merge the form over the stored config — unknown fields survive the
  *  read-modify-write round trip (index-signature contract). */
@@ -383,17 +390,12 @@ function collectTarget(): TargetConfig {
 }
 
 // ── Dirty: the collected config diverges from the stored one. Whole-value
-// compare — collect() spreads the stored config, so untouched unknown
-// fields can never read as dirty. ──
-function normalized(cfg: TargetConfig | null): string {
-  if (!cfg) return ''
-  const c = { ...cfg }
-  if (!(c.status_parser as string[] | undefined)?.length) delete c.status_parser
-  for (const k of Object.keys(c)) if (c[k] === undefined) delete c[k]
-  return JSON.stringify(c, Object.keys(c).sort())
-}
+// compare via canonicalTarget (recursive key sort — the earlier
+// array-replacer stringify filtered nested ssh keys out of both sides,
+// so SSH edits never enabled Save; Codex F1). collect() spreads the
+// stored config, so untouched unknown fields can never read as dirty. ──
 const dirty = computed(() =>
-  creating.value ? true : normalized(collectTarget()) !== normalized(activeCfg.value))
+  creating.value ? true : canonicalTarget(collectTarget()) !== canonicalTarget(activeCfg.value))
 
 // ── Presets (same source as `runq target config add --preset`) ──
 const presetNames = ref<string[]>([])
@@ -468,22 +470,35 @@ async function save() {
   saving.value = true
   try {
     await configApi.putTarget(name, collectTarget(), configGeneration.value)
-    await reloadTargets()
-    await config.fetchConfig() // rail/statusbar summaries follow the write
-    if (creating.value) {
-      snack.success(t('target.created', { name }))
-      router.replace({ name: 'target', params: { name } })
-    } else {
-      populateForm()
-      await runCheck()
-      snack.success(t('settings.hpc_saved'))
-    }
   } catch (e: any) {
+    saving.value = false
     if (isGenerationConflict(e)) {
       await openConflict()
       return
     }
     snack.error(e?.message || t('common.error'))
+    return
+  }
+  // The write SUCCEEDED — nothing after this may demote it to a failure.
+  // Creating the first explicit target triggers a lane reconcile whose
+  // window can 500 the follow-up reads (Codex F3); a failed refresh is a
+  // degraded view, not a failed save: the next poll/navigation re-reads.
+  const wasCreating = creating.value
+  if (wasCreating) {
+    snack.success(t('target.created', { name }))
+    router.replace({ name: 'target', params: { name } })
+  } else {
+    snack.success(t('settings.hpc_saved'))
+  }
+  try {
+    await reloadTargets()
+    await config.fetchConfig() // rail/statusbar summaries follow the write
+    if (!wasCreating) {
+      populateForm()
+      await runCheck()
+    }
+  } catch {
+    /* reconcile window — state refreshes on the next read */
   } finally {
     saving.value = false
   }
@@ -527,6 +542,10 @@ const conflictOpen = ref(false)
 const conflictFields = ref<ConflictField[]>([])
 
 async function openConflict() {
+  // Snapshot MINE before touching disk state — belt to the watch's
+  // braces: even if a future content-watch repopulates the form during
+  // the reload, arbitration still compares the user's actual edits.
+  const mine = collectTarget()
   try {
     await reloadTargets()
   } catch {
@@ -534,7 +553,6 @@ async function openConflict() {
     return
   }
   const disk = activeCfg.value
-  const mine = collectTarget()
   const rows: ConflictField[] = []
   const keys: (keyof TargetConfig)[] = [
     'submit_template', 'submit_id_regex', 'status_template', 'kill_template',
@@ -548,8 +566,10 @@ async function openConflict() {
   const dParser = ((disk?.status_parser as string[]) ?? []).join('\n')
   const mParser = (mine.status_parser as string[] ?? []).join('\n')
   if (dParser !== mParser) rows.push({ key: 'status_parser', disk: dParser, mine: mParser })
-  const dSSH = JSON.stringify(disk?.ssh ?? {})
-  const mSSH = JSON.stringify(mine.ssh ?? {})
+  // Canonical compare — "" and absent are the same statement, so a disk
+  // ssh.user:"" against the form's omitted user is NOT a difference.
+  const dSSH = canonicalValue(disk?.ssh ?? {})
+  const mSSH = canonicalValue(mine.ssh ?? {})
   if (dSSH !== mSSH) rows.push({ key: 'ssh', disk: dSSH, mine: mSSH })
   conflictFields.value = rows
   conflictOpen.value = true
