@@ -7,6 +7,7 @@ import type { JobResultsResponse } from '@/types/api'
 import {
   latestIdx, tableRows, renderLabel, guessDir, colDecimals,
   bestIndex, groupXOptions, resultsMarkdown, groupSeries, labelKeys,
+  resolveBaseIdx, metricsAt,
 } from './resultsView'
 
 /** Two groups: "base" has steps 100,200 + one off-axis tail record;
@@ -123,6 +124,40 @@ describe('Δ base picker', () => {
     const opts = groupXOptions(fixture(), 0, 'step')
     expect(opts.map(o => o.xv)).toEqual([100, 200])
     expect(opts.map(o => o.idx)).toEqual([0, 1])
+  })
+})
+
+describe('resolveBaseIdx (Codex F4: polling offset shift)', () => {
+  it('a grown earlier group shifts offsets; the (key, x) base still resolves to the same record', () => {
+    const v1 = fixture()
+    const idx1 = resolveBaseIdx(v1, 's:wide', 100)
+    expect(idx1).toBe(3)
+    expect(metricsAt(v1, idx1!).loss).toBe(2.31)
+
+    // Next poll: group "base" gained a record at step 300 — "wide" moved.
+    const v2 = fixture()
+    v2.schema.groups = [
+      { key: 's:base', offset: 0, count: 4 },
+      { key: 's:wide', offset: 4, count: 1 },
+    ]
+    v2.cols.axes.model = [0, 0, 0, 0, 1]
+    v2.cols.axes.step = [100, 200, 300, null, 100]
+    v2.cols.axes.data = [0, 0, 0, 0, null]
+    v2.cols.metrics.loss = [2.5, 2.1, 1.9, null, 2.31]
+    v2.cols.metrics.acc = [0.6, 0.7, 0.75, 0.72, 0.65]
+    v2.n = 5
+
+    const idx2 = resolveBaseIdx(v2, 's:wide', 100)
+    expect(idx2).toBe(4) // NOT the stale absolute index 3 (now base@null-x)
+    expect(metricsAt(v2, idx2!).loss).toBe(2.31)
+  })
+
+  it('a vanished x falls back to the group latest; a vanished group returns null', () => {
+    const res = fixture()
+    const fallback = resolveBaseIdx(res, 's:base', 999)
+    expect(fallback).toBe(1) // base's latest x-bearing record
+    expect(resolveBaseIdx(res, 's:base', null)).toBe(1)
+    expect(resolveBaseIdx(res, 's:gone', 100)).toBeNull()
   })
 })
 

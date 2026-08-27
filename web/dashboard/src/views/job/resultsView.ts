@@ -51,6 +51,9 @@ export function displayGroupKey(key: string): string {
 
 export interface ResultRow {
   gi: number
+  /** Raw wire identity key (typed, e.g. "s:base") — THE stable identity;
+   *  gi and record indexes shift as live polls insert records. */
+  rawKey: string
   /** Display face of the group's identity key. */
   key: string
   /** Record index of the latest slice. */
@@ -92,6 +95,7 @@ export function tableRows(res: JobResultsResponse): ResultRow[] {
     }
     return {
       gi,
+      rawKey: g.key ?? '',
       key: displayGroupKey(g.key ?? ''),
       idx,
       atX: x ? toNum(res.cols.axes[x]?.[idx]) : null,
@@ -165,6 +169,24 @@ export function groupXOptions(res: JobResultsResponse, gi: number, x: string): {
     if (xv !== null) out.push({ idx: i, xv })
   }
   return out
+}
+
+/** Resolve a SEMANTIC base selection — (group identity key, x value) —
+ *  to a record index on the CURRENT wire. Record indexes are not stable
+ *  identities: a live poll that grows an earlier group shifts every
+ *  later offset, so a stored absolute index silently starts pointing at
+ *  another group's record (Codex F4). Resolution: exact x match within
+ *  the group; a vanished x (or x === null) falls back to the group's
+ *  latest; a vanished group returns null. */
+export function resolveBaseIdx(res: JobResultsResponse, key: string, x: number | null): number | null {
+  const gi = res.schema.groups.findIndex(g => (g.key ?? '') === key)
+  if (gi < 0) return null
+  const px = primaryX(res)
+  if (x !== null && px) {
+    const opt = groupXOptions(res, gi, px).find(o => o.xv === x)
+    if (opt) return opt.idx
+  }
+  return latestIdx(res, res.schema.groups[gi], px)
 }
 
 /** Metric record at an arbitrary record index (the Δ base). */

@@ -64,11 +64,11 @@
           />
           <template v-if="deltaOn">
             <v-select
-              v-model="baseGi" :items="baseRowItems" density="compact" hide-details
+              v-model="baseKey" :items="baseRowItems" density="compact" hide-details
               variant="outlined" class="base-select font-mono" :label="t('results.base_row')"
             />
             <v-select
-              v-model="baseIdx" :items="baseStepItems" density="compact" hide-details
+              v-model="baseX" :items="baseStepItems" density="compact" hide-details
               variant="outlined" class="base-select font-mono" :label="t('results.base_step')"
               :disabled="baseStepItems.length === 0"
             />
@@ -97,7 +97,7 @@
               <tr v-for="(row, ri) in rows" :key="row.gi">
                 <td class="text-primary">
                   {{ renderLabel(labelTemplate, row) }}
-                  <v-chip v-if="deltaOn && row.gi === baseGi" size="x-small" variant="tonal" class="ml-1">
+                  <v-chip v-if="deltaOn && row.rawKey === baseKey" size="x-small" variant="tonal" class="ml-1">
                     {{ t('results.base_chip') }}
                   </v-chip>
                   <span
@@ -175,6 +175,7 @@ import ResultsChart from './ResultsChart.vue'
 import {
   tableRows, renderLabel, labelKeys, guessDir, colDecimals, fmtNum,
   bestIndex, groupXOptions, metricsAt, resultsMarkdown, groupSeries, primaryX,
+  resolveBaseIdx,
   type ResultRow,
 } from './resultsView'
 
@@ -254,36 +255,48 @@ const bests = computed<Record<string, number>>(() => {
   return out
 })
 
-// ── Δ vs base: a (group × step) record ──
+// ── Δ vs base: a (group × step) record, stored as SEMANTIC identity —
+// (raw group key, x value) — never as record/group indexes: a live poll
+// that grows an earlier group shifts every later offset, and a stored
+// absolute index silently starts reading another group's record
+// (Codex F4). resolveBaseIdx re-resolves against the current wire on
+// every render. ──
 const deltaOn = ref(false)
-const baseGi = ref<number | null>(null)
-const baseIdx = ref<number | null>(null)
+const baseKey = ref<string | null>(null)
+const baseX = ref<number | null>(null)
 
 const baseRowItems = computed(() =>
-  rows.value.map(r => ({ title: renderLabel(labelTemplate.value ?? '', r), value: r.gi })))
+  rows.value.map(r => ({ title: renderLabel(labelTemplate.value ?? '', r), value: r.rawKey })))
 
 const baseStepItems = computed(() => {
-  if (res.value == null || baseGi.value == null) return []
+  if (res.value == null || baseKey.value == null) return []
   const x = primaryX(res.value)
-  return groupXOptions(res.value, baseGi.value, x).map(o => ({
-    title: `${x || '#'} ${o.xv}`, value: o.idx,
+  const gi = res.value.schema.groups.findIndex(g => (g.key ?? '') === baseKey.value)
+  if (gi < 0) return []
+  return groupXOptions(res.value, gi, x).map(o => ({
+    title: `${x || '#'} ${o.xv}`, value: o.xv,
   }))
 })
 
-// Default base: first row at its latest step. Re-validate when data moves
-// under the picker (poll) — a vanished index resets, never dangles.
+// Default base: first row at its latest step. Re-validate when data
+// moves under the picker (poll) — a vanished group resets, never
+// dangles; a kept group re-resolves by (key, x) below.
 watch([deltaOn, rows], () => {
   if (!deltaOn.value || rows.value.length === 0) return
-  if (baseGi.value == null || !rows.value.some(r => r.gi === baseGi.value)) {
-    baseGi.value = rows.value[0].gi
-    baseIdx.value = rows.value[0].idx
+  if (baseKey.value == null || !rows.value.some(r => r.rawKey === baseKey.value)) {
+    baseKey.value = rows.value[0].rawKey
+    baseX.value = rows.value[0].atX
   }
 })
-watch(baseGi, (gi) => {
-  if (gi == null) return
-  const row = rows.value.find(r => r.gi === gi)
-  baseIdx.value = row ? row.idx : null
+watch(baseKey, (key) => {
+  if (key == null) return
+  const row = rows.value.find(r => r.rawKey === key)
+  baseX.value = row ? row.atX : null
 })
+
+/** The base record index on the CURRENT wire — re-resolved per update. */
+const baseIdx = computed(() =>
+  res.value && baseKey.value != null ? resolveBaseIdx(res.value, baseKey.value, baseX.value) : null)
 
 const baseMetrics = computed(() =>
   res.value && baseIdx.value != null ? metricsAt(res.value, baseIdx.value) : null)
@@ -291,7 +304,7 @@ const baseMetrics = computed(() =>
 function cellText(row: ResultRow, c: string): string {
   const dec = decimals.value[c] ?? 0
   const v = row.metrics[c]
-  if (!deltaOn.value || !baseMetrics.value || row.gi === baseGi.value) return fmtNum(v, dec)
+  if (!deltaOn.value || !baseMetrics.value || row.rawKey === baseKey.value) return fmtNum(v, dec)
   const b = baseMetrics.value[c]
   if (v === null || b === null) return '—'
   const d = v - b
@@ -299,7 +312,7 @@ function cellText(row: ResultRow, c: string): string {
 }
 
 function cellClass(row: ResultRow, ri: number, c: string): string {
-  if (deltaOn.value && baseMetrics.value && row.gi !== baseGi.value) {
+  if (deltaOn.value && baseMetrics.value && row.rawKey !== baseKey.value) {
     const v = row.metrics[c]
     const b = baseMetrics.value[c]
     if (v === null || b === null || v === b) return 'text-on-surface-variant'
