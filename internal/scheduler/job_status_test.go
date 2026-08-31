@@ -5,8 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gliese129/runq/internal/executor"
-	"github.com/gliese129/runq/internal/store"
+	"github.com/gliese129/runq-lab/internal/store"
 )
 
 // newStatusHarness builds a minimal scheduler around an in-memory store —
@@ -14,7 +13,7 @@ import (
 func newStatusHarness(t *testing.T) (*Scheduler, *store.Store) {
 	t.Helper()
 	st := testStore(t)
-	s := New(DefaultConfig(), NewQueue(), testPool(1), NewLocalLauncher(executor.New()), st, testLogger(), nil, "", nil)
+	s := New(DefaultConfig(), NewQueue(), testPool(1), &fakeRemoteLauncher{}, st, testLogger())
 	return s, st
 }
 

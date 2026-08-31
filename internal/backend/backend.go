@@ -10,8 +10,7 @@
 //	reconciler.go          — Reconciler interface, NoopReconciler, DefaultReadTTL
 //
 //	store_queries.go       — storeQueries base struct (store + registry delegation)
-//	local_backend.go       — LocalBackend: in-process daemon services (local GPU)
-//	ssh_backend.go         — SSHBackend: remote HPC cluster via SSH
+//	ssh_backend.go         — SSHBackend: HPC/runqd execution lanes
 //	multi.go               — MultiBackend: routes by target name
 //	unavailable_backend.go — test/fallback stub
 //

@@ -6,7 +6,7 @@ import (
 	"io/fs"
 	"time"
 
-	"github.com/gliese129/runq/internal/rfs"
+	"github.com/gliese129/runq-lab/internal/rfs"
 )
 
 // Follower is a pull-based Page iterator over a growing log file. It keeps

@@ -21,7 +21,7 @@ import (
 //
 //	retiring lane: rows stamped with exactly its generation
 //	active lane:   its generation, legacy '' rows, and ORPHAN generations
-//	               (no live retirement record) — which the lane then adopts
+//	               (no generation record at all) — which the lane then adopts
 //	               by restamping (ownership is written, never re-inferred)
 //
 // Retiring flips at rotation time while sensors are running — atomic.
@@ -46,6 +46,24 @@ func (s *LaneScope) ResumeActive() { s.retiring.Store(false) }
 // IsRetiring reports the current scope mode.
 func (s *LaneScope) IsRetiring() bool { return s.retiring.Load() }
 
+// Owns reports whether a point-read row is owned by this lane. SQL list
+// queries additionally let the active lane discover orphan generations so
+// restore can restamp them; after that adoption, point operations must use an
+// exact generation (or a legacy empty stamp). This stricter predicate keeps a
+// stale lane pointer from cancelling or reading through a newer endpoint.
+func (s *LaneScope) Owns(target, generation string) bool {
+	if s == nil {
+		return true
+	}
+	if target != s.Target {
+		return false
+	}
+	if s.IsRetiring() {
+		return generation == s.Generation
+	}
+	return generation == "" || generation == s.Generation
+}
+
 // whereClause renders the ownership predicate (target column is handled by
 // the caller's filter; this covers generation ownership only).
 func (s *LaneScope) whereClause() (string, []any) {
@@ -54,7 +72,7 @@ func (s *LaneScope) whereClause() (string, []any) {
 	}
 	return `(COALESCE(target_generation,'') = ? OR COALESCE(target_generation,'') = ''
 		OR target_generation NOT IN (
-			SELECT generation FROM target_generations WHERE target = ? AND done_at IS NULL))`,
+			SELECT generation FROM target_generations WHERE target = ?))`,
 		[]any{s.Generation, s.Target}
 }
 

@@ -9,15 +9,6 @@
     class="status-bar px-3"
     :class="{ 'status-bar--warn': !conn.connected.value }"
   >
-    <!-- connection segment -->
-    <span class="seg" :title="conn.lastError.value">
-      <span
-        class="status-dot mr-1"
-        :class="conn.connected.value ? 'status-dot--completed' : 'status-dot--failed sb-pulse'"
-      />
-      {{ conn.connected.value ? t('statusbar.connected') : t('statusbar.reconnecting') }}
-    </span>
-
     <template v-if="health">
       <!-- targets online -->
       <span v-if="health.targets.length > 0" class="seg">
@@ -117,22 +108,5 @@ watch(
 }
 .seg--dim {
   opacity: 0.75;
-}
-@keyframes sb-pulse {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.35;
-  }
-}
-.sb-pulse {
-  animation: sb-pulse 1.6s ease-in-out infinite;
-}
-@media (prefers-reduced-motion: reduce) {
-  .sb-pulse {
-    animation: none;
-  }
 }
 </style>

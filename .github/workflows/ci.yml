@@ -12,6 +12,18 @@ on:
       - dev
 
 jobs:
+  installer:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check installer shell syntax
+        run: sh -n install.sh tests/install/test_install.sh
+
+      - name: Run installer smoke tests
+        run: sh tests/install/test_install.sh
+
   go-core:
     runs-on: ubuntu-latest
     steps:
@@ -36,7 +48,7 @@ jobs:
           install-go: 'false'
 
       - name: Compilation Check
-        run: go build ./...
+        run: go build ./cmd/runq
 
       - name: Run unit test
         run: go test -v -race ./...

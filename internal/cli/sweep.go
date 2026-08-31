@@ -8,9 +8,9 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/gliese129/runq/internal/api"
-	"github.com/gliese129/runq/internal/backend"
-	job2 "github.com/gliese129/runq/internal/job"
+	"github.com/gliese129/runq-lab/internal/api"
+	"github.com/gliese129/runq-lab/internal/backend"
+	job2 "github.com/gliese129/runq-lab/internal/job"
 	"github.com/olekukonko/tablewriter"
 	"github.com/spf13/cobra"
 )

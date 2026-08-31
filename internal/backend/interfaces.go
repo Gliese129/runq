@@ -3,14 +3,14 @@ package backend
 import (
 	"context"
 
-	"github.com/gliese129/runq/internal/job"
-	"github.com/gliese129/runq/internal/logfile"
-	"github.com/gliese129/runq/internal/project"
-	"github.com/gliese129/runq/internal/workspace"
+	"github.com/gliese129/runq-lab/internal/job"
+	"github.com/gliese129/runq-lab/internal/logfile"
+	"github.com/gliese129/runq-lab/internal/project"
+	"github.com/gliese129/runq-lab/internal/workspace"
 )
 
 // Backend is the uniform interface consumed by the dashboard HTTP server
-// and CLI --json. Both daemon and HPC backends implement it.
+// and CLI --json. Execution lanes implement it for HPC schedulers and runqd.
 type Backend interface {
 	// Capabilities is the backend's self-description (pure data, no I/O).
 	// It is the single source of truth for what this backend can do; the
@@ -33,17 +33,17 @@ type Backend interface {
 	// <job_id>` and the WebUI task list). Pagination is SQL-level (D20);
 	// total is the unpaginated match count.
 	ListTasks(ctx context.Context, opts TaskListOptions) (items []TaskView, total int, err error)
-	// TaskMetrics returns ingested metric points (pure SQL read, spec
-	// §8.1.4). afterTS > 0 returns only points newer than it — the ?after=
-	// incremental pull for charts.
+	// TaskMetrics returns the bounded raw metric tail without changing SQL
+	// projections. afterTS > 0 returns only points newer than it — the
+	// ?after= incremental pull for charts.
 	TaskMetrics(ctx context.Context, taskID string, afterTS int64) ([]MetricPoint, error)
 	// MetricKeys is the discovery half of the metrics dual-mode (spec §5.4:
 	// GET /jobs/{id}/metrics without ?key=).
 	MetricKeys(ctx context.Context, jobID string) ([]string, error)
 	// TaskMetricBuckets is the chart's bucket mode (spec §6.4): one key,
 	// [fromTS, toTS] (0,0 = full), ≤ maxBuckets aggregated buckets.
-	// Terminal tasks read the on-target pyramid (1–O(log n) ranged
-	// reads); running / not-yet-built fall back to tail-window
+	// Wrapper-completed success/failure tasks read the on-target pyramid
+	// (1–O(log n) ranged reads); other states fall back to tail-window
 	// aggregation. source reports which path answered ("pyramid"|"tail").
 	TaskMetricBuckets(ctx context.Context, taskID, key string, fromTS, toTS int64, maxBuckets int) (buckets []workspace.PyramidBucket, source string, err error)
 

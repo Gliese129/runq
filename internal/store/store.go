@@ -3,11 +3,12 @@ package store
 import (
 	"context"
 	"database/sql"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite" // register "sqlite" driver
 
-	"github.com/gliese129/runq/internal/utils"
+	"github.com/gliese129/runq-lab/internal/utils"
 )
 
 // DefaultDBPath returns the resolved database path based on ResolveDataDir().
@@ -17,7 +18,8 @@ func DefaultDBPath() string {
 }
 
 type Store struct {
-	db *sql.DB
+	db           *sql.DB
+	attemptLocks [attemptLockShards]sync.Mutex
 }
 
 // Open creates or opens the SQLite database at dbPath, configures it for

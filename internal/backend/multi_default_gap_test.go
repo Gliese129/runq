@@ -2,10 +2,12 @@ package backend
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 
-	"github.com/gliese129/runq/internal/job"
-	"github.com/gliese129/runq/internal/store"
+	"github.com/gliese129/runq-lab/internal/job"
+	"github.com/gliese129/runq-lab/internal/store"
 )
 
 // Codex RQ2-4 F3: during a config reconcile the default target can be
@@ -49,5 +51,50 @@ func TestDefaultBackendReconcileGap(t *testing.T) {
 	}
 	if _, derr := m.DryRun(ctx, job.JobConfig{}); derr == nil {
 		t.Fatal("gap DryRun must return an error, not panic")
+	}
+}
+
+func TestMultiBackendUnconfiguredState(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	m, err := NewMultiBackend(map[string]Backend{}, st, "")
+	if err != nil {
+		t.Fatalf("empty MultiBackend must be valid: %v", err)
+	}
+	if got := m.DefaultTargetName(); got != "" {
+		t.Fatalf("default target = %q, want empty", got)
+	}
+	if err := m.SetDefaultTarget(""); err != nil {
+		t.Fatalf("setting empty default in empty state: %v", err)
+	}
+	jobs, err := m.ListJobs(ctx, "")
+	if err != nil || len(jobs) != 0 {
+		t.Fatalf("target-independent job list = %+v, err %v", jobs, err)
+	}
+	gpus, err := m.GPUStatus(ctx)
+	if err != nil || len(gpus) != 0 {
+		t.Fatalf("empty GPU aggregate = %+v, err %v", gpus, err)
+	}
+
+	_, err = m.DryRun(ctx, job.JobConfig{})
+	if !errors.Is(err, ErrNoTargetConfigured) {
+		t.Fatalf("DryRun error = %v, want ErrNoTargetConfigured", err)
+	}
+	if !strings.Contains(err.Error(), "runq target add") {
+		t.Fatalf("DryRun error is not actionable: %v", err)
+	}
+	_, _, err = m.SubmitJob(ctx, job.JobConfig{}, SubmitOptions{})
+	if !errors.Is(err, ErrNoTargetConfigured) {
+		t.Fatalf("SubmitJob error = %v, want ErrNoTargetConfigured", err)
+	}
+
+	m.SetTarget("configured", NewUnavailableBackend(errors.New("unused")))
+	if err := m.SetDefaultTarget(""); err == nil {
+		t.Fatal("clearing the default while a target is active must fail")
 	}
 }

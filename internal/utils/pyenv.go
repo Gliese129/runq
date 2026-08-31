@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/gliese129/runq/internal/rfs"
+	"github.com/gliese129/runq-lab/internal/rfs"
 )
 
 // WrapCommand prepends shell commands to activate the given Python environment

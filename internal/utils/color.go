@@ -34,13 +34,13 @@ func colorize(color, text string) string {
 
 // StatusColor returns the status string with an appropriate color.
 // Mapping mirrors the dashboard's statusGrammar (CI convention):
-// running→cyan, pending→yellow, success/done→green, failed→red,
+// running/submitting→cyan, pending→yellow, success/done→green, failed→red,
 // killed/partial→yellow (human decision / mixed outcome, not failure red),
 // unknown→gray (no verdict yet — RQ-74), paused→no color.
 func StatusColor(status string) string {
 	var color string
 	switch status {
-	case "running":
+	case "running", "submitting":
 		color = cyan
 	case "pending":
 		color = yellow

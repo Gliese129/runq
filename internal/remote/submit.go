@@ -9,15 +9,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gliese129/runq/internal/config"
-	"github.com/gliese129/runq/internal/job"
-	"github.com/gliese129/runq/internal/preflight"
-	"github.com/gliese129/runq/internal/project"
-	"github.com/gliese129/runq/internal/rfs"
-	"github.com/gliese129/runq/internal/store"
-	"github.com/gliese129/runq/internal/submitplan"
-	"github.com/gliese129/runq/internal/utils"
-	"github.com/gliese129/runq/internal/workspace"
+	"github.com/gliese129/runq-lab/internal/config"
+	"github.com/gliese129/runq-lab/internal/job"
+	"github.com/gliese129/runq-lab/internal/preflight"
+	"github.com/gliese129/runq-lab/internal/project"
+	"github.com/gliese129/runq-lab/internal/rfs"
+	"github.com/gliese129/runq-lab/internal/store"
+	"github.com/gliese129/runq-lab/internal/submitplan"
+	"github.com/gliese129/runq-lab/internal/utils"
+	"github.com/gliese129/runq-lab/internal/workspace"
 )
 
 // SubmitOpts carries per-call submit options, mirroring service.SubmitJobOpts on
@@ -45,6 +45,7 @@ func renderSubmitCmd(tmpl string, t submitplan.PlannedTask, plan submitplan.Plan
 	vars := map[string]string{
 		"run_sh":   runsh,
 		"gpus":     strconv.Itoa(t.GPUsNeeded),
+		"timeout":  strconv.Itoa(t.Timeout),
 		"job_id":   plan.JobID,
 		"task_id":  t.TaskID,
 		"task_dir": t.TaskDir,
@@ -115,10 +116,9 @@ func resolveNote(ctx context.Context, st *store.Store, cfg job.JobConfig) (strin
 }
 
 // Prepare does everything up to (but NOT including) the external submission:
-// plan, validate, one-shot setup, job row, and — per task — workspace files,
-// run.sh, submit.cmd, and the pending task row. The returned rows are ready
-// to be queued; the actual submission happens per task in Launcher.Launch
-// (scheduler lane) or inline in Submit (legacy lane).
+// plan, validate, one-shot setup, workspace files, run.sh, submit.cmd, then
+// one atomic job+tasks ledger transaction. The returned rows are ready
+// to be queued; the actual submission happens per task in Launcher.Launch.
 //
 // planDeps assembles the submitplan.Deps fields that Prepare and Preview
 // MUST agree on (RQ-65 retest #1: preview forgot PreflightFS and checked
@@ -242,23 +242,6 @@ func (b *Backend) Prepare(ctx context.Context, jobCfg job.JobConfig, proj *proje
 		Note: plan.Note, ConfigJSON: string(cfgJSON), Status: "pending",
 		TotalTasks: len(plan.Tasks), Target: b.Cfg.Name, CreatedAt: now,
 	}
-	if err := b.Store.InsertJob(ctx, &jobRow); err != nil {
-		return "", nil, fmt.Errorf("persist job: %w", err)
-	}
-
-	// Ledger hygiene: if per-task preparation aborts midway, rows already
-	// inserted would otherwise rot as pending forever — they never reach the
-	// queue. The user sees the submit error; the ledger must agree with it.
-	defer func() {
-		if err == nil {
-			return
-		}
-		for _, r := range rows {
-			_ = b.Store.UpdateTaskStatus(ctx, r.ID, "failed",
-				map[string]any{"finished_at": nowUnix(), "status_source": SourceSubmit})
-		}
-		_ = b.refreshJobStatus(ctx, jobID)
-	}()
 
 	for _, t := range plan.Tasks {
 		// Local prep + template render first: these have no external side effect,
@@ -283,67 +266,20 @@ func (b *Backend) Prepare(ctx context.Context, jobCfg job.JobConfig, proj *proje
 			return plan.JobID, rows, fmt.Errorf("write submit.cmd for %s: %w", t.TaskID, err)
 		}
 
-		// Durable ledger BEFORE the external submit: insert the task (pending, no
-		// external_id yet). A sbatch that succeeds but whose id we then fail to
-		// parse/persist must NOT become an invisible orphan — the row already
-		// exists and status/kill/collect can see it.
+		// Build the complete ledger image in memory. No external submission can
+		// happen until the job and every pending task commit together below.
 		row := planToTaskRow(t, plan, now, "", b.Cfg.Name, b.Cfg.SemanticGeneration())
-		if err := b.Store.InsertTask(ctx, &row); err != nil {
-			return plan.JobID, rows, fmt.Errorf("persist task %s: %w", t.TaskID, err)
-		}
 		rows = append(rows, row)
 	}
 
+	// Admission is one publication boundary: callers may enqueue only after
+	// every task exists durably. A task insert or commit failure rolls back the
+	// job row and all preceding task rows, satisfying the A1 DFA invariant.
+	if err := b.Store.InsertJobWithTasks(ctx, &jobRow, rows); err != nil {
+		return plan.JobID, nil, fmt.Errorf("persist job and tasks atomically: %w", err)
+	}
+
 	return plan.JobID, rows, nil
-}
-
-// Submit is the LEGACY inline path: Prepare followed by synchronous per-task
-// submission. The scheduler lane (SSHBackend queue + remote.Launcher) replaces
-// it in the daemon; this remains for tests and non-daemon callers and will be
-// removed in Step 3 of the scheduler unification.
-func (b *Backend) Submit(ctx context.Context, jobCfg job.JobConfig, proj *project.Config, opts SubmitOpts) (jobID string, submitted int, err error) {
-	jobID, rows, err := b.Prepare(ctx, jobCfg, proj, opts)
-	if err != nil {
-		return jobID, 0, err
-	}
-	for _, row := range rows {
-		cmdBytes, rerr := b.FS.ReadFile(path.Join(row.TaskDir, submitCmdFileName))
-		if rerr != nil {
-			return jobID, submitted, fmt.Errorf("read submit.cmd for %s: %w", row.ID, rerr)
-		}
-		fullCmd := string(cmdBytes)
-
-		out, xerr := b.shellRun(ctx, fullCmd)
-		if xerr != nil {
-			// sbatch itself errored → no cluster job exists → truly terminal.
-			opLog("SUBMIT FAIL task=%s job=%s\ncmd: %s\nerr: %v\noutput: %s", row.ID, jobID, fullCmd, xerr, out)
-			_ = b.Store.UpdateTaskStatus(ctx, row.ID, "failed",
-				map[string]any{"finished_at": nowUnix(), "status_source": SourceSubmit})
-			return jobID, submitted, fmt.Errorf("submit %s failed: %w\noutput:\n%s", row.ID, xerr, out)
-		}
-
-		extID, perr := utils.ExtractSubmitID(out, b.Cfg.SubmitIDRegex)
-		if perr != nil {
-			opLog("SUBMIT NOID task=%s job=%s\ncmd: %s\noutput: %s", row.ID, jobID, fullCmd, out)
-			// Submit SUCCEEDED but the id is unparseable → a cluster job may be
-			// running untracked. LEAVE the task pending (already inserted): it is
-			// not a failure, and pending is non-terminal so reconcile won't stamp a
-			// bogus finished_at. If the job actually runs it self-reports via
-			// status.json and Reconcile heals pending→running/success. We just
-			// can't kill it (no external id). Surface the error so the user fixes
-			// submit_id_regex.
-			return jobID, submitted, fmt.Errorf(
-				"submitted %s but could not parse its job id — check submit_id_regex (the cluster job may be running untracked and is not killable without its id): %w\noutput:\n%s",
-				row.ID, perr, out)
-		}
-
-		if uerr := b.Store.UpdateTaskStatus(ctx, row.ID, "pending", map[string]any{"external_id": extID}); uerr != nil {
-			return jobID, submitted, fmt.Errorf("record external id for %s: %w", row.ID, uerr)
-		}
-		opLog("SUBMIT OK task=%s job=%s ext=%s\ncmd: %s", row.ID, jobID, extID, fullCmd)
-		submitted++
-	}
-	return jobID, submitted, nil
 }
 
 // homeDirCached resolves the login node's absolute $HOME once per lane
@@ -400,7 +336,12 @@ func (b *Backend) buildRunScript(t submitplan.PlannedTask, plan submitplan.Plan)
 	}, workspace.Safety{FactorPercent: 110}) {
 		env[k] = v
 	}
-	env["RUNQ_NO_DAEMON"] = "1"
+	// A runqd-backed target injects RUNQ_SOCKET_PATH into the child process, so
+	// its SDK calls should use that machine daemon. Traditional HPC schedulers
+	// have no daemon on the compute node and retain the explicit no-daemon mode.
+	if b.Cfg == nil || b.Cfg.Scheduler != "runq" {
+		env["RUNQ_NO_DAEMON"] = "1"
+	}
 	// Done-marker dir: enables O(1) completion detection (one readdir instead
 	// of N status.json reads). Only baked in when the target has a workspace
 	// root; without it the daemon falls back to probe-only reconcile.

@@ -8,10 +8,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gliese129/runq/internal/backend"
-	"github.com/gliese129/runq/internal/config"
-	"github.com/gliese129/runq/internal/genfile"
-	"github.com/gliese129/runq/internal/rfs"
+	"github.com/gliese129/runq-lab/internal/backend"
+	"github.com/gliese129/runq-lab/internal/config"
+	"github.com/gliese129/runq-lab/internal/genfile"
+	"github.com/gliese129/runq-lab/internal/rfs"
 )
 
 // (ErrForwardRestartRequired is gone — RQ-75's lane reconciler builds a
@@ -143,6 +143,11 @@ func (s *Server) handlePutTarget(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !replaced {
+		if len(cfg.Targets) == 0 {
+			// The first real target ends the unconfigured state atomically; do
+			// not leave a stale default_target pointing at a deleted name.
+			cfg.DefaultTarget = name
+		}
 		cfg.Targets = append(cfg.Targets, tc)
 	}
 	if !s.saveGlobalConfigCAS(w, r, cfg) {
@@ -173,6 +178,9 @@ func (s *Server) handleDeleteTarget(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg.Targets = kept
+	if cfg.DefaultTarget == name {
+		cfg.DefaultTarget = ""
+	}
 	if !s.saveGlobalConfigCAS(w, r, cfg) {
 		return
 	}
@@ -302,7 +310,14 @@ func (s *Server) handlePutGlobalConfig(w http.ResponseWriter, r *http.Request) {
 		cfg.DataPath = *p.DataPath
 	}
 	if p.DefaultTarget != nil {
-		cfg.DefaultTarget = *p.DefaultTarget
+		name := strings.TrimSpace(*p.DefaultTarget)
+		if name != "" {
+			if _, ferr := cfg.FindTarget(name); ferr != nil {
+				writeErr(w, http.StatusBadRequest, backend.CodeBadRequest, "cannot set default_target: "+ferr.Error())
+				return
+			}
+		}
+		cfg.DefaultTarget = name
 	}
 	if !s.saveGlobalConfigCAS(w, r, cfg) {
 		return

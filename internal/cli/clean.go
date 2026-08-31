@@ -12,8 +12,8 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
-	"github.com/gliese129/runq/internal/backend"
-	"github.com/gliese129/runq/internal/utils"
+	"github.com/gliese129/runq-lab/internal/backend"
+	"github.com/gliese129/runq-lab/internal/utils"
 )
 
 // ── runq clean（issue 397203ea…7caa7c）──

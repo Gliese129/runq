@@ -235,13 +235,13 @@ func targetOrDefault(target string) string {
 	return target
 }
 
-// ActiveStatuses is THE definition of "this job still has live work":
-// queued, executing, or pause-resumable. Every guard that asks "is it safe
-// to hide/forget this?" must use it — the paused-archivable inconsistency
-// (GUI said no, CLI said yes) existed precisely because this list was
-// inlined in three places. Mirrors the frontend's statusGrammar single-
-// source philosophy (U3), backend edition.
-var ActiveStatuses = []string{"pending", "running", "paused"}
+// ActiveStatuses is THE definition of "this task/job still has live work":
+// queued, executing, pause-resumable, or outcome-unknown. Every guard that
+// asks "is it safe to hide/forget this?" must use it — the paused-archivable
+// inconsistency (GUI said no, CLI said yes) existed precisely because this
+// list was inlined in three places. Mirrors the frontend's statusGrammar
+// single-source philosophy (U3), backend edition.
+var ActiveStatuses = []string{"pending", "submitting", "running", "paused", "unknown"}
 
 // IsActiveStatus reports whether s is one of ActiveStatuses.
 func IsActiveStatus(s string) bool {
@@ -313,6 +313,38 @@ func TerminalJobStatus(success, failed, killed int) string {
 	default:
 		return "partial"
 	}
+}
+
+// ProjectJobStatus is the single lifecycle projection from task rows to a job
+// status. Pause remains an orthogonal job-level overlay: callers that hold a
+// pause intent keep "paused" instead of applying this projection.
+func ProjectJobStatus(tasks []TaskRow) (string, error) {
+	var waiting, active, success, failed, killed int
+	for _, task := range tasks {
+		switch task.Status {
+		case "pending", "paused":
+			waiting++
+		case "submitting", "running", "unknown":
+			active++
+		case "success":
+			success++
+		case "failed":
+			failed++
+		case "killed":
+			killed++
+		default:
+			return "", fmt.Errorf("project job status: task %q has invalid status %q", task.ID, task.Status)
+		}
+	}
+	if waiting+active > 0 {
+		// A job with only never-started work is pending. Any active or
+		// already-finished attempt means the job has started and is running.
+		if active+success+failed+killed > 0 {
+			return "running", nil
+		}
+		return "pending", nil
+	}
+	return TerminalJobStatus(success, failed, killed), nil
 }
 
 // ── Archive ──

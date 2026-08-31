@@ -6,8 +6,9 @@ import (
 )
 
 var (
-	ErrNotSupported = errors.New("not supported")
-	ErrNotFound     = errors.New("not found")
+	ErrNotSupported       = errors.New("not supported")
+	ErrNotFound           = errors.New("not found")
+	ErrNoTargetConfigured = errors.New("no target configured")
 )
 
 // IsNotFound reports whether err represents a "not found" condition.

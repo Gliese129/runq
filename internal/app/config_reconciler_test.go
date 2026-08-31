@@ -2,17 +2,21 @@ package app
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/gliese129/runq/internal/backend"
-	"github.com/gliese129/runq/internal/config"
-	"github.com/gliese129/runq/internal/store"
+	"github.com/gliese129/runq-lab/internal/backend"
+	"github.com/gliese129/runq-lab/internal/config"
+	"github.com/gliese129/runq-lab/internal/job"
+	"github.com/gliese129/runq-lab/internal/store"
 )
 
 // fakeLane embeds the Backend interface (nil — methods panic if called,
@@ -21,13 +25,25 @@ import (
 // review-#4 fence sequence), not just end state.
 type fakeLane struct {
 	backend.Backend
-	name     string
-	id       string
-	gen      string // SemanticGeneration of the config this lane was built from
-	closed   bool
-	started  bool
-	retiring bool
-	events   *[]string
+	name      string
+	id        string
+	gen       string // SemanticGeneration of the config this lane was built from
+	closed    bool
+	started   bool
+	retiring  bool
+	admitting bool
+	startErr  error
+	events    *[]string
+}
+
+type historyCapableLane struct {
+	*fakeLane
+	quiesced bool
+}
+
+func (f *historyCapableLane) QuiesceForHistory() {
+	f.quiesced = true
+	f.rec("quiesce")
 }
 
 func (f *fakeLane) rec(verb string) {
@@ -36,11 +52,16 @@ func (f *fakeLane) rec(verb string) {
 	}
 }
 
-func (f *fakeLane) Close() error          { f.closed = true; f.rec("close"); return nil }
-func (f *fakeLane) Start(context.Context) { f.started = true; f.rec("start") }
-func (f *fakeLane) Generation() string    { return f.gen }
-func (f *fakeLane) MarkRetiring()         { f.retiring = true; f.rec("retire") }
-func (f *fakeLane) PromoteActive()        { f.retiring = false; f.rec("promote") }
+func (f *fakeLane) Close() error { f.closed = true; f.rec("close"); return nil }
+func (f *fakeLane) Start(context.Context) error {
+	f.started = true
+	f.rec("start")
+	return f.startErr
+}
+func (f *fakeLane) Generation() string          { return f.gen }
+func (f *fakeLane) MarkRetiring()               { f.retiring = true; f.rec("retire") }
+func (f *fakeLane) PromoteActive()              { f.retiring = false; f.rec("promote") }
+func (f *fakeLane) HasInFlightAdmissions() bool { return f.admitting }
 
 func writeCfg(t *testing.T, dir, content string) {
 	t.Helper()
@@ -80,7 +101,11 @@ func newReconcilerHarness(t *testing.T, dir string) (*Daemon, *[]string, map[str
 		seq++
 		id := fmt.Sprintf("%s#%d", tc.Name, seq)
 		events = append(events, "build:"+id)
-		return &fakeLane{name: tc.Name, id: id, gen: tc.SemanticGeneration(), events: &events}, nil
+		lane := &fakeLane{name: tc.Name, id: id, gen: tc.SemanticGeneration(), events: &events}
+		if tc.SubmitTemplate == "START_FAIL" {
+			lane.startErr = errors.New("injected recovery failure")
+		}
+		return lane, nil
 	}
 
 	lanes := map[string]backend.Backend{}
@@ -204,6 +229,52 @@ func TestReconcileAddChangeRemove(t *testing.T) {
 	}
 }
 
+func TestReconcileLastTargetToUnconfigured(t *testing.T) {
+	dir := t.TempDir()
+	writeCfg(t, dir, baseCfg)
+	d, _, _ := newReconcilerHarness(t, dir)
+
+	writeCfg(t, dir, "")
+	if err := d.ReconcileConfig("remove last target"); err != nil {
+		t.Fatal(err)
+	}
+	if got := d.multiBe.DefaultTargetName(); got != "" {
+		t.Fatalf("default target = %q, want empty", got)
+	}
+	if _, ok := d.multiBe.ActiveLane("a"); ok {
+		t.Fatal("last target remains actively routed")
+	}
+	if len(d.lastTargets) != 0 {
+		t.Fatalf("observed targets = %+v, want empty", d.lastTargets)
+	}
+	if _, err := d.multiBe.DryRun(context.Background(), job.JobConfig{}); !errors.Is(err, backend.ErrNoTargetConfigured) {
+		t.Fatalf("unconfigured DryRun error = %v", err)
+	}
+}
+
+func TestReconcileAddsFirstTargetWithoutRestart(t *testing.T) {
+	dir := t.TempDir()
+	writeCfg(t, dir, "")
+	d, built, _ := newReconcilerHarness(t, dir)
+	if got := d.multiBe.DefaultTargetName(); got != "" {
+		t.Fatalf("boot default target = %q, want empty", got)
+	}
+
+	writeCfg(t, dir, baseCfg)
+	if err := d.ReconcileConfig("add first target"); err != nil {
+		t.Fatal(err)
+	}
+	if len(*built) != 1 || (*built)[0] != "a" {
+		t.Fatalf("first target builds = %v, want [a]", *built)
+	}
+	if got := d.multiBe.DefaultTargetName(); got != "a" {
+		t.Fatalf("default target = %q, want a", got)
+	}
+	if _, ok := d.multiBe.ActiveLane("a"); !ok {
+		t.Fatal("first target was not routed")
+	}
+}
+
 func TestReconcileBrokenEditKeepsOldLane(t *testing.T) {
 	dir := t.TempDir()
 	writeCfg(t, dir, baseCfg)
@@ -269,6 +340,58 @@ targets:
 	d.SweepRetiringLanes()
 	if !oldA.closed {
 		t.Error("fixed edit left the superseded lane open after two sweeps")
+	}
+}
+
+func TestReconcileAddedLaneRecoveryFailureStaysUnrouted(t *testing.T) {
+	dir := t.TempDir()
+	writeCfg(t, dir, baseCfg)
+	d, built, _ := newReconcilerHarness(t, dir)
+	writeCfg(t, dir, baseCfg+`  - name: b
+    scheduler: pbs
+    submit_template: START_FAIL
+`)
+	if err := d.ReconcileConfig("test"); err != nil {
+		t.Fatal(err)
+	}
+	if len(*built) != 1 || (*built)[0] != "b" {
+		t.Fatalf("built lanes = %v, want [b]", *built)
+	}
+	if _, ok := d.lanes["b"]; ok {
+		t.Fatal("lane with failed recovery was routed")
+	}
+	if _, err := d.multiBe.TargetFS("b"); err == nil {
+		t.Fatal("multi backend exposed lane with failed recovery")
+	}
+	var started, closed bool
+	for _, event := range harnessEvents(d) {
+		started = started || strings.HasPrefix(event, "start:b#")
+		closed = closed || strings.HasPrefix(event, "close:b#")
+	}
+	if !started || !closed {
+		t.Fatalf("failed lane lifecycle did not start+close: %v", harnessEvents(d))
+	}
+}
+
+func TestReconcileReplacementRecoveryFailureRestoresOldLane(t *testing.T) {
+	dir := t.TempDir()
+	writeCfg(t, dir, baseCfg)
+	d, _, _ := newReconcilerHarness(t, dir)
+	old := d.lanes["a"].(*fakeLane)
+	writeCfg(t, dir, `default_target: a
+targets:
+  - name: a
+    scheduler: slurm
+    submit_template: START_FAIL
+`)
+	if err := d.ReconcileConfig("test"); err != nil {
+		t.Fatal(err)
+	}
+	if got := d.lanes["a"]; got != old {
+		t.Fatalf("failed replacement displaced old lane: got %p want %p", got, old)
+	}
+	if old.closed || old.retiring {
+		t.Fatalf("old lane not restored active after replacement failure: %+v", old)
 	}
 }
 
@@ -477,6 +600,114 @@ targets:
 	}
 }
 
+func TestRetiringSweepWaitsForAdmissionBarrier(t *testing.T) {
+	dir := t.TempDir()
+	writeCfg(t, dir, baseCfg)
+	d, _, _ := newReconcilerHarness(t, dir)
+	oldA := d.lanes["a"].(*fakeLane)
+	oldA.admitting = true
+
+	writeCfg(t, dir, `default_target: a
+targets:
+  - name: a
+    scheduler: slurm
+    submit_template: changed
+`)
+	if err := d.ReconcileConfig("test"); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		d.SweepRetiringLanes()
+	}
+	if oldA.closed {
+		t.Fatal("retiring lane closed while an admission was in flight")
+	}
+
+	oldA.admitting = false
+	d.SweepRetiringLanes()
+	if oldA.closed {
+		t.Fatal("retiring lane closed on the first zero after admission drained")
+	}
+	d.SweepRetiringLanes()
+	if !oldA.closed {
+		t.Fatal("retiring lane stayed open after admission drained and zero was confirmed")
+	}
+}
+
+func TestRetiringSweepPreservesArtifactCapableGeneration(t *testing.T) {
+	dir := t.TempDir()
+	writeCfg(t, dir, baseCfg)
+	d, _, _ := newReconcilerHarness(t, dir)
+	original := d.lanes["a"].(*fakeLane)
+	old := &historyCapableLane{fakeLane: original}
+	d.lanes["a"] = old
+	d.multiBe.SetTarget("a", old)
+
+	writeCfg(t, dir, `default_target: a
+targets:
+  - name: a
+    scheduler: slurm
+    submit_template: changed
+`)
+	if err := d.ReconcileConfig("test"); err != nil {
+		t.Fatal(err)
+	}
+	d.SweepRetiringLanes()
+	d.SweepRetiringLanes()
+	key := "a@" + old.gen
+	if !old.quiesced || old.closed {
+		t.Fatalf("settled lane quiesced=%v closed=%v, want artifact-capable quiesce", old.quiesced, old.closed)
+	}
+	if got := d.historicalLanes[key]; got != old {
+		t.Fatalf("historical lane = %T %v, want preserved old lane", got, got)
+	}
+	if _, ok := d.retiringLanes[key]; ok {
+		t.Fatal("settled lane remains in live retiring registry")
+	}
+}
+
+func TestRestartRebuildsSettledGenerationAsColdArtifactLane(t *testing.T) {
+	dir := t.TempDir()
+	writeCfg(t, dir, baseCfg)
+	d, _, _ := newReconcilerHarness(t, dir)
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldTC := cfg.ResolveTargets()[0]
+	oldTC.SubmitTemplate = "historical-submit"
+	gen := oldTC.SemanticGeneration()
+	snapshot, err := json.Marshal(oldTC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := d.Store.UpsertRetiredGeneration(ctx, &store.TargetGenerationRow{
+		Target: "a", Generation: gen, ConfigJSON: string(snapshot), Reason: "changed",
+		RetiredAt: time.Now().Unix(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Store.MarkGenerationDone(ctx, "a", gen); err != nil {
+		t.Fatal(err)
+	}
+	var built *historyCapableLane
+	d.buildHistoricalLane = func(tc config.TargetConfig, _ *config.GlobalConfig) (backend.Backend, error) {
+		built = &historyCapableLane{fakeLane: &fakeLane{name: tc.Name, id: "history", gen: tc.SemanticGeneration()}}
+		return built, nil
+	}
+	if err := d.rebuildRetiringLanes(); err != nil {
+		t.Fatal(err)
+	}
+	if built == nil || built.started || !built.retiring {
+		t.Fatalf("historical lane = %+v, want cold retiring scope", built)
+	}
+	key := "a@" + gen
+	if d.historicalLanes[key] != built {
+		t.Fatalf("historical registry missing %s", key)
+	}
+}
+
 // Removed target: pending rows stop with a visible reason; the lane
 // retires for its in-flight rows (reason 'removed').
 func TestReconcileRemoveStopsPendingAndRetires(t *testing.T) {
@@ -589,6 +820,52 @@ targets:
 	}
 	if got := d.multiBe.DefaultTargetName(); got != "b" {
 		t.Fatalf("default target = %q, want b", got)
+	}
+}
+
+func TestRebuildRetiringLanesFailsWhenLiveSnapshotIsUnreadable(t *testing.T) {
+	dir := t.TempDir()
+	writeCfg(t, dir, baseCfg)
+	d, _, _ := newReconcilerHarness(t, dir)
+	seedLaneTask(t, d.Store, "t-bad-snapshot", "a", "broken-generation", "running", "external-1")
+	if err := d.Store.UpsertRetiredGeneration(context.Background(), &store.TargetGenerationRow{
+		Target: "a", Generation: "broken-generation", ConfigJSON: "{", Reason: "changed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	err := d.rebuildRetiringLanes()
+	if err == nil || !strings.Contains(err.Error(), "decode retiring generation") {
+		t.Fatalf("rebuild error = %v, want visible snapshot failure", err)
+	}
+	if len(d.retiringLanes) != 0 {
+		t.Fatalf("unreadable generation unexpectedly published a lane: %+v", d.retiringLanes)
+	}
+}
+
+func TestRebuildRetiringLanesPublishesOwnerBeforeSuccess(t *testing.T) {
+	dir := t.TempDir()
+	writeCfg(t, dir, baseCfg)
+	d, _, _ := newReconcilerHarness(t, dir)
+	old := config.TargetConfig{Name: "a", Scheduler: "slurm", SubmitTemplate: "old-submit"}
+	oldGeneration := old.SemanticGeneration()
+	seedLaneTask(t, d.Store, "t-old-generation", "a", oldGeneration, "running", "external-2")
+	snapshot, err := json.Marshal(old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Store.UpsertRetiredGeneration(context.Background(), &store.TargetGenerationRow{
+		Target: "a", Generation: oldGeneration, ConfigJSON: string(snapshot), Reason: "changed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := d.rebuildRetiringLanes(); err != nil {
+		t.Fatal(err)
+	}
+	lane, ok := d.retiringLanes["a@"+oldGeneration].(*fakeLane)
+	if !ok || !lane.started || !lane.retiring {
+		t.Fatalf("recovered lane = %#v, want started retiring owner", d.retiringLanes["a@"+oldGeneration])
 	}
 }
 

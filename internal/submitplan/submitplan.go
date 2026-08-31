@@ -11,12 +11,12 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/gliese129/runq/internal/job"
-	"github.com/gliese129/runq/internal/preflight"
-	"github.com/gliese129/runq/internal/project"
-	"github.com/gliese129/runq/internal/rfs"
-	"github.com/gliese129/runq/internal/utils"
-	"github.com/gliese129/runq/internal/workspace"
+	"github.com/gliese129/runq-lab/internal/job"
+	"github.com/gliese129/runq-lab/internal/preflight"
+	"github.com/gliese129/runq-lab/internal/project"
+	"github.com/gliese129/runq-lab/internal/rfs"
+	"github.com/gliese129/runq-lab/internal/utils"
+	"github.com/gliese129/runq-lab/internal/workspace"
 )
 
 // Paths are backend-selected roots. Build only joins below these roots; it does

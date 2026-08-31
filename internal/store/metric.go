@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"strings"
 )
 
@@ -61,31 +62,65 @@ func (s *Store) SetIngestMark(ctx context.Context, taskID string, m IngestMark) 
 	return err
 }
 
-// DeleteTaskMetrics drops a task's ingested SDK-output state — summaries,
-// result records, and every ingest mark — the retry unfreeze ("fresh
-// attempt = fresh ingest"). Terminal passes froze the marks (Final=true);
-// without this reset the new attempt's files would never be read. Result
-// rows must go WITH their mark: result_records has no natural PK, so a
-// mark-only reset would double-insert them on the full re-read.
-//
-// checkpoints are DELIBERATELY kept: they are a TASK-lifetime event log,
-// not a reduction of the current file. Freeze sizing (MaxCheckpointSize)
-// asks "how big does this task's checkpoints get" — attempt-independent,
-// and a retry often RESUMES from the previous attempt's checkpoint, whose
-// file is still on disk. PK (task_id, step) + newer-ts upsert makes
-// re-reads idempotent, so keeping rows costs nothing.
-func (s *Store) DeleteTaskMetrics(ctx context.Context, taskID string) error {
-	for _, stmt := range []string{
-		`DELETE FROM metric_summary WHERE task_id = ?`,
-		`DELETE FROM metrics_ingest WHERE task_id = ?`,
-		`DELETE FROM result_records WHERE task_id = ?`,
-		`DELETE FROM file_ingest WHERE task_id = ?`,
-	} {
-		if _, err := s.db.ExecContext(ctx, stmt, taskID); err != nil {
-			return err
-		}
+// unfreezeTaskIngestTx makes terminal SDK streams readable again without
+// rewinding their offsets or deleting their projections. The SDK appends a
+// retry to the same metrics/results/events files, so those streams are
+// task-lifetime history. Resetting an offset to zero would re-import the old
+// bytes (and deleting the projections first would make history disappear and
+// later reappear). A retry therefore changes only the terminal freeze bit;
+// newly appended bytes continue exactly where the previous attempt stopped.
+func unfreezeTaskIngestTx(ctx context.Context, tx *sql.Tx, taskID string) error {
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE metrics_ingest SET final = 0 WHERE task_id = ?`, taskID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE file_ingest SET final = 0 WHERE task_id = ?`, taskID); err != nil {
+		return err
 	}
 	return nil
+}
+
+// BeginTaskRetry atomically records durable pre-effect retry intent and
+// unfreezes task-lifetime SDK streams. The caller must reset wrapper evidence
+// before publishing status=pending; a crash in between is recovered from the
+// submitting/status_source=retry row without launching user work.
+func (s *Store) BeginTaskRetry(ctx context.Context, taskID string, currentRetry int, targetGeneration string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	result, err := tx.ExecContext(ctx, `
+		UPDATE tasks SET
+			status = 'submitting', status_source = 'retry',
+			retry_count = ?, gpus = NULL, pid = NULL, start_time = NULL,
+			started_at = NULL, finished_at = NULL, external_id = NULL,
+			native_state = NULL, queue = NULL, failure_detail = NULL,
+			target_generation = ?, kill_requested = 0
+		WHERE id = ? AND retry_count = ? AND status IN ('failed', 'killed')`,
+		currentRetry+1, targetGeneration, taskID, currentRetry)
+	if err != nil {
+		return err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return fmt.Errorf("task %q changed before retry intent could be recorded", taskID)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE jobs SET
+			status = CASE WHEN status = 'paused' THEN 'paused' ELSE 'running' END,
+			finished_at = CASE WHEN status = 'paused' THEN finished_at ELSE NULL END
+		WHERE id = (SELECT job_id FROM tasks WHERE id = ?)`, taskID); err != nil {
+		return err
+	}
+	if err := unfreezeTaskIngestTx(ctx, tx, taskID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // MetricSummaryRow is one (task, key) streaming reduction.
@@ -156,8 +191,8 @@ func (s *Store) ApplyIngestDelta(ctx context.Context, taskID string, rebuild boo
 	defer func() { _ = tx.Rollback() }()
 
 	if rebuild {
-		// Summaries only — checkpoints are a task-lifetime event log (see
-		// DeleteTaskMetrics), and re-reading the rewritten file re-inserts
+		// Summaries only — checkpoints are a task-lifetime event log, and
+		// re-reading the rewritten file re-inserts
 		// its events idempotently via PK (task_id, step).
 		if _, err := tx.ExecContext(ctx, `DELETE FROM metric_summary WHERE task_id = ?`, taskID); err != nil {
 			return err

@@ -73,7 +73,7 @@ __all__ = [  # noqa: RUF022
     "TransportError",
 ]
 
-__version__ = "0.5.0rc2"
+__version__ = "0.5.0"
 
 
 def __getattr__(name: str):

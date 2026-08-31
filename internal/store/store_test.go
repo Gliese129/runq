@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"testing"
 )
 
@@ -71,6 +72,50 @@ func TestForeignKeysEnabled(t *testing.T) {
 	}
 	if fk != 1 {
 		t.Errorf("expected foreign_keys=1, got %d", fk)
+	}
+}
+
+func TestUnknownIsActiveStatus(t *testing.T) {
+	if !IsActiveStatus("unknown") {
+		t.Fatal("unknown must be active while an execution attempt may still exist")
+	}
+	if !IsActiveStatus("submitting") {
+		t.Fatal("submitting must be active while an external effect may be in flight")
+	}
+}
+
+func TestProjectJobStatus(t *testing.T) {
+	tests := []struct {
+		name     string
+		statuses []string
+		want     string
+		wantErr  bool
+	}{
+		{name: "empty", want: "done"},
+		{name: "waiting", statuses: []string{"pending", "pending"}, want: "pending"},
+		{name: "submitting", statuses: []string{"submitting", "pending"}, want: "running"},
+		{name: "unknown", statuses: []string{"unknown"}, want: "running"},
+		{name: "mixed progress", statuses: []string{"success", "pending"}, want: "running"},
+		{name: "done", statuses: []string{"success", "success"}, want: "done"},
+		{name: "killed", statuses: []string{"killed", "killed"}, want: "killed"},
+		{name: "failed", statuses: []string{"failed", "killed"}, want: "failed"},
+		{name: "partial", statuses: []string{"success", "failed"}, want: "partial"},
+		{name: "corrupt", statuses: []string{"teleported"}, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rows := make([]TaskRow, len(tt.statuses))
+			for i, status := range tt.statuses {
+				rows[i] = TaskRow{ID: fmt.Sprintf("t%d", i), Status: status}
+			}
+			got, err := ProjectJobStatus(rows)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if !tt.wantErr && got != tt.want {
+				t.Fatalf("status = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 

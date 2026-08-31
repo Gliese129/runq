@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/gliese129/runq/internal/store"
+	"github.com/gliese129/runq-lab/internal/store"
 	_ "modernc.org/sqlite"
 )
 

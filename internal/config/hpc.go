@@ -167,7 +167,7 @@ func WriteHPCTemplate(scheduler string) (path string, created bool, err error) {
 // HPCPlaceholders is the single source of truth for which {{vars}} each
 // template accepts.
 var HPCPlaceholders = map[string][]string{
-	"submit_template": {"run_sh", "gpus", "job_id", "task_id", "task_dir", "name", "project", "log_path"},
+	"submit_template": {"run_sh", "gpus", "timeout", "job_id", "task_id", "task_dir", "name", "project", "log_path"},
 	"kill_template":   {"ext_id"},
 	"status_template": {"ext_id"},
 	"status_parser":   {"ext_id"},
@@ -365,29 +365,29 @@ hpc:
 `
 
 // runqHPCBody drives a remote runqd (the "runq preset"): the server
-// exposes sbatch/squeue/scancel isomorphs, so a runqd is just another
+// exposes submit/list/cancel adapters, so a runqd is just another
 // command-driven scheduler — with the nice property that its status
 // vocabulary already IS the canonical signal vocabulary (no signal_map, no
-// parsers). squeue reads the server's local SQLite, so probing it is cheap;
+// parsers). `runqd list` reads the daemon's local SQLite, so probing is cheap;
 // the client still applies the same hibernation etiquette as everywhere.
 const runqHPCBody = `
 hpc:
-  submit_template: "runq sbatch {{run_sh}} --gpus {{gpus}} --task-dir {{task_dir}} --name {{name}} --project {{project}} --log {{log_path}}"
+  submit_template: "runqd submit --gpus {{gpus}} --timeout {{timeout}} --task-id {{task_id}} --task-dir {{task_dir}} --name {{name}} --project {{project}} --log {{log_path}} {{run_sh}}"
   submit_id_regex: "submitted (\\S+)"
 
-  # runqd's squeue reads its own SQLite — an empty list is a real answer,
+  # runqd list reads its own SQLite — an empty list is a real answer,
   # not a parse suspicion; skip the conservative per-job fallback.
   trust_empty_list: true
 
-  # Per-task probe and batch probe both come from runq's own vocabulary —
+  # Per-task probe and batch probe both use runqd's compatibility vocabulary —
   # PENDING/RUNNING/SUCCESS/FAILED/KILLED map 1:1 onto canonical signals.
-  status_template: "runq squeue | awk -v id={{ext_id}} '$1==id{print $2}'"
-  status_list_template: "runq squeue"
+  status_template: "runqd list | awk -v id={{ext_id}} '$1==id{print $2}'"
+  status_list_template: "runqd list"
 
-  kill_template: "runq scancel {{ext_id}}"
+  kill_template: "runqd cancel {{ext_id}}"
 
   # This server's GPUs feed the client's aggregated (local + remote) panel.
-  gpu_template: "runq gpu --json"
+  gpu_template: "runqd gpu --json"
 `
 
 // Full templates = global header + hpc header + hpc body (for new files).

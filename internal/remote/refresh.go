@@ -5,16 +5,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"path"
 	"strings"
 	"time"
 
-	"github.com/gliese129/runq/internal/ingest"
-	"github.com/gliese129/runq/internal/rfs"
-	"github.com/gliese129/runq/internal/scheduler"
-	"github.com/gliese129/runq/internal/store"
-	"github.com/gliese129/runq/internal/utils"
-	"github.com/gliese129/runq/internal/workspace"
+	"github.com/gliese129/runq-lab/internal/ingest"
+	"github.com/gliese129/runq-lab/internal/rfs"
+	"github.com/gliese129/runq-lab/internal/scheduler"
+	"github.com/gliese129/runq-lab/internal/store"
+	"github.com/gliese129/runq-lab/internal/utils"
+	"github.com/gliese129/runq-lab/internal/workspace"
 )
 
 // statusFile is the shape run.sh writes to <task_dir>/status.json.
@@ -25,30 +26,37 @@ type statusFile struct {
 	FinishedAt int64  `json:"finished_at"`
 }
 
-// readStatus reads and parses status.json via the given FS. A missing or
-// malformed file yields a zero statusFile (WrapperStatus == ""), which
-// Reconcile treats as "no terminal signal yet".
-func readStatus(fsys rfs.FS, taskDir string) statusFile {
+// readStatusObserved distinguishes an absent status file (a normal
+// pre-start observation) from malformed data or a transport failure. Refresh
+// callers use the error to avoid publishing a successful freshness record.
+func readStatusObserved(fsys rfs.FS, taskDir string) (statusFile, error) {
 	var sf statusFile
 	buf, err := fsys.ReadFile(path.Join(taskDir, statusFileName))
-	if err != nil {
-		return sf
+	if errors.Is(err, fs.ErrNotExist) {
+		return sf, nil
 	}
-	_ = json.Unmarshal(buf, &sf)
-	return sf
+	if err != nil {
+		return sf, fmt.Errorf("read status.json: %w", err)
+	}
+	if err := json.Unmarshal(buf, &sf); err != nil {
+		return sf, fmt.Errorf("parse status.json: %w", err)
+	}
+	return sf, nil
 }
 
 // ── Reconciler (satisfies backend.Reconciler via duck typing) ──
 
 // EnsureFresh ensures jobID's data is current. Local reconcile (status.json,
-// metrics.jsonl ingest) ALWAYS runs. The scheduler probe runs only when ttl=0
-// (force) or when the probe cache has expired. This is the ONLY entry point
-// for advancing HPC task state — there is no resident process, so state moves
-// forward only when a command calls this.
+// metrics.jsonl ingest) runs unless a complete pass finished within
+// localScanTTL. The scheduler probe runs only when ttl=0 (force) or when the
+// probe cache has expired. This is the ONLY entry point for advancing HPC
+// task state — there is no resident process, so state moves forward only
+// when a command calls this.
 //
 // Two-tier design:
-//   - Local file reads (cheap): always run so wrapper-written status/metrics
-//     surface immediately.
+//   - Local file reads (cheap locally, SFTP round trips on remote targets):
+//     run every pass, throttled only by the short localScanTTL window that
+//     coalesces back-to-back reads (task GET + job GET) into one scan.
 //   - Scheduler probe (expensive, may ssh/qstat): TTL-gated.
 //
 // The method satisfies backend.Reconciler implicitly (Go structural typing).
@@ -56,6 +64,14 @@ func (b *Backend) EnsureFresh(ctx context.Context, jobID string, ttl time.Durati
 	b.lifecycleMu.Lock()
 	defer b.lifecycleMu.Unlock()
 	probe := ttl == 0 || !b.probeIsFresh(jobID, ttl)
+	// Read-path coalescing: a probe-free pass whose local scan completed
+	// within localScanTTL is a no-op. Concurrent dashboard reads of the
+	// same job (task GET + job GET) serialize on lifecycleMu — the second
+	// caller lands here right after the first finished and skips the
+	// repeat scan. ttl=0 (force) always probes and never lands here.
+	if !probe && b.localScanIsFresh(jobID) {
+		return nil
+	}
 	return b.reconcile(ctx, jobID, probe)
 }
 
@@ -77,6 +93,17 @@ func (b *Backend) SchedulerProbe(ctx context.Context, floor time.Duration) error
 	if err != nil {
 		return err
 	}
+	var ownedJobs map[string]bool
+	if b.Scope != nil {
+		ownedJobs = make(map[string]bool)
+		ownedTasks, lerr := b.Store.ListTasks(ctx, store.TaskFilter{Target: b.Cfg.Name, Scope: b.Scope})
+		if lerr != nil {
+			return lerr
+		}
+		for _, tk := range ownedTasks {
+			ownedJobs[tk.JobID] = true
+		}
+	}
 
 	// Pre-scan: which jobs need a scheduler probe this pass?
 	type entry struct {
@@ -87,6 +114,9 @@ func (b *Backend) SchedulerProbe(ctx context.Context, floor time.Duration) error
 	anyNeedsProbe := false
 	for _, j := range jobs {
 		if store.IsTerminalJobStatus(j.Status) {
+			continue
+		}
+		if b.Scope != nil && !ownedJobs[j.ID] {
 			continue
 		}
 		probe := ttl == 0 || !b.probeIsFresh(j.ID, ttl)
@@ -171,16 +201,62 @@ func (b *Backend) HeartbeatProbe(ctx context.Context, silenceAfter time.Duration
 	return silent, nil
 }
 
-// awaitingRelaunch reports whether the task was requeued by the scheduler
-// (retry) and has not been relaunched yet: no external id, at least one prior
-// attempt. Wrapper files on disk belong to the PREVIOUS attempt and must not
-// be reconciled against — remote.Launcher resets them at the next launch.
+// awaitingRelaunch reports whether a task has no durable external handoff yet
+// and its wrapper files are therefore not admissible evidence. During retry
+// they belong to the previous attempt; during first submission they are not
+// known to belong to a started attempt at all. Launcher resets wrapper state
+// before invoking the external submit command and publishes the external ID
+// only after a confirmed handoff.
 func awaitingRelaunch(tk store.TaskRow) bool {
+	// Both manual retry reset intent and scheduler dispatch are pre-effect
+	// submitting phases. No observation may settle them before the launcher
+	// has either published an external ID or returned a classified failure.
+	if tk.Status == "submitting" && tk.ExternalID == "" {
+		return true
+	}
 	// Only PENDING rows can be "requeued but not relaunched". An `unknown`
 	// task (RQ-74) also has no external id and may have retry_count > 0, but
 	// it is exactly the task reconcile must look at — its on-disk wrapper
 	// state is the evidence that settles it.
 	return tk.Status == "pending" && tk.ExternalID == "" && tk.RetryCount > 0
+}
+
+// reconcileObservationCurrent reloads the durable attempt immediately before
+// local file ingestion. A lane can retain a TaskRow loaded just before manual
+// retry commits; comparing the complete reconciliation identity prevents that
+// stale row from reopening the old attempt's files during reset.
+func (b *Backend) reconcileObservationCurrent(ctx context.Context, loaded store.TaskRow) (bool, error) {
+	current, err := b.Store.GetTask(ctx, loaded.ID)
+	if err != nil {
+		return false, err
+	}
+	if current == nil || awaitingRelaunch(*current) {
+		return false, nil
+	}
+	return current.Status == loaded.Status &&
+		current.StatusSource == loaded.StatusSource &&
+		current.RetryCount == loaded.RetryCount &&
+		current.TargetGeneration == loaded.TargetGeneration &&
+		current.ExternalID == loaded.ExternalID, nil
+}
+
+// ingestLoadedAttempt makes the identity check and filesystem ingestion one
+// process-local critical section shared by active and retiring lanes. Status
+// decisions still use durable CAS after this lock is released; this lock only
+// closes the non-transactional file-read/reset window.
+func (b *Backend) ingestLoadedAttempt(ctx context.Context, loaded store.TaskRow, final bool) (current bool, verifyErr, ingestErr error) {
+	verifyErr = b.Store.WithTaskAttemptLock(loaded.ID, func() error {
+		var err error
+		current, err = b.reconcileObservationCurrent(ctx, loaded)
+		if err != nil || !current {
+			return err
+		}
+		_, ingestErr = ingest.ReapIncremental(ctx, b.Store, ingest.Target{
+			TaskID: loaded.ID, JobID: loaded.JobID, Dir: loaded.TaskDir, FS: b.FS,
+		}, final)
+		return nil
+	})
+	return current, verifyErr, ingestErr
 }
 
 // persistDecision writes a reconcile decision. A terminal transition of a
@@ -202,6 +278,9 @@ func (b *Backend) persistDecision(ctx context.Context, tk store.TaskRow, d Decis
 		fields["native_state"] = "gone"
 		fields["queue"] = ""
 	}
+	if isTerminal(d.Status) {
+		fields["kill_requested"] = 0
+	}
 	// Leaving `unknown` (RQ-74 review finding 1): the resolved state must
 	// not keep the submit-era evidence — a task reconcile just confirmed
 	// RUNNING would otherwise still render "failed before running" — and
@@ -209,18 +288,16 @@ func (b *Backend) persistDecision(ctx context.Context, tk store.TaskRow, d Decis
 	// path keeps matching against a stale unknown-state condition.
 	// (Explicitly clearing failure_detail is idempotent with the terminal
 	// branch: completeTask's defaults clear it there anyway.)
-	if tk.Status == "unknown" && d.Status != "unknown" {
+	leavingUnknown := tk.Status == "unknown" && d.Status != "unknown"
+	if leavingUnknown {
 		if _, ok := fields["failure_detail"]; !ok {
 			fields["failure_detail"] = nil
 		}
-		// Queue sync only for non-terminal exits (unknown → running);
-		// terminal exits settle the queue through FinishTask below.
-		if !isTerminal(d.Status) {
-			if ru, ok := b.Finisher.(interface{ ResumeUnknown(taskID string) }); ok {
-				ru.ResumeUnknown(tk.ID)
-			}
-		}
 	}
+	// The observation belongs to exactly the row identity loaded above. This
+	// fence survives the scheduler completion funnel because its metadata is
+	// carried in fields and consumed by the store as CAS predicates.
+	store.FenceTaskStatusUpdate(fields, tk)
 	if b.Finisher != nil && isTerminal(d.Status) && !isTerminal(tk.Status) {
 		b.Finisher.FinishTask(rowToTask(tk), scheduler.TaskStatus(d.Status), fields)
 		// READ-BACK verification (review round 6 #1): FinishTask is a void
@@ -231,13 +308,35 @@ func (b *Backend) persistDecision(ctx context.Context, tk store.TaskRow, d Decis
 		if gerr != nil {
 			return fmt.Errorf("verify terminal persist: %w", gerr)
 		}
+		// A failed verdict may legally advance to a new retry attempt. A manual
+		// retry can do the same while this lane holds an old observation. Either
+		// way, an identity change makes this verdict obsolete and authoritative.
+		attemptChanged := row != nil && (row.RetryCount != tk.RetryCount ||
+			row.TargetGeneration != tk.TargetGeneration || row.ExternalID != tk.ExternalID)
+		if attemptChanged {
+			return nil // this verdict is obsolete; the newer durable attempt wins
+		}
 		if row == nil || !isTerminal(row.Status) {
 			return fmt.Errorf("terminal persist for %s did not land (status %q) — verdict will be redelivered",
 				tk.ID, statusOf(row))
 		}
 		return nil
 	}
-	return b.Store.UpdateTaskStatus(ctx, tk.ID, d.Status, fields)
+	if err := b.Store.UpdateTaskStatus(ctx, tk.ID, d.Status, fields); err != nil {
+		if errors.Is(err, store.ErrTaskStatusConflict) {
+			return nil // a newer durable status/attempt superseded this observation
+		}
+		return err
+	}
+	// Queue sync only for non-terminal exits (unknown → running). The DB is
+	// authoritative, so publication follows the successful write; terminal
+	// exits settle the queue through FinishTask above.
+	if leavingUnknown && !isTerminal(d.Status) {
+		if ru, ok := b.Finisher.(interface{ ResumeUnknown(taskID string) }); ok {
+			ru.ResumeUnknown(tk.ID)
+		}
+	}
+	return nil
 }
 
 // statusOf is a nil-safe row status reader for error messages.
@@ -246,6 +345,33 @@ func statusOf(row *store.TaskRow) string {
 		return "missing"
 	}
 	return row.Status
+}
+
+// localScanTTL bounds how often back-to-back reads repeat the job-wide
+// local file scan (status.json + metrics/checkpoint stats per task — SFTP
+// round trips on remote targets). Deliberately shorter than the dashboard's
+// 3s live poll: each poll tick still observes fresh wrapper state, but the
+// burst of reads inside one page navigation collapses into a single scan.
+const localScanTTL = 2 * time.Second
+
+// localScanIsFresh returns true if jobID's local file scan completed
+// within localScanTTL.
+func (b *Backend) localScanIsFresh(jobID string) bool {
+	b.probeMu.Lock()
+	defer b.probeMu.Unlock()
+	return time.Since(b.lastLocalScan[jobID]) < localScanTTL
+}
+
+// markLocalScan records that jobID's local file scan just completed. Only
+// fully successful passes mark — a failed observation must not suppress
+// the retry a following read would perform.
+func (b *Backend) markLocalScan(jobID string) {
+	b.probeMu.Lock()
+	defer b.probeMu.Unlock()
+	if b.lastLocalScan == nil {
+		b.lastLocalScan = make(map[string]time.Time)
+	}
+	b.lastLocalScan[jobID] = time.Now()
 }
 
 // probeIsFresh returns true if jobID's scheduler was probed within the TTL.
@@ -318,17 +444,32 @@ func (b *Backend) reconcileWith(ctx context.Context, jobID string, probe bool, p
 	if err != nil {
 		return err
 	}
+	if b.Scope != nil && len(tasks) == 0 {
+		return nil
+	}
+	var observationErrs []error
 	var ingestErrs []error
 	for _, tk := range tasks {
+		// Retry intent/pending epoch is durable before wrapper files are reset.
+		// Until relaunch, every on-disk stream belongs to the previous attempt;
+		// gate before ingestion as well as status reconciliation.
+		if awaitingRelaunch(tk) {
+			continue
+		}
 		// Metrics/checkpoints: incremental via the (size,offset) mark —
 		// growth ships only the delta, no growth is one stat. final only
 		// for hard-final terminals (wrapper/runq source): soft terminals
 		// can still be overturned and rerun.
 		hardFinal := isTerminal(tk.Status) && (tk.StatusSource == SourceWrapper || tk.StatusSource == SourceRunq)
-		if _, ierr := ingest.ReapIncremental(ctx, b.Store, ingest.Target{
-			TaskID: tk.ID, JobID: tk.JobID, Dir: tk.TaskDir, FS: b.FS,
-		}, hardFinal); ierr != nil {
-			ingestErrs = append(ingestErrs, fmt.Errorf("ingest task %s: %w", tk.ID, ierr))
+		current, verifyErr, ingestErr := b.ingestLoadedAttempt(ctx, tk, hardFinal)
+		if verifyErr != nil {
+			return fmt.Errorf("verify task %s attempt before reconcile: %w", tk.ID, verifyErr)
+		}
+		if ingestErr != nil {
+			ingestErrs = append(ingestErrs, fmt.Errorf("ingest task %s: %w", tk.ID, ingestErr))
+		}
+		if !current {
+			continue
 		}
 
 		// Only wrapper and runq terminals are hard-final (skip re-probe).
@@ -337,16 +478,17 @@ func (b *Backend) reconcileWith(ctx context.Context, jobID string, probe bool, p
 		if isTerminal(tk.Status) && (tk.StatusSource == SourceWrapper || tk.StatusSource == SourceRunq) {
 			continue
 		}
-		// Requeued-but-not-relaunched: on-disk wrapper state is the previous
-		// attempt's — reconciling against it would re-fail the task in a loop.
-		if awaitingRelaunch(tk) {
-			continue
+		sf, statusErr := readStatusObserved(b.FS, tk.TaskDir)
+		if statusErr != nil {
+			observationErrs = append(observationErrs, fmt.Errorf("observe task %s: %w", tk.ID, statusErr))
 		}
-
-		sf := readStatus(b.FS, tk.TaskDir)
 		var pr ProbeResult
 		if probe {
-			pr = b.probeSchedulerWith(ctx, probeRun, tk.ExternalID)
+			var probeErr error
+			pr, probeErr = b.probeSchedulerObservedWith(ctx, probeRun, tk.ExternalID)
+			if probeErr != nil {
+				observationErrs = append(observationErrs, fmt.Errorf("probe task %s: %w", tk.ID, probeErr))
+			}
 		}
 		d := Reconcile(tk.Status, tk.StatusSource, Observed{
 			WrapperStatus: sf.Status,
@@ -395,19 +537,30 @@ func (b *Backend) reconcileWith(ctx context.Context, jobID string, probe bool, p
 	if err := b.refreshJobStatus(ctx, jobID); err != nil {
 		return err
 	}
+	if len(observationErrs) > 0 {
+		return fmt.Errorf("reconcile job %s incomplete: %w", jobID,
+			errors.Join(append(observationErrs, ingestErrs...)...))
+	}
+	if len(ingestErrs) > 0 {
+		// The scheduler observation itself succeeded, so its narrow TTL may
+		// be cached. Durable job freshness remains untouched because metrics
+		// ingestion did not complete.
+		if probe {
+			b.markProbed(jobID)
+		}
+		return fmt.Errorf("reconcile job %s incomplete: %w", jobID, errors.Join(ingestErrs...))
+	}
 	// Record that a reconcile pass completed. This is the honesty contract
 	// of poll-based state: consumers (dashboard "data as of ...") can only
 	// be truthful about staleness if the reconcile time is a recorded fact.
 	if err := b.Store.TouchJobRefreshedAt(ctx, jobID, time.Now()); err != nil {
 		return fmt.Errorf("touch refreshed_at for job %s: %w", jobID, err)
 	}
-	// Mark the in-memory TTL cache so subsequent calls within the window skip
-	// the scheduler probe (local reconcile always runs regardless).
+	// Mark the in-memory TTL caches so subsequent calls within the window
+	// skip the scheduler probe / the whole local scan (localScanTTL).
+	b.markLocalScan(jobID)
 	if probe {
 		b.markProbed(jobID)
-	}
-	if len(ingestErrs) > 0 {
-		return fmt.Errorf("status refreshed but ingest had errors: %w", errors.Join(ingestErrs...))
 	}
 	return nil
 }
@@ -420,24 +573,35 @@ func (b *Backend) reconcileWithBatch(ctx context.Context, jobID string, signals 
 	if err != nil {
 		return err
 	}
+	if b.Scope != nil && len(tasks) == 0 {
+		return nil
+	}
+	var observationErrs []error
 	var ingestErrs []error
 	for _, tk := range tasks {
+		// Same pre-ingestion retry fence as the per-task probe variant.
+		if awaitingRelaunch(tk) {
+			continue
+		}
 		hardFinal := isTerminal(tk.Status) && (tk.StatusSource == SourceWrapper || tk.StatusSource == SourceRunq)
-		if _, ierr := ingest.ReapIncremental(ctx, b.Store, ingest.Target{
-			TaskID: tk.ID, JobID: tk.JobID, Dir: tk.TaskDir, FS: b.FS,
-		}, hardFinal); ierr != nil {
-			ingestErrs = append(ingestErrs, fmt.Errorf("ingest task %s: %w", tk.ID, ierr))
+		current, verifyErr, ingestErr := b.ingestLoadedAttempt(ctx, tk, hardFinal)
+		if verifyErr != nil {
+			return fmt.Errorf("verify task %s attempt before batch reconcile: %w", tk.ID, verifyErr)
+		}
+		if ingestErr != nil {
+			ingestErrs = append(ingestErrs, fmt.Errorf("ingest task %s: %w", tk.ID, ingestErr))
+		}
+		if !current {
+			continue
 		}
 
 		if hardFinal {
 			continue
 		}
-		// Requeued-but-not-relaunched: skip, same as reconcileWith.
-		if awaitingRelaunch(tk) {
-			continue
+		sf, statusErr := readStatusObserved(b.FS, tk.TaskDir)
+		if statusErr != nil {
+			observationErrs = append(observationErrs, fmt.Errorf("observe task %s: %w", tk.ID, statusErr))
 		}
-
-		sf := readStatus(b.FS, tk.TaskDir)
 
 		// Look up pre-computed probe result; absent ext_ids are gone.
 		pr := ProbeResult{Signal: SchedUnknown}
@@ -491,13 +655,21 @@ func (b *Backend) reconcileWithBatch(ctx context.Context, jobID string, signals 
 	if err := b.refreshJobStatus(ctx, jobID); err != nil {
 		return err
 	}
+	if len(observationErrs) > 0 {
+		return fmt.Errorf("reconcile job %s incomplete: %w", jobID,
+			errors.Join(append(observationErrs, ingestErrs...)...))
+	}
+	if len(ingestErrs) > 0 {
+		// Batch scheduler data succeeded even though local metrics did not.
+		// Cache only the scheduler probe; do not touch durable job freshness.
+		b.markProbed(jobID)
+		return fmt.Errorf("reconcile job %s incomplete: %w", jobID, errors.Join(ingestErrs...))
+	}
 	if err := b.Store.TouchJobRefreshedAt(ctx, jobID, time.Now()); err != nil {
 		return fmt.Errorf("touch refreshed_at for job %s: %w", jobID, err)
 	}
+	b.markLocalScan(jobID)
 	b.markProbed(jobID)
-	if len(ingestErrs) > 0 {
-		return fmt.Errorf("status refreshed but ingest had errors: %w", errors.Join(ingestErrs...))
-	}
 	return nil
 }
 
@@ -556,7 +728,7 @@ func (b *Backend) probeBatch(ctx context.Context) (map[string]ProbeResult, error
 	// Empty result: for dialect schedulers (qstat/squeue) this is suspicious
 	// — the command "succeeded" but nothing parsed, so fall back to per-job
 	// probing rather than declaring every job gone. Targets that TRUST their
-	// list (runqd: squeue reads its own SQLite — empty means truly empty)
+	// list (runqd: `runqd list` reads its SQLite — empty means truly empty)
 	// opt in via trust_empty_list and skip the wasteful fallback.
 	if len(result) == 0 && !b.Cfg.TrustEmptyList {
 		return nil, nil
@@ -576,13 +748,21 @@ func (b *Backend) probeScheduler(ctx context.Context, extID string) ProbeResult 
 }
 
 func (b *Backend) probeSchedulerWith(ctx context.Context, run runner, extID string) ProbeResult {
+	result, _ := b.probeSchedulerObservedWith(ctx, run, extID)
+	return result
+}
+
+// probeSchedulerObservedWith returns both the scheduler fact and whether the
+// requested observation failed. Callers may still reconcile independent
+// wrapper evidence, but they must not record the pass as fresh on error.
+func (b *Backend) probeSchedulerObservedWith(ctx context.Context, run runner, extID string) (ProbeResult, error) {
 	none := ProbeResult{Signal: SchedUnknown}
 	if b.Cfg.StatusTemplate == "" || extID == "" {
-		return none
+		return none, nil
 	}
 	cmd, err := utils.Render(b.Cfg.StatusTemplate, map[string]string{"ext_id": extID})
 	if err != nil {
-		return none
+		return none, fmt.Errorf("render status_template: %w", err)
 	}
 	out, exitCode, runErr := run(ctx, cmd)
 	// TRANSPORT failure: the command never ran — no fact learned, regardless
@@ -590,7 +770,7 @@ func (b *Backend) probeSchedulerWith(ctx context.Context, run runner, extID stri
 	// ("qstat errors once the job left the queue"); a connection blip parsed
 	// as "gone" would get healthy tasks inferred as failed.
 	if runErr != nil {
-		return none
+		return none, fmt.Errorf("run status_template: %w", runErr)
 	}
 
 	// Optional parser pipeline: feed the status output to stage 1 on stdin and
@@ -607,39 +787,42 @@ func (b *Backend) probeSchedulerWith(ctx context.Context, run runner, extID stri
 		for _, s := range b.Cfg.StatusParser {
 			rs, perr := utils.Render(s, map[string]string{"ext_id": extID})
 			if perr != nil {
-				return none
+				return none, fmt.Errorf("render status_parser: %w", perr)
 			}
 			stages = append(stages, rs)
 		}
 		pipeline := "printf '%s\\n' " + utils.ShellQuote(out) + " | " + strings.Join(stages, " | ")
 		pout, pcode, perr := run(ctx, pipeline)
-		if perr != nil || pcode != 0 {
-			return none // the PIPELINE must succeed; its failure is never a verdict
+		if perr != nil {
+			return none, fmt.Errorf("run status_parser: %w", perr)
+		}
+		if pcode != 0 {
+			return none, fmt.Errorf("status_parser exited with code %d", pcode)
 		}
 		token := strings.TrimSpace(pout)
 		// Empty parser output = job absent from the active query = gone.
 		if token == "" {
-			return ProbeResult{Signal: SchedGone}
+			return ProbeResult{Signal: SchedGone}, nil
 		}
 		return ProbeResult{
 			Signal:      MapSignal(b.Cfg, token),
 			NativeState: token,
-		}
+		}, nil
 	}
 
 	// No parser: any non-zero exit is "no info" (don't guess).
 	if exitCode != 0 {
-		return none
+		return none, fmt.Errorf("status_template exited with code %d", exitCode)
 	}
 	token := strings.TrimSpace(out)
 	if token == "" {
-		return ProbeResult{Signal: SchedGone}
+		return ProbeResult{Signal: SchedGone}, nil
 	}
 	sig := MapSignal(b.Cfg, token)
 	if sig != SchedUnknown {
-		return ProbeResult{Signal: sig, NativeState: token}
+		return ProbeResult{Signal: sig, NativeState: token}, nil
 	}
-	return ProbeResult{Signal: SchedActive, NativeState: token}
+	return ProbeResult{Signal: SchedActive, NativeState: token}, nil
 }
 
 // memoRunner caches command → result for the lifetime of one reconcile pass.

@@ -1,5 +1,13 @@
 <template>
-  <svg :width="size" :height="size" viewBox="0 0 36 36" xmlns="http://www.w3.org/2000/svg">
+  <img
+    v-if="showAnime"
+    :src="animeLogoUrl"
+    :width="size"
+    :height="size"
+    :style="{ borderRadius: `${(size / 36) * 8}px`, objectFit: 'cover', display: 'block' }"
+    alt="runq"
+  >
+  <svg v-else :width="size" :height="size" viewBox="0 0 36 36" xmlns="http://www.w3.org/2000/svg">
     <defs>
       <linearGradient id="logo-grad" x1="0%" y1="0%" x2="100%" y2="100%">
         <stop offset="0%" :stop-color="color1" />
@@ -19,11 +27,24 @@
 </template>
 
 <script setup lang="ts">
-withDefaults(defineProps<{
+import { computed } from 'vue'
+import { useSettingsStore } from '@/stores/settings'
+import animeLogoUrl from '@/assets/anime-logo.png'
+
+// variant pins a face for pickers (the Settings logo switch shows both);
+// 'auto' follows the anime-mode setting everywhere else.
+const props = withDefaults(defineProps<{
   size?: number
+  variant?: 'auto' | 'normal' | 'anime'
 }>(), {
   size: 36,
+  variant: 'auto',
 })
+
+const settings = useSettingsStore()
+const showAnime = computed(
+  () => props.variant === 'anime' || (props.variant === 'auto' && settings.animeMode),
+)
 
 const color1 = 'rgb(var(--v-theme-primary))'
 const color2 = 'rgb(var(--v-theme-secondary))'

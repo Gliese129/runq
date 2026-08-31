@@ -3,8 +3,8 @@ package cli
 import (
 	"fmt"
 
-	"github.com/gliese129/runq/internal/api"
-	"github.com/gliese129/runq/internal/backend"
+	"github.com/gliese129/runq-lab/internal/api"
+	"github.com/gliese129/runq-lab/internal/backend"
 	"github.com/spf13/cobra"
 )
 
@@ -39,11 +39,16 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		}
 
 		// No arguments: daemon health first (spec §7.2: status → /health)…
+		var health map[string]any
 		if p, ok := be.(*api.Proxy); ok {
-			if health, err := p.Health(ctx); err == nil && !jsonOut {
-				fmt.Printf("Daemon:    %v (up %vs)\n", health["version"], health["uptime_seconds"])
+			if h, err := p.Health(ctx); err == nil {
+				health = h
+				if !jsonOut {
+					fmt.Printf("Daemon:    %v (up %vs)\n", health["version"], health["uptime_seconds"])
+				}
 			}
 		}
+		targetState, _ := health["target_state"].(string)
 
 		// …then aggregate queue status (running/pending/GPU).
 		jobs, err := be.ListJobs(ctx, "")
@@ -62,7 +67,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		// and would be misleading for a remote HPC target. Only show GPU
 		// info when no explicit target filter is set (aggregate view).
 		gpusFree := -1 // sentinel: omit from output
-		if target == "" {
+		if target == "" && targetState != backend.TargetStateUnconfigured {
 			gpusFree = 0
 			if gpus, gerr := be.GPUStatus(ctx); gerr == nil {
 				for _, g := range gpus {
@@ -74,9 +79,12 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		}
 
 		if jsonOut {
-			out := map[string]int{
+			out := map[string]any{
 				"running": running,
 				"pending": pending,
+			}
+			if targetState != "" {
+				out["target_state"] = targetState
 			}
 			if gpusFree >= 0 {
 				out["gpus_free"] = gpusFree
@@ -85,6 +93,9 @@ func runStatus(cmd *cobra.Command, args []string) error {
 			return nil
 		}
 
+		if targetState == backend.TargetStateUnconfigured {
+			fmt.Println("Target:    not configured — run `runq target add <name> ...`")
+		}
 		fmt.Printf("Running:   %d\n", running)
 		fmt.Printf("Pending:   %d\n", pending)
 		if gpusFree >= 0 {

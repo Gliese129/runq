@@ -9,18 +9,19 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/gliese129/runq/internal/rfs"
-	"github.com/gliese129/runq/internal/store"
-	"github.com/gliese129/runq/internal/utils"
+	"github.com/gliese129/runq-lab/internal/rfs"
+	"github.com/gliese129/runq-lab/internal/store"
+	"github.com/gliese129/runq-lab/internal/utils"
 )
 
 // PerformClean removes tasks matching opts and cleans their on-disk artifacts.
 // If opts.DryRun is true it returns a preview without deleting.
 //
-// fsFor resolves a task's TARGET to the filesystem its artifacts live on —
-// remote tasks' dirs are on the remote (rm over Exec), local ones here.
-// nil = everything is local (single-lane callers, tests).
-func PerformClean(ctx context.Context, st *store.Store, fsFor func(target string) rfs.FS, opts CleanOptions) (*CleanResult, error) {
+// fsFor resolves a task's exact target GENERATION to the filesystem its
+// artifacts live on. A resolution error makes the action DB-only; it must
+// never fall through to the client's local filesystem. nil means everything
+// is local (single-lane callers and tests).
+func PerformClean(ctx context.Context, st *store.Store, fsFor func(store.TaskRow) (rfs.FS, error), opts CleanOptions) (*CleanResult, error) {
 	tasks, reason, err := collectCleanTargets(ctx, st, opts)
 	if err != nil {
 		return nil, fmt.Errorf("query tasks: %w", err)
@@ -75,15 +76,19 @@ func PerformClean(ctx context.Context, st *store.Store, fsFor func(target string
 	if serr != nil {
 		stats = map[string]store.TaskCleanStat{} // preview degrades, never blocks
 	}
-	resolveFS := func(target string) rfs.FS {
+	resolveFS := func(task store.TaskRow) (rfs.FS, error) {
 		if fsFor == nil {
-			return nil // local semantics
+			return nil, nil // local semantics
 		}
-		return fsFor(target)
+		return fsFor(task)
 	}
 	preview := make([]CleanPreviewItem, 0, len(unique))
 	for _, u := range unique {
-		action := classifyAction(u.task, resolveFS(u.task.Target))
+		fsys, ferr := resolveFS(u.task)
+		action := CleanActionDBOnly
+		if ferr == nil {
+			action = classifyAction(u.task, fsys)
+		}
 		var finishedUnix *int64
 		if u.task.FinishedAt != nil {
 			ts := u.task.FinishedAt.Unix()
@@ -130,8 +135,20 @@ func PerformClean(ctx context.Context, st *store.Store, fsFor func(target string
 
 	for i, u := range unique {
 		// All-or-nothing by design: the DB record dies here, files die in
-		// phase 2. Partial modes are gone — surgical cleanup is a cd away.
-		if _, err := tx.ExecContext(ctx, "DELETE FROM tasks WHERE id = ?", u.task.ID); err != nil {
+		// phase 2. Re-check liveness in the DELETE itself: reconciliation may
+		// move a selected task to unknown after the preview/filter pass, and
+		// an outcome-unknown attempt must retain its durable ownership.
+		res, err := tx.ExecContext(ctx,
+			fmt.Sprintf("DELETE FROM tasks WHERE id = ? AND status NOT IN %s", store.ActiveStatusesSQL()),
+			u.task.ID)
+		if err != nil {
+			return nil, fmt.Errorf("delete task %q during clean: %w", u.task.ID, err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return nil, fmt.Errorf("count deleted task %q during clean: %w", u.task.ID, err)
+		}
+		if n == 0 {
 			continue
 		}
 		deleted = append(deleted, dbDeleted{u.task, preview[i].Action})
@@ -145,18 +162,24 @@ func PerformClean(ctx context.Context, st *store.Store, fsFor func(target string
 	// another target's empty terminal jobs.
 	var res sql.Result
 	if opts.Target != "" {
-		res, _ = tx.ExecContext(ctx,
+		res, err = tx.ExecContext(ctx,
 			fmt.Sprintf("DELETE FROM jobs WHERE status IN %s AND target = ? AND id NOT IN (SELECT DISTINCT job_id FROM tasks)",
 				store.TerminalJobStatusesSQL()),
 			opts.Target)
 	} else {
-		res, _ = tx.ExecContext(ctx,
+		res, err = tx.ExecContext(ctx,
 			fmt.Sprintf("DELETE FROM jobs WHERE status IN %s AND id NOT IN (SELECT DISTINCT job_id FROM tasks)",
 				store.TerminalJobStatusesSQL()))
 	}
+	if err != nil {
+		return nil, fmt.Errorf("delete orphan jobs during clean: %w", err)
+	}
 	deletedJobs := int64(0)
 	if res != nil {
-		deletedJobs, _ = res.RowsAffected()
+		deletedJobs, err = res.RowsAffected()
+		if err != nil {
+			return nil, fmt.Errorf("count deleted jobs during clean: %w", err)
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -169,15 +192,30 @@ func PerformClean(ctx context.Context, st *store.Store, fsFor func(target string
 	// owning lane's Exec (freed bytes approximated from the ledger stats —
 	// per-dir du over SSH isn't worth the round trips).
 	var freedBytes int64
-	remoteByTarget := map[string][]store.TaskRow{}
+	type remoteGroup struct {
+		fs   rfs.FS
+		rows []store.TaskRow
+	}
+	remoteByGeneration := map[string]*remoteGroup{}
 	for _, d := range deleted {
 		if d.action != CleanActionAll {
 			continue // db_only: nothing on disk
 		}
-		fsys := resolveFS(d.task.Target)
+		fsys, ferr := resolveFS(d.task)
+		if ferr != nil {
+			slog.Warn("clean: artifact generation unavailable after DB deletion",
+				"task", d.task.ID, "generation", d.task.TargetGeneration, "error", ferr)
+			continue
+		}
 		if fsys != nil {
 			if _, isLocal := fsys.(*rfs.LocalFS); !isLocal {
-				remoteByTarget[d.task.Target] = append(remoteByTarget[d.task.Target], d.task)
+				key := d.task.Target + "\x00" + d.task.TargetGeneration
+				group := remoteByGeneration[key]
+				if group == nil {
+					group = &remoteGroup{fs: fsys}
+					remoteByGeneration[key] = group
+				}
+				group.rows = append(group.rows, d.task)
 				continue
 			}
 		}
@@ -188,8 +226,8 @@ func PerformClean(ctx context.Context, st *store.Store, fsFor func(target string
 		}
 		freedBytes += cleaned
 	}
-	for target, rows := range remoteByTarget {
-		freedBytes += cleanRemoteArtifacts(ctx, resolveFS(target), rows, stats)
+	for _, group := range remoteByGeneration {
+		freedBytes += cleanRemoteArtifacts(ctx, group.fs, group.rows, stats)
 	}
 
 	return &CleanResult{
@@ -207,8 +245,8 @@ func collectCleanTargets(ctx context.Context, st *store.Store, opts CleanOptions
 
 	if opts.Orphan {
 		// Only tasks already MARKED orphaned qualify (rfs.FS-based detection
-		// with guardrails — see remote.DetectOrphans / LocalBackend.
-		// DetectOrphansNow). Never stat paths here: this code runs on the
+		// with guardrails — see remote.DetectOrphans). Never stat paths here:
+		// this code runs on the
 		// client, where a remote target's path is unobservable and a blind
 		// os.Stat would misclassify every remote task as orphaned.
 		rows, err := st.ListOrphanedTasks(ctx, opts.Target)

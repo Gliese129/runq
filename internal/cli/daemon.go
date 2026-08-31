@@ -10,9 +10,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/gliese129/runq/internal/api"
-	"github.com/gliese129/runq/internal/app"
-	"github.com/gliese129/runq/internal/utils"
+	"github.com/gliese129/runq-lab/internal/api"
+	"github.com/gliese129/runq-lab/internal/app"
+	"github.com/gliese129/runq-lab/internal/utils"
 	"github.com/spf13/cobra"
 )
 

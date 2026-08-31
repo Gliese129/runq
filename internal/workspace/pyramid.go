@@ -49,7 +49,7 @@ import (
 	"math"
 	"sort"
 
-	"github.com/gliese129/runq/internal/rfs"
+	"github.com/gliese129/runq-lab/internal/rfs"
 )
 
 const (

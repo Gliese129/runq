@@ -132,22 +132,73 @@ func TestIngestMarkRoundTrip(t *testing.T) {
 	if m.Size != 200 || m.Offset != 200 || !m.Final {
 		t.Errorf("mark = %+v", m)
 	}
-	// DeleteTaskMetrics unfreezes (retry path). checkpoints survive: they
-	// are a task-lifetime log (freeze sizing, resume source), NOT a
-	// projection of the current metrics.jsonl.
-	if err := s.DeleteTaskMetrics(context.Background(), "t1"); err != nil {
-		t.Fatalf("delete: %v", err)
-	}
-	m, _ = s.GetIngestMark(context.Background(), "t1")
-	if m.Final || m.Size != 0 {
-		t.Errorf("mark after delete = %+v", m)
-	}
-	var ckptCount int
-	if err := s.DB().QueryRow(`SELECT COUNT(*) FROM checkpoints WHERE task_id='t1'`).Scan(&ckptCount); err != nil {
+}
+
+func TestBeginTaskRetryPreservesTaskLifetimeIngest(t *testing.T) {
+	s, err := Open(":memory:")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if ckptCount != 1 {
-		t.Errorf("checkpoints must SURVIVE retry unfreeze (task-lifetime log), got %d rows", ckptCount)
+	defer s.Close()
+	seedJobAndTask(t, s, "t1", "j1")
+	ctx := context.Background()
+
+	if err := s.UpdateTaskStatus(ctx, "t1", "failed", map[string]any{"status_source": "wrapper"}); err != nil {
+		t.Fatalf("make task retryable: %v", err)
+	}
+	if err := s.MergeMetricSummaries(ctx, []MetricSummaryRow{{
+		TaskID: "t1", JobID: "j1", Key: "loss", Min: 1, Max: 1,
+		Last: 1, LastTS: 10, Count: 1,
+	}}); err != nil {
+		t.Fatalf("seed summary: %v", err)
+	}
+	if err := s.SetIngestMark(ctx, "t1", IngestMark{Size: 100, Offset: 100, Final: true}); err != nil {
+		t.Fatalf("seed metric mark: %v", err)
+	}
+	if err := s.ApplyResultsIngestDelta(ctx, "t1", false, []ResultRecordRow{{
+		TaskID: "t1", JobID: "j1", TS: 10, AxesJSON: `{}`, MetricsJSON: `{"score":1}`,
+	}}, 3, FileIngestMark{Size: 80, Offset: 80, Final: true}); err != nil {
+		t.Fatalf("seed results: %v", err)
+	}
+	if err := s.ApplyEventsIngestDelta(ctx, "t1", []CheckpointRow{{
+		TaskID: "t1", JobID: "j1", Path: "/p/ckpt.pt", SizeBytes: 1024,
+		Step: ptrInt64(1), TS: 10,
+	}}, FileIngestMark{Size: 60, Offset: 60, Final: true}); err != nil {
+		t.Fatalf("seed events: %v", err)
+	}
+
+	if err := s.BeginTaskRetry(ctx, "t1", 0, "gen-next"); err != nil {
+		t.Fatalf("begin retry: %v", err)
+	}
+
+	metricMark, err := s.GetIngestMark(ctx, "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metricMark.Size != 100 || metricMark.Offset != 100 || metricMark.Final {
+		t.Fatalf("metric mark after retry = %+v, want preserved offset and final=false", metricMark)
+	}
+	resultMark, err := s.GetFileIngestMark(ctx, "t1", IngestFileResults)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resultMark.Size != 80 || resultMark.Offset != 80 || resultMark.Final || resultMark.Dropped != 2 {
+		t.Fatalf("result mark after retry = %+v, want preserved state and final=false", resultMark)
+	}
+	eventMark, err := s.GetFileIngestMark(ctx, "t1", IngestFileEvents)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if eventMark.Size != 60 || eventMark.Offset != 60 || eventMark.Final {
+		t.Fatalf("event mark after retry = %+v, want preserved offset and final=false", eventMark)
+	}
+
+	summaries, _ := s.ListMetricSummaries(ctx, "j1", "loss")
+	results, _ := s.ListResultRecords(ctx, "j1")
+	checkpoints, _ := s.ListCheckpoints(ctx, "t1")
+	if len(summaries) != 1 || len(results) != 1 || len(checkpoints) != 1 {
+		t.Fatalf("retry erased task history: summaries=%d results=%d checkpoints=%d",
+			len(summaries), len(results), len(checkpoints))
 	}
 }
 

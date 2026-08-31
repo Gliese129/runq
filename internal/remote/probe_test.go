@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/gliese129/runq/internal/config"
-	"github.com/gliese129/runq/internal/rfs"
+	"github.com/gliese129/runq-lab/internal/config"
+	"github.com/gliese129/runq-lab/internal/rfs"
 )
 
 func TestProbeScheduler(t *testing.T) {

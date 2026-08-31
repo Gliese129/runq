@@ -3,13 +3,14 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
-	"github.com/gliese129/runq/internal/backend"
-	"github.com/gliese129/runq/internal/config"
-	"github.com/gliese129/runq/internal/store"
+	"github.com/gliese129/runq-lab/internal/backend"
+	"github.com/gliese129/runq-lab/internal/config"
+	"github.com/gliese129/runq-lab/internal/store"
 )
 
 // ── RQ-75: config → lanes reconciler ────────────────────────────────────────
@@ -68,14 +69,17 @@ func targetsByName(cfg *config.GlobalConfig) map[string]config.TargetConfig {
 
 // ReconcileConfig runs one reconcile pass: reload config.yaml, diff against
 // the observed lane set, apply. Safe to call from any goroutine (watcher
-// tick, API write notify, connect); passes are serialized. No-op on runqd
-// deployments (no buildLane).
+// tick, API write notify, connect); passes are serialized. It is a no-op in
+// minimal assemblies that do not provide buildLane.
 func (d *Daemon) ReconcileConfig(reason string) error {
-	if d.buildLane == nil {
+	if d.buildLane == nil || d.shuttingDown.Load() {
 		return nil
 	}
 	d.reconcileMu.Lock()
 	defer d.reconcileMu.Unlock()
+	if d.shuttingDown.Load() {
+		return nil
+	}
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -97,6 +101,12 @@ func (d *Daemon) ReconcileConfig(reason string) error {
 	if len(added)+len(changed)+len(removed) == 0 && cfg.ResolveDefaultTarget() == d.lastDefault {
 		return nil
 	}
+	// From the first observable scope change through the final registry/sweep
+	// update, routed operations must see either the old generation topology or
+	// the new one. Holding this writer lease also prevents a control operation
+	// from continuing on a lane that is being retired beneath it.
+	releaseRouting := d.multiBe.BeginRoutingUpdate()
+	defer releaseRouting()
 	d.Logger.Info("config reconcile", "reason", reason,
 		"added", added, "changed", changed, "removed", removed)
 
@@ -183,8 +193,14 @@ func (d *Daemon) ReconcileConfig(reason string) error {
 			d.noteLaneBuildErr(name, berr)
 			continue
 		}
+		if serr := startLane(be); serr != nil {
+			closeLane(d, name, be)
+			delete(record, name)
+			d.noteLaneBuildErr(name, fmt.Errorf("lane recovery failed: %w", serr))
+			continue
+		}
+		d.dropHistoricalLane(name, tc.SemanticGeneration())
 		d.clearLaneBuildErr(name)
-		startLane(be)
 		d.laneMu.Lock()
 		d.lanes[name] = be
 		d.laneMu.Unlock()
@@ -269,8 +285,23 @@ func (d *Daemon) ReconcileConfig(reason string) error {
 		} else {
 			// 5. Start the replacement, then swap active+retiring in ONE
 			//    registry transaction (round 8 #2).
-			startLane(newBe)
+			if serr := startLane(newBe); serr != nil {
+				closeLane(d, name, newBe)
+				promoteActive(old)
+				if retire && d.Store != nil {
+					mctx, mcancel := context.WithTimeout(context.Background(), 10*time.Second)
+					merr := d.Store.MarkGenerationDone(mctx, name, oldGen)
+					mcancel()
+					if merr != nil {
+						d.Logger.Warn("rollback retirement record after failed replacement start", "target", name, "error", merr)
+					}
+				}
+				record[name] = d.lastTargets[name]
+				d.noteLaneBuildErr(name, fmt.Errorf("replacement recovery failed: %w", serr))
+				continue
+			}
 			_ = d.StopRemoteForward(name)
+			d.dropHistoricalLane(name, newGen)
 			d.multiBe.RotateLane(name, newBe, oldGen, old)
 			d.laneMu.Lock()
 			d.lanes[name] = newBe
@@ -341,10 +372,14 @@ func (d *Daemon) clearLaneBuildErr(name string) {
 
 // startLane starts a lane if it supports the lifecycle (SSHBackend does;
 // test fakes may not).
-func startLane(be backend.Backend) {
+func startLane(be backend.Backend) error {
+	if s, ok := be.(interface{ Start(context.Context) error }); ok {
+		return s.Start(context.Background())
+	}
 	if s, ok := be.(interface{ Start(context.Context) }); ok {
 		s.Start(context.Background())
 	}
+	return nil
 }
 
 // persistRetirement records a superseding/removal BEFORE anything
@@ -419,8 +454,16 @@ func (d *Daemon) registerRetiring(name, gen string, be backend.Backend) {
 // single zero reading — the confirmation window outlasts any bounded
 // request). Level-triggered: after each reconcile pass + a 1min ticker.
 func (d *Daemon) SweepRetiringLanes() {
+	if d.shuttingDown.Load() {
+		return
+	}
 	d.reconcileMu.Lock()
 	defer d.reconcileMu.Unlock()
+	if d.shuttingDown.Load() {
+		return
+	}
+	releaseRouting := d.multiBe.BeginRoutingUpdate()
+	defer releaseRouting()
 	d.sweepRetiringLocked()
 }
 
@@ -482,10 +525,10 @@ func (d *Daemon) sweepRetiringLocked() {
 			cancel()
 			continue
 		}
-		// Round 8 #1: an in-flight SubmitJob on this lane's pointer is a
-		// HARD barrier — its rows may not have landed yet (the counter is
-		// incremented before the retired gate, so no submit is invisible).
-		if sub, ok2 := be.(interface{ HasInFlightSubmits() bool }); ok2 && sub.HasInFlightSubmits() {
+		// SubmitJob and manual RetryTask share this HARD admission barrier:
+		// intent/reset/publication may not have produced a countable row yet,
+		// so the lane cannot close while either operation is in flight.
+		if admission, ok2 := be.(interface{ HasInFlightAdmissions() bool }); ok2 && admission.HasInFlightAdmissions() {
 			d.retireZeroSeen[key] = false
 			cancel()
 			continue
@@ -505,52 +548,92 @@ func (d *Daemon) sweepRetiringLocked() {
 			continue
 		}
 		delete(d.retireZeroSeen, key)
-		d.multiBe.RemoveRetiringLane(name, gen)
-		d.laneMu.Lock()
-		delete(d.retiringLanes, key)
-		d.laneMu.Unlock()
-		closeLane(d, name, be)
+		if quiesceLaneForHistory(be) {
+			d.multiBe.CompleteRetiringLane(name, gen, be)
+			d.laneMu.Lock()
+			delete(d.retiringLanes, key)
+			if d.historicalLanes == nil {
+				d.historicalLanes = map[string]backend.Backend{}
+			}
+			d.historicalLanes[key] = be
+			d.laneMu.Unlock()
+		} else {
+			// Non-generation-aware test/minimal backends cannot be safely kept
+			// as artifact readers after shutdown.
+			d.multiBe.RemoveRetiringLane(name, gen)
+			d.laneMu.Lock()
+			delete(d.retiringLanes, key)
+			d.laneMu.Unlock()
+			closeLane(d, name, be)
+		}
 		cancel()
 		d.Logger.Info("retired generation done — all its tasks reached terminal state",
 			"target", name, "generation", shortGen(gen))
 	}
 }
 
+// dropHistoricalLane closes a quiesced duplicate when its exact generation
+// becomes active again; the active lane is now the correct artifact endpoint.
+func (d *Daemon) dropHistoricalLane(name, generation string) {
+	if generation == "" {
+		return
+	}
+	be := d.multiBe.RemoveHistoricalLane(name, generation)
+	if be == nil {
+		return
+	}
+	d.laneMu.Lock()
+	delete(d.historicalLanes, name+"@"+generation)
+	d.laneMu.Unlock()
+	closeLane(d, name, be)
+}
+
 // rebuildRetiringLanes restores retiring lanes after a daemon restart from
 // their persisted config snapshots — long-running old-generation tasks
 // keep being tracked on their original endpoints.
-func (d *Daemon) rebuildRetiringLanes() {
+func (d *Daemon) rebuildRetiringLanes() error {
 	if d.Store == nil || d.buildLane == nil || d.multiBe == nil {
-		return
+		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	gens, err := d.Store.ListRetiringGenerations(ctx)
 	if err != nil {
-		d.Logger.Warn("list retiring generations failed", "error", err)
-		return
+		return fmt.Errorf("list retiring generations: %w", err)
 	}
 	cfg, cerr := config.Load()
 	if cerr != nil {
-		d.Logger.Warn("config load for retiring rebuild failed", "error", cerr)
-		return
+		return fmt.Errorf("load config for retiring rebuild: %w", cerr)
 	}
+	var rebuildErrs []error
+	var historical []store.TargetGenerationRow
 	// Self-heal (round 5 #4): a generation marked done that still owns
 	// unfinished rows (a straggler submit landed between the final sweep
 	// and close) is REOPENED and its lane rebuilt.
-	if all, aerr := d.Store.ListAllGenerations(ctx); aerr == nil {
+	if all, aerr := d.Store.ListAllGenerations(ctx); aerr != nil {
+		rebuildErrs = append(rebuildErrs, fmt.Errorf("list generation history: %w", aerr))
+	} else {
 		for _, g := range all {
 			if g.DoneAt == nil {
 				continue
 			}
-			if n, nerr := d.Store.CountUnfinishedGenerationTasks(ctx, g.Target, g.Generation); nerr == nil && n > 0 {
-				g := g
-				if uerr := d.Store.UpsertRetiredGeneration(ctx, &g); uerr == nil { // resets done_at
-					gens = append(gens, g)
-					d.Logger.Warn("done generation reopened — unfinished rows found after close",
-						"target", g.Target, "generation", shortGen(g.Generation), "unfinished", n)
-				}
+			n, nerr := d.Store.CountUnfinishedGenerationTasks(ctx, g.Target, g.Generation)
+			if nerr != nil {
+				rebuildErrs = append(rebuildErrs, fmt.Errorf("count unfinished tasks for %s@%s: %w", g.Target, shortGen(g.Generation), nerr))
+				continue
 			}
+			if n == 0 {
+				historical = append(historical, g)
+				continue
+			}
+			g := g
+			if uerr := d.Store.UpsertRetiredGeneration(ctx, &g); uerr != nil { // resets done_at
+				rebuildErrs = append(rebuildErrs, fmt.Errorf("reopen generation %s@%s: %w", g.Target, shortGen(g.Generation), uerr))
+				continue
+			}
+			gens = append(gens, g)
+			d.Logger.Warn("done generation reopened — unfinished rows found after close",
+				"target", g.Target, "generation", shortGen(g.Generation), "unfinished", n)
 		}
 	}
 	cur := targetsByName(cfg)
@@ -566,29 +649,41 @@ func (d *Daemon) rebuildRetiringLanes() {
 		// step failed, the lane stayed active) — close it out instead of
 		// rebuilding a duplicate lane for the ACTIVE generation.
 		if tc, ok := cur[g.Target]; ok && tc.SemanticGeneration() == g.Generation {
-			_ = d.Store.MarkGenerationDone(ctx, g.Target, g.Generation)
+			if err := d.Store.MarkGenerationDone(ctx, g.Target, g.Generation); err != nil {
+				rebuildErrs = append(rebuildErrs, fmt.Errorf("close stale active retirement %s@%s: %w", g.Target, shortGen(g.Generation), err))
+				continue
+			}
 			d.Logger.Info("stale retirement record for the active generation closed",
 				"target", g.Target, "generation", shortGen(g.Generation))
 			continue
 		}
-		if n, nerr := d.Store.CountUnfinishedGenerationTasks(ctx, g.Target, g.Generation); nerr == nil && n == 0 {
-			_ = d.Store.MarkGenerationDone(ctx, g.Target, g.Generation)
+		n, nerr := d.Store.CountUnfinishedGenerationTasks(ctx, g.Target, g.Generation)
+		if nerr != nil {
+			rebuildErrs = append(rebuildErrs, fmt.Errorf("count retiring tasks for %s@%s: %w", g.Target, shortGen(g.Generation), nerr))
+			continue
+		}
+		if n == 0 {
+			if err := d.Store.MarkGenerationDone(ctx, g.Target, g.Generation); err != nil {
+				rebuildErrs = append(rebuildErrs, fmt.Errorf("close empty retirement %s@%s: %w", g.Target, shortGen(g.Generation), err))
+			}
 			continue
 		}
 		var tc config.TargetConfig
 		if uerr := json.Unmarshal([]byte(g.ConfigJSON), &tc); uerr != nil {
-			d.Logger.Error("retiring generation snapshot unreadable — its tasks stay visible but untracked",
-				"target", g.Target, "generation", shortGen(g.Generation), "error", uerr)
+			rebuildErrs = append(rebuildErrs, fmt.Errorf("decode retiring generation %s@%s: %w", g.Target, shortGen(g.Generation), uerr))
 			continue
 		}
 		be, berr := d.buildLane(tc, cfg)
 		if berr != nil {
-			d.Logger.Error("retiring lane rebuild failed — its tasks stay visible but untracked until the endpoint returns",
-				"target", g.Target, "generation", shortGen(g.Generation), "error", berr)
+			rebuildErrs = append(rebuildErrs, fmt.Errorf("build retiring generation %s@%s: %w", g.Target, shortGen(g.Generation), berr))
 			continue
 		}
 		markRetiring(be) // BEFORE Start: restore must use the retiring filter
-		startLane(be)
+		if serr := startLane(be); serr != nil {
+			closeLane(d, g.Target, be)
+			rebuildErrs = append(rebuildErrs, fmt.Errorf("start retiring generation %s@%s: %w", g.Target, shortGen(g.Generation), serr))
+			continue
+		}
 
 		d.multiBe.SetRetiringLane(g.Target, g.Generation, be)
 		d.laneMu.Lock()
@@ -600,6 +695,60 @@ func (d *Daemon) rebuildRetiringLanes() {
 		d.Logger.Info("retiring lane rebuilt after restart",
 			"target", g.Target, "generation", shortGen(g.Generation), "reason", g.Reason)
 	}
+	// Re-read after the live pass because an empty open generation may have
+	// been marked done above and should become artifact-routable immediately.
+	if all, aerr := d.Store.ListAllGenerations(ctx); aerr == nil {
+		historical = historical[:0]
+		for _, g := range all {
+			if g.DoneAt != nil {
+				historical = append(historical, g)
+			}
+		}
+	} else {
+		rebuildErrs = append(rebuildErrs, fmt.Errorf("reload generation history: %w", aerr))
+	}
+
+	// Settled generations are rebuilt cold: no restore, scheduler, or sensor;
+	// only their original filesystem endpoint remains available for terminal
+	// logs and metric artifacts. Failure is non-fatal and routing then returns
+	// an honest unavailable-generation error instead of using a newer host.
+	if d.buildHistoricalLane != nil {
+		for _, g := range historical {
+			if tc, ok := cur[g.Target]; ok && tc.SemanticGeneration() == g.Generation {
+				continue // the active lane is the same endpoint/config generation
+			}
+			key := g.Target + "@" + g.Generation
+			d.laneMu.Lock()
+			_, registered := d.historicalLanes[key]
+			d.laneMu.Unlock()
+			if registered {
+				continue
+			}
+			var tc config.TargetConfig
+			if uerr := json.Unmarshal([]byte(g.ConfigJSON), &tc); uerr != nil {
+				d.Logger.Warn("historical generation snapshot invalid — artifacts unavailable",
+					"target", g.Target, "generation", shortGen(g.Generation), "error", uerr)
+				continue
+			}
+			be, berr := d.buildHistoricalLane(tc, cfg)
+			if berr != nil {
+				d.Logger.Warn("historical generation lane unavailable — artifacts will not fall through",
+					"target", g.Target, "generation", shortGen(g.Generation), "error", berr)
+				continue
+			}
+			markRetiring(be)
+			d.multiBe.SetHistoricalLane(g.Target, g.Generation, be)
+			d.laneMu.Lock()
+			if d.historicalLanes == nil {
+				d.historicalLanes = map[string]backend.Backend{}
+			}
+			d.historicalLanes[key] = be
+			d.laneMu.Unlock()
+			d.Logger.Info("historical generation artifact lane rebuilt",
+				"target", g.Target, "generation", shortGen(g.Generation))
+		}
+	}
+	return errors.Join(rebuildErrs...)
 }
 
 // laneGeneration reads a lane's generation stamp (SSHBackend has one;
@@ -617,6 +766,16 @@ func markRetiring(be backend.Backend) {
 	if m, ok := be.(interface{ MarkRetiring() }); ok {
 		m.MarkRetiring()
 	}
+}
+
+// quiesceLaneForHistory stops scheduling/sensors without closing the lane's
+// filesystem. Only real generation-aware lanes expose this contract.
+func quiesceLaneForHistory(be backend.Backend) bool {
+	if q, ok := be.(interface{ QuiesceForHistory() }); ok {
+		q.QuiesceForHistory()
+		return true
+	}
+	return false
 }
 
 // shortGen abbreviates a generation hash for logs.

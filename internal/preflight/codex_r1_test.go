@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gliese129/runq/internal/project"
+	"github.com/gliese129/runq-lab/internal/project"
 )
 
 // Codex r1 #2a: a `bash run.sh` entry is scanned for the python it

@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -16,14 +17,14 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/gliese129/runq/internal/backend"
-	"github.com/gliese129/runq/internal/config"
-	"github.com/gliese129/runq/internal/job"
-	"github.com/gliese129/runq/internal/logfile"
-	"github.com/gliese129/runq/internal/project"
-	"github.com/gliese129/runq/internal/rfs"
-	"github.com/gliese129/runq/internal/version"
-	"github.com/gliese129/runq/internal/workspace"
+	"github.com/gliese129/runq-lab/internal/backend"
+	"github.com/gliese129/runq-lab/internal/config"
+	"github.com/gliese129/runq-lab/internal/job"
+	"github.com/gliese129/runq-lab/internal/logfile"
+	"github.com/gliese129/runq-lab/internal/project"
+	"github.com/gliese129/runq-lab/internal/rfs"
+	"github.com/gliese129/runq-lab/internal/version"
+	"github.com/gliese129/runq-lab/internal/workspace"
 )
 
 // backgroundReconciler is the optional capability for HPC backends that can
@@ -53,7 +54,7 @@ type Server struct {
 
 	// forwardStarter is the client daemon's runtime hook for POST
 	// /targets/{name}/connect (start/replace a remote CLI forward without
-	// a restart). nil on deployments without forwards (runqd) → 501.
+	// a restart). nil when remote forwarding is unavailable → 501.
 	forwardStarter func(name string) error
 	forwardStopper func(name string) error
 	// forwardStatus, when set (client daemon), snapshots every remote CLI
@@ -345,6 +346,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		DataPath:         cfg.DataPath,
 		ConfigPath:       config.ConfigPath(),
 		DefaultTarget:    cfg.ResolveDefaultTarget(),
+		TargetState:      targetConfigurationState(cfg),
 		Targets:          []backend.TargetSummary{},
 		ConfigGeneration: cfg.Generation,
 	}
@@ -438,6 +440,11 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"uptime_seconds": int64(time.Since(s.startedAt).Seconds()),
 		"targets":        targets,
 	}
+	cfg := s.cfg
+	if fresh, err := config.Load(); err == nil {
+		cfg = fresh
+	}
+	body["target_state"] = targetConfigurationState(cfg)
 	// Identity (RQ-74): a remote CLI reaching this endpoint through a
 	// forwarded socket needs to know WHOSE daemon answered — with several
 	// machines running runq against one cluster account, "the socket
@@ -451,6 +458,13 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		body["forwards"] = s.forwardStatus()
 	}
 	writeJSON(w, http.StatusOK, body)
+}
+
+func targetConfigurationState(cfg *config.GlobalConfig) string {
+	if cfg == nil || len(cfg.ResolveTargets()) == 0 {
+		return backend.TargetStateUnconfigured
+	}
+	return backend.TargetStateConfigured
 }
 
 // handleListTasks — GET /tasks?job=&status=&target=&limit=&offset= (spec
@@ -1087,7 +1101,7 @@ func (s *Server) handleTaskLogStream(w http.ResponseWriter, r *http.Request) {
 // handleTaskMetrics — GET /tasks/{id}/metrics, dual-mode (spec §5.5/§6.4):
 // without ?key= → {points, refreshed_at} (all-key tail points; ?after=
 // incremental); with ?key=&buckets=&from=&to= → {buckets, source}
-// (terminal → pyramid, otherwise tail aggregation).
+// (wrapper-completed success/failure → pyramid, otherwise tail aggregation).
 func (s *Server) handleTaskMetrics(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	if key := q.Get("key"); key != "" {
@@ -1281,8 +1295,41 @@ func (s *Server) handleSPA(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", mimeByExt(path))
+	// Vite emits content-hashed files under assets/ — a changed file gets a
+	// new URL, so the old one may be cached forever. Everything else
+	// (index.html, favicons) must revalidate to pick up new deployments.
+	if strings.HasPrefix(path, "assets/") {
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	} else {
+		w.Header().Set("Cache-Control", "no-cache")
+	}
+	if compressibleExt(path) {
+		w.Header().Add("Vary", "Accept-Encoding")
+		if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+			w.Header().Set("Content-Encoding", "gzip")
+			w.WriteHeader(http.StatusOK)
+			gz := gzip.NewWriter(w)
+			_, _ = gz.Write(data)
+			_ = gz.Close()
+			return
+		}
+	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(data)
+}
+
+// compressibleExt reports whether the static file is text-based and worth
+// gzipping on the fly (images and fonts are already compressed).
+func compressibleExt(path string) bool {
+	switch {
+	case strings.HasSuffix(path, ".html"),
+		strings.HasSuffix(path, ".js"),
+		strings.HasSuffix(path, ".css"),
+		strings.HasSuffix(path, ".svg"),
+		strings.HasSuffix(path, ".json"):
+		return true
+	}
+	return false
 }
 
 func mimeByExt(path string) string {
@@ -1334,6 +1381,8 @@ func writeError(w http.ResponseWriter, err error) {
 	status, code := http.StatusInternalServerError, backend.CodeInternal
 	msg := strings.ToLower(err.Error())
 	switch {
+	case errors.Is(err, backend.ErrNoTargetConfigured):
+		status, code = http.StatusConflict, backend.CodeInvalidState
 	case errors.Is(err, backend.ErrNotSupported):
 		status, code = http.StatusConflict, backend.CodeNotSupported
 	case backend.IsNotFound(err):

@@ -2,21 +2,20 @@ package remote
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/gliese129/runq/internal/config"
-	"github.com/gliese129/runq/internal/job"
-	"github.com/gliese129/runq/internal/project"
-	"github.com/gliese129/runq/internal/store"
+	"github.com/gliese129/runq-lab/internal/config"
+	"github.com/gliese129/runq-lab/internal/job"
+	"github.com/gliese129/runq-lab/internal/project"
+	"github.com/gliese129/runq-lab/internal/store"
 )
 
-// TestSubmitRefreshKill exercises the full HPC loop against an in-memory store
-// and a fake cluster (the injected FS stands in for sbatch/scancel).
-func TestSubmitRefreshKill(t *testing.T) {
+// TestPrepareRefreshKill exercises durable admission, refresh, and cancellation
+// against an in-memory store and a fake cluster control surface.
+func TestPrepareRefreshKill(t *testing.T) {
 
 	st, err := store.Open(":memory:")
 	if err != nil {
@@ -34,17 +33,11 @@ func TestSubmitRefreshKill(t *testing.T) {
 		// StatusTemplate empty → status derived from status.json alone.
 	}
 
-	// Fake cluster: submit returns an incrementing job id; everything else
-	// (scancel) returns empty. Submit/EnsureFresh/Kill call this sequentially.
-	next := 100
+	// The fake cluster records cancellation calls. Canonical submission itself
+	// is covered by Launcher tests; this test seeds its resulting external IDs.
 	var calls []string
 	runner := func(ctx context.Context, command string) (string, error) {
 		calls = append(calls, command)
-		if strings.HasPrefix(schedCmd(command), "submit") {
-			out := fmt.Sprintf("job %d", next)
-			next++
-			return out, nil
-		}
 		return "", nil
 	}
 	b := &Backend{Cfg: cfg, Store: st, FS: newTestFSFromRunner(runner)}
@@ -64,12 +57,18 @@ func TestSubmitRefreshKill(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	jobID, count, err := b.Submit(ctx, jobCfg, proj, SubmitOpts{SkipPreflight: true})
+	jobID, rows, err := b.Prepare(ctx, jobCfg, proj, SubmitOpts{SkipPreflight: true})
 	if err != nil {
-		t.Fatalf("Submit: %v", err)
+		t.Fatalf("Prepare: %v", err)
 	}
-	if count != 2 {
-		t.Fatalf("submitted %d tasks, want 2", count)
+	if len(rows) != 2 {
+		t.Fatalf("prepared %d tasks, want 2", len(rows))
+	}
+	externalIDs := []string{"100", "101"}
+	for i, row := range rows {
+		if err := st.UpdateTaskStatus(ctx, row.ID, "pending", map[string]any{"external_id": externalIDs[i]}); err != nil {
+			t.Fatalf("seed external id: %v", err)
+		}
 	}
 
 	tasks, err := st.ListTasks(ctx, store.TaskFilter{JobID: jobID})

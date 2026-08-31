@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gliese129/runq/internal/genfile"
+	"github.com/gliese129/runq-lab/internal/genfile"
 )
 
 // waitCount polls until the counter reaches want or the deadline passes.

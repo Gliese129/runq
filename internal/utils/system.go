@@ -4,8 +4,6 @@ import (
 	"bufio"
 	"fmt"
 	"os"
-	"os/exec"
-	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -72,54 +70,6 @@ func ReadProcessStartTime(pid int) (time.Time, error) {
 	return time.Unix(bootTime+seconds, nanoRemainder), nil
 }
 
-// ReadProcessState returns the single-letter process state for the given PID:
-//
-//	R = running, S = sleeping, D = uninterruptible sleep,
-//	T = stopped (SIGSTOP), t = traced, Z = zombie, X = dead, I = idle.
-//
-// Linux reads /proc/<pid>/stat; macOS/BSD shells out to `ps -o state= -p`.
-// Returns ("", err) when the process is gone or we can't read the state.
-//
-// Used by daemon reclaim to detect tasks that were SIGSTOPped when the
-// previous daemon died — the new daemon has no record of their freeze
-// state, so it can only WARN the operator.
-func ReadProcessState(pid int) (string, error) {
-	if pid <= 0 {
-		return "", fmt.Errorf("invalid pid %d", pid)
-	}
-	switch runtime.GOOS {
-	case "linux":
-		data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
-		if err != nil {
-			return "", err
-		}
-		s := string(data)
-		// /proc/<pid>/stat fields: pid (comm) state ppid ...
-		// "comm" can contain spaces/parens, so split after the last ')'.
-		idx := strings.LastIndex(s, ")")
-		if idx < 0 || idx+2 >= len(s) {
-			return "", fmt.Errorf("malformed /proc/%d/stat", pid)
-		}
-		fields := strings.Fields(s[idx+2:])
-		if len(fields) == 0 {
-			return "", fmt.Errorf("no state field in /proc/%d/stat", pid)
-		}
-		return fields[0], nil
-	default:
-		// macOS / BSD: `ps -o state= -p <pid>` returns lines like "T", "S",
-		// "R+", "Ss" — the first char is the state. Empty output ⇒ gone.
-		out, err := exec.Command("ps", "-o", "state=", "-p", strconv.Itoa(pid)).Output()
-		if err != nil {
-			return "", err
-		}
-		s := strings.TrimSpace(string(out))
-		if s == "" {
-			return "", fmt.Errorf("no such process %d", pid)
-		}
-		return s[:1], nil
-	}
-}
-
 // IsProcessAlive checks if a process with the given PID is still running.
 //
 // Two checks:
@@ -137,10 +87,8 @@ func ReadProcessState(pid int) (string, error) {
 //   - ReadProcessStartTime fails: typically macOS / non-Linux where there
 //     is no /proc. Same fallback: trust signal-0.
 //
-// The zero-time semantic matters because the daemon-restart freeze case
-// re-uses this for tasks whose StartTime column may not have been
-// populated reliably; passing zero is the explicit way to say "I don't
-// have a baseline".
+// Passing zero is the explicit way for client-daemon callers to say they do
+// not have a reliable start-time baseline.
 func IsProcessAlive(pid int, expectedStartTime time.Time) bool {
 	if pid <= 0 {
 		return false

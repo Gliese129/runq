@@ -1,7 +1,7 @@
 package cli
 
 import (
-	"github.com/gliese129/runq/internal/backend"
+	"github.com/gliese129/runq-lab/internal/backend"
 	"github.com/spf13/cobra"
 )
 

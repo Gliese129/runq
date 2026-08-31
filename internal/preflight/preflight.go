@@ -11,10 +11,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gliese129/runq/internal/job"
-	"github.com/gliese129/runq/internal/project"
-	"github.com/gliese129/runq/internal/rfs"
-	"github.com/gliese129/runq/internal/utils"
+	"github.com/gliese129/runq-lab/internal/job"
+	"github.com/gliese129/runq-lab/internal/project"
+	"github.com/gliese129/runq-lab/internal/rfs"
+	"github.com/gliese129/runq-lab/internal/utils"
 )
 
 // Preflight is the L2-C step 10 fail-fast check that runs **before** a

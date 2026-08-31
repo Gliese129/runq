@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gliese129/runq/internal/config"
-	"github.com/gliese129/runq/internal/submitplan"
+	"github.com/gliese129/runq-lab/internal/config"
+	"github.com/gliese129/runq-lab/internal/submitplan"
 )
 
 // RQ-76 ①: run.sh restores CONTEXT instead of rewriting scripts — an

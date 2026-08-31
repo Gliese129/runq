@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/gliese129/runq/internal/config"
+	"github.com/gliese129/runq-lab/internal/config"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )
@@ -164,17 +164,19 @@ func runConfigAdd(cmd *cobra.Command, args []string) error {
 		tc.GPUs = gpuList
 	}
 
+	firstTarget := len(cfg.Targets) == 0
+	if firstTarget {
+		// One atomic write transitions out of the unconfigured state and also
+		// repairs any stale default_target left by a hand-edited config.
+		cfg.DefaultTarget = name
+	}
 	cfg.Targets = append(cfg.Targets, tc)
 	if err := config.SaveGlobal(cfg); err != nil {
 		return err
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "added target %q\n", name)
-
-	// If this is the first target and no default is set, make it the default.
-	if cfg.DefaultTarget == "" && len(cfg.Targets) == 1 {
-		if err := config.SetKey("default_target", name); err == nil {
-			fmt.Fprintf(cmd.OutOrStdout(), "set as default_target\n")
-		}
+	if firstTarget {
+		fmt.Fprintln(cmd.OutOrStdout(), "set as default_target")
 	}
 	return nil
 }

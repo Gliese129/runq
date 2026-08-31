@@ -10,11 +10,11 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/gliese129/runq/internal/backend"
-	"github.com/gliese129/runq/internal/job"
-	"github.com/gliese129/runq/internal/logfile"
-	"github.com/gliese129/runq/internal/project"
-	"github.com/gliese129/runq/internal/workspace"
+	"github.com/gliese129/runq-lab/internal/backend"
+	"github.com/gliese129/runq-lab/internal/job"
+	"github.com/gliese129/runq-lab/internal/logfile"
+	"github.com/gliese129/runq-lab/internal/project"
+	"github.com/gliese129/runq-lab/internal/workspace"
 )
 
 // proxySubmitTimeout is the client-side timeout for the submit RPC,
@@ -110,6 +110,9 @@ func (p *Proxy) Capabilities() backend.Capabilities {
 				return t.Capabilities
 			}
 		}
+		// A successful empty bootstrap is the unconfigured state, not a reason
+		// to resurrect the legacy local-backend capability defaults.
+		return backend.Capabilities{}
 	}
 	return backend.Capabilities{
 		GPUMap:      true,
@@ -280,7 +283,7 @@ func (p *Proxy) GPUStatus(ctx context.Context) ([]backend.GPUSlot, error) {
 		name = cfg.DefaultTarget
 	}
 	if name == "" {
-		return nil, fmt.Errorf("no target resolved for gpu status")
+		return nil, fmt.Errorf("%w; add one before requesting GPU status", backend.ErrNoTargetConfigured)
 	}
 	return getList[backend.GPUSlot](p, ctx, "/api/v1/targets/"+url.PathEscape(name)+"/gpus")
 }
@@ -318,8 +321,7 @@ func (p *Proxy) GPUStatusByTarget(ctx context.Context) (map[string][]backend.GPU
 
 // MachineGPUStatus is the PLUMBING view: THIS machine's GPUs from runqd's
 // executor lane (spec §9). Used by `runq gpu --json` (the runq preset's
-// gpu_template) — must not go through the v1 surface, which runqd
-// doesn't serve.
+// gpu_template) over the versioned machine protocol.
 func (p *Proxy) MachineGPUStatus(ctx context.Context) ([]backend.GPUSlot, error) {
 	type enrichedGPU struct {
 		Index    int    `json:"index"`
@@ -331,7 +333,7 @@ func (p *Proxy) MachineGPUStatus(ctx context.Context) ([]backend.GPUSlot, error)
 		JobID    string `json:"job_id"`
 	}
 	var gpus []enrichedGPU
-	if err := p.do(ctx, "GET", "/api/gpu", nil, &gpus); err != nil {
+	if err := p.do(ctx, "GET", "/api/v1/resources/gpus", nil, &gpus); err != nil {
 		return nil, err
 	}
 	out := make([]backend.GPUSlot, 0, len(gpus))
@@ -347,12 +349,6 @@ func (p *Proxy) MachineGPUStatus(ctx context.Context) ([]backend.GPUSlot, error)
 		})
 	}
 	return out, nil
-}
-
-// MachineKillTask cancels a task on THIS machine's executor via runqd's
-// executor lane (scancel plumbing).
-func (p *Proxy) MachineKillTask(ctx context.Context, taskID string) error {
-	return p.do(ctx, "POST", "/api/tasks/"+url.PathEscape(taskID)+"/kill", nil, nil)
 }
 
 // ── Tasks ───────────────────────────────────────────────────────────────
@@ -659,33 +655,10 @@ func (p *Proxy) ThawTasks(ctx context.Context, owner int, force bool) (*backend.
 		q.Set("force", "true")
 	}
 	var result backend.ThawResponse
-	if err := p.do(ctx, "POST", "/api/thaw?"+q.Encode(), nil, &result); err != nil {
+	if err := p.do(ctx, "POST", "/api/v1/thaw?"+q.Encode(), nil, &result); err != nil {
 		return nil, err
 	}
 	return &result, nil
-}
-
-// ── Foreign task lane (runq preset, executor lane §9) ───────────────────
-
-// Sbatch enqueues a foreign task on the server (runq preset). Returns the
-// task id, which the client records as the task's external_id.
-func (p *Proxy) Sbatch(ctx context.Context, spec backend.TaskSpec) (string, error) {
-	var out struct {
-		TaskID string `json:"task_id"`
-	}
-	if err := p.do(ctx, "POST", "/api/sbatch", spec, &out); err != nil {
-		return "", err
-	}
-	return out.TaskID, nil
-}
-
-// Squeue lists the server's non-terminal tasks (runq preset batch probe).
-func (p *Proxy) Squeue(ctx context.Context) ([]backend.QueueEntry, error) {
-	var out []backend.QueueEntry
-	if err := p.do(ctx, "GET", "/api/squeue", nil, &out); err != nil {
-		return nil, err
-	}
-	return out, nil
 }
 
 // ── HTTP helpers ────────────────────────────────────────────────────────

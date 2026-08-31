@@ -16,21 +16,23 @@ import (
 )
 
 type cliFixture struct {
-	t       *testing.T
-	bin     string
-	root    string
-	dataDir string
-	env     []string
+	t           *testing.T
+	bin         string
+	root        string
+	dataDir     string
+	runqdSocket string
+	env         []string
 }
 
 func TestConfigKeysDefaultsAndRoundTrips(t *testing.T) {
 	fx := newCLIFixture(t)
 
 	// mode is dead (D9): the surviving keys are data_path + default_target.
-	if got := strings.TrimSpace(fx.run("config", "get", "default_target")); got != "local" {
-		t.Fatalf("missing config should default target to local, got %q", got)
+	if got := strings.TrimSpace(fx.run("config", "get", "default_target")); got != "" {
+		t.Fatalf("missing config should be unconfigured, got default %q", got)
 	}
 
+	fx.run("target", "add", "my-lab", "--gpus=0")
 	fx.run("config", "set", "default_target=my-lab")
 	if got := strings.TrimSpace(fx.run("config", "get", "default_target")); got != "my-lab" {
 		t.Fatalf("default_target should round-trip, got %q", got)
@@ -56,6 +58,9 @@ func TestConfigSetKeepsExistingHPCSection(t *testing.T) {
 
 	initial := strings.Join([]string{
 		"data_path: " + filepath.ToSlash(filepath.Join(fx.dataDir, "data")),
+		"targets:",
+		"  - name: my-lab",
+		"    scheduler: slurm",
 		"hpc:",
 		"  submit_template: sbatch --wrap '{{cmd}}'",
 		"  partition: debug",
@@ -86,6 +91,11 @@ func TestDashboardConfigAPIUsesDashboardNamespace(t *testing.T) {
 	port := freePort(t)
 	configPath := fx.configPath()
 	writeConfig(t, configPath, dataPath, port)
+	runqd, err := net.Listen("unix", fx.runqdSocket)
+	if err != nil {
+		t.Fatalf("listen on independent runqd test endpoint: %v", err)
+	}
+	defer runqd.Close()
 
 	exited, output, stop := fx.startDaemon()
 	defer stop()
@@ -161,13 +171,15 @@ func newCLIFixture(t *testing.T) cliFixture {
 	t.Cleanup(func() { _ = os.RemoveAll(shortRoot) })
 	dataDir := filepath.Join(shortRoot, "runq-data")
 	home := filepath.Join(shortRoot, "home")
+	runqdSocket := filepath.Join(shortRoot, "runqd.sock")
 	env := append(os.Environ(),
 		"RUNQ_DATA_DIR="+dataDir,
+		"RUNQD_SOCKET="+runqdSocket,
 		"HOME="+home,
 		"XDG_CONFIG_HOME="+filepath.Join(shortRoot, "xdg-config"),
 		"XDG_DATA_HOME="+filepath.Join(shortRoot, "xdg-data"),
 	)
-	return cliFixture{t: t, bin: bin, root: root, dataDir: dataDir, env: env}
+	return cliFixture{t: t, bin: bin, root: root, dataDir: dataDir, runqdSocket: runqdSocket, env: env}
 }
 
 func (fx cliFixture) run(args ...string) string {
@@ -274,11 +286,12 @@ func writeConfig(t *testing.T, configPath, dataPath string, dashboardPort int) {
 	t.Helper()
 	contents := strings.Join([]string{
 		"data_path: " + filepath.ToSlash(dataPath),
+		"default_target: dashboard-test",
 		"dashboard:",
 		"  enabled: true",
 		fmt.Sprintf("  listen: 127.0.0.1:%d", dashboardPort),
-		"hpc:",
-		"  submit_template: sbatch --wrap '{{cmd}}'",
+		"targets:",
+		"  - name: dashboard-test",
 		"",
 	}, "\n")
 	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {

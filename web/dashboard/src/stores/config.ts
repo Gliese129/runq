@@ -24,19 +24,22 @@ export const useConfigStore = defineStore('config', () => {
   const dataPath = ref('')
   const configPath = ref('')
   const defaultTarget = ref('')
+  const targetState = ref<'configured' | 'unconfigured'>('unconfigured')
   const targets = ref<TargetSummary[]>([])
   const loaded = ref(false)
 
   // The target the UI is operating on. Alignment phase: = default_target.
   // The app-shell issue upgrades this to a user-switchable context.
-  const currentTarget = computed(() => defaultTarget.value || targets.value[0]?.name || 'local')
+  const currentTarget = computed(() => defaultTarget.value || targets.value[0]?.name || '')
 
   const currentTargetSummary = computed(() =>
-    targets.value.find(t => t.name === currentTarget.value))
+    targets.value.find((t) => t.name === currentTarget.value),
+  )
 
   /** Capabilities of the CURRENT target — existing caps-gating reads this. */
-  const caps = computed<Capabilities>(() =>
-    currentTargetSummary.value?.capabilities ?? { ...NO_CAPS })
+  const caps = computed<Capabilities>(
+    () => currentTargetSummary.value?.capabilities ?? { ...NO_CAPS },
+  )
 
   /** Human-readable descriptor shown where `mode` used to be. */
   const targetLabel = computed(() => {
@@ -55,12 +58,24 @@ export const useConfigStore = defineStore('config', () => {
     configPath.value = res.config_path
     defaultTarget.value = res.default_target
     targets.value = res.targets ?? []
+    targetState.value =
+      res.target_state ?? (targets.value.length > 0 ? 'configured' : 'unconfigured')
     loaded.value = true
   }
 
   return {
-    dataPath, configPath, defaultTarget, targets, loaded,
-    currentTarget, currentTargetSummary, caps, targetLabel, isPoll, killAsync,
+    dataPath,
+    configPath,
+    defaultTarget,
+    targetState,
+    targets,
+    loaded,
+    currentTarget,
+    currentTargetSummary,
+    caps,
+    targetLabel,
+    isPoll,
+    killAsync,
     fetchConfig,
   }
 })

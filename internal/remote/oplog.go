@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gliese129/runq/internal/config"
+	"github.com/gliese129/runq-lab/internal/config"
 )
 
 // opLog appends one timestamped entry to the HPC operation log

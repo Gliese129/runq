@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gliese129/runq/internal/store"
+	"github.com/gliese129/runq-lab/internal/store"
 )
 
 func seedResultsStore(t *testing.T, taskIDs ...string) *store.Store {

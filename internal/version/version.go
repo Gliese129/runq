@@ -9,7 +9,7 @@ package version
 
 // Version is the build version, stamped via:
 //
-//	go build -ldflags "-X github.com/gliese129/runq/internal/version.Version=v0.4.0"
+//	go build -ldflags "-X github.com/gliese129/runq-lab/internal/version.Version=v0.4.0"
 //
 // "dev" means an unstamped local build. Dev builds are exempt from the
 // client gate on both sides: a gate between two workstation builds would

@@ -6,8 +6,8 @@ import (
 	"os/exec"
 	"path/filepath"
 
-	"github.com/gliese129/runq/internal/backend"
-	"github.com/gliese129/runq/internal/project"
+	"github.com/gliese129/runq-lab/internal/backend"
+	"github.com/gliese129/runq-lab/internal/project"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )

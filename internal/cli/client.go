@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"text/tabwriter"
 
-	"github.com/gliese129/runq/internal/api"
+	"github.com/gliese129/runq-lab/internal/api"
 )
 
 func getSocketPath() string {

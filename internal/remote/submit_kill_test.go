@@ -11,12 +11,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gliese129/runq/internal/config"
-	"github.com/gliese129/runq/internal/job"
-	"github.com/gliese129/runq/internal/project"
-	"github.com/gliese129/runq/internal/store"
-	"github.com/gliese129/runq/internal/submitplan"
-	"github.com/gliese129/runq/internal/utils"
+	"github.com/gliese129/runq-lab/internal/config"
+	"github.com/gliese129/runq-lab/internal/job"
+	"github.com/gliese129/runq-lab/internal/project"
+	"github.com/gliese129/runq-lab/internal/store"
+	"github.com/gliese129/runq-lab/internal/submitplan"
+	"github.com/gliese129/runq-lab/internal/utils"
 )
 
 func newTestBackend(t *testing.T, cfg *config.TargetConfig, run func(ctx context.Context, command string) (string, error)) (*Backend, *project.Config, job.JobConfig) {
@@ -35,39 +35,22 @@ func newTestBackend(t *testing.T, cfg *config.TargetConfig, run func(ctx context
 	return &Backend{Cfg: cfg, Store: st, FS: newTestFSFromRunner(run)}, proj, jobCfg
 }
 
-// #1: a submit that succeeds on the cluster but whose id can't be parsed must
-// leave a VISIBLE task (the durable ledger row), not an invisible orphan. It
-// stays pending — NOT failed — because the job may be running untracked, and
-// pending is non-terminal so reconcile won't stamp a bogus finished_at.
-func TestSubmitUnparseableIDLeavesVisibleTask(t *testing.T) {
+func prepareTasks(t *testing.T, b *Backend, proj *project.Config, cfg job.JobConfig) (string, []store.TaskRow) {
+	t.Helper()
+	jobID, rows, err := b.Prepare(context.Background(), cfg, proj, SubmitOpts{SkipPreflight: true})
+	if err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	return jobID, rows
+}
 
-	cfg := &config.TargetConfig{SubmitTemplate: "submit {{run_sh}}", SubmitIDRegex: `job ([0-9]+)`, KillTemplate: "cancel {{ext_id}}"}
-	runner := func(ctx context.Context, command string) (string, error) {
-		if strings.HasPrefix(schedCmd(command), "submit") {
-			return "GARBAGE no id here", nil // sbatch "succeeded" but no parseable id
-		}
-		return "", nil
+func readSubmitCommand(t *testing.T, b *Backend, row store.TaskRow) string {
+	t.Helper()
+	buf, err := b.FS.ReadFile(filepath.Join(row.TaskDir, submitCmdFileName))
+	if err != nil {
+		t.Fatalf("read submit command: %v", err)
 	}
-	b, proj, jobCfg := newTestBackend(t, cfg, runner)
-	ctx := context.Background()
-
-	jobID, submitted, err := b.Submit(ctx, jobCfg, proj, SubmitOpts{SkipPreflight: true})
-	if err == nil {
-		t.Fatal("expected an error when the submit id is unparseable")
-	}
-	if submitted != 0 {
-		t.Errorf("submitted = %d, want 0", submitted)
-	}
-	tasks, _ := b.Store.ListTasks(ctx, store.TaskFilter{JobID: jobID})
-	if len(tasks) != 1 {
-		t.Fatalf("want 1 visible ledger task, got %d", len(tasks))
-	}
-	if tasks[0].Status != "pending" {
-		t.Errorf("task status = %s, want pending (not a failure — job may be running untracked)", tasks[0].Status)
-	}
-	if tasks[0].FinishedAt != nil {
-		t.Errorf("finished_at must not be set on an id-loss task")
-	}
+	return string(buf)
 }
 
 // #3: when the cancel command fails, the task must NOT be marked killed (else
@@ -76,10 +59,7 @@ func TestKillFailureLeavesTaskUnkilled(t *testing.T) {
 
 	cfg := &config.TargetConfig{SubmitTemplate: "submit {{run_sh}}", SubmitIDRegex: `job ([0-9]+)`, KillTemplate: "cancel {{ext_id}}"}
 	runner := func(ctx context.Context, command string) (string, error) {
-		switch {
-		case strings.HasPrefix(schedCmd(command), "submit"):
-			return "job 7", nil
-		case strings.HasPrefix(schedCmd(command), "cancel"):
+		if strings.HasPrefix(schedCmd(command), "cancel") {
 			return "scancel: connection error", fmt.Errorf("exit status 1")
 		}
 		return "", nil
@@ -87,9 +67,9 @@ func TestKillFailureLeavesTaskUnkilled(t *testing.T) {
 	b, proj, jobCfg := newTestBackend(t, cfg, runner)
 	ctx := context.Background()
 
-	jobID, _, err := b.Submit(ctx, jobCfg, proj, SubmitOpts{SkipPreflight: true})
-	if err != nil {
-		t.Fatalf("Submit: %v", err)
+	jobID, rows := prepareTasks(t, b, proj, jobCfg)
+	if err := b.Store.UpdateTaskStatus(ctx, rows[0].ID, "pending", map[string]any{"external_id": "7"}); err != nil {
+		t.Fatalf("set external id: %v", err)
 	}
 	tasks, _ := b.Store.ListTasks(ctx, store.TaskFilter{JobID: jobID})
 	if _, err := b.Kill(ctx, tasks[0].ID); err == nil {
@@ -107,16 +87,11 @@ func TestKillFailureLeavesTaskUnkilled(t *testing.T) {
 func TestKillNoExternalIDRefuses(t *testing.T) {
 
 	cfg := &config.TargetConfig{SubmitTemplate: "submit {{run_sh}}", SubmitIDRegex: `job ([0-9]+)`, KillTemplate: "cancel {{ext_id}}"}
-	runner := func(ctx context.Context, command string) (string, error) {
-		if strings.HasPrefix(schedCmd(command), "submit") {
-			return "GARBAGE", nil // id unparseable → task left pending, no external_id
-		}
-		return "", nil
-	}
+	runner := func(ctx context.Context, command string) (string, error) { return "", nil }
 	b, proj, jobCfg := newTestBackend(t, cfg, runner)
 	ctx := context.Background()
 
-	jobID, _, _ := b.Submit(ctx, jobCfg, proj, SubmitOpts{SkipPreflight: true}) // returns error; the task is left pending
+	jobID, _ := prepareTasks(t, b, proj, jobCfg)
 	tasks, _ := b.Store.ListTasks(ctx, store.TaskFilter{JobID: jobID})
 	if len(tasks) != 1 || tasks[0].ExternalID != "" {
 		t.Fatalf("precondition: want 1 task with empty external_id, got %+v", tasks)
@@ -144,21 +119,13 @@ func TestSubmitTemplateParamNamespace(t *testing.T) {
 		SubmitIDRegex:  `job ([0-9]+)`,
 		KillTemplate:   "cancel {{ext_id}}",
 	}
-	var captured string
-	runner := func(ctx context.Context, command string) (string, error) {
-		if strings.HasPrefix(schedCmd(command), "qsub") {
-			captured = command
-			return "job 42", nil
-		}
-		return "", nil
-	}
+	runner := func(ctx context.Context, command string) (string, error) { return "", nil }
 	b, proj, jobCfg := newTestBackend(t, cfg, runner)
 	proj.CmdTemplate = "python x.py --lr {{lr}} --h-rt {{h_rt}}"
 	jobCfg.FixedParams = map[string]any{"h_rt": "4:00:00"}
 
-	if _, _, err := b.Submit(context.Background(), jobCfg, proj, SubmitOpts{SkipPreflight: true}); err != nil {
-		t.Fatalf("submit: %v", err)
-	}
+	_, rows := prepareTasks(t, b, proj, jobCfg)
+	captured := readSubmitCommand(t, b, rows[0])
 	if !strings.Contains(captured, "-l h_rt='4:00:00'") {
 		t.Errorf("fixed param not rendered into submit command: %q", captured)
 	}
@@ -181,7 +148,7 @@ func TestSetupCommandFailureAborts(t *testing.T) {
 	b, proj, jobCfg := newTestBackend(t, cfg, runner)
 	proj.SetupCommand = "exit 7"
 
-	_, _, err := b.Submit(context.Background(), jobCfg, proj, SubmitOpts{SkipPreflight: true})
+	_, _, err := b.Prepare(context.Background(), jobCfg, proj, SubmitOpts{SkipPreflight: true})
 	if err == nil {
 		t.Fatal("failing setup must abort the submit")
 	}
@@ -204,22 +171,14 @@ func TestSchedulerParamsExemptFromCommand(t *testing.T) {
 		SubmitIDRegex:  `job ([0-9]+)`,
 		KillTemplate:   "cancel {{ext_id}}",
 	}
-	var captured string
-	runner := func(ctx context.Context, command string) (string, error) {
-		if strings.Contains(command, "qsub") {
-			captured = command
-			return "job 7", nil
-		}
-		return "", nil
-	}
+	runner := func(ctx context.Context, command string) (string, error) { return "", nil }
 	b, proj, jobCfg := newTestBackend(t, cfg, runner)
 	// command_template does NOT consume h_rt — and has no {{args}} either.
 	proj.CmdTemplate = "python x.py --lr {{lr}}"
 	jobCfg.FixedParams = map[string]any{"h_rt": "8:00:00"}
 
-	if _, _, err := b.Submit(context.Background(), jobCfg, proj, SubmitOpts{SkipPreflight: true}); err != nil {
-		t.Fatalf("scheduler param must not require command consumption: %v", err)
-	}
+	_, rows := prepareTasks(t, b, proj, jobCfg)
+	captured := readSubmitCommand(t, b, rows[0])
 	if !strings.Contains(captured, "-l h_rt='8:00:00'") {
 		t.Errorf("h_rt missing from submit command: %q", captured)
 	}
@@ -252,33 +211,23 @@ func TestSubmitCommandReceivesRenderedJobName(t *testing.T) {
 		SubmitIDRegex:  `job ([0-9]+)`,
 		KillTemplate:   "cancel {{ext_id}}",
 	}
-	var captured []string
-	runner := func(ctx context.Context, command string) (string, error) {
-		if strings.Contains(command, "qsub") {
-			captured = append(captured, command)
-			return "job 42", nil
-		}
-		return "", nil
-	}
+	runner := func(ctx context.Context, command string) (string, error) { return "", nil }
 
 	// 1. project.job_name template (params + sanitization: "/" → "-")
 	b, proj, jobCfg := newTestBackend(t, cfg, runner)
 	proj.JobName = "eval/{{lr}}"
-	if _, _, err := b.Submit(context.Background(), jobCfg, proj, SubmitOpts{SkipPreflight: true}); err != nil {
-		t.Fatalf("submit: %v", err)
-	}
-	if !strings.Contains(captured[0], "-N 'eval-0.1'") {
-		t.Errorf("project job_name not rendered into -N: %q", captured[0])
+	_, rows := prepareTasks(t, b, proj, jobCfg)
+	captured := readSubmitCommand(t, b, rows[0])
+	if !strings.Contains(captured, "-N 'eval-0.1'") {
+		t.Errorf("project job_name not rendered into -N: %q", captured)
 	}
 
 	// 2. job.yaml name: override wins over the project template
-	captured = nil
 	jobCfg.Name = "override-{{lr}}"
-	if _, _, err := b.Submit(context.Background(), jobCfg, proj, SubmitOpts{SkipPreflight: true}); err != nil {
-		t.Fatalf("submit with override: %v", err)
-	}
-	if !strings.Contains(captured[0], "-N 'override-0.1'") {
-		t.Errorf("job name override not rendered into -N: %q", captured[0])
+	_, rows = prepareTasks(t, b, proj, jobCfg)
+	captured = readSubmitCommand(t, b, rows[0])
+	if !strings.Contains(captured, "-N 'override-0.1'") {
+		t.Errorf("job name override not rendered into -N: %q", captured)
 	}
 }
 
@@ -373,8 +322,9 @@ func TestRunScriptTrapWritesKilledOnTerm(t *testing.T) {
 }
 
 // TTL-based throttle: repeated EnsureFresh calls within the TTL window skip
-// the scheduler probe but still run local reconcile (status.json + metrics).
-// A zero TTL always forces a full reconcile including the probe.
+// the scheduler probe; probe-free calls within localScanTTL additionally
+// skip the local file scan (read coalescing). A zero TTL always forces a
+// full reconcile including the probe.
 func TestEnsureFreshTTLThrottle(t *testing.T) {
 
 	cfg := &config.TargetConfig{
@@ -385,9 +335,6 @@ func TestEnsureFreshTTLThrottle(t *testing.T) {
 	}
 	probes := 0
 	runner := func(ctx context.Context, command string) (string, error) {
-		if strings.Contains(command, "qsub") {
-			return "job 42", nil
-		}
 		if strings.Contains(command, "checkstat") {
 			probes++
 			return "RUNNING", nil
@@ -395,9 +342,9 @@ func TestEnsureFreshTTLThrottle(t *testing.T) {
 		return "", nil
 	}
 	b, proj, jobCfg := newTestBackend(t, cfg, runner)
-	jobID, _, err := b.Submit(context.Background(), jobCfg, proj, SubmitOpts{SkipPreflight: true})
-	if err != nil {
-		t.Fatalf("submit: %v", err)
+	jobID, rows := prepareTasks(t, b, proj, jobCfg)
+	if err := b.Store.UpdateTaskStatus(context.Background(), rows[0].ID, "pending", map[string]any{"external_id": "42"}); err != nil {
+		t.Fatalf("set external id: %v", err)
 	}
 
 	// Three calls with a long TTL: only the first should probe the scheduler.
@@ -418,8 +365,9 @@ func TestEnsureFreshTTLThrottle(t *testing.T) {
 		t.Errorf("EnsureFresh(0) must bypass the TTL cache, got %d probes", probes)
 	}
 
-	// Even within TTL, local reconcile still runs: a wrapper status.json
-	// written after the first call must be picked up by the next call.
+	// Read coalescing: within localScanTTL a probe-free call skips even the
+	// local scan, so a wrapper status.json written right after the previous
+	// pass is not observed yet.
 	tasks, _ := b.Store.ListTasks(context.Background(), store.TaskFilter{JobID: jobID})
 	tk := tasks[0]
 	writeFile(t, filepath.Join(tk.TaskDir, statusFileName),
@@ -433,8 +381,24 @@ func TestEnsureFreshTTLThrottle(t *testing.T) {
 		t.Errorf("within-TTL call should NOT probe again, but probes went %d→%d", probesBefore, probes)
 	}
 	got, _ := b.Store.GetTask(context.Background(), tk.ID)
+	if got.Status != "running" {
+		t.Errorf("within-localScanTTL call should have skipped the scan: got %s, want running", got.Status)
+	}
+
+	// Once the local-scan window expires, the next call still skips the
+	// probe but re-runs the local scan and picks up the wrapper verdict.
+	b.probeMu.Lock()
+	b.lastLocalScan[jobID] = time.Now().Add(-localScanTTL)
+	b.probeMu.Unlock()
+	if err := b.EnsureFresh(context.Background(), jobID, 30*time.Second); err != nil {
+		t.Fatalf("EnsureFresh(after local-scan window): %v", err)
+	}
+	if probes != probesBefore {
+		t.Errorf("expired local scan must not force a probe, but probes went %d→%d", probesBefore, probes)
+	}
+	got, _ = b.Store.GetTask(context.Background(), tk.ID)
 	if got.Status != "success" {
-		t.Errorf("within-TTL call must still pick up wrapper status.json: got %s, want success", got.Status)
+		t.Errorf("post-window call must pick up wrapper status.json: got %s, want success", got.Status)
 	}
 }
 
@@ -450,12 +414,9 @@ func TestListingStatusTemplateBatchesPerPass(t *testing.T) {
 		StatusTemplate: "qstat-all", // listing-style: identical for every task
 		StatusParser:   []string{`awk -v id={{ext_id}} '$1==id{print $2; f=1} END{if(!f) print "gone"}'`},
 	}
-	statCalls, submits := 0, 0
+	statCalls := 0
 	runner := func(ctx context.Context, command string) (string, error) {
 		switch {
-		case strings.HasPrefix(schedCmd(command), "qsub"):
-			submits++
-			return fmt.Sprintf("job %d", 100+submits), nil
 		case command == "qstat-all":
 			statCalls++
 			return "101 RUNNING\n102 RUNNING", nil
@@ -469,9 +430,14 @@ func TestListingStatusTemplateBatchesPerPass(t *testing.T) {
 	jobCfg.Sweep = []job.SweepBlock{{Method: "grid",
 		Parameters: map[string]job.ParameterSpec{"lr": {Values: []any{0.1, 0.2}}}}}
 
-	jobID, n, err := b.Submit(context.Background(), jobCfg, proj, SubmitOpts{SkipPreflight: true})
-	if err != nil || n != 2 {
-		t.Fatalf("submit: n=%d err=%v", n, err)
+	jobID, rows := prepareTasks(t, b, proj, jobCfg)
+	if len(rows) != 2 {
+		t.Fatalf("prepared rows = %d, want 2", len(rows))
+	}
+	for i, row := range rows {
+		if err := b.Store.UpdateTaskStatus(context.Background(), row.ID, "pending", map[string]any{"external_id": fmt.Sprintf("%d", 101+i)}); err != nil {
+			t.Fatalf("set external id: %v", err)
+		}
 	}
 	if err := b.EnsureFresh(context.Background(), jobID, 0); err != nil {
 		t.Fatalf("EnsureFresh: %v", err)
@@ -490,9 +456,8 @@ func TestListingStatusTemplateBatchesPerPass(t *testing.T) {
 
 // New work must not land in an archived project — the cascade hides its
 // jobs from the default lists, so the run would be invisible. The guard
-// lives in Submit (one backend point: GUI rerun/draft/import, CLI,
-// --project-file all pass through here).
-func TestSubmitRefusesArchivedProject(t *testing.T) {
+// lives in Prepare, before admission publishes any task rows.
+func TestPrepareRefusesArchivedProject(t *testing.T) {
 
 	cfg := &config.TargetConfig{
 		SubmitTemplate: "qsub {{run_sh}}",
@@ -502,10 +467,8 @@ func TestSubmitRefusesArchivedProject(t *testing.T) {
 	runner := func(ctx context.Context, command string) (string, error) { return "job 1", nil }
 	b, proj, jobCfg := newTestBackend(t, cfg, runner)
 
-	// First submit registers the project; archive it, then try again.
-	if _, _, err := b.Submit(context.Background(), jobCfg, proj, SubmitOpts{SkipPreflight: true}); err != nil {
-		t.Fatalf("first submit: %v", err)
-	}
+	// First preparation registers the project; archive it, then try again.
+	prepareTasks(t, b, proj, jobCfg)
 	reg := project.NewRegistry(b.Store.DB())
 	// jobs from the first submit are pending — flip them terminal so the
 	// project archive guard lets us archive.
@@ -515,9 +478,33 @@ func TestSubmitRefusesArchivedProject(t *testing.T) {
 	if err := reg.Archive(context.Background(), proj.ProjectName); err != nil {
 		t.Fatalf("archive project: %v", err)
 	}
-	if _, _, err := b.Submit(context.Background(), jobCfg, proj, SubmitOpts{SkipPreflight: true}); err == nil {
+	if _, _, err := b.Prepare(context.Background(), jobCfg, proj, SubmitOpts{SkipPreflight: true}); err == nil {
 		t.Fatal("submit into an archived project must be refused")
 	} else if !strings.Contains(err.Error(), "archived") {
 		t.Fatalf("error should explain the archive state, got: %v", err)
+	}
+}
+
+func TestSingleTaskKillResolutionRejectsAnotherGeneration(t *testing.T) {
+	cfg := &config.TargetConfig{Name: "hpc", KillTemplate: "cancel {{ext_id}}"}
+	b, _, _ := newTestBackend(t, cfg, func(context.Context, string) (string, error) { return "", nil })
+	b.Scope = store.NewLaneScope("hpc", "old")
+	b.Scope.MarkRetiring()
+	ctx := context.Background()
+	if err := b.Store.InsertJob(ctx, &store.JobRow{
+		ID: "job-scope", ProjectName: "p", Status: "running", TotalTasks: 1,
+		Target: "hpc", CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Store.InsertTask(ctx, &store.TaskRow{
+		ID: "task-scope", JobID: "job-scope", ProjectName: "p", Command: "true",
+		ParamsJSON: "{}", Status: "running", ExternalID: "42", Target: "hpc",
+		TargetGeneration: "new", EnqueuedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := b.resolveTargets(ctx, "task-scope"); err == nil || !strings.Contains(err.Error(), "not this lane generation") {
+		t.Fatalf("cross-generation point resolution error = %v", err)
 	}
 }

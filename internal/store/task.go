@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -13,28 +14,29 @@ import (
 // TaskRow is a pure data-transfer object whose field types mirror the DB schema.
 // Callers are responsible for converting between the two.
 type TaskRow struct {
-	ID          string
-	JobID       string
-	ProjectName string
-	Command     string
-	ParamsJSON  string // JSON-serialized parameter map
-	GPUsNeeded  int
-	GPUs        string // comma-separated GPU indices, e.g. "0,1,3"
-	Status      string
-	RetryCount  int
-	MaxRetry    int
-	PID         int
-	StartTime   int64 // /proc starttime (Unix timestamp) for reclaim validation
-	LogPath     string
-	WorkingDir  string
-	EnvJSON     string // JSON-serialized environment variable map
-	Resumable   bool
-	ExtraArgs   string
-	UID         int // submitting user's UID
-	Timeout     int // timeout in seconds, 0 = no timeout
-	EnqueuedAt  time.Time
-	StartedAt   *time.Time
-	FinishedAt  *time.Time
+	ID            string
+	JobID         string
+	ProjectName   string
+	Command       string
+	ParamsJSON    string // JSON-serialized parameter map
+	GPUsNeeded    int
+	GPUs          string // comma-separated GPU indices, e.g. "0,1,3"
+	Status        string
+	KillRequested bool
+	RetryCount    int
+	MaxRetry      int
+	PID           int
+	StartTime     int64 // /proc starttime (Unix timestamp) for reclaim validation
+	LogPath       string
+	WorkingDir    string
+	EnvJSON       string // JSON-serialized environment variable map
+	Resumable     bool
+	ExtraArgs     string
+	UID           int // submitting user's UID
+	Timeout       int // timeout in seconds, 0 = no timeout
+	EnqueuedAt    time.Time
+	StartedAt     *time.Time
+	FinishedAt    *time.Time
 
 	// L2-C: per-task workspace at <root>/<job_id>/<task_id>.
 	// Holds params.json, wandb_config.json (optional), metrics.jsonl, checkpoints/.
@@ -45,18 +47,19 @@ type TaskRow struct {
 	// "tsubame"). Phase 1: MultiBackend routing key.
 	Target string
 
-	// L2-E: HPC scheduler job id (sbatch/qsub). Empty for daemon-managed tasks.
-	// Set by the HPC backend after submit; used by refresh to map a task back to
-	// its cluster job for status/kill.
+	// L2-E: external attempt/job id returned by runqd or an HPC scheduler.
+	// Set after handoff and used by refresh to map a task back to its execution
+	// record for status and cancellation.
 	ExternalID string
 
 	// L2-E: provenance of Status — "" | wrapper | scheduler | inferred | runq |
-	// submit. Lets HPC refresh treat "inferred" terminals as correctable while
-	// wrapper/scheduler/runq terminals are final. Empty for daemon tasks.
+	// submit | retry. Reconciliation applies the closed evidence-precedence matrix:
+	// wrapper/runq terminals are hard; scheduler/submit/inferred evidence is
+	// correctable only by an allowed stronger fact.
 	StatusSource string
 
 	// RQ-74: verbatim failure evidence for pre-run failures (submit rejection:
-	// scheduler stderr + exit code + rendered command; local spawn errors).
+	// scheduler stderr + exit code + rendered command).
 	// Empty for tasks that reached the run phase — those self-report through
 	// logs/status.json. Cleared on requeue (a new attempt starts clean).
 	FailureDetail string
@@ -96,7 +99,7 @@ const allTaskColumns = `id, job_id, project_name, command, params_json,
 	gpus_needed, gpus, status, retry_count, max_retry,
 	pid, start_time, log_path, working_dir, env_json,
 	resumable, extra_args, uid, timeout,
-	enqueued_at, started_at, finished_at, task_dir, target, external_id, status_source,
+	enqueued_at, started_at, finished_at, task_dir, target, external_id, status_source, kill_requested,
 	native_state, queue, failure_detail, target_generation`
 
 // scanTask reads one result row into a TaskRow.
@@ -120,6 +123,7 @@ func scanTask(scanner interface{ Scan(dest ...any) error }) (*TaskRow, error) {
 		taskDir       sql.NullString
 		externalID    sql.NullString
 		statusSource  sql.NullString
+		killRequested int
 		nativeState   sql.NullString
 		queue         sql.NullString
 		failureDetail sql.NullString
@@ -132,7 +136,7 @@ func scanTask(scanner interface{ Scan(dest ...any) error }) (*TaskRow, error) {
 		&t.GPUsNeeded, &gpus, &t.Status, &t.RetryCount, &t.MaxRetry,
 		&pid, &startTime, &logPath, &workingDir, &envJSON,
 		&resumable, &extraArgs, &uid, &timeout, &enqueuedAt, &startedAt, &finishedAt,
-		&taskDir, &target, &externalID, &statusSource,
+		&taskDir, &target, &externalID, &statusSource, &killRequested,
 		&nativeState, &queue, &failureDetail, &targetGen,
 	)
 	if err != nil {
@@ -159,6 +163,7 @@ func scanTask(scanner interface{ Scan(dest ...any) error }) (*TaskRow, error) {
 	}
 	t.ExternalID = externalID.String
 	t.StatusSource = statusSource.String
+	t.KillRequested = killRequested != 0
 	t.NativeState = nativeState.String
 	t.Queue = queue.String
 	t.FailureDetail = failureDetail.String
@@ -174,13 +179,17 @@ func (s *Store) InsertTask(ctx context.Context, t *TaskRow) error {
 		gpus_needed, gpus, status, retry_count, max_retry,
 		pid, start_time, log_path, working_dir, env_json,
 		resumable, extra_args, uid, timeout,
-		enqueued_at, started_at, finished_at, task_dir, target, external_id, status_source,
+		enqueued_at, started_at, finished_at, task_dir, target, external_id, status_source, kill_requested,
 		native_state, queue, failure_detail, target_generation
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	resumable := 0
 	if t.Resumable {
 		resumable = 1
+	}
+	killRequested := 0
+	if t.KillRequested {
+		killRequested = 1
 	}
 
 	_, err := s.db.ExecContext(ctx, query,
@@ -191,7 +200,7 @@ func (s *Store) InsertTask(ctx context.Context, t *TaskRow) error {
 		resumable, t.ExtraArgs, nullInt(t.UID), nullInt(t.Timeout),
 		t.EnqueuedAt.Unix(),
 		nullTimeToUnix(t.StartedAt), nullTimeToUnix(t.FinishedAt),
-		nullString(t.TaskDir), targetOrDefault(t.Target), nullString(t.ExternalID), nullString(t.StatusSource),
+		nullString(t.TaskDir), targetOrDefault(t.Target), nullString(t.ExternalID), nullString(t.StatusSource), killRequested,
 		nullString(t.NativeState), nullString(t.Queue), nullString(t.FailureDetail),
 		t.TargetGeneration,
 	)
@@ -205,13 +214,17 @@ func (s *Store) InsertTaskTx(ctx context.Context, tx *sql.Tx, t *TaskRow) error 
 		gpus_needed, gpus, status, retry_count, max_retry,
 		pid, start_time, log_path, working_dir, env_json,
 		resumable, extra_args, uid, timeout,
-		enqueued_at, started_at, finished_at, task_dir, target, external_id, status_source,
+		enqueued_at, started_at, finished_at, task_dir, target, external_id, status_source, kill_requested,
 		native_state, queue, failure_detail, target_generation
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	resumable := 0
 	if t.Resumable {
 		resumable = 1
+	}
+	killRequested := 0
+	if t.KillRequested {
+		killRequested = 1
 	}
 
 	_, err := tx.ExecContext(ctx, query,
@@ -222,7 +235,7 @@ func (s *Store) InsertTaskTx(ctx context.Context, tx *sql.Tx, t *TaskRow) error 
 		resumable, t.ExtraArgs, nullInt(t.UID), nullInt(t.Timeout),
 		t.EnqueuedAt.Unix(),
 		nullTimeToUnix(t.StartedAt), nullTimeToUnix(t.FinishedAt),
-		nullString(t.TaskDir), targetOrDefault(t.Target), nullString(t.ExternalID), nullString(t.StatusSource),
+		nullString(t.TaskDir), targetOrDefault(t.Target), nullString(t.ExternalID), nullString(t.StatusSource), killRequested,
 		nullString(t.NativeState), nullString(t.Queue), nullString(t.FailureDetail),
 		t.TargetGeneration,
 	)
@@ -249,6 +262,82 @@ var allowedStatusFields = map[string]bool{
 	"target_generation": true,
 	"queue":             true,
 	"failure_detail":    true,
+	"kill_requested":    true,
+}
+
+// ErrTaskStatusConflict means a conditional task transition lost a race with
+// another durable transition. Callers should reload the row rather than
+// retrying an observation made against the old attempt.
+var ErrTaskStatusConflict = errors.New("task status transition conflict")
+
+const (
+	expectedStatusField           = "__expected_status"
+	expectedStatusSourceField     = "__expected_status_source"
+	expectedRetryCountField       = "__expected_retry_count"
+	expectedTargetGenerationField = "__expected_target_generation"
+	expectedExternalIDField       = "__expected_external_id"
+)
+
+// FenceTaskStatusUpdate attaches the durable identity of the task attempt
+// that produced a transition. The metadata travels through lifecycle funnels
+// in fields but is consumed as WHERE predicates by UpdateTaskStatus; it is
+// never written as task data.
+func FenceTaskStatusUpdate(fields map[string]any, expected TaskRow) {
+	fields[expectedStatusField] = expected.Status
+	fields[expectedStatusSourceField] = expected.StatusSource
+	fields[expectedRetryCountField] = expected.RetryCount
+	fields[expectedTargetGenerationField] = expected.TargetGeneration
+	fields[expectedExternalIDField] = expected.ExternalID
+}
+
+// CarryTaskStatusFence copies only FenceTaskStatusUpdate's private predicate
+// metadata into another transition field map. Lifecycle reducers such as the
+// scheduler's failed→pending retry intentionally discard terminal evidence
+// fields, but they must not discard the attempt identity that guards the
+// write against a stronger concurrent verdict or a newer generation.
+func CarryTaskStatusFence(dst, src map[string]any) {
+	for _, key := range []string{
+		expectedStatusField,
+		expectedStatusSourceField,
+		expectedRetryCountField,
+		expectedTargetGenerationField,
+		expectedExternalIDField,
+	} {
+		if value, ok := src[key]; ok {
+			dst[key] = value
+		}
+	}
+}
+
+// SetTaskKillRequested durably records or clears user cancellation intent on
+// a non-terminal task. The conditional update prevents a racing request from
+// attaching stale intent after the task has already settled.
+func (s *Store) SetTaskKillRequested(ctx context.Context, taskID string, requested bool) (bool, error) {
+	value := 0
+	if requested {
+		value = 1
+	}
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE tasks SET kill_requested = ?
+		WHERE id = ? AND status NOT IN ('success', 'failed', 'killed')`, value, taskID)
+	if err != nil {
+		return false, err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if n > 0 {
+		return true, nil
+	}
+	var status string
+	if err := s.db.QueryRowContext(ctx, `SELECT status FROM tasks WHERE id = ?`, taskID).Scan(&status); err != nil {
+		if err == sql.ErrNoRows {
+			return false, fmt.Errorf("task %q not found", taskID)
+		}
+		return false, err
+	}
+	return false, nil
 }
 
 // UpdateTaskStatus updates a task's status and any extra fields.
@@ -265,17 +354,58 @@ var allowedStatusFields = map[string]bool{
 func (s *Store) UpdateTaskStatus(ctx context.Context, taskID string, status string, fields map[string]any) error {
 	setClauses := []string{"status = ?"}
 	args := []any{status}
+	whereClauses := []string{"id = ?"}
+	whereArgs := []any{taskID}
+	fenced := false
+
+	if expected, ok := fields[expectedStatusField]; ok {
+		fenced = true
+		whereClauses = append(whereClauses, "status = ?")
+		whereArgs = append(whereArgs, expected)
+	}
+	if expected, ok := fields[expectedStatusSourceField]; ok {
+		whereClauses = append(whereClauses, "COALESCE(status_source, '') = ?")
+		whereArgs = append(whereArgs, expected)
+	}
+	if expected, ok := fields[expectedRetryCountField]; ok {
+		whereClauses = append(whereClauses, "retry_count = ?")
+		whereArgs = append(whereArgs, expected)
+	}
+	if expected, ok := fields[expectedTargetGenerationField]; ok {
+		whereClauses = append(whereClauses, "COALESCE(target_generation, '') = ?")
+		whereArgs = append(whereArgs, expected)
+	}
+	if expected, ok := fields[expectedExternalIDField]; ok {
+		whereClauses = append(whereClauses, "COALESCE(external_id, '') = ?")
+		whereArgs = append(whereArgs, expected)
+	}
 
 	for col, val := range fields {
+		switch col {
+		case expectedStatusField, expectedStatusSourceField, expectedRetryCountField,
+			expectedTargetGenerationField, expectedExternalIDField:
+			continue
+		}
 		if !allowedStatusFields[col] {
 			return fmt.Errorf("UpdateTaskStatus: column %q not in whitelist", col)
 		}
 		setClauses = append(setClauses, col+" = ?")
 		args = append(args, val)
 	}
+	// Automatic failure retry increments retry_count but intentionally drops
+	// terminal evidence fields. Requiring the immediately preceding epoch is
+	// its attempt fence: a manual retry records the same next epoch first, so
+	// an old failure can no longer republish pending over that reset intent.
+	if !fenced {
+		if next, ok := intField(fields["retry_count"]); ok && next > 0 {
+			whereClauses = append(whereClauses, "retry_count = ?")
+			whereArgs = append(whereArgs, next-1)
+		}
+	}
 
-	query := fmt.Sprintf("UPDATE tasks SET %s WHERE id = ?", strings.Join(setClauses, ", "))
-	args = append(args, taskID)
+	query := fmt.Sprintf("UPDATE tasks SET %s WHERE %s",
+		strings.Join(setClauses, ", "), strings.Join(whereClauses, " AND "))
+	args = append(args, whereArgs...)
 
 	result, err := s.db.ExecContext(ctx, query, args...)
 	if err != nil {
@@ -283,9 +413,25 @@ func (s *Store) UpdateTaskStatus(ctx context.Context, taskID string, status stri
 	}
 	n, _ := result.RowsAffected()
 	if n == 0 {
+		if fenced || len(whereClauses) > 1 {
+			return fmt.Errorf("%w for task %q", ErrTaskStatusConflict, taskID)
+		}
 		return fmt.Errorf("task %q not found", taskID)
 	}
 	return nil
+}
+
+func intField(value any) (int, bool) {
+	switch v := value.(type) {
+	case int:
+		return v, true
+	case int32:
+		return int(v), true
+	case int64:
+		return int(v), true
+	default:
+		return 0, false
+	}
 }
 
 // ── Orphan marking ─────────────────────────────────────────────────────────
@@ -488,41 +634,14 @@ func (s *Store) GetJobIDsForTasks(ctx context.Context, taskIDs []string) (map[st
 	return result, rows.Err()
 }
 
-// ListActiveTasks returns all pending or running tasks, ordered by enqueue time.
+// ListActiveTasks returns every nonterminal task, ordered by enqueue time.
 // Called at daemon startup to rebuild the in-memory Queue.
 func (s *Store) ListActiveTasks(ctx context.Context) ([]TaskRow, error) {
 	query := fmt.Sprintf(
-		"SELECT %s FROM tasks WHERE status IN ('pending', 'running') ORDER BY enqueued_at ASC",
-		allTaskColumns,
+		"SELECT %s FROM tasks WHERE status IN %s ORDER BY enqueued_at ASC",
+		allTaskColumns, ActiveStatusesSQL(),
 	)
 	rows, err := s.db.QueryContext(ctx, query)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var result []TaskRow
-	for rows.Next() {
-		t, err := scanTask(rows)
-		if err != nil {
-			return nil, err
-		}
-		result = append(result, *t)
-	}
-	return result, rows.Err()
-}
-
-// ListFinishedTasksAfter returns tasks in terminal states finished after the cutoff.
-// Used by fair-share scheduling to compute per-user GPU-hours in a sliding window.
-func (s *Store) ListFinishedTasksAfter(ctx context.Context, cutoff time.Time) ([]TaskRow, error) {
-	query := fmt.Sprintf(
-		`SELECT %s FROM tasks
-		 WHERE status IN ('success', 'failed', 'killed')
-		   AND finished_at IS NOT NULL
-		   AND finished_at >= ?
-		 ORDER BY finished_at ASC`, allTaskColumns)
-
-	rows, err := s.db.QueryContext(ctx, query, cutoff.Unix())
 	if err != nil {
 		return nil, err
 	}

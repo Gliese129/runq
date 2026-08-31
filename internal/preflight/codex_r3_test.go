@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gliese129/runq/internal/project"
+	"github.com/gliese129/runq-lab/internal/project"
 )
 
 // Codex r3: the six import-graph corners that regex-based discovery

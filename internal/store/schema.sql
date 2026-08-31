@@ -10,11 +10,10 @@ CREATE TABLE IF NOT EXISTS projects (
 
 CREATE TABLE IF NOT EXISTS jobs (
     id           TEXT PRIMARY KEY,    -- ULID or short UUID
-    -- No FK to projects: on runqd this ledger is a SCHEDULER's — foreign
-    -- tasks carry the client's project name as a plain LABEL (like Slurm
-    -- records a job name); registration is a client-side concept. Pre-split
-    -- client DBs keep their old FK (CREATE IF NOT EXISTS never alters) and
-    -- the client only writes registered projects, so behavior is identical.
+    -- No FK to projects: target lanes may carry a remote scheduler's tasks,
+    -- where the project name is a client-side label. Existing databases may
+    -- retain the historical FK because CREATE IF NOT EXISTS does not alter
+    -- tables; the client registers projects before writing jobs either way.
     project_name TEXT NOT NULL,
     description  TEXT,
     note         TEXT,                -- user-supplied experiment note (--note flag or job.yaml note: field)
@@ -53,8 +52,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     started_at   INTEGER,            -- Unix timestamp, nullable
     finished_at  INTEGER,            -- Unix timestamp, nullable
     task_dir     TEXT,                -- L2-C: <root>/<job_id>/<task_id>, holds params.json / metrics.jsonl / checkpoints/
-    external_id  TEXT,                -- L2-E: HPC scheduler job id (sbatch/qsub). Empty for daemon-managed tasks.
-    status_source TEXT,               -- L2-E: provenance of status: "" | wrapper | scheduler | inferred | runq | submit
+    external_id  TEXT,                -- L2-E: runqd attempt id or HPC scheduler job id
+    status_source TEXT,               -- L2-E: provenance: "" | wrapper | scheduler | inferred | runq | submit | retry
+    kill_requested INTEGER NOT NULL DEFAULT 0, -- durable user cancellation intent
     failure_detail TEXT,              -- RQ-74: verbatim failure evidence (scheduler stderr, exit code, rendered command) for pre-run failures
     target_generation TEXT NOT NULL DEFAULT ''  -- RQ-75: semantic hash of the target config that owns this task (lane-generation routing)
 );
@@ -66,12 +66,12 @@ CREATE INDEX IF NOT EXISTS idx_jobs_status       ON jobs(status);
 CREATE INDEX IF NOT EXISTS idx_jobs_finished_at  ON jobs(finished_at);
 
 -- ── L2-C: metrics and checkpoints ─────────────────────────────────────────
--- Populated by daemon during `runTask` reap: read the task's SDK output
--- files, dispatch each event by type. Tables carry job_id as a redundant
+-- Populated by remote-result ingestion from the task's SDK output files,
+-- dispatching each event by type. Tables carry job_id as a redundant
 -- column to avoid joining on `tasks` when querying by job.
--- (The legacy raw-point `metrics` table is GONE — RQ2-1 c6; migrate.go
--- drops it from existing DBs. metric_summary + the on-target pyramid
--- index replaced it in the streaming-reduction design.)
+-- New databases do not create the legacy raw-point `metrics` table.
+-- Existing databases retain those rows under `metrics_legacy_v1`; current
+-- summaries plus the on-target pyramid serve the active read path.
 
 -- Streaming metric summaries: ONE row per (task, key), maintained by the
 -- incremental ingest's on-the-fly reduction — raw points are NOT stored

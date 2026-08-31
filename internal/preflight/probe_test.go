@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gliese129/runq/internal/job"
-	"github.com/gliese129/runq/internal/project"
+	"github.com/gliese129/runq-lab/internal/job"
+	"github.com/gliese129/runq-lab/internal/project"
 )
 
 // ----------------------------------------------------------------------

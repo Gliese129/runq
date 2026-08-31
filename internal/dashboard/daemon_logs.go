@@ -8,10 +8,10 @@ import (
 	"path/filepath"
 	"strconv"
 
-	"github.com/gliese129/runq/internal/backend"
-	"github.com/gliese129/runq/internal/logfile"
-	"github.com/gliese129/runq/internal/rfs"
-	"github.com/gliese129/runq/internal/utils"
+	"github.com/gliese129/runq-lab/internal/backend"
+	"github.com/gliese129/runq-lab/internal/logfile"
+	"github.com/gliese129/runq-lab/internal/rfs"
+	"github.com/gliese129/runq-lab/internal/utils"
 )
 
 // ── runq self-logs (RQ-74) ──────────────────────────────────────────────────
@@ -27,15 +27,13 @@ import (
 //
 // The name → path mapping is a fixed whitelist — this is NOT a file server.
 
-// daemonLogFiles maps the whitelisted log names to their on-disk paths for
-// THIS machine: the client daemon's own log, plus the local runqd's when
-// this machine also executes.
+// daemonLogFiles maps the whitelisted client log name to its on-disk path.
+// runqd owns its own data/log directory and exposes diagnostics independently;
+// runq-lab must not guess or serve a sibling daemon's files.
 func daemonLogFiles() map[string]string {
 	_, dataDir := utils.ResolveDataDir()
-	paths := utils.PathsFromDataDir(dataDir)
 	return map[string]string{
 		"daemon": filepath.Join(dataDir, "daemon.log"),
-		"runqd":  filepath.Join(paths.LogDir, "runqd.log"),
 	}
 }
 
@@ -50,7 +48,7 @@ type daemonLogFileInfo struct {
 // normal machine shape).
 func (s *Server) handleDaemonLogList(w http.ResponseWriter, r *http.Request) {
 	files := []daemonLogFileInfo{}
-	for _, name := range []string{"daemon", "runqd"} { // stable order
+	for _, name := range []string{"daemon"} { // stable order
 		path := daemonLogFiles()[name]
 		info, err := os.Stat(path)
 		if err != nil {
@@ -66,7 +64,7 @@ func resolveDaemonLog(w http.ResponseWriter, r *http.Request) (string, bool) {
 	name := r.PathValue("name")
 	path, ok := daemonLogFiles()[name]
 	if !ok {
-		writeErr(w, http.StatusNotFound, backend.CodeNotFound, fmt.Sprintf("unknown daemon log %q (want daemon|runqd)", name))
+		writeErr(w, http.StatusNotFound, backend.CodeNotFound, fmt.Sprintf("unknown daemon log %q (want daemon)", name))
 		return "", false
 	}
 	return path, true

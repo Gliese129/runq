@@ -6,13 +6,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gliese129/runq/internal/store"
+	"github.com/gliese129/runq-lab/internal/store"
 )
 
 // genLane is an active lane with a generation stamp; records retries.
 // Its RetryTask honors the LANE CONTRACT (review P2): ownership is
 // stamped by the lane itself, inside its reset write, only on success —
-// exactly what SSHBackend/LocalBackend do.
+// exactly what SSHBackend does.
 type genLane struct {
 	*UnavailableBackend
 	st      *store.Store

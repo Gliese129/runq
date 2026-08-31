@@ -7,36 +7,47 @@ clusters (SLURM / PBS / SGE) do steps 1–3 here, then switch to
 ## 1. Install and check
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Gliese129/runq/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Gliese129/runq-lab/main/install.sh | sh
 runq doctor
 ```
 
-The installer supports Linux and macOS on amd64/arm64. It asks whether to
-install the embedded UI build, verifies the downloaded checksums, installs
-`runq` (plus Linux-only `runqd`), and starts `runq` in the background.
-`doctor` then tells you exactly what's missing and how to fix it.
+The runq-lab installer supports Linux and macOS on amd64/arm64. It asks
+whether to install the embedded UI build, verifies the downloaded checksum,
+and installs only `runq`. It does not install `runqd` and does not start a
+daemon unless explicitly requested. Install `runqd` separately on the Linux
+GPU host from the
+[`runq-executor`](https://github.com/Gliese129/runq-executor) repository, then
+use `doctor` to check the client side.
 
 The one-liner remains scriptable: set `RUNQ_WITH_UI=0` or `1`,
-`RUNQ_START_DAEMON=0` to skip startup, `RUNQ_INSTALL_DIR` for a custom
+`RUNQ_START_DAEMON=1` to opt into client startup, `RUNQ_INSTALL_DIR` for a custom
 destination, and `RUNQ_VERSION=v…` to pin a release.
 
+Rerunning the installer updates the binary atomically and leaves the database
+and configuration untouched. An existing daemon is restarted only when
+`RUNQ_START_DAEMON=1` is set.
+
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Gliese129/runq/main/install.sh \
-  | RUNQ_WITH_UI=1 RUNQ_VERSION=v0.5.0rc2 sh
+curl -fsSL https://raw.githubusercontent.com/Gliese129/runq-lab/main/install.sh \
+  | RUNQ_WITH_UI=1 RUNQ_VERSION=v0.5.0 sh
 ```
 
-## 2. Start the daemon
+## 2. Start the two independent services
 
 ```bash
+runq target add local       # explicit: a fresh client has no implicit executor
+runqd serve                 # Linux execution host; normally use systemd
 runq daemon start -d
 ```
 
-The installer already runs this command; use it after a manual install or
-after stopping the client daemon. `runq` owns the cross-platform client and
-dashboard process. On a Linux local target it finds the sibling `runqd` and
-starts that headless scheduler/executor as needed. `runqd` is intentionally
-separate so the client can also run on macOS and drive Linux/HPC targets.
-`runq status` shows the queue summary any time.
+`runq` owns experiment intent, targets, and the optional dashboard. `runqd`
+owns execution on one machine — start it independently (see the
+[`runq-executor` docs](https://github.com/Gliese129/runq-executor) for setup).
+A fresh runq client has no target, so `target add local` is the
+explicit opt-in to this machine's runqd. The client never starts or
+supervises `runqd`. If the endpoint is unavailable, client-daemon startup
+reports the connection error and how to fix it. `runq status` shows the
+client-side view.
 
 ## 3. Turn your script into a project
 
@@ -101,9 +112,9 @@ expansion looks right:
 runq submit job.yaml
 ```
 
-runq queues 6 tasks, assigns free GPUs as they become available, isolates
-each task to its GPUs via `CUDA_VISIBLE_DEVICES`, retries failures up to
-`max_retry`, and gives each task its own log tagged with its exact params.
+runq queues 6 tasks; GPUs are assigned as they become available. runq
+retries failures up to `max_retry`, and gives each task its own log tagged
+with its exact params.
 
 ## 6. Watch, and collect results
 
@@ -146,7 +157,7 @@ runq clean --older-than 720h # delete finished tasks + artifacts (IRREVERSIBLE)
 | Path | What |
 |---|---|
 | `~/.runq/config.yaml` | Global config + HPC targets |
-| `~/.runq/runq.db` | Queue state (SQLite; daemon crash recovery reads this) |
+| `~/.local/share/runq/runq.db` | Client queue/projection state (override the root with `RUNQ_DATA_DIR`) |
 | `<working_dir>/.runq/<note>-<job_id>/<task_id>/` | Per-task workspace: log, params.json, metrics.jsonl, results.jsonl, events.jsonl, checkpoints/ |
 
 The job directory starts with your `note`, so `ls .runq/` reads like an
@@ -154,4 +165,4 @@ experiment log. Don't parse these paths in scripts — use `--json` output.
 
 Next steps: [configuration.md](./configuration.md) for the full YAML
 reference · [hpc.md](./hpc.md) to run the same workflow on a cluster ·
-[runq skill](../.skills/runq/SKILL.md) if an AI agent will drive runq for you.
+[cli.md](./cli.md) for stable commands and machine-readable JSON output.

@@ -1,15 +1,21 @@
 package scheduler
 
 import (
-	"github.com/gliese129/runq/internal/store"
+	"context"
+	"fmt"
+	"time"
+
+	"github.com/gliese129/runq-lab/internal/store"
 )
 
 // ── Job pause/resume ──────────────────────────────────────────────────────
 
 // PauseJob marks a job as paused in the scheduler's in-memory set.
 // Paused jobs' pending tasks are skipped during scheduling.
-// Running tasks are NOT affected (killing GPU processes doesn't free VRAM).
+// In-flight tasks are not affected; pause only gates new submissions.
 func (s *Scheduler) PauseJob(jobID string) {
+	s.dispatchMu.Lock()
+	defer s.dispatchMu.Unlock()
 	s.pauseMu.Lock()
 	defer s.pauseMu.Unlock()
 	s.pausedJobs[jobID] = true
@@ -18,6 +24,8 @@ func (s *Scheduler) PauseJob(jobID string) {
 
 // ResumeJob removes a job from the paused set. Its pending tasks rejoin scheduling.
 func (s *Scheduler) ResumeJob(jobID string) {
+	s.dispatchMu.Lock()
+	defer s.dispatchMu.Unlock()
 	s.pauseMu.Lock()
 	defer s.pauseMu.Unlock()
 	delete(s.pausedJobs, jobID)
@@ -52,34 +60,64 @@ func (s *Scheduler) ClearPause(jobID string) {
 
 // ── Kill request tracking ─────────────────────────────────────────────────
 
-// RequestKill marks a task as user-killed. Call before Launcher.Kill()
-// (currently executor.Stop at the call sites; consolidating both into one
-// Scheduler.KillTask is planned for Step 3 of the scheduler unification).
-// runTask checks this flag to decide killed vs retry.
-func (s *Scheduler) RequestKill(taskID string) {
+// RequestKill persists user intent before publishing it in memory. It shares
+// finishMu with terminal transitions, so a racing completion either clears the
+// durable flag atomically with terminal persistence or wins before this write.
+func (s *Scheduler) RequestKill(taskID string) error {
+	s.finishMu.Lock()
+	defer s.finishMu.Unlock()
+	dbCtx, cancel := context.WithTimeout(s.ctx, 5*time.Second)
+	defer cancel()
+	recorded, err := s.store.SetTaskKillRequested(dbCtx, taskID, true)
+	if err != nil {
+		return fmt.Errorf("persist kill intent for %s: %w", taskID, err)
+	}
+	if !recorded {
+		return nil // a terminal transition won the race
+	}
+	s.killMu.Lock()
+	defer s.killMu.Unlock()
+	s.killRequested[taskID] = true
+	return nil
+}
+
+// RestoreKillRequest republishes already-durable intent during lane recovery.
+func (s *Scheduler) RestoreKillRequest(taskID string) {
 	s.killMu.Lock()
 	defer s.killMu.Unlock()
 	s.killRequested[taskID] = true
 }
 
+// TryKillPending atomically settles a task only if it is still waiting for
+// handoff. A concurrent dispatch uses the same finishMu; if dispatch wins,
+// this returns false and the caller must persist intent then cancel remotely.
+func (s *Scheduler) TryKillPending(taskID, source string) (bool, error) {
+	s.finishMu.Lock()
+	defer s.finishMu.Unlock()
+	task := s.queue.Get(taskID)
+	if task == nil || task.Status != StatusPending {
+		return false, nil
+	}
+	if !s.completeTask(task, StatusKilled, map[string]any{"status_source": source}) {
+		return false, fmt.Errorf("task %s pending kill was not persisted", taskID)
+	}
+	s.RefreshJobStatus(task.JobID)
+	return true, nil
+}
+
 // KillTask is the single entry point for user-initiated kills on
 // scheduler-managed tasks: flag first (so the exit verdict reads "killed",
 // not "failed"→retry), then best-effort termination via the launcher
-// (process-group kill locally; scancel/qdel on remote lanes).
-func (s *Scheduler) KillTask(taskID string) {
-	s.RequestKill(taskID)
-	s.launcher.Kill(taskID)
-}
-
-// consumeKillRequest checks and clears the kill flag for a task.
-func (s *Scheduler) consumeKillRequest(taskID string) bool {
-	s.killMu.Lock()
-	defer s.killMu.Unlock()
-	if s.killRequested[taskID] {
-		delete(s.killRequested, taskID)
-		return true
+// (runqd cancellation or scheduler-specific scancel/qdel).
+func (s *Scheduler) KillTask(taskID string) error {
+	if err := s.RequestKill(taskID); err != nil {
+		return err
 	}
-	return false
+	if err := s.launcher.Kill(taskID); err != nil {
+		s.logger.Warn("remote cancel failed; kill intent retained", "task", taskID, "error", err)
+		return err
+	}
+	return nil
 }
 
 // killPending reports whether a kill flag is set WITHOUT consuming it.
@@ -121,30 +159,6 @@ func (s *Scheduler) RefreshJobStatus(jobID string) {
 		return
 	}
 
-	var running, pending, unknown, success, failed, killed int
-	for _, t := range tasks {
-		switch t.Status {
-		case "running":
-			running++
-		case "pending":
-			pending++
-		case "unknown":
-			// RQ-74: outcome-unknown submission — live work as far as the
-			// job is concerned (reconcile may still settle it either way),
-			// so it blocks the terminal split like pending/running do.
-			unknown++
-		case "success":
-			success++
-		case "failed":
-			failed++
-		case "killed":
-			killed++
-		}
-	}
-
-	isStarted := (running + unknown + success + failed + killed) > 0
-	isEnded := (pending + running + unknown) == 0
-
 	// Preserve the "paused" control state — UNCONDITIONALLY. Pause is a human
 	// intent (same grammar as the kill flag, RQ-69): it outlives mechanical
 	// task terminality and is released only by another human action. Even when
@@ -157,13 +171,10 @@ func (s *Scheduler) RefreshJobStatus(jobID string) {
 		return
 	}
 
-	var newStatus string
-	if isEnded {
-		newStatus = store.TerminalJobStatus(success, failed, killed)
-	} else if isStarted {
-		newStatus = "running"
-	} else {
-		newStatus = "pending"
+	newStatus, err := store.ProjectJobStatus(tasks)
+	if err != nil {
+		s.logger.Error("refresh job status: invalid task state", "job", jobID, "error", err)
+		return
 	}
 
 	if err := s.store.UpdateJobStatus(s.ctx, jobID, newStatus); err != nil {

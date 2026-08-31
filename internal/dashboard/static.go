@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/gliese129/runq/internal/config"
+	"github.com/gliese129/runq-lab/internal/config"
 )
 
 const DashboardDirEnv = "RUNQ_DASHBOARD_DIR"

@@ -7,10 +7,10 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/gliese129/runq/internal/api"
-	"github.com/gliese129/runq/internal/backend"
-	"github.com/gliese129/runq/internal/logfile"
-	"github.com/gliese129/runq/internal/utils"
+	"github.com/gliese129/runq-lab/internal/api"
+	"github.com/gliese129/runq-lab/internal/backend"
+	"github.com/gliese129/runq-lab/internal/logfile"
+	"github.com/gliese129/runq-lab/internal/utils"
 	"github.com/spf13/cobra"
 )
 

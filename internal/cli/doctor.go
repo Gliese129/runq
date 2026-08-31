@@ -11,10 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gliese129/runq/internal/api"
-	"github.com/gliese129/runq/internal/app"
-	"github.com/gliese129/runq/internal/config"
-	"github.com/gliese129/runq/internal/utils"
+	"github.com/gliese129/runq-lab/internal/api"
+	"github.com/gliese129/runq-lab/internal/config"
+	"github.com/gliese129/runq-lab/internal/utils"
 
 	"github.com/spf13/cobra"
 )
@@ -260,10 +259,10 @@ func doctorTargets(d *doctorChecks, cfg *config.GlobalConfig, dataDir string, da
 		var ok bool
 		if t.Type() != config.TargetTypeRemote {
 			// Local runqd: socket dial is local IPC.
-			if checkSocketAlive(utils.RunqdPathsFromDataDir(dataDir).SocketPath) {
+			if checkSocketAlive(utils.RunqdSocketPath()) {
 				status, ok = "connected", true
 			} else {
-				status, ok = "disconnected (auto-starts on demand)", true // informational, not a failure
+				status, ok = "disconnected — start runqd independently or set RUNQD_SOCKET", false
 			}
 		} else if !daemonUp {
 			status, ok = "status unknown (daemon offline)", true
@@ -388,10 +387,9 @@ func fetchTargetHealth(daemonUp bool) map[string]targetHealthLine {
 	return out
 }
 
-// hasExecutorRole reports whether THIS machine is supposed to execute:
-// a local target is configured, or the runqd binary is installed. A live
-// runqd socket alone is deliberately NOT a role claim — a stale daemon
-// from past experiments must not conjure a section full of red.
+// hasExecutorRole reports whether THIS machine is configured to execute.
+// Installed binaries and stale sockets do not create a role: an explicit local
+// target does. This keeps an unconfigured macOS/Windows client diagnostic-only.
 func hasExecutorRole(cfg *config.GlobalConfig) bool {
 	if cfg != nil {
 		for _, t := range cfg.ResolveTargets() {
@@ -400,7 +398,7 @@ func hasExecutorRole(cfg *config.GlobalConfig) bool {
 			}
 		}
 	}
-	return app.FindRunqd() != ""
+	return false
 }
 
 // doctorExecutor checks the executor role: can this machine RUN tasks.
@@ -429,20 +427,34 @@ func doctorExecutor(d *doctorChecks, cfg *config.GlobalConfig) {
 	}
 
 	fmt.Println("runqd binary:")
-	if bin := app.FindRunqd(); bin != "" {
+	if bin := findRunqdBinary(); bin != "" {
 		d.check(true, bin, "")
 	} else {
 		d.check(false, "", "not found next to runq or on PATH — local targets cannot execute")
 	}
 
 	fmt.Println("runqd daemon:")
-	_, dataDir := utils.ResolveDataDir()
-	socket := utils.RunqdPathsFromDataDir(dataDir).SocketPath
+	socket := utils.RunqdSocketPath()
 	if checkSocketAlive(socket) {
 		d.check(true, "running and answering on the socket", "")
 	} else {
-		d.skip("not running — the client daemon auto-starts it on demand (ensure-running)")
+		d.check(false, "", fmt.Sprintf("not reachable at %s — start runqd independently or set RUNQD_SOCKET", socket))
 	}
+}
+
+// findRunqdBinary is a diagnostic only. Discovery here does not launch,
+// configure, supervise, or otherwise transfer lifecycle ownership to runq.
+func findRunqdBinary() string {
+	if self, err := os.Executable(); err == nil {
+		sibling := filepath.Join(filepath.Dir(self), "runqd")
+		if st, err := os.Stat(sibling); err == nil && !st.IsDir() {
+			return sibling
+		}
+	}
+	if p, err := exec.LookPath("runqd"); err == nil {
+		return p
+	}
+	return ""
 }
 
 // checkNvidiaSmi runs nvidia-smi and returns the number of GPUs detected.

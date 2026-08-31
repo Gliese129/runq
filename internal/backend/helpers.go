@@ -14,15 +14,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gliese129/runq/internal/config"
-	"github.com/gliese129/runq/internal/job"
-	"github.com/gliese129/runq/internal/logfile"
-	"github.com/gliese129/runq/internal/project"
-	"github.com/gliese129/runq/internal/rfs"
-	"github.com/gliese129/runq/internal/scheduler"
-	"github.com/gliese129/runq/internal/store"
-	"github.com/gliese129/runq/internal/utils"
-	"github.com/gliese129/runq/internal/workspace"
+	"github.com/gliese129/runq-lab/internal/config"
+	"github.com/gliese129/runq-lab/internal/job"
+	"github.com/gliese129/runq-lab/internal/logfile"
+	"github.com/gliese129/runq-lab/internal/project"
+	"github.com/gliese129/runq-lab/internal/rfs"
+	"github.com/gliese129/runq-lab/internal/scheduler"
+	"github.com/gliese129/runq-lab/internal/store"
+	"github.com/gliese129/runq-lab/internal/utils"
+	"github.com/gliese129/runq-lab/internal/workspace"
 )
 
 // ---- builders: store rows → view types ----
@@ -33,7 +33,7 @@ func BuildJobSummary(job store.JobRow, tasks []store.TaskRow) JobSummary {
 		switch task.Status {
 		case "pending":
 			counts.Pending++
-		case "running":
+		case "running", "submitting":
 			counts.Running++
 		case "unknown":
 			counts.Unknown++
@@ -227,21 +227,28 @@ func tailMetricBuckets(fsys rfs.FS, taskDir, key string, fromTS, toTS int64, bud
 // injection semantics to reason about. Batched to keep command lines
 // bounded on thousand-task sweeps.
 func jobLogSearchViaExec(ctx context.Context, st *store.Store, fsys rfs.FS, jobID, query string) ([]LogMatch, error) {
-	if query == "" {
+	rows, err := st.ListTasks(ctx, store.TaskFilter{JobID: jobID})
+	if err != nil {
+		return nil, err
+	}
+	return jobLogSearchRowsViaExec(ctx, fsys, rows, query, jobLogSearchMaxMatches)
+}
+
+const jobLogSearchMaxMatches = 500 // mirrors logfile.MaxSearchMatches
+
+// jobLogSearchRowsViaExec is the generation-aware primitive used by the
+// Multi router. rows must all live on fsys; callers split mixed-generation
+// jobs before reaching this function so an old path is never searched on a
+// replacement host.
+func jobLogSearchRowsViaExec(ctx context.Context, fsys rfs.FS, rows []store.TaskRow, query string, maxMatches int) ([]LogMatch, error) {
+	if query == "" || maxMatches <= 0 {
 		return []LogMatch{}, nil
 	}
 	if fsys == nil {
 		fsys = rfs.NewLocalFS()
 	}
-	rows, err := st.ListTasks(ctx, store.TaskFilter{JobID: jobID})
-	if err != nil {
-		return nil, err
-	}
 
-	const (
-		maxMatches = 500 // mirrors logfile.MaxSearchMatches
-		batchSize  = 100 // paths per grep invocation (command-line budget)
-	)
+	const batchSize = 100                        // paths per grep invocation (command-line budget)
 	byPath := make(map[string]string, len(rows)) // log path → task id
 	paths := make([]string, 0, len(rows))
 	for _, r := range rows {
@@ -539,7 +546,6 @@ func TaskRowToSchedulerTask(row *store.TaskRow) *scheduler.Task {
 		RetryCount:    row.RetryCount,
 		MaxRetry:      row.MaxRetry,
 		PID:           row.PID,
-		StartTime:     time.Unix(row.StartTime, 0),
 		LogPath:       row.LogPath,
 		WorkingDir:    row.WorkingDir,
 		Env:           env,
@@ -559,6 +565,8 @@ func TaskRowToSchedulerTask(row *store.TaskRow) *scheduler.Task {
 // mapTaskStatus converts a DB status string to scheduler.TaskStatus.
 func mapTaskStatus(s string) scheduler.TaskStatus {
 	switch s {
+	case "submitting":
+		return scheduler.StatusSubmitting
 	case "running":
 		return scheduler.StatusRunning
 	case "success":
@@ -567,6 +575,8 @@ func mapTaskStatus(s string) scheduler.TaskStatus {
 		return scheduler.StatusFailed
 	case "killed":
 		return scheduler.StatusKilled
+	case "unknown":
+		return scheduler.StatusUnknown
 	default:
 		return scheduler.StatusPending
 	}
@@ -613,9 +623,6 @@ const activityBatch = 100
 // the rows daemon-side would waste exactly the transfer the decimation
 // exists to save.
 func jobActivityViaExec(ctx context.Context, st *store.Store, fsys rfs.FS, jobID string) (*JobActivity, error) {
-	if fsys == nil {
-		fsys = rfs.NewLocalFS()
-	}
 	job, err := st.GetJob(ctx, jobID)
 	if err != nil {
 		return nil, err
@@ -628,20 +635,34 @@ func jobActivityViaExec(ctx context.Context, st *store.Store, fsys rfs.FS, jobID
 		return nil, err
 	}
 
-	out := &JobActivity{Tasks: make([]TaskActivity, 0, len(rows))}
+	tasks, err := taskActivityRowsViaExec(ctx, fsys, rows)
+	if err != nil {
+		return nil, err
+	}
+	out := &JobActivity{Tasks: tasks}
 	out.JobStart, out.JobEnd = activityWindow(job, rows)
+	return out, nil
+}
 
+// taskActivityRowsViaExec is the generation-aware primitive used by the
+// Multi router. It returns only the supplied rows and performs every remote
+// read through their already-resolved filesystem.
+func taskActivityRowsViaExec(ctx context.Context, fsys rfs.FS, rows []store.TaskRow) ([]TaskActivity, error) {
+	if fsys == nil {
+		fsys = rfs.NewLocalFS()
+	}
+	out := make([]TaskActivity, 0, len(rows))
 	byPath := make(map[string]int, len(rows)) // activity path → index in out.Tasks
 	paths := make([]string, 0, len(rows))
 	for _, r := range rows {
-		out.Tasks = append(out.Tasks, TaskActivity{
+		out = append(out, TaskActivity{
 			TaskID: r.ID, Status: r.Status, BucketMin: 1, Points: []ActivityPoint{},
 		})
 		if r.TaskDir == "" {
 			continue // never started — no workspace, empty points is the answer
 		}
 		p := workspace.ActivityPath(r.TaskDir)
-		byPath[p] = len(out.Tasks) - 1
+		byPath[p] = len(out) - 1
 		paths = append(paths, p)
 	}
 
@@ -651,7 +672,7 @@ func jobActivityViaExec(ctx context.Context, st *store.Store, fsys rfs.FS, jobID
 		if err != nil {
 			return nil, err // transport-level: no fact learned about any file
 		}
-		parseActivityOutput(stdout, byPath, out.Tasks)
+		parseActivityOutput(stdout, byPath, out)
 	}
 	return out, nil
 }

@@ -7,9 +7,9 @@ import (
 	"path"
 	"strings"
 
-	"github.com/gliese129/runq/internal/rfs"
-	"github.com/gliese129/runq/internal/scheduler"
-	"github.com/gliese129/runq/internal/utils"
+	"github.com/gliese129/runq-lab/internal/rfs"
+	"github.com/gliese129/runq-lab/internal/scheduler"
+	"github.com/gliese129/runq-lab/internal/utils"
 )
 
 // submitCmdFileName is the rendered submit command, persisted at submit time
@@ -19,7 +19,7 @@ import (
 // project environment values.
 const submitCmdFileName = "submit.cmd"
 
-// Launcher adapts Backend to scheduler.Launcher — the unsupervised lane.
+// Launcher adapts Backend to scheduler.Launcher for a remote lane.
 // Launch hands one task to the external scheduler (sbatch/qsub/... rendered
 // at submit time) and returns immediately; terminal states arrive later via
 // reconcile → Scheduler.FinishTask.
@@ -30,23 +30,13 @@ type Launcher struct {
 // NewLauncher wraps a remote Backend in the scheduler.Launcher interface.
 func NewLauncher(b *Backend) *Launcher { return &Launcher{b: b} }
 
-// Supervised is false: Launch returns on handoff, not on task exit.
-func (l *Launcher) Supervised() bool { return false }
-
 // Kill forwards a cancel (scancel/qdel via kill_template) for the task.
-// Best-effort: errors are logged to the oplog; the task only becomes
-// "killed" in the DB once the cancel actually succeeds (Backend.Kill).
-func (l *Launcher) Kill(taskID string) {
-	if err := l.KillErr(taskID); err != nil {
+// The task only becomes "killed" in the DB once the cancel succeeds.
+func (l *Launcher) Kill(taskID string) error {
+	_, err := l.b.Kill(context.Background(), taskID)
+	if err != nil {
 		opLog("KILL FAIL task=%s err=%v", taskID, err)
 	}
-}
-
-// KillErr is the error-reporting cancel the scheduler's kill/submit race
-// path uses (RQ-69): a task may be recorded killed ONLY after the cancel
-// command actually succeeded, so the caller needs the verdict.
-func (l *Launcher) KillErr(taskID string) error {
-	_, err := l.b.Kill(context.Background(), taskID)
 	return err
 }
 
@@ -57,29 +47,30 @@ func (l *Launcher) KillErr(taskID string) error {
 //     scheduler rejected it): no cluster job exists, retry is safe.
 //   - id-parse or id-persist failure → wrapped scheduler.ErrLaunchUntracked.
 //     A cluster job may exist untracked: the scheduler must NOT retry.
-func (l *Launcher) Launch(ctx context.Context, t *scheduler.Task, _ map[string]string, _ func(scheduler.StartInfo)) (scheduler.LaunchResult, error) {
+func (l *Launcher) Launch(ctx context.Context, t *scheduler.Task) error {
 	// Pre-submit file operations are pure FS work: their failures are
 	// transport-class (SSH down, workspace unreachable) — TRANSIENT, the
 	// launch never happened.
 	cmdFile := path.Join(t.TaskDir, submitCmdFileName)
 	cmdBytes, err := l.b.FS.ReadFile(cmdFile)
 	if err != nil {
-		return scheduler.LaunchResult{}, fmt.Errorf("%w: read %s: %v", scheduler.ErrLaunchTransient, cmdFile, err)
+		return fmt.Errorf("%w: read %s: %v", scheduler.ErrLaunchTransient, cmdFile, err)
 	}
 
 	// New attempt = fresh wrapper state, BEFORE the submit so the new job
 	// can't race the reset.
 	if werr := l.b.ResetWrapperState(ctx, t.TaskDir, t.ID); werr != nil {
-		return scheduler.LaunchResult{}, fmt.Errorf("%w: %v", scheduler.ErrLaunchTransient, werr)
+		return fmt.Errorf("%w: %v", scheduler.ErrLaunchTransient, werr)
 	}
 
 	// RQ-69: deterministic per-attempt cancel handle, known BEFORE the
-	// submit. The runqd preset's `runq sbatch` adopts it as the remote task
+	// submit. The runqd preset's `runqd submit` adopts it as the remote task
 	// id (external_id = handle — the "submit id was lost" class dies for
 	// that lane); dialect schedulers (sbatch/qdel) ignore the variable.
 	// The attempt suffix keeps a stale verdict from a previous attempt from
-	// being attributed to this one — identity stays the task id alone.
-	handle := fmt.Sprintf("%s-a%d", t.ID, t.RetryCount)
+	// being attributed to this one. RetryCount is the durable attempt epoch:
+	// both automatic and explicit retries advance it before relaunch.
+	handle := attemptHandle(t.ID, t.RetryCount)
 	cmd := "export RUNQ_SUBMIT_HANDLE=" + utils.ShellQuote(handle) + "\n" + string(cmdBytes)
 
 	out, exitCode, rerr := l.b.shellRunClassified(ctx, cmd)
@@ -93,12 +84,12 @@ func (l *Launcher) Launch(ctx context.Context, t *scheduler.Task, _ map[string]s
 		//     maps to ErrLaunchUntracked and the task waits for reconcile.
 		if errors.Is(rerr, rfs.ErrExecInterrupted) {
 			opLog("SUBMIT INTERRUPTED task=%s job=%s err=%v\npartial output: %s", t.ID, t.JobID, rerr, out)
-			return scheduler.LaunchResult{}, fmt.Errorf(
+			return fmt.Errorf(
 				"%w: submit command interrupted mid-flight — a cluster job may exist: %v\npartial output:\n%s",
 				scheduler.ErrLaunchUntracked, rerr, strings.TrimSpace(out))
 		}
 		opLog("SUBMIT TRANSPORT task=%s job=%s err=%v", t.ID, t.JobID, rerr)
-		return scheduler.LaunchResult{}, fmt.Errorf("%w: %v", scheduler.ErrLaunchTransient, rerr)
+		return fmt.Errorf("%w: %v", scheduler.ErrLaunchTransient, rerr)
 	}
 	if exitCode != 0 {
 		// The scheduler RAN and said no — deterministic rejection; its own
@@ -108,7 +99,7 @@ func (l *Launcher) Launch(ctx context.Context, t *scheduler.Task, _ map[string]s
 		// the death cause reaches `runq task show` / the dashboard verbatim
 		// instead of living only in the oplog.
 		opLog("SUBMIT REJECTED task=%s job=%s exit=%d\ncmd file: %s\noutput: %s", t.ID, t.JobID, exitCode, cmdFile, out)
-		return scheduler.LaunchResult{}, fmt.Errorf(
+		return fmt.Errorf(
 			"submit %s rejected (exit %d):\n%s\n\nsubmit command (%s):\n%s",
 			t.ID, exitCode, strings.TrimSpace(out), cmdFile, strings.TrimSpace(string(cmdBytes)))
 	}
@@ -116,7 +107,7 @@ func (l *Launcher) Launch(ctx context.Context, t *scheduler.Task, _ map[string]s
 	extID, err := utils.ExtractSubmitID(out, l.b.Cfg.SubmitIDRegex)
 	if err != nil {
 		opLog("SUBMIT NOID task=%s job=%s\noutput: %s", t.ID, t.JobID, out)
-		return scheduler.LaunchResult{}, fmt.Errorf(
+		return fmt.Errorf(
 			"%w: %s — check submit_id_regex (the cluster job may be running untracked and is not killable without its id): %v\noutput:\n%s",
 			scheduler.ErrLaunchUntracked, t.ID, err, out)
 	}
@@ -127,11 +118,15 @@ func (l *Launcher) Launch(ctx context.Context, t *scheduler.Task, _ map[string]s
 		"external_id":    extID,
 		"failure_detail": nil,
 	}); uerr != nil {
-		return scheduler.LaunchResult{}, fmt.Errorf(
+		return fmt.Errorf(
 			"%w: record external id %s for %s: %v", scheduler.ErrLaunchUntracked, extID, t.ID, uerr)
 	}
 	opLog("SUBMIT OK task=%s job=%s ext=%s", t.ID, t.JobID, extID)
-	return scheduler.LaunchResult{ExtID: extID}, nil
+	return nil
+}
+
+func attemptHandle(taskID string, retryCount int) string {
+	return fmt.Sprintf("%s-a%d", taskID, retryCount)
 }
 
 // compile-time interface check

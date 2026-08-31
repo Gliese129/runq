@@ -5,8 +5,8 @@ import (
 	"maps"
 	"slices"
 
-	"github.com/gliese129/runq/internal/api"
-	"github.com/gliese129/runq/internal/backend"
+	"github.com/gliese129/runq-lab/internal/api"
+	"github.com/gliese129/runq-lab/internal/backend"
 	"github.com/spf13/cobra"
 )
 

@@ -4,10 +4,10 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/gliese129/runq/internal/job"
-	"github.com/gliese129/runq/internal/logfile"
-	"github.com/gliese129/runq/internal/project"
-	"github.com/gliese129/runq/internal/workspace"
+	"github.com/gliese129/runq-lab/internal/job"
+	"github.com/gliese129/runq-lab/internal/logfile"
+	"github.com/gliese129/runq-lab/internal/project"
+	"github.com/gliese129/runq-lab/internal/workspace"
 )
 
 type UnavailableBackend struct {

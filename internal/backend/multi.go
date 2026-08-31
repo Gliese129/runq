@@ -2,17 +2,19 @@ package backend
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
-	"github.com/gliese129/runq/internal/job"
-	"github.com/gliese129/runq/internal/logfile"
-	"github.com/gliese129/runq/internal/project"
-	"github.com/gliese129/runq/internal/rfs"
-	"github.com/gliese129/runq/internal/store"
-	"github.com/gliese129/runq/internal/workspace"
+	"github.com/gliese129/runq-lab/internal/job"
+	"github.com/gliese129/runq-lab/internal/logfile"
+	"github.com/gliese129/runq-lab/internal/project"
+	"github.com/gliese129/runq-lab/internal/rfs"
+	"github.com/gliese129/runq-lab/internal/store"
+	"github.com/gliese129/runq-lab/internal/workspace"
 )
 
 // MultiBackend routes operations to per-target backends. ListJobs aggregates
@@ -24,6 +26,15 @@ import (
 // targets and defaultTarget; every reader goes through get/snapshot/
 // defaultName so a rebuild never races an in-flight request.
 type MultiBackend struct {
+	// routingMu is the generation-transition barrier. User operations hold a
+	// read lease from resolution through the backend effect; the config
+	// reconciler and retirement sweep hold the write lease while changing
+	// scopes/registry membership. This makes each operation linearizable to a
+	// single lane generation without holding the registry map mutex over SSH.
+	routingMu sync.RWMutex
+	// controlMu serializes user control transitions that can move ownership or
+	// terminalize work (retry/kill/pause/resume) across lane generations.
+	controlMu     sync.Mutex
 	mu            sync.RWMutex
 	targets       map[string]Backend
 	defaultTarget string
@@ -33,12 +44,26 @@ type MultiBackend struct {
 	// has a live retiring lane — the OLD endpoint/templates are the only
 	// ones that can correctly act on those tasks.
 	retiring map[string]map[string]Backend
+	// historical holds quiesced, generation-scoped lanes for terminal
+	// artifact reads. They do not participate in refresh or control fanout,
+	// but preserve the original host/workspace after retirement completes.
+	historical map[string]map[string]Backend
 
 	store *store.Store
 	// registry is the ONE routed project registry shared by every lane
 	// (RQ-65); kept here so lanes added at runtime get the same wiring
 	// assembly-time lanes got.
 	registry *project.Registry
+}
+
+// BeginRoutingUpdate excludes routed operations while the reconciler changes
+// lane scopes and registry membership. The returned release function must be
+// deferred by the caller. Cold lane construction should happen before taking
+// this lease when practical; correctness takes precedence when Start itself
+// participates in the ownership handoff.
+func (m *MultiBackend) BeginRoutingUpdate() func() {
+	m.routingMu.Lock()
+	return m.routingMu.Unlock
 }
 
 // get returns the named backend under the read lock.
@@ -57,6 +82,49 @@ func (m *MultiBackend) snapshot() map[string]Backend {
 	out := make(map[string]Backend, len(m.targets))
 	for k, v := range m.targets {
 		out[k] = v
+	}
+	return out
+}
+
+// liveLanes snapshots active and retiring lanes, optionally for one target.
+// Backend calls must happen after this returns; m.mu only protects registry
+// membership and must never be held across SSH work.
+func (m *MultiBackend) liveLanes(target string) []Backend {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	names := make([]string, 0, len(m.targets)+len(m.retiring))
+	seenNames := make(map[string]struct{}, len(m.targets)+len(m.retiring))
+	for name := range m.targets {
+		if target == "" || name == target {
+			seenNames[name] = struct{}{}
+		}
+	}
+	for name := range m.retiring {
+		if target == "" || name == target {
+			seenNames[name] = struct{}{}
+		}
+	}
+	for name := range seenNames {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	var out []Backend
+	for _, name := range names {
+		if be := m.targets[name]; be != nil {
+			out = append(out, be)
+		}
+		generations := make([]string, 0, len(m.retiring[name]))
+		for generation := range m.retiring[name] {
+			generations = append(generations, generation)
+		}
+		sort.Strings(generations)
+		for _, generation := range generations {
+			be := m.retiring[name][generation]
+			if be != nil && (len(out) == 0 || be != out[len(out)-1]) {
+				out = append(out, be)
+			}
+		}
 	}
 	return out
 }
@@ -158,11 +226,67 @@ func (m *MultiBackend) RemoveRetiringLane(name, generation string) {
 	}
 }
 
+// CompleteRetiringLane atomically moves a settled generation out of live
+// routing and into artifact-only routing.
+func (m *MultiBackend) CompleteRetiringLane(name, generation string, be Backend) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if lanes := m.retiring[name]; lanes != nil {
+		delete(lanes, generation)
+		if len(lanes) == 0 {
+			delete(m.retiring, name)
+		}
+	}
+	if m.historical == nil {
+		m.historical = map[string]map[string]Backend{}
+	}
+	if m.historical[name] == nil {
+		m.historical[name] = map[string]Backend{}
+	}
+	m.historical[name][generation] = be
+}
+
+// SetHistoricalLane restores an artifact-only lane from a persisted target
+// generation snapshot during daemon startup.
+func (m *MultiBackend) SetHistoricalLane(name, generation string, be Backend) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.historical == nil {
+		m.historical = map[string]map[string]Backend{}
+	}
+	if m.historical[name] == nil {
+		m.historical[name] = map[string]Backend{}
+	}
+	m.historical[name][generation] = be
+}
+
+// RemoveHistoricalLane forgets an artifact-only lane, returning it so the
+// daemon can release its filesystem. Used when that exact generation becomes
+// active again and the active lane is once more the correct endpoint.
+func (m *MultiBackend) RemoveHistoricalLane(name, generation string) Backend {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	lanes := m.historical[name]
+	be := lanes[generation]
+	delete(lanes, generation)
+	if len(lanes) == 0 {
+		delete(m.historical, name)
+	}
+	return be
+}
+
 // retiringLane looks up a retiring lane for (target, generation).
 func (m *MultiBackend) retiringLane(name, generation string) (Backend, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	be, ok := m.retiring[name][generation]
+	return be, ok
+}
+
+func (m *MultiBackend) historicalLane(name, generation string) (Backend, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	be, ok := m.historical[name][generation]
 	return be, ok
 }
 
@@ -196,17 +320,6 @@ func (m *MultiBackend) ActiveLane(name string) (Backend, bool) {
 	return m.get(name)
 }
 
-// retiringLanesOf snapshots the retiring lanes of one target.
-func (m *MultiBackend) retiringLanesOf(name string) []Backend {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	out := make([]Backend, 0, len(m.retiring[name]))
-	for _, be := range m.retiring[name] {
-		out = append(out, be)
-	}
-	return out
-}
-
 // SetTarget adds or replaces a lane at runtime (RQ-75), wiring the shared
 // project registry exactly as assembly does. The caller owns the OLD
 // backend's shutdown (replace first, then close — no routing gap).
@@ -232,6 +345,13 @@ func (m *MultiBackend) RemoveTarget(name string) {
 func (m *MultiBackend) SetDefaultTarget(name string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if name == "" {
+		if len(m.targets) != 0 {
+			return fmt.Errorf("cannot clear default target while %d target lane(s) are active", len(m.targets))
+		}
+		m.defaultTarget = ""
+		return nil
+	}
 	if _, ok := m.targets[name]; !ok {
 		return fmt.Errorf("default target %q not in targets map", name)
 	}
@@ -239,14 +359,22 @@ func (m *MultiBackend) SetDefaultTarget(name string) error {
 	return nil
 }
 
-// NewMultiBackend creates a routing backend. targets must contain at least
-// the defaultTarget key.
+// NewMultiBackend creates a routing backend. The exact (empty targets,
+// empty default) pair is the supported unconfigured state; otherwise targets
+// must contain the defaultTarget key.
 func NewMultiBackend(targets map[string]Backend, st *store.Store, defaultTarget string) (*MultiBackend, error) {
-	if _, ok := targets[defaultTarget]; !ok {
-		return nil, fmt.Errorf("default target %q not in targets map", defaultTarget)
+	if len(targets) == 0 && defaultTarget != "" {
+		return nil, fmt.Errorf("default target %q set but no targets are configured", defaultTarget)
+	}
+	if len(targets) > 0 {
+		if _, ok := targets[defaultTarget]; !ok {
+			return nil, fmt.Errorf("default target %q not in targets map", defaultTarget)
+		}
 	}
 	m := &MultiBackend{
 		targets:       targets,
+		retiring:      map[string]map[string]Backend{},
+		historical:    map[string]map[string]Backend{},
 		store:         st,
 		defaultTarget: defaultTarget,
 	}
@@ -282,6 +410,10 @@ func (m *MultiBackend) resolve(target string) (Backend, error) {
 	if target == "" {
 		target = m.defaultTarget
 	}
+	if target == "" && len(m.targets) == 0 {
+		m.mu.RUnlock()
+		return nil, noTargetConfiguredError()
+	}
 	be, ok := m.targets[target]
 	m.mu.RUnlock()
 	if !ok {
@@ -290,23 +422,11 @@ func (m *MultiBackend) resolve(target string) (Backend, error) {
 	return be, nil
 }
 
-// resolveJob looks up the job's target column and returns the owning backend.
-func (m *MultiBackend) resolveJob(ctx context.Context, jobID string) (Backend, error) {
-	j, err := m.store.GetJob(ctx, jobID)
-	if err != nil {
-		return nil, err
-	}
-	if j == nil {
-		return nil, fmt.Errorf("job %q: %w", jobID, ErrNotFound)
-	}
-	return m.resolve(j.Target)
-}
-
 // resolveTask looks up the task's target column and returns the OWNING
 // backend (RQ-75): a task stamped with a generation that has a live
 // retiring lane routes there — only the old endpoint/templates can
-// correctly kill/probe/read it. Everything else (active generation,
-// legacy ” rows, settled generations) routes to the active lane.
+// correctly kill/probe/read it. Settled generations use a quiesced historical
+// lane, never the current endpoint. Legacy rows use the active lane.
 func (m *MultiBackend) resolveTask(ctx context.Context, taskID string) (Backend, error) {
 	t, err := m.store.GetTask(ctx, taskID)
 	if err != nil {
@@ -315,12 +435,241 @@ func (m *MultiBackend) resolveTask(ctx context.Context, taskID string) (Backend,
 	if t == nil {
 		return nil, fmt.Errorf("task %q: %w", taskID, ErrNotFound)
 	}
+	return m.resolveTaskRow(t)
+}
+
+func (m *MultiBackend) resolveTaskRow(t *store.TaskRow) (Backend, error) {
 	if t.TargetGeneration != "" {
 		if be, ok := m.retiringLane(t.Target, t.TargetGeneration); ok {
 			return be, nil
 		}
+		if active, ok := m.get(t.Target); ok {
+			if generation, hasGeneration := active.(interface{ Generation() string }); !hasGeneration || generation.Generation() == t.TargetGeneration {
+				return active, nil
+			}
+		}
+		if be, ok := m.historicalLane(t.Target, t.TargetGeneration); ok {
+			return be, nil
+		}
+		return nil, fmt.Errorf("task %q belongs to unavailable target generation %q", t.ID, t.TargetGeneration)
 	}
 	return m.resolve(t.Target)
+}
+
+type artifactTaskGroup struct {
+	fs    rfs.FS
+	tasks []store.TaskRow
+}
+
+// jobArtifactGroups partitions a job by its durable target generation and
+// resolves each partition to that generation's exact filesystem. Group order
+// follows the first task occurrence so responses stay deterministic.
+func (m *MultiBackend) jobArtifactGroups(ctx context.Context, jobID string) (*store.JobRow, []store.TaskRow, []artifactTaskGroup, error) {
+	j, err := m.store.GetJob(ctx, jobID)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if j == nil {
+		return nil, nil, nil, fmt.Errorf("job %q: %w", jobID, ErrNotFound)
+	}
+	tasks, err := m.store.ListTasks(ctx, store.TaskFilter{JobID: jobID})
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	groupIndex := make(map[string]int)
+	groups := make([]artifactTaskGroup, 0)
+	for i := range tasks {
+		be, err := m.resolveTaskRow(&tasks[i])
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		fsys := rfs.FS(rfs.NewLocalFS())
+		if fsp, ok := be.(interface{ FS() rfs.FS }); ok {
+			fsys = fsp.FS()
+		}
+		if active, ok := be.(interface{ touchActivity() }); ok {
+			active.touchActivity()
+		}
+		key := tasks[i].Target + "\x00" + tasks[i].TargetGeneration
+		idx, ok := groupIndex[key]
+		if !ok {
+			idx = len(groups)
+			groupIndex[key] = idx
+			groups = append(groups, artifactTaskGroup{fs: fsys})
+		}
+		groups[idx].tasks = append(groups[idx].tasks, tasks[i])
+	}
+	return j, tasks, groups, nil
+}
+
+// refreshJobForStoreRead refreshes every live generation only while the job
+// can still change externally. Terminal history is already durable and must
+// remain readable even after its target has no active/retiring lane.
+func (m *MultiBackend) refreshJobForStoreRead(ctx context.Context, jobID string) (*store.JobRow, error) {
+	j, err := m.store.GetJob(ctx, jobID)
+	if err != nil {
+		return nil, err
+	}
+	if j == nil {
+		return nil, fmt.Errorf("job %q: %w", jobID, ErrNotFound)
+	}
+	if !store.IsTerminalJobStatus(j.Status) {
+		if _, err := m.refreshJobGenerations(ctx, jobID); err != nil {
+			return nil, err
+		}
+		j, err = m.store.GetJob(ctx, jobID)
+		if err != nil {
+			return nil, err
+		}
+		if j == nil {
+			return nil, fmt.Errorf("job %q: %w", jobID, ErrNotFound)
+		}
+	}
+	return j, nil
+}
+
+// jobOwningLanes resolves the live lane generations that actually own tasks
+// for a job. Generation stamps are authoritative: a live retiring generation
+// owns its exact rows; active owns its own, legacy, and orphan-generation rows.
+// primary is the active lane when present (the renderer for whole-job views),
+// otherwise the first live owner of a removed target.
+func (m *MultiBackend) jobOwningLanes(ctx context.Context, jobID string) (primary Backend, owners []Backend, err error) {
+	j, err := m.store.GetJob(ctx, jobID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if j == nil {
+		return nil, nil, fmt.Errorf("job %q: %w", jobID, ErrNotFound)
+	}
+	tasks, err := m.store.ListTasks(ctx, store.TaskFilter{JobID: jobID})
+	if err != nil {
+		return nil, nil, fmt.Errorf("list job %s generations: %w", jobID, err)
+	}
+
+	m.mu.RLock()
+	active := m.targets[j.Target]
+	retiring := make(map[string]Backend, len(m.retiring[j.Target]))
+	for generation, be := range m.retiring[j.Target] {
+		retiring[generation] = be
+	}
+	m.mu.RUnlock()
+
+	activeOwns := false
+	ownedRetiring := make(map[string]struct{})
+	for i := range tasks {
+		if _, ok := retiring[tasks[i].TargetGeneration]; ok && tasks[i].TargetGeneration != "" {
+			ownedRetiring[tasks[i].TargetGeneration] = struct{}{}
+			continue
+		}
+		if active != nil {
+			activeOwns = true
+		}
+	}
+	if activeOwns {
+		owners = append(owners, active)
+	}
+	generations := make([]string, 0, len(ownedRetiring))
+	for generation := range ownedRetiring {
+		generations = append(generations, generation)
+	}
+	sort.Strings(generations)
+	for _, generation := range generations {
+		be := retiring[generation]
+		if be != nil && be != active {
+			owners = append(owners, be)
+		}
+	}
+	if len(owners) == 0 && active != nil {
+		// Preserve the zero-task job behavior without letting an empty active
+		// scope mask a real retiring owner (which would already be in owners).
+		owners = append(owners, active)
+	}
+	primary = active
+	if primary == nil && len(owners) > 0 {
+		primary = owners[0]
+	}
+	if primary == nil {
+		return nil, nil, fmt.Errorf("unknown target %q", j.Target)
+	}
+	return primary, owners, nil
+}
+
+// jobControlLanes includes every current owner plus the active lane even when
+// its scope is empty. The active generation owns any future manual retry, so a
+// paused job must already be gated there before ownership can move to it.
+func (m *MultiBackend) jobControlLanes(ctx context.Context, jobID string) ([]Backend, error) {
+	primary, owners, err := m.jobOwningLanes(ctx, jobID)
+	if err != nil {
+		return nil, err
+	}
+	if len(owners) == 0 || owners[0] != primary {
+		owners = append([]Backend{primary}, owners...)
+	}
+	return owners, nil
+}
+
+// refreshJobGenerations reconciles every live lane generation that owns at
+// least one task for the job. Errors are joined so an empty/successful active
+// scope can never hide a retiring generation's failure.
+func (m *MultiBackend) refreshJobGenerations(ctx context.Context, jobID string) (Backend, error) {
+	primary, owners, err := m.jobOwningLanes(ctx, jobID)
+	if err != nil {
+		return nil, err
+	}
+	var refreshErrs []error
+	for _, be := range owners {
+		if err := be.RefreshJob(ctx, jobID); err != nil {
+			refreshErrs = append(refreshErrs, err)
+		}
+	}
+	return primary, errors.Join(refreshErrs...)
+}
+
+// refreshListedJobGenerations upgrades the SSH lane's active-only list refresh
+// to generation-complete reconciliation. Lists remain best-effort by contract:
+// failures surface through SyncInfo/stale while available rows still render.
+func (m *MultiBackend) refreshListedJobGenerations(ctx context.Context, jobs []JobSummary) bool {
+	refreshed := false
+	type laneOutcome struct {
+		be  Backend
+		err []error
+	}
+	var outcomes []laneOutcome
+	findOutcome := func(be Backend) *laneOutcome {
+		for i := range outcomes {
+			if outcomes[i].be == be {
+				return &outcomes[i]
+			}
+		}
+		outcomes = append(outcomes, laneOutcome{be: be})
+		return &outcomes[len(outcomes)-1]
+	}
+	for i := range jobs {
+		if store.IsTerminalJobStatus(jobs[i].Status) {
+			continue
+		}
+		refreshed = true
+		_, owners, err := m.jobOwningLanes(ctx, jobs[i].ID)
+		if err != nil {
+			continue
+		}
+		for _, be := range owners {
+			outcome := findOutcome(be)
+			if err := be.RefreshJob(ctx, jobs[i].ID); err != nil {
+				outcome.err = append(outcome.err, fmt.Errorf("refresh job %s: %w", jobs[i].ID, err))
+			}
+		}
+	}
+	// RefreshJob records each observation immediately for point reads. A list
+	// observes several jobs, so publish one final per-lane aggregate after all
+	// of them: a later success must not erase an earlier failure in the same
+	// returned snapshot.
+	for i := range outcomes {
+		if recorder, ok := outcomes[i].be.(interface{ recordTasksSync(error) }); ok {
+			recorder.recordTasksSync(errors.Join(outcomes[i].err...))
+		}
+	}
+	return refreshed
 }
 
 // defaultBackend returns the default target's backend. During a config
@@ -355,7 +704,17 @@ func (m *MultiBackend) defaultBackendE() (Backend, error) {
 	if be := m.defaultBackend(); be != nil {
 		return be, nil
 	}
+	m.mu.RLock()
+	unconfigured := len(m.targets) == 0 && m.defaultTarget == ""
+	m.mu.RUnlock()
+	if unconfigured {
+		return nil, noTargetConfiguredError()
+	}
 	return nil, fmt.Errorf("no target lane available (config reconcile in progress) — retry")
+}
+
+func noTargetConfiguredError() error {
+	return fmt.Errorf("%w; add one with `runq target add <name> ...`", ErrNoTargetConfigured)
 }
 
 // ── Backend interface ──────────────────────────────────────────────────────
@@ -365,6 +724,8 @@ func (m *MultiBackend) defaultBackendE() (Backend, error) {
 // In the reconcile gap (no lane routable) it reports zero capabilities —
 // a briefly degraded UI beats a 500 for a config that DID apply.
 func (m *MultiBackend) Capabilities() Capabilities {
+	m.routingMu.RLock()
+	defer m.routingMu.RUnlock()
 	if be := m.defaultBackend(); be != nil {
 		return be.Capabilities()
 	}
@@ -375,6 +736,8 @@ func (m *MultiBackend) Capabilities() Capabilities {
 // dashboard gates per-job UI (retry, live log, poll cadence) by the job's
 // target through this map.
 func (m *MultiBackend) PerTargetCapabilities() map[string]Capabilities {
+	m.routingMu.RLock()
+	defer m.routingMu.RUnlock()
 	targets := m.snapshot()
 	out := make(map[string]Capabilities, len(targets))
 	for name, be := range targets {
@@ -391,8 +754,10 @@ func (m *MultiBackend) DefaultTargetName() string { return m.defaultName() }
 // model — nothing to reconcile. This is what keeps a WATCHED dashboard
 // fresher (30s cadence) than the lanes' own 25min alignment loops.
 func (m *MultiBackend) ReconcileAll(ctx context.Context) error {
+	m.routingMu.RLock()
+	defer m.routingMu.RUnlock()
 	var firstErr error
-	for _, be := range m.snapshot() {
+	for _, be := range m.liveLanes("") {
 		if r, ok := be.(interface{ ReconcileAll(context.Context) error }); ok {
 			if err := r.ReconcileAll(ctx); err != nil && firstErr == nil {
 				firstErr = err
@@ -403,67 +768,122 @@ func (m *MultiBackend) ReconcileAll(ctx context.Context) error {
 }
 
 func (m *MultiBackend) RefreshJob(ctx context.Context, jobID string) error {
-	be, err := m.resolveJob(ctx, jobID)
-	if err != nil {
-		return err
-	}
-	return be.RefreshJob(ctx, jobID)
+	m.routingMu.RLock()
+	defer m.routingMu.RUnlock()
+	_, err := m.refreshJobGenerations(ctx, jobID)
+	return err
 }
 
-// ListJobs aggregates jobs from all targets. Errors from individual targets
-// are logged but do not fail the entire listing — partial results are better
-// than none for multi-cluster dashboards.
+func (m *MultiBackend) renderJobRows(ctx context.Context, jobs []store.JobRow) ([]JobSummary, error) {
+	if len(jobs) == 0 {
+		return []JobSummary{}, nil
+	}
+	jobIDs := make([]string, len(jobs))
+	for i := range jobs {
+		jobIDs[i] = jobs[i].ID
+	}
+	tasks, err := m.store.ListTasksForJobs(ctx, jobIDs)
+	if err != nil {
+		return nil, err
+	}
+	byJob := make(map[string][]store.TaskRow, len(jobs))
+	for i := range tasks {
+		byJob[tasks[i].JobID] = append(byJob[tasks[i].JobID], tasks[i])
+	}
+	out := make([]JobSummary, 0, len(jobs))
+	for i := range jobs {
+		out = append(out, BuildJobSummary(jobs[i], byJob[jobs[i].ID]))
+	}
+	return out, nil
+}
+
+// ListJobs renders the durable store, not the current lane registry. A target
+// may be removed and every one of its generations may be settled, but its job
+// history remains user data and must stay visible. Live non-terminal owners
+// are reconciled before the final store read.
 func (m *MultiBackend) ListJobs(ctx context.Context, projectScope string) ([]JobSummary, error) {
-	var all []JobSummary
-	var firstErr error
-	for _, be := range m.snapshot() {
-		jobs, err := be.ListJobs(ctx, projectScope)
+	m.routingMu.RLock()
+	defer m.routingMu.RUnlock()
+	rows, err := m.store.ListJobsVisible(ctx, projectScope, "")
+	if err != nil {
+		return nil, err
+	}
+	jobs, err := m.renderJobRows(ctx, rows)
+	if err != nil {
+		return nil, err
+	}
+	if m.refreshListedJobGenerations(ctx, jobs) {
+		rows, err = m.store.ListJobsVisible(ctx, projectScope, "")
 		if err != nil {
-			if firstErr == nil {
-				firstErr = err
-			}
-			continue
+			return nil, err
 		}
-		all = append(all, jobs...)
+		return m.renderJobRows(ctx, rows)
 	}
-	if len(all) == 0 && firstErr != nil {
-		return nil, firstErr
-	}
-	return all, nil
+	return jobs, nil
 }
 
-// ListJobsForTarget returns jobs from a single target backend.
+// ListJobsForTarget has the same durable-history contract as ListJobs. An
+// absent active lane is not an absent target history.
 func (m *MultiBackend) ListJobsForTarget(ctx context.Context, target, projectScope string) ([]JobSummary, error) {
-	be, err := m.resolve(target)
+	m.routingMu.RLock()
+	defer m.routingMu.RUnlock()
+	rows, err := m.store.ListJobsVisible(ctx, projectScope, target)
 	if err != nil {
 		return nil, err
 	}
-	return be.ListJobs(ctx, projectScope)
+	jobs, err := m.renderJobRows(ctx, rows)
+	if err != nil {
+		return nil, err
+	}
+	if m.refreshListedJobGenerations(ctx, jobs) {
+		rows, err = m.store.ListJobsVisible(ctx, projectScope, target)
+		if err != nil {
+			return nil, err
+		}
+		return m.renderJobRows(ctx, rows)
+	}
+	return jobs, nil
 }
 
-// ListArchivedJobsForTarget returns archived jobs from a single target backend.
+// ListArchivedJobsForTarget also survives target removal.
 func (m *MultiBackend) ListArchivedJobsForTarget(ctx context.Context, target string) ([]JobSummary, error) {
-	be, err := m.resolve(target)
+	rows, err := m.store.ListJobsArchived(ctx, "", target)
 	if err != nil {
 		return nil, err
 	}
-	return be.ListArchivedJobs(ctx)
+	return m.renderJobRows(ctx, rows)
 }
 
 func (m *MultiBackend) GetJob(ctx context.Context, jobID string) (*JobDetail, error) {
-	be, err := m.resolveJob(ctx, jobID)
+	m.routingMu.RLock()
+	defer m.routingMu.RUnlock()
+	j, err := m.refreshJobForStoreRead(ctx, jobID)
 	if err != nil {
 		return nil, err
 	}
-	return be.GetJob(ctx, jobID)
+	tasks, err := m.store.ListTasks(ctx, store.TaskFilter{JobID: jobID})
+	if err != nil {
+		return nil, err
+	}
+	keys, _ := m.store.MetricKeys(ctx, jobID)
+	detail := BuildJobDetail(*j, tasks, keys)
+	if cfg, err := m.registry.Get(ctx, j.ProjectName); err == nil && cfg.Wandb != nil {
+		detail.Wandb = &WandbInfo{
+			Entity:  cfg.Wandb.Entity,
+			Project: cfg.Wandb.Project,
+			BaseURL: WandbBaseURL(cfg.Wandb.Entity, cfg.Wandb.Project),
+		}
+	}
+	return &detail, nil
 }
 
 func (m *MultiBackend) CompareMetrics(ctx context.Context, jobID, key string, desc bool) ([]CompareRow, error) {
-	be, err := m.resolveJob(ctx, jobID)
-	if err != nil {
+	m.routingMu.RLock()
+	defer m.routingMu.RUnlock()
+	if _, err := m.refreshJobForStoreRead(ctx, jobID); err != nil {
 		return nil, err
 	}
-	return be.CompareMetrics(ctx, jobID, key, desc)
+	return compareRowsFromDB(ctx, m.store, jobID, key, desc)
 }
 
 // GPUStatus aggregates GPU visibility across ALL targets (local ∪ remote —
@@ -471,6 +891,8 @@ func (m *MultiBackend) CompareMetrics(ctx context.Context, jobID, key string, de
 // `runq gpu --json`; targets without one contribute nothing). Slots are
 // stamped with their target name for panel grouping.
 func (m *MultiBackend) GPUStatus(ctx context.Context) ([]GPUSlot, error) {
+	m.routingMu.RLock()
+	defer m.routingMu.RUnlock()
 	var all []GPUSlot
 	for name, be := range m.snapshot() {
 		slots, err := be.GPUStatus(ctx)
@@ -488,6 +910,8 @@ func (m *MultiBackend) GPUStatus(ctx context.Context) ([]GPUSlot, error) {
 }
 
 func (m *MultiBackend) GetTask(ctx context.Context, taskID string) (*TaskView, error) {
+	m.routingMu.RLock()
+	defer m.routingMu.RUnlock()
 	be, err := m.resolveTask(ctx, taskID)
 	if err != nil {
 		return nil, err
@@ -496,6 +920,8 @@ func (m *MultiBackend) GetTask(ctx context.Context, taskID string) (*TaskView, e
 }
 
 func (m *MultiBackend) TaskMetrics(ctx context.Context, taskID string, afterTS int64) ([]MetricPoint, error) {
+	m.routingMu.RLock()
+	defer m.routingMu.RUnlock()
 	be, err := m.resolveTask(ctx, taskID)
 	if err != nil {
 		return nil, err
@@ -504,14 +930,21 @@ func (m *MultiBackend) TaskMetrics(ctx context.Context, taskID string, afterTS i
 }
 
 func (m *MultiBackend) MetricKeys(ctx context.Context, jobID string) ([]string, error) {
-	be, err := m.resolveJob(ctx, jobID)
+	m.routingMu.RLock()
+	defer m.routingMu.RUnlock()
+	j, err := m.store.GetJob(ctx, jobID)
 	if err != nil {
 		return nil, err
 	}
-	return be.MetricKeys(ctx, jobID)
+	if j == nil {
+		return nil, fmt.Errorf("job %q: %w", jobID, ErrNotFound)
+	}
+	return m.store.MetricKeys(ctx, jobID)
 }
 
 func (m *MultiBackend) TaskMetricBuckets(ctx context.Context, taskID, key string, fromTS, toTS int64, maxBuckets int) ([]workspace.PyramidBucket, string, error) {
+	m.routingMu.RLock()
+	defer m.routingMu.RUnlock()
 	be, err := m.resolveTask(ctx, taskID)
 	if err != nil {
 		return nil, "", err
@@ -522,6 +955,8 @@ func (m *MultiBackend) TaskMetricBuckets(ctx context.Context, taskID, key string
 // ── RQ-44: log access — pure ownership routing ────────────────────────────
 
 func (m *MultiBackend) TaskLogRead(ctx context.Context, taskID string, offset int64, maxLines int) (*LogPage, error) {
+	m.routingMu.RLock()
+	defer m.routingMu.RUnlock()
 	be, err := m.resolveTask(ctx, taskID)
 	if err != nil {
 		return nil, err
@@ -544,8 +979,7 @@ func (m *MultiBackend) TargetFS(name string) (rfs.FS, error) {
 }
 
 // PerTargetHealth collects each lane's passive reachability row (/health,
-// D6). Lanes without the concept (e.g. a pure-push local backend, always
-// reachable by construction) report reachable with LastChecked = now.
+// D6). Lanes without the concept report reachable with LastChecked = now.
 // RecordTargetContact records a daemon-observed reachability proof for one
 // target's lane (RQ-74). No-op for unknown targets and lanes without a
 // contact record (local).
@@ -598,22 +1032,13 @@ func (m *MultiBackend) TaskTarget(ctx context.Context, taskID string) (string, e
 // refreshed_at and OR of stale — a mixed response is only as fresh as its
 // weakest ingredient.
 func (m *MultiBackend) SyncInfo(ctx context.Context, target string) (refreshedAt int64, stale bool, known bool) {
+	m.routingMu.RLock()
+	defer m.routingMu.RUnlock()
 	type syncer interface {
 		SyncInfo(context.Context) (int64, bool)
 	}
-	if target != "" {
-		be, err := m.resolve(target)
-		if err != nil {
-			return 0, false, false
-		}
-		if sy, ok := be.(syncer); ok {
-			at, st := sy.SyncInfo(ctx)
-			return at, st, true
-		}
-		return 0, false, false
-	}
 	first := true
-	for _, be := range m.snapshot() {
+	for _, be := range m.liveLanes(target) {
 		sy, ok := be.(syncer)
 		if !ok {
 			continue
@@ -629,18 +1054,59 @@ func (m *MultiBackend) SyncInfo(ctx context.Context, target string) (refreshedAt
 	return refreshedAt, stale, known
 }
 
-// ForceRefreshTarget routes an explicit refresh to the named lane (D22).
+// ForceRefreshTarget refreshes every live generation of the named target.
+// The receipt is conservative across lanes: refreshed is true only when all
+// lanes refreshed, refreshed_at is the oldest lane timestamp, and retry_after
+// is the longest requested delay. Lane errors are joined after every lane has
+// been attempted, so one success cannot mask another generation's failure.
 func (m *MultiBackend) ForceRefreshTarget(ctx context.Context, target string) (*RefreshReceipt, error) {
-	be, err := m.resolve(target)
-	if err != nil {
-		return nil, fmt.Errorf("refresh: %w: %v", ErrNotFound, err)
+	m.routingMu.RLock()
+	defer m.routingMu.RUnlock()
+	if target == "" {
+		target = m.defaultName()
 	}
-	if fr, ok := be.(interface {
-		ForceRefresh(context.Context) (*RefreshReceipt, error)
-	}); ok {
-		return fr.ForceRefresh(ctx)
+	if target == "" {
+		return nil, noTargetConfiguredError()
 	}
-	return &RefreshReceipt{RefreshedAt: time.Now().Unix(), Refreshed: true}, nil
+	lanes := m.liveLanes(target)
+	if len(lanes) == 0 {
+		return nil, fmt.Errorf("refresh: %w: unknown target %q", ErrNotFound, target)
+	}
+
+	receipt := &RefreshReceipt{Refreshed: true}
+	var reasons []string
+	var refreshErrs []error
+	for i, be := range lanes {
+		laneReceipt := &RefreshReceipt{RefreshedAt: time.Now().Unix(), Refreshed: true}
+		if fr, ok := be.(interface {
+			ForceRefresh(context.Context) (*RefreshReceipt, error)
+		}); ok {
+			var err error
+			laneReceipt, err = fr.ForceRefresh(ctx)
+			if err != nil {
+				refreshErrs = append(refreshErrs, fmt.Errorf("refresh target %q lane %d: %w", target, i+1, err))
+			}
+			if laneReceipt == nil {
+				laneReceipt = &RefreshReceipt{Reason: "refresh returned no receipt"}
+			}
+		}
+
+		if i == 0 || laneReceipt.RefreshedAt < receipt.RefreshedAt {
+			receipt.RefreshedAt = laneReceipt.RefreshedAt
+		}
+		receipt.Refreshed = receipt.Refreshed && laneReceipt.Refreshed
+		if laneReceipt.RetryAfterSeconds > receipt.RetryAfterSeconds {
+			receipt.RetryAfterSeconds = laneReceipt.RetryAfterSeconds
+		}
+		if laneReceipt.Reason != "" {
+			reasons = append(reasons, laneReceipt.Reason)
+		}
+	}
+	if len(refreshErrs) > 0 {
+		receipt.Refreshed = false
+	}
+	receipt.Reason = strings.Join(reasons, "; ")
+	return receipt, errors.Join(refreshErrs...)
 }
 
 // ListTasks — flat table over the shared store (all lanes write here;
@@ -650,6 +1116,8 @@ func (m *MultiBackend) ListTasks(ctx context.Context, opts TaskListOptions) ([]T
 }
 
 func (m *MultiBackend) TaskLogTail(ctx context.Context, taskID string, maxLines int) (*LogPage, error) {
+	m.routingMu.RLock()
+	defer m.routingMu.RUnlock()
 	be, err := m.resolveTask(ctx, taskID)
 	if err != nil {
 		return nil, err
@@ -658,6 +1126,8 @@ func (m *MultiBackend) TaskLogTail(ctx context.Context, taskID string, maxLines 
 }
 
 func (m *MultiBackend) TaskLogPage(ctx context.Context, taskID string, req logfile.PageRequest) (*LogPage, error) {
+	m.routingMu.RLock()
+	defer m.routingMu.RUnlock()
 	be, err := m.resolveTask(ctx, taskID)
 	if err != nil {
 		return nil, err
@@ -666,6 +1136,8 @@ func (m *MultiBackend) TaskLogPage(ctx context.Context, taskID string, req logfi
 }
 
 func (m *MultiBackend) TaskLogFollow(ctx context.Context, taskID string, offset int64) (LogFollower, error) {
+	m.routingMu.RLock()
+	defer m.routingMu.RUnlock()
 	be, err := m.resolveTask(ctx, taskID)
 	if err != nil {
 		return nil, err
@@ -674,30 +1146,65 @@ func (m *MultiBackend) TaskLogFollow(ctx context.Context, taskID string, offset 
 }
 
 func (m *MultiBackend) JobLogSearch(ctx context.Context, jobID, query string) ([]LogMatch, error) {
-	be, err := m.resolveJob(ctx, jobID)
+	m.routingMu.RLock()
+	defer m.routingMu.RUnlock()
+	_, _, groups, err := m.jobArtifactGroups(ctx, jobID)
 	if err != nil {
 		return nil, err
 	}
-	return be.JobLogSearch(ctx, jobID, query)
+	out := make([]LogMatch, 0)
+	for _, group := range groups {
+		matches, err := jobLogSearchRowsViaExec(ctx, group.fs, group.tasks, query, jobLogSearchMaxMatches-len(out))
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, matches...)
+		if len(out) >= jobLogSearchMaxMatches {
+			break
+		}
+	}
+	return out, nil
 }
 
 func (m *MultiBackend) JobActivity(ctx context.Context, jobID string) (*JobActivity, error) {
-	be, err := m.resolveJob(ctx, jobID)
+	m.routingMu.RLock()
+	defer m.routingMu.RUnlock()
+	j, rows, groups, err := m.jobArtifactGroups(ctx, jobID)
 	if err != nil {
 		return nil, err
 	}
-	return be.JobActivity(ctx, jobID)
+	byTask := make(map[string]TaskActivity, len(rows))
+	for _, group := range groups {
+		activity, err := taskActivityRowsViaExec(ctx, group.fs, group.tasks)
+		if err != nil {
+			return nil, err
+		}
+		for i := range activity {
+			byTask[activity[i].TaskID] = activity[i]
+		}
+	}
+	out := &JobActivity{Tasks: make([]TaskActivity, 0, len(rows))}
+	for i := range rows {
+		out.Tasks = append(out.Tasks, byTask[rows[i].ID])
+	}
+	out.JobStart, out.JobEnd = activityWindow(j, rows)
+	return out, nil
 }
 
 func (m *MultiBackend) JobResults(ctx context.Context, jobID string) (*JobResults, error) {
-	be, err := m.resolveJob(ctx, jobID)
-	if err != nil {
+	m.routingMu.RLock()
+	defer m.routingMu.RUnlock()
+	if _, err := m.refreshJobForStoreRead(ctx, jobID); err != nil {
 		return nil, err
 	}
-	return be.JobResults(ctx, jobID)
+	return jobResultsFromDB(ctx, m.store, jobID)
 }
 
 func (m *MultiBackend) KillTask(ctx context.Context, taskID string) error {
+	m.controlMu.Lock()
+	defer m.controlMu.Unlock()
+	m.routingMu.RLock()
+	defer m.routingMu.RUnlock()
 	be, err := m.resolveTask(ctx, taskID)
 	if err != nil {
 		return err
@@ -716,6 +1223,10 @@ func (m *MultiBackend) RetryTask(ctx context.Context, taskID string) error {
 
 // RetryTaskGen is RetryTask with the cross-generation confirmation knob.
 func (m *MultiBackend) RetryTaskGen(ctx context.Context, taskID string, confirmGeneration bool) error {
+	m.controlMu.Lock()
+	defer m.controlMu.Unlock()
+	m.routingMu.RLock()
+	defer m.routingMu.RUnlock()
 	t, err := m.store.GetTask(ctx, taskID)
 	if err != nil {
 		return err
@@ -734,51 +1245,83 @@ func (m *MultiBackend) RetryTaskGen(ctx context.Context, taskID string, confirmG
 	if t.TargetGeneration != "" && activeGen != "" && t.TargetGeneration != activeGen && !confirmGeneration {
 		return &GenerationChangedError{TaskGeneration: t.TargetGeneration, ActiveGeneration: activeGen}
 	}
-	// Ownership is stamped by the lane itself, inside its reset write and
-	// only after the wrapper reset succeeded (review P2: a pre-retry
-	// restamp would leave routing lying when the reset fails).
+	// BeginTaskRetry atomically stamps the active generation together with
+	// durable submitting/retry intent before wrapper reset. A failed reset
+	// therefore remains owned and recoverable by this active lane.
 	return be.RetryTask(ctx, taskID)
 }
 
 func (m *MultiBackend) KillJob(ctx context.Context, jobID string) error {
-	be, err := m.resolveJob(ctx, jobID)
+	m.controlMu.Lock()
+	defer m.controlMu.Unlock()
+	m.routingMu.RLock()
+	defer m.routingMu.RUnlock()
+	j, err := m.store.GetJob(ctx, jobID)
 	if err != nil {
 		return err
 	}
+	if j == nil {
+		return fmt.Errorf("job %q: %w", jobID, ErrNotFound)
+	}
+	owners := m.liveLanes(j.Target)
+	if len(owners) == 0 {
+		return fmt.Errorf("unknown target %q", j.Target)
+	}
+	var killErrs []error
 	// A job may span lane generations after a config change (in-flight
-	// tasks stay with the retiring lane, pending migrated to the active
-	// one) — fan the kill to the target's retiring lanes too, best-effort,
-	// so old-generation tasks get killed with the templates that own them.
-	j, jerr := m.store.GetJob(ctx, jobID)
-	if jerr == nil && j != nil {
-		for _, rbe := range m.retiringLanesOf(j.Target) {
-			if rbe != be {
-				_ = rbe.KillJob(ctx, jobID)
-			}
+	// tasks stay with the retiring lane, pending work uses the active one).
+	// Attempt every owner, but do not hide a retiring-lane failure: returning
+	// one joined error is the only honest contract for a partially applied
+	// whole-job cancellation.
+	for i, be := range owners {
+		if err := be.KillJob(ctx, jobID); err != nil {
+			killErrs = append(killErrs, fmt.Errorf("kill job %s on owner lane %d: %w", jobID, i+1, err))
 		}
 	}
-	return be.KillJob(ctx, jobID)
+	return errors.Join(killErrs...)
 }
 
 func (m *MultiBackend) PauseJob(ctx context.Context, jobID string) error {
-	be, err := m.resolveJob(ctx, jobID)
+	m.controlMu.Lock()
+	defer m.controlMu.Unlock()
+	m.routingMu.RLock()
+	defer m.routingMu.RUnlock()
+	owners, err := m.jobControlLanes(ctx, jobID)
 	if err != nil {
 		return err
 	}
-	return be.PauseJob(ctx, jobID)
+	var pauseErrs []error
+	for _, be := range owners {
+		if err := be.PauseJob(ctx, jobID); err != nil {
+			pauseErrs = append(pauseErrs, err)
+		}
+	}
+	return errors.Join(pauseErrs...)
 }
 
 func (m *MultiBackend) ResumeJob(ctx context.Context, jobID string) error {
-	be, err := m.resolveJob(ctx, jobID)
+	m.controlMu.Lock()
+	defer m.controlMu.Unlock()
+	m.routingMu.RLock()
+	defer m.routingMu.RUnlock()
+	owners, err := m.jobControlLanes(ctx, jobID)
 	if err != nil {
 		return err
 	}
-	return be.ResumeJob(ctx, jobID)
+	var resumeErrs []error
+	for _, be := range owners {
+		if err := be.ResumeJob(ctx, jobID); err != nil {
+			resumeErrs = append(resumeErrs, err)
+		}
+	}
+	return errors.Join(resumeErrs...)
 }
 
 // SubmitJob routes to the target specified in opts.Target, falling back to
 // default_target.
 func (m *MultiBackend) SubmitJob(ctx context.Context, cfg job.JobConfig, opts SubmitOptions) (string, int, error) {
+	m.routingMu.RLock()
+	defer m.routingMu.RUnlock()
 	be, err := m.resolve(opts.Target)
 	if err != nil {
 		return "", 0, err
@@ -787,6 +1330,8 @@ func (m *MultiBackend) SubmitJob(ctx context.Context, cfg job.JobConfig, opts Su
 }
 
 func (m *MultiBackend) DryRun(ctx context.Context, cfg job.JobConfig) (*DryRunResult, error) {
+	m.routingMu.RLock()
+	defer m.routingMu.RUnlock()
 	be, err := m.defaultBackendE()
 	if err != nil {
 		return nil, err
@@ -795,6 +1340,8 @@ func (m *MultiBackend) DryRun(ctx context.Context, cfg job.JobConfig) (*DryRunRe
 }
 
 func (m *MultiBackend) PreviewSubmit(ctx context.Context, cfg job.JobConfig, skipPreflight bool) (PreviewResult, error) {
+	m.routingMu.RLock()
+	defer m.routingMu.RUnlock()
 	be, err := m.defaultBackendE()
 	if err != nil {
 		return PreviewResult{}, err
@@ -806,6 +1353,8 @@ func (m *MultiBackend) PreviewSubmit(ctx context.Context, cfg job.JobConfig, ski
 // Used by the API handler to give `submit --dry-run --target <hpc>` access
 // to the HPC backend's full run.sh + submit-command rendering.
 func (m *MultiBackend) PreviewSubmitForTarget(ctx context.Context, target string, cfg job.JobConfig, skipPreflight bool) (PreviewResult, error) {
+	m.routingMu.RLock()
+	defer m.routingMu.RUnlock()
 	be, err := m.resolve(target)
 	if err != nil {
 		return PreviewResult{}, err
@@ -815,6 +1364,8 @@ func (m *MultiBackend) PreviewSubmitForTarget(ctx context.Context, target string
 
 // DryRunForTarget routes dry-run expansion to the named target backend.
 func (m *MultiBackend) DryRunForTarget(ctx context.Context, target string, cfg job.JobConfig) (*DryRunResult, error) {
+	m.routingMu.RLock()
+	defer m.routingMu.RUnlock()
 	be, err := m.resolve(target)
 	if err != nil {
 		return nil, err
@@ -823,31 +1374,26 @@ func (m *MultiBackend) DryRunForTarget(ctx context.Context, target string, cfg j
 }
 
 func (m *MultiBackend) ListArchivedJobs(ctx context.Context) ([]JobSummary, error) {
-	var all []JobSummary
-	for _, be := range m.snapshot() {
-		jobs, err := be.ListArchivedJobs(ctx)
-		if err != nil {
-			continue
-		}
-		all = append(all, jobs...)
+	rows, err := m.store.ListJobsArchived(ctx, "", "")
+	if err != nil {
+		return nil, err
 	}
-	return all, nil
+	return m.renderJobRows(ctx, rows)
 }
 
 func (m *MultiBackend) ArchiveJob(ctx context.Context, jobID string) error {
-	be, err := m.resolveJob(ctx, jobID)
-	if err != nil {
+	m.routingMu.RLock()
+	defer m.routingMu.RUnlock()
+	if _, err := m.refreshJobForStoreRead(ctx, jobID); err != nil {
 		return err
 	}
-	return be.ArchiveJob(ctx, jobID)
+	return m.store.ArchiveJob(ctx, jobID)
 }
 
 func (m *MultiBackend) UnarchiveJob(ctx context.Context, jobID string) error {
-	be, err := m.resolveJob(ctx, jobID)
-	if err != nil {
-		return err
-	}
-	return be.UnarchiveJob(ctx, jobID)
+	m.routingMu.RLock()
+	defer m.routingMu.RUnlock()
+	return m.store.UnarchiveJob(ctx, jobID)
 }
 
 func (m *MultiBackend) ArchiveProject(ctx context.Context, name string) error {
@@ -882,6 +1428,8 @@ type orphanDetector interface {
 }
 
 func (m *MultiBackend) Clean(ctx context.Context, opts CleanOptions) (*CleanResult, error) {
+	m.routingMu.RLock()
+	defer m.routingMu.RUnlock()
 	// Orphan cleaning: refresh each target's orphan marks first, each through
 	// its own FS. Detection failures are non-fatal — an unobservable target
 	// simply contributes no NEW marks (its guardrails also prevent false
@@ -900,12 +1448,15 @@ func (m *MultiBackend) Clean(ctx context.Context, opts CleanOptions) (*CleanResu
 	// live on their target's filesystem, and only the Multi knows every
 	// lane. (Delegating to the default lane would delete remote dirs with
 	// a local os.RemoveAll: silent no-op, artifacts left behind.)
-	return PerformClean(ctx, m.store, func(target string) rfs.FS {
-		fsys, err := m.TargetFS(target)
+	return PerformClean(ctx, m.store, func(task store.TaskRow) (rfs.FS, error) {
+		be, err := m.resolveTaskRow(&task)
 		if err != nil {
-			return nil // unknown target: local semantics, worst case no-op
+			return nil, err
 		}
-		return fsys
+		if fsp, ok := be.(interface{ FS() rfs.FS }); ok {
+			return fsp.FS(), nil
+		}
+		return rfs.NewLocalFS(), nil
 	}, opts)
 }
 

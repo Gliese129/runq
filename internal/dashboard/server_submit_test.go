@@ -8,9 +8,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gliese129/runq/internal/backend"
-	"github.com/gliese129/runq/internal/config"
-	"github.com/gliese129/runq/internal/job"
+	"github.com/gliese129/runq-lab/internal/backend"
+	"github.com/gliese129/runq-lab/internal/config"
+	"github.com/gliese129/runq-lab/internal/job"
 )
 
 type submitCaptureBackend struct {

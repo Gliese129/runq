@@ -149,7 +149,7 @@ func (s *Store) ApplyResultsIngestDelta(ctx context.Context, taskID string, rebu
 
 // ApplyEventsIngestDelta commits one incremental pass over events.jsonl:
 // checkpoint upserts + the mark in one transaction. No rebuild delete —
-// checkpoints are a task-lifetime event log (see DeleteTaskMetrics), and
+// checkpoints are a task-lifetime event log, and
 // the (task_id, step) newer-ts upsert makes full re-reads idempotent.
 func (s *Store) ApplyEventsIngestDelta(ctx context.Context, taskID string,
 	ckpts []CheckpointRow, mark FileIngestMark) error {

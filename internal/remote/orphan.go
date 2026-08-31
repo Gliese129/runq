@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gliese129/runq/internal/rfs"
-	"github.com/gliese129/runq/internal/store"
+	"github.com/gliese129/runq-lab/internal/rfs"
+	"github.com/gliese129/runq-lab/internal/store"
 )
 
 // DetectOrphans scans this target's terminal tasks for missing task dirs and

@@ -3,8 +3,8 @@ package cli
 import (
 	"fmt"
 
-	"github.com/gliese129/runq/internal/backend"
-	"github.com/gliese129/runq/internal/utils"
+	"github.com/gliese129/runq-lab/internal/backend"
+	"github.com/gliese129/runq-lab/internal/utils"
 	"github.com/spf13/cobra"
 )
 

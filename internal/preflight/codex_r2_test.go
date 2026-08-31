@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gliese129/runq/internal/project"
-	"github.com/gliese129/runq/internal/rfs"
+	"github.com/gliese129/runq-lab/internal/project"
+	"github.com/gliese129/runq-lab/internal/rfs"
 )
 
 // Codex r2 #1a: `from pkg.helper import x` must verify the WHOLE dotted

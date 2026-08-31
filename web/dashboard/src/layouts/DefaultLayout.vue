@@ -18,16 +18,6 @@
           <RunqLogo :size="28" />
           <span v-if="!collapsed" class="text-body-1 font-weight-bold text-on-surface">runq</span>
         </router-link>
-        <v-spacer />
-        <v-chip
-          v-if="!collapsed && config.loaded"
-          size="x-small"
-          variant="tonal"
-          color="primary"
-          label
-        >
-          {{ config.targetLabel }}
-        </v-chip>
       </div>
 
       <v-divider />

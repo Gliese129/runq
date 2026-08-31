@@ -10,9 +10,9 @@ import (
 	"io/fs"
 
 	"github.com/bytedance/gopkg/util/logger"
-	"github.com/gliese129/runq/internal/rfs"
-	"github.com/gliese129/runq/internal/store"
-	"github.com/gliese129/runq/internal/workspace"
+	"github.com/gliese129/runq-lab/internal/rfs"
+	"github.com/gliese129/runq-lab/internal/store"
+	"github.com/gliese129/runq-lab/internal/workspace"
 )
 
 // Target identifies the task workspace whose SDK outputs should be ingested.

@@ -5,7 +5,7 @@ package remote
 import (
 	"strings"
 
-	"github.com/gliese129/runq/internal/config"
+	"github.com/gliese129/runq-lab/internal/config"
 )
 
 // SchedulerSignal is the semantic verdict about a task derived from the
@@ -93,6 +93,123 @@ type Observed struct {
 	KillRequested bool
 }
 
+// evidenceClass is deliberately closed: every persisted/candidate provenance
+// Reconcile understands belongs to exactly one class. The acceptance relation
+// below compares these classes instead of relying on the order of observation
+// branches, which would let a later weak probe regress an earlier terminal.
+type evidenceClass uint8
+
+const (
+	evidenceNone evidenceClass = iota
+	evidenceSubmit
+	evidenceInferredTerminal
+	evidenceSchedulerLive
+	evidenceWrapperLive
+	evidenceSchedulerTerminal
+	evidenceWrapperTerminal
+	evidenceRunqTerminal
+)
+
+func classifyEvidence(d Decision) evidenceClass {
+	switch {
+	case d.Source == SourceRunq && isTerminal(d.Status):
+		return evidenceRunqTerminal
+	case d.Source == SourceWrapper && isTerminal(d.Status):
+		return evidenceWrapperTerminal
+	case d.Source == SourceScheduler && isTerminal(d.Status):
+		return evidenceSchedulerTerminal
+	case d.Source == SourceInferred && isTerminal(d.Status):
+		return evidenceInferredTerminal
+	case d.Source == SourceWrapper && d.Status == "running":
+		return evidenceWrapperLive
+	case d.Source == SourceScheduler && (d.Status == "pending" || d.Status == "running"):
+		return evidenceSchedulerLive
+	case d.Source == SourceSubmit:
+		return evidenceSubmit
+	default:
+		return evidenceNone
+	}
+}
+
+// acceptCandidate is the complete evidence-acceptance relation.
+//
+//   - wrapper/runq terminals are hard and cannot be replaced;
+//   - scheduler terminals are soft, but only hard terminal evidence can
+//     correct them (another scheduler/live inference cannot regress them);
+//   - inferred and submit terminals are provisional and remain correctable;
+//   - wrapper-live outranks scheduler-live, while the combined wrapper-live +
+//     scheduler-gone inference may still detect a vanished process;
+//   - scheduler-live may advance pending -> running, never running -> pending.
+func acceptCandidate(current, candidate Decision) bool {
+	currentEvidence := classifyEvidence(current)
+	candidateEvidence := classifyEvidence(candidate)
+
+	switch currentEvidence {
+	case evidenceWrapperTerminal, evidenceRunqTerminal:
+		return false
+	case evidenceSchedulerTerminal:
+		switch candidateEvidence {
+		case evidenceWrapperTerminal, evidenceRunqTerminal:
+			return true
+		default:
+			return false
+		}
+	case evidenceWrapperLive:
+		switch candidateEvidence {
+		case evidenceInferredTerminal, evidenceWrapperLive, evidenceSchedulerTerminal,
+			evidenceWrapperTerminal, evidenceRunqTerminal:
+			return true
+		default:
+			return false
+		}
+	case evidenceSchedulerLive:
+		switch candidateEvidence {
+		case evidenceInferredTerminal, evidenceWrapperLive, evidenceSchedulerTerminal,
+			evidenceWrapperTerminal, evidenceRunqTerminal:
+			return true
+		case evidenceSchedulerLive:
+			return current.Status != "running" || candidate.Status != "pending"
+		default:
+			return false
+		}
+	case evidenceNone, evidenceSubmit, evidenceInferredTerminal:
+		return candidateEvidence != evidenceNone && candidateEvidence != evidenceSubmit
+	default:
+		return false
+	}
+}
+
+func observedCandidate(o Observed) (Decision, bool) {
+	if o.KillRequested {
+		return Decision{"killed", SourceRunq}, true
+	}
+	if o.WrapperStatus == "success" || o.WrapperStatus == "failed" || o.WrapperStatus == "killed" {
+		return Decision{o.WrapperStatus, SourceWrapper}, true
+	}
+	switch o.Scheduler {
+	case SchedSuccess:
+		return Decision{"success", SourceScheduler}, true
+	case SchedFailed:
+		return Decision{"failed", SourceScheduler}, true
+	case SchedKilled:
+		return Decision{"killed", SourceScheduler}, true
+	}
+	if o.WrapperStatus == "started" || o.WrapperStatus == "running" {
+		if o.Scheduler == SchedGone {
+			return Decision{"failed", SourceInferred}, true
+		}
+		return Decision{"running", SourceWrapper}, true
+	}
+	switch o.Scheduler {
+	case SchedRunning:
+		return Decision{"running", SourceScheduler}, true
+	case SchedActive, SchedPending:
+		return Decision{"pending", SourceScheduler}, true
+	default:
+		return Decision{}, false
+	}
+}
+
 // Reconcile merges wrapper (process-inside) and scheduler (process-outside)
 // facts into the canonical status to persist, plus provenance.
 //
@@ -107,38 +224,10 @@ type Observed struct {
 //	wrapper "" + scheduler Active|Pending      → pending  / scheduler
 //	otherwise                                  → keep current
 func Reconcile(currentStatus, currentSource string, o Observed) Decision {
-	keep := Decision{Status: currentStatus, Source: currentSource}
-
-	if o.KillRequested {
-		return Decision{"killed", SourceRunq}
+	current := Decision{Status: currentStatus, Source: currentSource}
+	candidate, ok := observedCandidate(o)
+	if !ok || !acceptCandidate(current, candidate) {
+		return current
 	}
-	// All three wrapper terminals count — including "killed", which run.sh's
-	// TERM/INT/HUP trap writes on scancel/walltime. Dropping it would let the
-	// task fall through to the scheduler branches and be misread as an
-	// inferred FAILURE (SchedGone + running), which then retries a task the
-	// user deliberately cancelled.
-	if o.WrapperStatus == "success" || o.WrapperStatus == "failed" || o.WrapperStatus == "killed" {
-		return Decision{o.WrapperStatus, SourceWrapper}
-	}
-	switch o.Scheduler {
-	case SchedSuccess:
-		return Decision{"success", SourceScheduler}
-	case SchedFailed:
-		return Decision{"failed", SourceScheduler}
-	case SchedKilled:
-		return Decision{"killed", SourceScheduler}
-	}
-	if o.WrapperStatus == "started" || o.WrapperStatus == "running" {
-		if o.Scheduler == SchedGone {
-			return Decision{"failed", SourceInferred}
-		}
-		return Decision{"running", SourceWrapper}
-	}
-	switch o.Scheduler {
-	case SchedRunning:
-		return Decision{"running", SourceScheduler}
-	case SchedActive, SchedPending:
-		return Decision{"pending", SourceScheduler}
-	}
-	return keep
+	return candidate
 }

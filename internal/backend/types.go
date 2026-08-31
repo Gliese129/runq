@@ -6,9 +6,9 @@ import (
 	"errors"
 	"time"
 
-	"github.com/gliese129/runq/internal/job"
-	"github.com/gliese129/runq/internal/logfile"
-	"github.com/gliese129/runq/internal/preflight"
+	"github.com/gliese129/runq-lab/internal/job"
+	"github.com/gliese129/runq-lab/internal/logfile"
+	"github.com/gliese129/runq-lab/internal/preflight"
 )
 
 // View types shared by HTTP responses and CLI --json output.
@@ -155,11 +155,17 @@ type ConfigResponse struct {
 	DataPath      string          `json:"data_path"`
 	ConfigPath    string          `json:"config_path"`
 	DefaultTarget string          `json:"default_target"`
+	TargetState   string          `json:"target_state"`
 	Targets       []TargetSummary `json:"targets"`
 	// ConfigGeneration: config.yaml's semantic content hash (RQ-75) at the
 	// time of this response — freshly computed, not the boot snapshot's.
 	ConfigGeneration string `json:"config_generation,omitempty"`
 }
+
+const (
+	TargetStateConfigured   = "configured"
+	TargetStateUnconfigured = "unconfigured"
+)
 
 // TargetSummary is one target's bootstrap entry (spec §4): identity +
 // capability bits, no scheduler template details. Type is inferred from
@@ -408,14 +414,6 @@ type LogPage = logfile.Page
 type LogFollower interface {
 	Next(ctx context.Context) (*LogPage, error)
 	Close() error
-}
-
-// QueueEntry is one row of the squeue output (runq preset): a non-terminal
-// task's id and status, in runq's own status vocabulary (which doubles as
-// remote.ParseSignal's canonical vocabulary — no SignalMap needed).
-type QueueEntry struct {
-	ID     string `json:"id"`
-	Status string `json:"status"`
 }
 
 // CleanAction DESCRIBES what deletion will touch — it is not a user

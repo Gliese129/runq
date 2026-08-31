@@ -25,14 +25,51 @@ func (s *Store) Migrate() error {
 	if err := s.addMissingColumns(ctx); err != nil {
 		return err
 	}
-	// RQ2-1 c6: the legacy raw-point metrics table is vestigial — the
-	// streaming reduction (metric_summary + on-target pyramid) replaced
-	// it and grep confirms zero readers/writers. Dropping is safe on old
-	// DBs (points were never served) and a no-op on new ones.
-	if _, err := s.db.ExecContext(ctx, `DROP TABLE IF EXISTS metrics`); err != nil {
+	if err := s.archiveLegacyMetrics(ctx); err != nil {
 		return err
 	}
 	return s.reclassifyDoneJobs(ctx)
+}
+
+// archiveLegacyMetrics preserves raw metric points created by releases before
+// the streaming summary/pyramid design. Current code no longer reads or writes
+// this table, but deleting it during startup would make an otherwise routine
+// binary upgrade destructive. Renaming is an O(1) SQLite schema operation, so
+// even databases with millions of historical points remain cheap to upgrade.
+//
+// New databases never create either table. If a prior/manual migration already
+// created the archive, leave any additional `metrics` table untouched too: an
+// ambiguous duplicate is safer than discarding user data.
+func (s *Store) archiveLegacyMetrics(ctx context.Context) error {
+	hasMetrics, err := tableExists(ctx, s.db, "metrics")
+	if err != nil {
+		return fmt.Errorf("inspect legacy metrics table: %w", err)
+	}
+	if !hasMetrics {
+		return nil
+	}
+	hasArchive, err := tableExists(ctx, s.db, "metrics_legacy_v1")
+	if err != nil {
+		return fmt.Errorf("inspect legacy metrics archive: %w", err)
+	}
+	if hasArchive {
+		return nil
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`ALTER TABLE metrics RENAME TO metrics_legacy_v1`); err != nil {
+		return fmt.Errorf("archive legacy metrics: %w", err)
+	}
+	return nil
+}
+
+func tableExists(ctx context.Context, db *sql.DB, name string) (bool, error) {
+	var exists int
+	err := db.QueryRowContext(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM sqlite_master
+			WHERE type = 'table' AND name = ?
+		)`, name).Scan(&exists)
+	return exists == 1, err
 }
 
 // reclassifyDoneJobs is the one-shot data migration for the terminal job
@@ -86,16 +123,27 @@ func (s *Store) addMissingColumns(ctx context.Context) error {
 	if err := addColumnIfMissing(ctx, s.db, "tasks", "target_generation", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return fmt.Errorf("add tasks.target_generation: %w", err)
 	}
-	// L2-E: external_id holds the HPC scheduler job id (sbatch/qsub) so refresh
-	// can map a task back to its cluster job. Empty for daemon-managed tasks.
+	// Task execution timeouts predate the explicit migration list. Existing
+	// databases whose tasks table was created before this column was added must
+	// be upgraded before the normal task SELECT list can be queried.
+	if err := addColumnIfMissing(ctx, s.db, "tasks", "timeout", "INTEGER"); err != nil {
+		return fmt.Errorf("add tasks.timeout: %w", err)
+	}
+	// L2-E: external_id holds the runqd attempt id or HPC scheduler job id so
+	// refresh can map a task back to its execution record.
 	if err := addColumnIfMissing(ctx, s.db, "tasks", "external_id", "TEXT"); err != nil {
 		return fmt.Errorf("add tasks.external_id: %w", err)
 	}
 	// L2-E: status_source records where a task's status came from (wrapper /
-	// scheduler / inferred / runq / submit). Lets refresh treat "inferred"
+	// scheduler / inferred / runq / submit / retry). Lets refresh treat "inferred"
 	// terminals as correctable while hard terminals are final.
 	if err := addColumnIfMissing(ctx, s.db, "tasks", "status_source", "TEXT"); err != nil {
 		return fmt.Errorf("add tasks.status_source: %w", err)
+	}
+	// Durable K2 intent: a restart must not forget cancellation that raced a
+	// remote submission or an external scheduler response.
+	if err := addColumnIfMissing(ctx, s.db, "tasks", "kill_requested", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return fmt.Errorf("add tasks.kill_requested: %w", err)
 	}
 	// note: user-supplied experiment note (--note flag or job.yaml note: field).
 	if err := addColumnIfMissing(ctx, s.db, "jobs", "note", "TEXT"); err != nil {

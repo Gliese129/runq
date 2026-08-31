@@ -6,7 +6,7 @@ import (
 	"strings"
 	"text/template"
 
-	"github.com/gliese129/runq/internal/utils"
+	"github.com/gliese129/runq-lab/internal/utils"
 	"github.com/spf13/cobra"
 )
 
@@ -185,5 +185,5 @@ const usageTemplate = `{{if .Runnable}}{{underline "Usage:"}}
 {{- end}}
 
 Use "{{.CommandPath}} [command] --help" for more information about a command.
-{{dim "Docs & annotated config examples: https://github.com/gliese129/runq — docs/ and examples/"}}
+{{dim "Docs & annotated config examples: https://github.com/gliese129/runq-lab — docs/ and examples/"}}
 `

@@ -16,7 +16,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/gliese129/runq/internal/genfile"
+	"github.com/gliese129/runq-lab/internal/genfile"
 )
 
 // WatchFile polls path every interval and calls onChange when the SEMANTIC

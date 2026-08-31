@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gliese129/runq/internal/genfile"
+	"github.com/gliese129/runq-lab/internal/genfile"
 )
 
 const saveTestCfg = `# my precious comment
@@ -154,8 +154,13 @@ func TestSaveGlobalDeleteLastTarget(t *testing.T) {
 	if len(after.Targets) != 0 {
 		t.Fatalf("deleting the last target did not stick: %+v", after.Targets)
 	}
+	if after.ResolveDefaultTarget() != "" {
+		t.Fatalf("effective default after deleting the last target = %q, want empty", after.ResolveDefaultTarget())
+	}
 	if buf, _ := os.ReadFile(filepath.Join(dir, "config.yaml")); strings.Contains(string(buf), "targets:") {
 		t.Fatalf("targets key still present after removing all targets:\n%s", buf)
+	} else if strings.Contains(string(buf), "default_target:") {
+		t.Fatalf("stale default_target still present after removing all targets:\n%s", buf)
 	}
 }
 

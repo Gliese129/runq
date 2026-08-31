@@ -26,6 +26,14 @@ data/
 vendor/
 internal/dashboard/dist/
 
+# JavaScript dependencies
+node_modules/
+
+# Python environments and bytecode
+.venv/
+__pycache__/
+*.py[cod]
+
 # IDE
 .idea/
 .vscode/

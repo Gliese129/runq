@@ -21,7 +21,7 @@ import (
 	"regexp"
 	"unicode/utf8"
 
-	"github.com/gliese129/runq/internal/rfs"
+	"github.com/gliese129/runq-lab/internal/rfs"
 )
 
 // DefaultPageLines is the number of lines returned when the caller doesn't

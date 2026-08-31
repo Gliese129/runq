@@ -5,7 +5,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/gliese129/runq/internal/version"
+	"github.com/gliese129/runq-lab/internal/version"
 )
 
 func TestVersionGateMiddleware(t *testing.T) {

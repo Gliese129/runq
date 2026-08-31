@@ -12,11 +12,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gliese129/runq/internal/api"
-	"github.com/gliese129/runq/internal/config"
-	"github.com/gliese129/runq/internal/rfs"
-	"github.com/gliese129/runq/internal/utils"
-	"github.com/gliese129/runq/internal/version"
+	"github.com/gliese129/runq-lab/internal/api"
+	"github.com/gliese129/runq-lab/internal/config"
+	"github.com/gliese129/runq-lab/internal/rfs"
+	"github.com/gliese129/runq-lab/internal/utils"
+	"github.com/gliese129/runq-lab/internal/version"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/ssh"

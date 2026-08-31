@@ -161,7 +161,7 @@ const statusOptions = computed(() => [
 
 const isActiveJob = computed(() => {
   const s = detail.value?.job.status
-  return s === 'running' || s === 'pending' || s === 'paused'
+  return s === 'running' || s === 'submitting' || s === 'pending' || s === 'paused'
 })
 
 // Results wire is fetched only while its tab shows (heavy ingest), live

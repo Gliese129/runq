@@ -34,7 +34,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/gliese129/runq/internal/genfile"
+	"github.com/gliese129/runq-lab/internal/genfile"
 )
 
 // GlobalConfig is the top-level section of ~/.runq/config.yaml.
@@ -46,7 +46,7 @@ type GlobalConfig struct {
 	// <working_dir>/.runq/ is the real storage location.
 	DataPath string `yaml:"data_path,omitempty"`
 	// DefaultTarget names the target to use when --target is omitted.
-	// Falls back to the first entry in Targets, then "local".
+	// Falls back to the first configured target; stays empty when unconfigured.
 	DefaultTarget string `yaml:"default_target,omitempty"`
 	// Dashboard configures the embedded dashboard server.
 	Dashboard *DashboardConfig `yaml:"dashboard,omitempty"`
@@ -71,9 +71,9 @@ type DashboardConfig struct {
 }
 
 // TargetConfig describes a single compute target. Type is inferred:
-//   - gpus present   → LocalBackend (daemon-managed GPU scheduling)
-//   - scheduler set  → SSHBackend   (cluster job submission via SSH)
-//   - ssh present    → SSHFS        (remote filesystem); absent → LocalFS
+//   - gpus present   → local runqd lane
+//   - scheduler set  → external scheduler lane (runqd, Slurm, PBS, ...)
+//   - ssh present    → SSHFS (remote filesystem); absent → LocalFS
 type TargetConfig struct {
 	Name      string           `yaml:"name" json:"name"`
 	GPUs      []int            `yaml:"gpus,omitempty" json:"gpus,omitempty"`
@@ -89,7 +89,7 @@ type TargetConfig struct {
 	MaxInflight int `yaml:"max_inflight,omitempty" json:"max_inflight,omitempty"`
 
 	// RemoteCLI enables the reverse socket forward for this target: the
-	// daemon keeps ~/.runq/runq.sock listening on the remote host, so a
+	// daemon keeps its runq.sock listening on the remote host, so a
 	// `runq` CLI there (installed by `runq connect`) talks to THIS daemon —
 	// users whose code lives on the login node get the full CLI without a
 	// second deployment. The forward lives and dies with the daemon; when
@@ -98,7 +98,7 @@ type TargetConfig struct {
 
 	// TrustEmptyList declares that an EMPTY status_list output is a real
 	// answer ("no jobs"), not a parse suspicion. runqd targets set it (their
-	// squeue reads a local SQLite); dialect schedulers leave it off so the
+	// list command reads local SQLite); dialect schedulers leave it off so the
 	// conservative per-job fallback still guards against silent breakage.
 	TrustEmptyList bool `yaml:"trust_empty_list,omitempty" json:"trust_empty_list,omitempty"`
 
@@ -225,26 +225,30 @@ func (t *TargetConfig) SemanticGeneration() string {
 	return gen
 }
 
-// ResolveTargets returns the configured targets. An empty targets[] means
-// "just this machine": a single default local target. (mode is dead, D9 —
-// a stale `mode:` key in old config files parses as an ignored unknown.)
+// ResolveTargets returns the configured targets. Empty is a real,
+// first-class state: the client daemon can still serve status/configuration,
+// but it must not silently invent a local runqd dependency. (mode is dead,
+// D9 — a stale `mode:` key in old config files parses as an ignored unknown.)
 func (cfg *GlobalConfig) ResolveTargets() []TargetConfig {
-	if len(cfg.Targets) > 0 {
-		return cfg.Targets
+	if len(cfg.Targets) == 0 {
+		return []TargetConfig{}
 	}
-	return []TargetConfig{{Name: "local"}}
+	return cfg.Targets
 }
 
 // ResolveDefaultTarget returns the name of the default target.
 func (cfg *GlobalConfig) ResolveDefaultTarget() string {
+	targets := cfg.ResolveTargets()
+	if len(targets) == 0 {
+		// Ignore a stale default_target when there is nothing it can name. This
+		// keeps a manually emptied config bootable and lets the target editor
+		// repair it through the running daemon.
+		return ""
+	}
 	if cfg.DefaultTarget != "" {
 		return cfg.DefaultTarget
 	}
-	targets := cfg.ResolveTargets()
-	if len(targets) > 0 {
-		return targets[0].Name
-	}
-	return "local"
+	return targets[0].Name
 }
 
 // FindTarget looks up a target by name. Returns an error if not found.
@@ -326,9 +330,11 @@ func renderGlobalYAML(cfg *GlobalConfig) ([]byte, error) {
 	// Scalars are authoritative like targets (review fix #3): callers
 	// always start from Load(), so an empty value means absent-or-cleared
 	// — remove the key instead of silently keeping the disk value.
-	if cfg.DefaultTarget != "" {
+	if cfg.DefaultTarget != "" && len(cfg.Targets) > 0 {
 		setMappingScalar(root, "default_target", cfg.DefaultTarget)
 	} else {
+		// A default without any target is stale by definition. Keep the
+		// persisted file aligned with ResolveDefaultTarget's unconfigured state.
 		removeMappingValue(root, "default_target")
 	}
 	if cfg.DataPath != "" {
@@ -469,7 +475,15 @@ func SetKey(key, value string) error {
 	case "data_path":
 		// No extra validation: users may point at paths not mounted on this host.
 	case "default_target":
-		// Accept any name; actual validation happens when targets are resolved.
+		if value != "" {
+			cfg, err := Load()
+			if err != nil {
+				return err
+			}
+			if _, err := cfg.FindTarget(value); err != nil {
+				return fmt.Errorf("cannot set default_target: %w; add the target first", err)
+			}
+		}
 	default:
 		return fmt.Errorf("unsupported config key %q", key)
 	}
@@ -479,7 +493,7 @@ func SetKey(key, value string) error {
 		return err
 	}
 	root := doc.Content[0]
-	if key == "data_path" && value == "" {
+	if value == "" {
 		removeMappingValue(root, key)
 	} else {
 		setMappingScalar(root, key, value)

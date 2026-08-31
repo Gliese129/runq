@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gliese129/runq/internal/project"
-	"github.com/gliese129/runq/internal/rfs"
+	"github.com/gliese129/runq-lab/internal/project"
+	"github.com/gliese129/runq-lab/internal/rfs"
 )
 
 // The r4 doctrine (user ruling): paths resolve from working_dir, runq

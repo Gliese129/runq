@@ -3,7 +3,7 @@ package cli
 import (
 	"fmt"
 
-	"github.com/gliese129/runq/internal/workspace"
+	"github.com/gliese129/runq-lab/internal/workspace"
 	"github.com/spf13/cobra"
 )
 

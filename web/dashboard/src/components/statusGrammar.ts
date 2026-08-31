@@ -5,7 +5,7 @@
 // heatmap). No view may hard-code a status color.
 //
 // Two enums exist BY DESIGN (different abstraction levels):
-//   task: pending | running | success | failed | killed | unknown
+//   task: pending | submitting | running | success | failed | killed | unknown
 //         (+ cancelling — a frontend-only transitional state, never persisted;
 //         unknown = outcome-lost submission awaiting reconcile, RQ-74)
 //   job:  pending | running | paused | done | failed | partial | killed
@@ -65,6 +65,7 @@ const UNKNOWN: StatusStyle = {
 
 export const taskStatusStyles: Record<string, StatusStyle> = {
   pending: { color: 'neutral', css: SLATE, icon: 'mdi-clock-outline', variant: 'outlined' },
+  submitting: { color: 'info', css: BLUE, icon: 'mdi-upload', variant: 'outlined', animated: true },
   running: { color: 'info', css: BLUE, icon: 'mdi-loading', variant: 'outlined', animated: true },
   success: { color: 'success', css: GREEN, icon: 'mdi-check', variant: 'tonal' },
   failed: { color: 'error', css: RED, icon: 'mdi-alert-circle', variant: 'tonal' },

@@ -5,9 +5,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gliese129/runq/internal/config"
-	"github.com/gliese129/runq/internal/submitplan"
-	"github.com/gliese129/runq/internal/utils"
+	"github.com/gliese129/runq-lab/internal/config"
+	"github.com/gliese129/runq-lab/internal/submitplan"
+	"github.com/gliese129/runq-lab/internal/utils"
 )
 
 // THE single-injection-point contract (Codex r2 #2): run.sh, the submit

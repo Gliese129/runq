@@ -3,13 +3,19 @@ package remote
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"path"
 	"strings"
 
-	"github.com/gliese129/runq/internal/store"
-	"github.com/gliese129/runq/internal/utils"
+	"github.com/gliese129/runq-lab/internal/store"
+	"github.com/gliese129/runq-lab/internal/utils"
 )
+
+// ErrMarkerDetectionDisabled means no marker source is configured, so no
+// remote observation was attempted. ScanDoneMarkers returns nil only after a
+// configured marker source has been observed successfully.
+var ErrMarkerDetectionDisabled = errors.New("done marker detection is disabled")
 
 // ScanDoneMarkers is the cheap completion detector: ONE ReadDir of the
 // target's done dir tells us which tasks finished since the last look,
@@ -27,7 +33,7 @@ func (b *Backend) ScanDoneMarkers(ctx context.Context) error {
 	defer b.lifecycleMu.Unlock()
 	dir := b.doneDir()
 	if dir == "" {
-		return nil // no workspace root configured — marker detection disabled
+		return ErrMarkerDetectionDisabled
 	}
 	entries, err := b.FS.ReadDir(dir)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -36,7 +42,7 @@ func (b *Backend) ScanDoneMarkers(ctx context.Context) error {
 	}
 	b.recordContact(err) // the 2min marker scan is /health's main heartbeat
 	if err != nil {
-		return nil // transport blip: no verdicts this round; sensor retries
+		return fmt.Errorf("scan done markers: %w", err)
 	}
 
 	var cleanup []string
@@ -49,7 +55,13 @@ func (b *Backend) ScanDoneMarkers(ctx context.Context) error {
 		}
 		id := e.Name()
 		tk, gerr := b.Store.GetTask(ctx, id)
-		if gerr != nil || tk == nil || tk.Target != b.Cfg.Name {
+		if gerr != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("look up completion marker owner %s: %w", id, gerr)
+			}
+			continue
+		}
+		if tk == nil || tk.Target != b.Cfg.Name {
 			continue // not ours — leave the marker alone
 		}
 		// Generation ownership (review round 3): with a shared workspace,
@@ -69,7 +81,19 @@ func (b *Backend) ScanDoneMarkers(ctx context.Context) error {
 			continue // previous attempt's marker; Launch clears it
 		}
 
-		sf := readStatus(b.FS, tk.TaskDir)
+		sf, statusErr := readStatusObserved(b.FS, tk.TaskDir)
+		if statusErr != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("read completion marker status for %s: %w", tk.ID, statusErr)
+			}
+			continue
+		}
+		if sf.Status == "" {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("completion marker for %s has no valid status yet", tk.ID)
+			}
+			continue
+		}
 		d := Reconcile(tk.Status, tk.StatusSource, Observed{
 			WrapperStatus: sf.Status,
 			ExitCode:      sf.ExitCode,
@@ -121,17 +145,17 @@ func (b *Backend) ScanDoneMarkers(ctx context.Context) error {
 	return firstErr
 }
 
-// HasInFlight reports whether this target currently has any non-terminal
-// tasks with a live external id — the condition under which the daemon's
-// marker-scan and probe-align loops run at all. Zero in-flight = zero SSH
-// traffic (the design's silence contract).
+// HasInFlight reports whether this lane owns work that may already exist
+// outside runq-lab. Generation scope is load-bearing here: an empty active
+// lane must not stay awake merely because a retiring lane owns the target's
+// remaining work, and vice versa.
 func (b *Backend) HasInFlight(ctx context.Context) (bool, error) {
-	jobs, err := b.Store.ListJobs(ctx, "", b.Cfg.Name)
+	tasks, err := b.Store.ListTasks(ctx, store.TaskFilter{Target: b.Cfg.Name, Scope: b.Scope})
 	if err != nil {
 		return false, err
 	}
-	for _, j := range jobs {
-		if !store.IsTerminalJobStatus(j.Status) {
+	for _, task := range tasks {
+		if task.ExternalID != "" || task.Status == "submitting" || task.Status == "running" || task.Status == "unknown" {
 			return true, nil
 		}
 	}

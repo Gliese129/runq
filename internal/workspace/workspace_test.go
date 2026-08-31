@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/gliese129/runq/internal/job"
-	"github.com/gliese129/runq/internal/project"
+	"github.com/gliese129/runq-lab/internal/job"
+	"github.com/gliese129/runq-lab/internal/project"
 )
 
 func TestPathHelpers(t *testing.T) {

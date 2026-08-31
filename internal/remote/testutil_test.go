@@ -4,7 +4,7 @@ import (
 	"context"
 	"strings"
 
-	"github.com/gliese129/runq/internal/rfs"
+	"github.com/gliese129/runq-lab/internal/rfs"
 )
 
 // testFS wraps a real LocalFS for file operations but intercepts command

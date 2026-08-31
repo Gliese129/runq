@@ -191,13 +191,32 @@
                 <div class="text-body-2 font-weight-medium">{{ t('settings.anime_mode') }}</div>
                 <div class="text-caption text-on-surface-variant">{{ t('settings.anime_hint') }}</div>
               </div>
-              <v-switch
-                :model-value="settings.animeMode"
-                @update:model-value="settings.setAnimeMode(Boolean($event))"
-                hide-details
-                color="primary"
-                density="compact"
-              />
+              <!-- Logo switch group: pick the face, not a bare toggle — the
+                   choice IS which logo the app wears. -->
+              <div class="d-flex ga-2">
+                <v-card
+                  class="pa-2 d-flex align-center justify-center cursor-pointer"
+                  :color="!settings.animeMode ? 'primary' : 'surface-variant'"
+                  :variant="!settings.animeMode ? 'tonal' : 'flat'"
+                  role="button"
+                  :aria-pressed="!settings.animeMode"
+                  :aria-label="t('settings.anime_mode') + ': off'"
+                  @click="settings.setAnimeMode(false)"
+                >
+                  <RunqLogo :size="32" variant="normal" />
+                </v-card>
+                <v-card
+                  class="pa-2 d-flex align-center justify-center cursor-pointer"
+                  :color="settings.animeMode ? 'primary' : 'surface-variant'"
+                  :variant="settings.animeMode ? 'tonal' : 'flat'"
+                  role="button"
+                  :aria-pressed="settings.animeMode"
+                  :aria-label="t('settings.anime_mode') + ': on'"
+                  @click="settings.setAnimeMode(true)"
+                >
+                  <RunqLogo :size="32" variant="anime" />
+                </v-card>
+              </div>
             </div>
           </v-expansion-panel-text>
         </v-expansion-panel>
@@ -232,6 +251,7 @@ import { isGenerationConflict } from '@/apis/client'
 import { configApi } from '@/apis/config'
 import ConfigConflictDialog, { type ConflictField } from '@/components/ConfigConflictDialog.vue'
 import DaemonLogPanel from '@/components/DaemonLogPanel.vue'
+import RunqLogo from '@/components/RunqLogo.vue'
 
 const { t, locale } = useI18n()
 const theme = useTheme()

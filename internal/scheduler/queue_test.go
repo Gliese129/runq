@@ -34,24 +34,6 @@ func TestPeekEmpty(t *testing.T) {
 	}
 }
 
-func TestPeekSchedulable(t *testing.T) {
-	q := NewQueue()
-	q.Push(makeTask("t-big", 8))   // needs 8 GPUs
-	q.Push(makeTask("t-small", 1)) // needs 1 GPU
-
-	// Only 2 GPUs free — big task can't run, but small one can
-	task := q.PeekSchedulable(2, nil)
-	if task == nil || task.ID != "t-small" {
-		t.Errorf("expected t-small, got %v", task)
-	}
-
-	// 0 GPUs free — nothing fits
-	task = q.PeekSchedulable(0, nil)
-	if task != nil {
-		t.Errorf("expected nil, got %s", task.ID)
-	}
-}
-
 func TestMarkRunning(t *testing.T) {
 	q := NewQueue()
 	q.Push(makeTask("t1", 1))

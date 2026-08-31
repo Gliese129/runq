@@ -11,9 +11,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gliese129/runq/internal/backend"
-	"github.com/gliese129/runq/internal/logfile"
-	"github.com/gliese129/runq/internal/rfs"
+	"github.com/gliese129/runq-lab/internal/backend"
+	"github.com/gliese129/runq-lab/internal/logfile"
+	"github.com/gliese129/runq-lab/internal/rfs"
 )
 
 // utilsLogSession tracks a single uploaded log file for the log viewer.

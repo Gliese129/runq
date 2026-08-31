@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gliese129/runq/internal/store"
-	"github.com/gliese129/runq/internal/workspace"
+	"github.com/gliese129/runq-lab/internal/store"
+	"github.com/gliese129/runq-lab/internal/workspace"
 )
 
 func openMemoryStoreAndSeed(t *testing.T, taskID, jobID, taskDir string) *store.Store {

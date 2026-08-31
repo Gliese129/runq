@@ -29,8 +29,8 @@ import (
 	"path/filepath"
 
 	"github.com/bytedance/gopkg/util/logger"
-	"github.com/gliese129/runq/internal/backend"
-	"github.com/gliese129/runq/internal/config"
+	"github.com/gliese129/runq-lab/internal/backend"
+	"github.com/gliese129/runq-lab/internal/config"
 )
 
 const maxUIStateBytes = 64 * 1024

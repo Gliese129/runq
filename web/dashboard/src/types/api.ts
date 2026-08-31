@@ -225,6 +225,8 @@ export interface ConfigResponse {
   data_path: string
   config_path: string
   default_target: string
+  /** Explicit onboarding state; empty targets never imply a local executor. */
+  target_state?: 'configured' | 'unconfigured'
   targets: TargetSummary[]
   /** config.yaml semantic content hash (RQ-75) — send back as If-Match on writes */
   config_generation?: string
@@ -264,6 +266,7 @@ export interface ForwardStatus {
 export interface HealthResponse {
   version: string
   uptime_seconds: number
+  target_state: 'configured' | 'unconfigured'
   targets: TargetHealth[]
   /** daemon identity — whose daemon answered (RQ-74) */
   hostname?: string

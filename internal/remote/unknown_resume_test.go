@@ -6,9 +6,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/gliese129/runq/internal/config"
-	"github.com/gliese129/runq/internal/scheduler"
-	"github.com/gliese129/runq/internal/store"
+	"github.com/gliese129/runq-lab/internal/config"
+	"github.com/gliese129/runq-lab/internal/scheduler"
+	"github.com/gliese129/runq-lab/internal/store"
 )
 
 // resumeRecorder is a TaskFinisher that also records ResumeUnknown calls —

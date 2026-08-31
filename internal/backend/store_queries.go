@@ -4,14 +4,14 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/gliese129/runq/internal/job"
-	"github.com/gliese129/runq/internal/project"
-	"github.com/gliese129/runq/internal/store"
+	"github.com/gliese129/runq-lab/internal/job"
+	"github.com/gliese129/runq-lab/internal/project"
+	"github.com/gliese129/runq-lab/internal/store"
 )
 
 // storeQueries groups the store + registry fields and the Backend methods
-// that are identical across LocalBackend and SSHBackend: pure delegation
-// to the project registry, store-level clean, and dry-run.
+// that are pure delegation to the project registry, store-level clean, and
+// dry-run assembly.
 //
 // Embed this in concrete backends to avoid duplicating ~11 methods.
 type storeQueries struct {
@@ -91,7 +91,7 @@ func (b *storeQueries) DryRun(ctx context.Context, cfg job.JobConfig) (*DryRunRe
 // ── Clean / Thaw ─────────────────────────────────────────────────────────
 
 func (b *storeQueries) Clean(ctx context.Context, opts CleanOptions) (*CleanResult, error) {
-	// Single-lane path (runqd's ledger, tests): everything is local.
+	// Single-target lane path: all indexed artifacts are in this store.
 	// Cross-target FS routing lives in MultiBackend.Clean.
 	return PerformClean(ctx, b.store, nil, opts)
 }

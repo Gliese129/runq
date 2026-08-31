@@ -28,7 +28,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/gliese129/runq/internal/backend"
+	"github.com/gliese129/runq-lab/internal/backend"
 )
 
 // guardBodyLimit caps buffered request bodies (submit configs are small).

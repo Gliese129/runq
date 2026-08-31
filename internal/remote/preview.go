@@ -6,11 +6,11 @@ import (
 	"path"
 	"strings"
 
-	"github.com/gliese129/runq/internal/job"
-	"github.com/gliese129/runq/internal/preflight"
-	"github.com/gliese129/runq/internal/project"
-	"github.com/gliese129/runq/internal/submitplan"
-	"github.com/gliese129/runq/internal/utils"
+	"github.com/gliese129/runq-lab/internal/job"
+	"github.com/gliese129/runq-lab/internal/preflight"
+	"github.com/gliese129/runq-lab/internal/project"
+	"github.com/gliese129/runq-lab/internal/submitplan"
+	"github.com/gliese129/runq-lab/internal/utils"
 )
 
 // Preview compiles the job and renders what WOULD be submitted — the

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/gliese129/runq/internal/cli"
+	"github.com/gliese129/runq-lab/internal/cli"
 )
 
 func main() {

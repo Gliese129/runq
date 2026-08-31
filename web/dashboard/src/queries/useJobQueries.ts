@@ -56,6 +56,26 @@ export function useJobDetailQuery(jobId: MaybeRefOrGetter<string>) {
   })
 }
 
+/** Read-only view of the SAME cache entry as useJobDetailQuery, for pages
+ *  that need job CONTEXT rather than live job state — the task page's W&B
+ *  base_url, target name, and sibling params (swept-vs-fixed). Those are
+ *  static for the life of a job, so this observer never polls and treats
+ *  cached data as fresh: arriving from the job page costs zero requests,
+ *  and a deep link pays exactly one. Sharing the key means the job page's
+ *  own polling observer still refreshes the entry for both. */
+const JOB_CONTEXT_STALE_MS = 5 * 60_000
+
+export function useJobContextQuery(jobId: MaybeRefOrGetter<string>) {
+  return useQuery({
+    queryKey: computed(() => qk.job(toValue(jobId))),
+    queryFn: ({ signal }) => jobsApi.get(toValue(jobId), { silent: true, signal }),
+    staleTime: JOB_CONTEXT_STALE_MS,
+    refetchInterval: false,
+    refetchOnMount: false,
+    refetchOnWindowFocus: false,
+  })
+}
+
 /** Columnar results wire (RQ2-1 §A) for the Results tab. Fetch is gated
  *  on tab visibility (`enabled`) — the ingest walks every task's
  *  results.jsonl, too heavy to pay while the user watches the task list.

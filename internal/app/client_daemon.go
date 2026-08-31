@@ -7,27 +7,25 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
 	"time"
 
-	"github.com/gliese129/runq/internal/backend"
-	"github.com/gliese129/runq/internal/config"
-	"github.com/gliese129/runq/internal/dashboard"
-	"github.com/gliese129/runq/internal/rfs"
-	"github.com/gliese129/runq/internal/store"
-	"github.com/gliese129/runq/internal/utils"
+	"github.com/gliese129/runq-lab/internal/backend"
+	"github.com/gliese129/runq-lab/internal/config"
+	"github.com/gliese129/runq-lab/internal/dashboard"
+	"github.com/gliese129/runq-lab/internal/rfs"
+	"github.com/gliese129/runq-lab/internal/store"
+	"github.com/gliese129/runq-lab/internal/utils"
 )
 
 // newClientDaemon assembles the CLIENT deployment (4d): routing + tracking +
-// dashboard, and nothing else. No executor, no GPU pool, no local scheduler
-// lane, no gin API — execution lives in runqd (local or remote), and every
+// dashboard, and nothing else. No in-process runner, GPU pool, local scheduler
+// lane, or machine API — execution lives in runqd (local or remote), and every
 // target, including this machine's own GPUs, is a remote-machinery lane:
 //
 //	remote HPC:     slurm/pbs preset over rfs.SSHFS
 //	remote runqd:   runq preset over rfs.SSHFS
-//	local runqd:    runq preset over rfs.LocalFS (+ ensure-running)
+//	local runqd:    runq preset over rfs.LocalFS (pre-started independently)
 //
 // The client serves ONE route table (the dashboard mux) on two listeners:
 // the unix socket for the CLI and TCP for the browser.
@@ -46,18 +44,14 @@ func newClientDaemon(dataDir string, paths utils.DataDirPaths, logger *slog.Logg
 	}
 	defaultTarget := storageCfg.ResolveDefaultTarget()
 
-	// buildLane is THE lane constructor — boot and the RQ-75 reconciler
-	// build lanes through the same function, so a runtime rebuild can never
-	// diverge from what a restart would have produced.
-	buildLane := func(tc config.TargetConfig, cfg *config.GlobalConfig) (backend.Backend, error) {
+	// Active and historical lanes share one constructor. Historical lanes are
+	// cold filesystem readers, so they must not require a live local runqd
+	// endpoint merely to expose terminal artifacts.
+	buildLaneFor := func(tc config.TargetConfig, cfg *config.GlobalConfig, requireLocalEndpoint bool) (backend.Backend, error) {
 		if tc.Type() == config.TargetTypeRemote {
-			be, berr := backend.NewSSHBackend(backend.SSHBackendConfig{
+			return backend.NewSSHBackend(backend.SSHBackendConfig{
 				Target: tc, Store: st, GlobalCfg: cfg, Logger: logger,
 			})
-			if berr == nil {
-				logger.Info("remote lane registered", "target", tc.Name, "host", tc.SSH.Host)
-			}
-			return be, berr
 		}
 		// Local-GPUs target: synthesize a localhost-runqd lane. Same
 		// machinery, LocalFS transport; plumbing commands default to
@@ -66,15 +60,23 @@ func newClientDaemon(dataDir string, paths utils.DataDirPaths, logger *slog.Logg
 		if serr != nil {
 			return nil, fmt.Errorf("target %q: %w", tc.Name, serr)
 		}
-		ensureRunqd(logger, dataDir)
-		be, berr := backend.NewSSHBackend(backend.SSHBackendConfig{
+		if requireLocalEndpoint {
+			if cerr := connectRunqdEndpoint(utils.RunqdSocketPath()); cerr != nil {
+				return nil, fmt.Errorf("target %q: %w", tc.Name, cerr)
+			}
+		}
+		return backend.NewSSHBackend(backend.SSHBackendConfig{
 			Target: synth, Store: st, GlobalCfg: cfg, Logger: logger,
 			FS: rfs.NewLocalFS(),
 		})
-		if berr == nil {
-			logger.Info("localhost runqd lane registered", "target", tc.Name)
-		}
-		return be, berr
+	}
+	// buildLane is THE active lane constructor — boot and hot reconcile use
+	// the same readiness contract.
+	buildLane := func(tc config.TargetConfig, cfg *config.GlobalConfig) (backend.Backend, error) {
+		return buildLaneFor(tc, cfg, true)
+	}
+	buildHistoricalLane := func(tc config.TargetConfig, cfg *config.GlobalConfig) (backend.Backend, error) {
+		return buildLaneFor(tc, cfg, false)
 	}
 
 	targets := make(map[string]backend.Backend)
@@ -94,19 +96,21 @@ func newClientDaemon(dataDir string, paths utils.DataDirPaths, logger *slog.Logg
 	}
 
 	d := &Daemon{
-		Store:        st,
-		Logger:       logger,
-		lanes:        laneMap,
-		multiBe:      multiBe,
-		buildLane:    buildLane,
-		lastTargets:  targetsByName(storageCfg),
-		lastDefault:  defaultTarget,
-		bootDataPath: storageCfg.DataPath,
-		pidPath:      paths.PIDPath,
-		socketPath:   paths.SocketPath,
+		Store:               st,
+		Logger:              logger,
+		lanes:               laneMap,
+		multiBe:             multiBe,
+		buildLane:           buildLane,
+		buildHistoricalLane: buildHistoricalLane,
+		lastTargets:         targetsByName(storageCfg),
+		lastDefault:         defaultTarget,
+		bootDataPath:        storageCfg.DataPath,
+		pidPath:             paths.PIDPath,
+		socketPath:          paths.SocketPath,
 		// Superseded lanes with nothing left to track keep serving
 		// already-started reads/streams for 60s before closing.
-		laneCloseGrace: 60 * time.Second,
+		laneCloseGrace:  60 * time.Second,
+		historicalLanes: map[string]backend.Backend{},
 	}
 
 	// The dashboard mux is the client's ONLY server surface: always built
@@ -115,7 +119,7 @@ func newClientDaemon(dataDir string, paths utils.DataDirPaths, logger *slog.Logg
 	d.Dashboard = dashboard.NewServer(multiBe, storageCfg)
 
 	// Remote CLI forwards (remote_cli targets): a dedicated SSH connection
-	// per target keeps ~/.runq/runq.sock on the login node routed straight
+	// per target keeps the runq client socket on the login node routed straight
 	// into the mux above — the remote `runq` is just another socket client.
 	// Serve reuses the full middleware chain (version gate included).
 	d.forwards = map[string]*rfs.RemoteForward{}
@@ -219,92 +223,29 @@ func synthLocalRunqdTarget(tc config.TargetConfig, dataDir string) (config.Targe
 	out.GPUs = tc.GPUs // informational; allocation is runqd's job
 	out.MaxInflight = tc.MaxInflight
 	out.DoneDir = filepath.Join(dataDir, "runq-done")
-
-	// PATH independence: the daemon may run under launchd/systemd where
-	// `runq` is not on PATH. Rewrite the preset's leading `runq ` to this
-	// executable's absolute path (shell-quoted — paths can contain spaces).
+	// Metrics indexing remains runq-lab-owned. A local task's compute node is
+	// this machine, so retain the client's absolute path for that optional
+	// post-processing hook without using it as runqd's control adapter.
 	if self, serr := os.Executable(); serr == nil {
-		selfQ := utils.ShellQuote(self) + " "
-		for _, f := range []*string{
-			&out.SubmitTemplate, &out.StatusTemplate,
-			&out.StatusListTemplate, &out.KillTemplate, &out.GPUTemplate,
-		} {
-			if strings.HasPrefix(*f, "runq ") {
-				*f = selfQ + strings.TrimPrefix(*f, "runq ")
-			}
-		}
-		// Same PATH-independence for compute-node work inside run.sh
-		// (pyramid build): a local task's "compute node" is this machine.
 		out.RunqBin = self
 	}
 	return out, nil
 }
 
-// ensureRunqd starts this machine's execution daemon when its socket is not
-// answering. Best-effort and fire-and-forget: runqd owns its own lifecycle
-// (crash isolation is the point of the split), so the client never
-// supervises or stops it — it only makes sure one exists.
-func ensureRunqd(logger *slog.Logger, dataDir string) {
-	socket := utils.RunqdPathsFromDataDir(dataDir).SocketPath
-	if conn, err := net.DialTimeout("unix", socket, time.Second); err == nil {
-		_ = conn.Close()
-		return
-	}
-
-	bin := FindRunqd()
-	if bin == "" {
-		logger.Warn("runqd binary not found (looked next to runq and on PATH) — local target will fail until runqd is started manually")
-		return
-	}
-
-	logDir := utils.PathsFromDataDir(dataDir).LogDir
-	_ = os.MkdirAll(logDir, 0o755)
-	logFile, err := os.OpenFile(filepath.Join(logDir, "runqd.log"),
-		os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+// connectRunqdEndpoint verifies the configured execution endpoint without
+// locating, launching, supervising, or otherwise owning runqd. The execution
+// daemon is an independent service and must be ready before the runq client
+// daemon starts a local machine lane.
+func connectRunqdEndpoint(socket string) error {
+	conn, err := net.DialTimeout("unix", socket, time.Second)
 	if err != nil {
-		logger.Warn("open runqd log failed", "error", err)
-		return
+		return fmt.Errorf(
+			"runqd is not reachable at %q: %w; start runqd independently (for example, `runqd serve`) or set RUNQD_SOCKET to its Unix socket",
+			socket, err,
+		)
 	}
-
-	cmd := exec.Command(bin)
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
-	if err := cmd.Start(); err != nil {
-		logger.Warn("start runqd failed", "error", err)
-		_ = logFile.Close()
-		return
+	if err := conn.Close(); err != nil {
+		return fmt.Errorf("close runqd connection at %q: %w", socket, err)
 	}
-	// Detach: the child outlives us by design.
-	go func() { _ = cmd.Wait(); _ = logFile.Close() }()
-
-	// Wait for the socket to answer (≤5s). Without this, a submit fired
-	// right after daemon start races runqd's boot — and since a transport
-	// failure sends the task back to pending, the race would only cost a
-	// tick, but a clean readiness gate keeps first-run logs quiet and
-	// first-submit latency deterministic.
-	for i := 0; i < 50; i++ {
-		time.Sleep(100 * time.Millisecond)
-		if conn, err := net.DialTimeout("unix", socket, 200*time.Millisecond); err == nil {
-			_ = conn.Close()
-			logger.Info("runqd started", "pid", cmd.Process.Pid, "bin", bin)
-			return
-		}
-	}
-	logger.Warn("runqd started but socket not ready within 5s — local submissions will retry per tick",
-		"pid", cmd.Process.Pid, "socket", socket)
-}
-
-// FindRunqd locates the runqd binary: sibling of the current executable
-// first (the normal install layout), then PATH.
-func FindRunqd() string {
-	if self, err := os.Executable(); err == nil {
-		sibling := filepath.Join(filepath.Dir(self), "runqd")
-		if st, err := os.Stat(sibling); err == nil && !st.IsDir() {
-			return sibling
-		}
-	}
-	if p, err := exec.LookPath("runqd"); err == nil {
-		return p
-	}
-	return ""
+	return nil
 }

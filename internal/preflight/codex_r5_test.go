@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gliese129/runq/internal/rfs"
+	"github.com/gliese129/runq-lab/internal/rfs"
 )
 
 // Codex r5: timeout-side cleanup used to RACE the background upload —

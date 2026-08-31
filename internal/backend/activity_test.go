@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gliese129/runq/internal/rfs"
-	"github.com/gliese129/runq/internal/store"
+	"github.com/gliese129/runq-lab/internal/rfs"
+	"github.com/gliese129/runq-lab/internal/store"
 )
 
 // writeActivityTSV writes n cumulative 3-column rows: ts=i*60,

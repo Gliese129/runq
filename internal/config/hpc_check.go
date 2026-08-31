@@ -5,7 +5,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/gliese129/runq/internal/utils"
+	"github.com/gliese129/runq-lab/internal/utils"
 )
 
 // hpcSampleVars builds a representative var set for a template's vocabulary.
@@ -13,6 +13,7 @@ func hpcSampleVars(field string) map[string]string {
 	samples := map[string]string{
 		"run_sh":   "/data/runq/jb01HQZX/tk02ABCD/run.sh",
 		"gpus":     "1",
+		"timeout":  "60",
 		"job_id":   "jb01HQZX",
 		"task_id":  "tk02ABCD",
 		"name":     "rq-tk02ABCD",

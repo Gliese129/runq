@@ -47,6 +47,48 @@ func TestTargetGenerationRoundTrip(t *testing.T) {
 	}
 }
 
+func TestLaneScopePointOwnershipIsGenerationExact(t *testing.T) {
+	active := NewLaneScope("hpc", "new")
+	if !active.Owns("hpc", "new") || !active.Owns("hpc", "") {
+		t.Fatal("active lane must own its generation and legacy rows")
+	}
+	if active.Owns("hpc", "old") || active.Owns("other", "new") {
+		t.Fatal("active point routing accepted another generation or target")
+	}
+	active.MarkRetiring()
+	if !active.Owns("hpc", "new") || active.Owns("hpc", "") {
+		t.Fatal("retiring lane must own only its exact generation")
+	}
+}
+
+func TestActiveScopeDoesNotAdoptSettledRecordedGeneration(t *testing.T) {
+	s := genTestStore(t)
+	ctx := context.Background()
+	if err := s.UpsertRetiredGeneration(ctx, &TargetGenerationRow{
+		Target: "hpc", Generation: "settled", ConfigJSON: `{}`, Reason: "changed",
+		RetiredAt: time.Now().Unix(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkGenerationDone(ctx, "hpc", "settled"); err != nil {
+		t.Fatal(err)
+	}
+	seedGenTask(t, s, "t-own", "hpc", "active", "running", "1")
+	seedGenTask(t, s, "t-orphan", "hpc", "unrecorded", "running", "2")
+	seedGenTask(t, s, "t-settled", "hpc", "settled", "running", "3")
+	rows, err := s.ListTasks(ctx, TaskFilter{Target: "hpc", Scope: NewLaneScope("hpc", "active")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for i := range rows {
+		seen[rows[i].ID] = true
+	}
+	if !seen["t-own"] || !seen["t-orphan"] || seen["t-settled"] {
+		t.Fatalf("active scope rows = %v, want own+unrecorded and no settled generation", seen)
+	}
+}
+
 func TestRetiredGenerationLifecycle(t *testing.T) {
 	s := genTestStore(t)
 	ctx := context.Background()

@@ -14,7 +14,7 @@ import (
 // Before the ownership-flag protocol this was an unkillable resubmit loop
 // under unlimited retry (max_retry -1; 0 was "unlimited" at the time).
 
-// fakeRemoteLauncher is an unsupervised (remote-lane-shaped) launcher.
+// fakeRemoteLauncher models the production remote-launcher contract.
 type fakeRemoteLauncher struct {
 	mu        sync.Mutex
 	launched  []string
@@ -24,30 +24,25 @@ type fakeRemoteLauncher struct {
 	killErr   error         // when non-nil, KillErr reports it (cancel failed)
 }
 
-func (f *fakeRemoteLauncher) Launch(_ context.Context, t *Task, _ map[string]string, _ func(StartInfo)) (LaunchResult, error) {
+func (f *fakeRemoteLauncher) Launch(_ context.Context, t *Task) error {
 	if f.gate != nil {
 		<-f.gate
 	}
 	if f.launchErr != nil {
-		return LaunchResult{}, f.launchErr
+		return f.launchErr
 	}
 	f.mu.Lock()
 	f.launched = append(f.launched, t.ID)
 	f.mu.Unlock()
-	return LaunchResult{ExtID: t.ID + "-a0"}, nil
+	return nil
 }
 
-func (f *fakeRemoteLauncher) Kill(taskID string) { _ = f.KillErr(taskID) }
-
-// KillErr mirrors remote.Launcher's error-reporting cancel (RQ-69).
-func (f *fakeRemoteLauncher) KillErr(taskID string) error {
+func (f *fakeRemoteLauncher) Kill(taskID string) error {
 	f.mu.Lock()
 	f.killed = append(f.killed, taskID)
 	f.mu.Unlock()
 	return f.killErr
 }
-
-func (f *fakeRemoteLauncher) Supervised() bool { return false }
 
 func (f *fakeRemoteLauncher) killedIDs() []string {
 	f.mu.Lock()
@@ -55,12 +50,18 @@ func (f *fakeRemoteLauncher) killedIDs() []string {
 	return append([]string(nil), f.killed...)
 }
 
+func (f *fakeRemoteLauncher) launchedIDs() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.launched...)
+}
+
 func newKillRaceHarness(t *testing.T, launcher Launcher) (*Scheduler, *Queue, *fakeRemoteLauncher) {
 	t.Helper()
 	q := NewQueue()
 	st := testStore(t)
 	fl, _ := launcher.(*fakeRemoteLauncher)
-	s := New(DefaultConfig(), q, testPool(1), launcher, st, testLogger(), nil, "", nil)
+	s := New(DefaultConfig(), q, testPool(1), launcher, st, testLogger())
 	return s, q, fl
 }
 
@@ -77,6 +78,7 @@ func seedRunningTask(t *testing.T, s *Scheduler, q *Queue, id string) *Task {
 	// Simulate "handed to the remote lane": queue entry running, no
 	// external id yet (exactly the in-flight window).
 	task.Status = StatusRunning
+	s.slots.Reserve(task.ID)
 	return task
 }
 
@@ -102,6 +104,13 @@ func TestKillFlagSettlesFailureAsKilled(t *testing.T) {
 
 	if got := taskStatus(t, s, task.ID); got != "killed" {
 		t.Fatalf("status = %q, want killed (flag must beat retry)", got)
+	}
+	row, err := s.store.GetTask(context.Background(), task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.StatusSource != "runq" {
+		t.Fatalf("status_source = %q, want authoritative runq cancellation", row.StatusSource)
 	}
 	if qt := q.Get(task.ID); qt != nil && qt.Status == StatusPending {
 		t.Fatal("task was requeued despite kill flag — unkillable loop regressed")

@@ -1,8 +1,8 @@
 package backend
 
 // Columnar assembly for GET /jobs/{id}/results (RQ2-1 §A) — pure SQL over
-// result_records, zero filesystem access. Shared by LocalBackend and
-// SSHBackend (which runs EnsureFresh first so the store is current).
+// result_records, zero filesystem access. SSHBackend runs EnsureFresh first
+// so the store is current before calling this shared assembler.
 //
 // Key classification ("smart parse") doctrine — ZERO path/name inference:
 //   - `model` is the ONLY convention identity key (role=identity), typed —
@@ -23,7 +23,7 @@ import (
 	"strconv"
 
 	"github.com/bytedance/gopkg/util/logger"
-	"github.com/gliese129/runq/internal/store"
+	"github.com/gliese129/runq-lab/internal/store"
 )
 
 // ResultSource is the JobResults.Source constant: it names the write

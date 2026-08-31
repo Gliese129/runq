@@ -311,7 +311,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, computed, watch, onUnmounted, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { tasksApi, DEFAULT_LOG_MAX_BYTES } from '@/apis/tasks'
@@ -321,6 +321,7 @@ import { useSnackbar } from '@/composables/useSnackbar'
 import { useConfirm } from '@/composables/useConfirm'
 import { useCancelling } from '@/composables/useCancelling'
 import { useTaskQuery, useTaskMetricsQuery, useTaskActions } from '@/queries/useTaskQueries'
+import { useJobContextQuery } from '@/queries/useJobQueries'
 import { useGenerationRerun } from '@/composables/useGenerationRerun'
 import GenerationRerunDialog from '@/components/GenerationRerunDialog.vue'
 import { useConfigStore } from '@/stores/config'
@@ -331,7 +332,7 @@ import type { ActivityCell } from './activityMath'
 import TaskStatusBadge from '@/components/TaskStatusBadge.vue'
 import LogSidePanel from '@/components/LogSidePanel.vue'
 import LogSurfaceView from '@/components/LogSurfaceView.vue'
-import type { ActivityPoint, JobDetail, LogPage } from '@/types/api'
+import type { ActivityPoint, LogPage } from '@/types/api'
 import { trimLogBuffer } from '@/utils/log/buffer'
 import { applyPage as applyCursorPage } from '@/utils/log/cursor'
 import { useLogSurface } from '@/composables/useLogSurface'
@@ -346,15 +347,24 @@ const logStore = useLogViewerStore()
 const { t } = useI18n()
 const { confirm: confirmDialog } = useConfirm()
 
+// ── Tabs (RQ2-4 ①): ?tab= is the shareable truth; replace keeps the
+// back button pointing at the job page, not at tab flips. Declared before
+// the queries below — the metrics query's `enabled` gate reads it. ──
+const tab = ref(route.query.tab === 'log' ? 'log' : 'run')
+watch(tab, (v) => {
+  router.replace({ query: { ...route.query, tab: v === 'run' ? undefined : v } })
+})
+
 // ── Server state: query cache owns task + metrics (polls while active,
-// stops on terminal states, pauses in background tabs). ──
-const taskQuery = useTaskQuery(() => props.taskId)
+// stops on terminal states, pauses in background tabs). The jobId lets
+// the query seed its first paint from the cached job row. ──
+const taskQuery = useTaskQuery(() => props.taskId, () => props.jobId)
 const task = computed(() => taskQuery.data.value ?? null)
 // `unknown` counts as active (RQ-74): reconcile may settle it any moment —
 // keep polling task/metrics and let the log follower arm (the log file
 // appears the instant the cluster job turns out to be alive).
 const isActive = computed(
-  () => !!task.value && ['running', 'pending', 'unknown'].includes(task.value.status),
+  () => !!task.value && ['running', 'submitting', 'pending', 'unknown'].includes(task.value.status),
 )
 // client.ts mutes 404 snackbars by design — the page must render the
 // absence itself instead of spinning forever.
@@ -362,7 +372,14 @@ const notFound = computed(
   () => taskQuery.error.value instanceof ApiError && taskQuery.error.value.status === 404,
 )
 
-const metricsQuery = useTaskMetricsQuery(() => props.taskId, isActive)
+// Metrics fetch only once the REAL task row exists and the Run tab (the
+// chart's home) is visible — the placeholder must not trigger a remote
+// 256 KB tail read in parallel with the blocking task GET.
+const metricsQuery = useTaskMetricsQuery(
+  () => props.taskId,
+  isActive,
+  () => tab.value === 'run' && !!task.value && !taskQuery.isPlaceholderData.value,
+)
 const metricPoints = computed(() => metricsQuery.data.value ?? [])
 
 // Kill in flight — shared overlay, same state the job page renders.
@@ -426,23 +443,14 @@ const logLoading = ref(false)
 const loadingMore = ref(false)
 const logContainer = ref<HTMLElement>()
 
-// ── Tabs (RQ2-4 ①): ?tab= is the shareable truth; replace keeps the
-// back button pointing at the job page, not at tab flips. ──
-const tab = ref(route.query.tab === 'log' ? 'log' : 'run')
-watch(tab, (v) => {
-  router.replace({ query: { ...route.query, tab: v === 'run' ? undefined : v } })
-})
-
-// ── Job context: one fetch serves W&B base_url, the target for the
-// Execution KV, and the sibling tasks that define swept-vs-fixed. ──
-const jobDetail = ref<JobDetail | null>(null)
-async function fetchJobContext() {
-  try {
-    jobDetail.value = await jobsApi.get(props.jobId, { silent: true })
-  } catch {
-    /* best effort */
-  }
-}
+// ── Job context: W&B base_url, the target for the Execution KV, and the
+// sibling tasks that define swept-vs-fixed — read from the SHARED job
+// cache the job page already populated. The old manual jobsApi.get()
+// repeated the job-wide remote reconciliation the task GET had just
+// performed; the context observer neither polls nor refetches on mount,
+// so arriving from the job page costs no request at all. ──
+const jobQuery = useJobContextQuery(() => props.jobId)
+const jobDetail = computed(() => jobQuery.data.value ?? null)
 const jobTarget = computed(() => jobDetail.value?.job.target ?? '')
 
 // Swept vs fixed is a property of the JOB, not the task: a param is an
@@ -874,7 +882,7 @@ watch(isActive, async (active, prev) => {
   if (active) {
     // Legal only from `ready` — the setter enforces it, so a task query
     // that resolves before the initial GET simply no-ops here and
-    // onMounted seeds follow after loading.
+    // initLogTab seeds follow after loading.
     if (!prev) following.value = true
   } else {
     following.value = false // closes SSE via the following watcher
@@ -882,6 +890,9 @@ watch(isActive, async (active, prev) => {
       // Final metrics refetch: polling stops on terminal states, but the
       // last batch (often THE final score) lands right at the flip.
       metricsQuery.refetch()
+      // Log buffer exists only once the Log tab initialized — without it
+      // there is no cursor to top up (the tab will tail-open fresh).
+      if (!logInitStarted.value) return
       // The stream may die before the final buffered lines flush — fetch
       // once from our cursor so the exit message is never missing.
       try {
@@ -980,12 +991,15 @@ function formatBytes(b: number): string {
 }
 
 /** The first log fetch needs to know live vs archive (count_lines only on
- *  archive) — wait for the task row; the query cache may already have it. */
+ *  archive) — wait for the REAL task row (a job-cache placeholder may
+ *  carry a stale status); the query cache may already have it. */
 function waitForTask(): Promise<void> {
-  if (task.value || notFound.value) return Promise.resolve()
+  const settled = () =>
+    (!!task.value && !taskQuery.isPlaceholderData.value) || notFound.value
+  if (settled()) return Promise.resolve()
   return new Promise((resolve) => {
-    const stop = watch([task, notFound], ([tv, nf]) => {
-      if (tv || nf) {
+    const stop = watch([task, notFound, () => taskQuery.isPlaceholderData.value], () => {
+      if (settled()) {
         stop()
         resolve()
       }
@@ -993,8 +1007,14 @@ function waitForTask(): Promise<void> {
   })
 }
 
-onMounted(async () => {
-  fetchJobContext() // fire-and-forget — best effort, doesn't block render
+// ── Lazy log init: the tail read (256 KB — an SFTP round trip on remote
+// targets) is paid only when the Log tab is actually shown, not on the
+// default Run landing. Deep links (?tab=log) still init immediately via
+// the immediate watch. ──
+const logInitStarted = ref(false)
+async function initLogTab() {
+  if (logInitStarted.value) return
+  logInitStarted.value = true
   await waitForTask()
   if (notFound.value) return
   logLoading.value = true
@@ -1010,7 +1030,10 @@ onMounted(async () => {
   // the immediate isActive value seeds follow, the watch handles flips.
   if (isActive.value) following.value = true
   nextTick(() => scrollToBottom())
-})
+}
+watch(tab, (v) => {
+  if (v === 'log') void initLogTab()
+}, { immediate: true })
 
 onUnmounted(() => {
   stopFollow()

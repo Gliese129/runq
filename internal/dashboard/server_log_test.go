@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gliese129/runq/internal/backend"
-	"github.com/gliese129/runq/internal/config"
-	"github.com/gliese129/runq/internal/logfile"
+	"github.com/gliese129/runq-lab/internal/backend"
+	"github.com/gliese129/runq-lab/internal/config"
+	"github.com/gliese129/runq-lab/internal/logfile"
 )
 
 // logStubFollower emits one fixed page, then ends the stream.

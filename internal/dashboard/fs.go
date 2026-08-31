@@ -13,10 +13,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gliese129/runq/internal/backend"
-	"github.com/gliese129/runq/internal/job"
-	"github.com/gliese129/runq/internal/rfs"
-	"github.com/gliese129/runq/internal/utils"
+	"github.com/gliese129/runq-lab/internal/backend"
+	"github.com/gliese129/runq-lab/internal/job"
+	"github.com/gliese129/runq-lab/internal/rfs"
+	"github.com/gliese129/runq-lab/internal/utils"
 )
 
 // fs group — /targets/{name}/fs/* (spec §5.2, #44): the browser operates

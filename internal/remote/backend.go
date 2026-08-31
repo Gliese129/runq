@@ -47,13 +47,14 @@ import (
 	"fmt"
 	"path"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
-	"github.com/gliese129/runq/internal/config"
-	"github.com/gliese129/runq/internal/rfs"
-	"github.com/gliese129/runq/internal/scheduler"
-	"github.com/gliese129/runq/internal/store"
+	"github.com/gliese129/runq-lab/internal/config"
+	"github.com/gliese129/runq-lab/internal/rfs"
+	"github.com/gliese129/runq-lab/internal/scheduler"
+	"github.com/gliese129/runq-lab/internal/store"
 )
 
 // runner executes a shell command and returns (combined output, exit code,
@@ -106,6 +107,13 @@ type Backend struct {
 	probeMu   sync.Mutex
 	lastProbe map[string]time.Time
 
+	// Per-job local-scan cache (guarded by probeMu, see refresh.go): when
+	// the last complete file-scan pass for a job finished, so probe-free
+	// EnsureFresh calls within localScanTTL can skip the scan entirely —
+	// back-to-back dashboard reads (task GET + job GET) coalesce instead
+	// of serializing on lifecycleMu and repeating the same SFTP reads.
+	lastLocalScan map[string]time.Time
+
 	// Batch probe TTL: when status_list_template is configured,
 	// SchedulerProbe skips the batch query if the last batch probe
 	// completed within the TTL window.
@@ -129,22 +137,22 @@ type Backend struct {
 	contactWroteErr  string
 	contactEverWrote bool
 
-	// lifecycleMu serializes every verdict-producing pass on this target —
+	// lifecycleMu serializes every verdict-producing pass on this lane —
 	// EnsureFresh / SchedulerProbe / HeartbeatProbe / ScanDoneMarkers / Kill — plus manual
 	// retry (via WithLifecycleLock). THE staleness invariant of the remote
-	// lane rests on it: a requeue only ever happens inside a verdict
-	// delivery, so with all producers serialized, "read against attempt N,
-	// deliver after attempt N+1 started" is impossible BY CONSTRUCTION —
-	// no attempt-identity token needed.
+	// lane rests on it: a requeue only ever happens inside a verdict delivery.
+	// Different target generations have different lane locks, so Store's
+	// durable attempt CAS and per-task attempt-file lock fence cross-generation
+	// reads against a retry that starts attempt N+1.
 	//
 	// INVARIANT: any new code path that reads task state and may call
 	// persistDecision/FinishTask, or that resets a task for relaunch, MUST
-	// hold this lock. Per-target lock: no cross-target contention; these
+	// hold this lock. Per-lane lock: no cross-target contention; these
 	// paths are SSH-bound and effectively serial anyway.
 	lifecycleMu sync.Mutex
 }
 
-// WithLifecycleLock runs fn under this target's lifecycle lock. Exposed for
+// WithLifecycleLock runs fn under this lane's lifecycle lock. Exposed for
 // the one non-verdict identity mutation outside this package: user-initiated
 // retry (SSHBackend.RetryTask), which must not interleave with an in-flight
 // verdict delivery.
@@ -273,7 +281,14 @@ func (b *Backend) ResetWrapperState(ctx context.Context, taskDir, taskID string)
 		return fmt.Errorf("reset %s: %w", statusFile, err)
 	}
 	if dir := b.doneDir(); dir != "" {
-		_, _, _, _ = b.FS.Exec(ctx, "rm", "-f", path.Join(dir, taskID))
+		marker := path.Join(dir, taskID)
+		_, stderr, exitCode, err := b.FS.Exec(ctx, "rm", "-f", marker)
+		if err != nil {
+			return fmt.Errorf("reset done marker %s: %w", marker, err)
+		}
+		if exitCode != 0 {
+			return fmt.Errorf("reset done marker %s: rm exited %d: %s", marker, exitCode, strings.TrimSpace(string(stderr)))
+		}
 	}
 	return nil
 }
@@ -325,34 +340,9 @@ func (b *Backend) refreshJobStatus(ctx context.Context, jobID string) error {
 	if err != nil {
 		return err
 	}
-	var running, pending, unknown, success, failed, killed int
-	for _, t := range tasks {
-		switch t.Status {
-		case "running":
-			running++
-		case "pending":
-			pending++
-		case "unknown":
-			// RQ-74: live work — blocks the terminal split until reconcile
-			// settles it.
-			unknown++
-		case "success":
-			success++
-		case "failed":
-			failed++
-		case "killed":
-			killed++
-		}
-	}
-	started := running+unknown+success+failed+killed > 0
-	ended := pending+running+unknown == 0
-
-	status := "pending"
-	switch {
-	case ended:
-		status = store.TerminalJobStatus(success, failed, killed)
-	case started:
-		status = "running"
+	status, err := store.ProjectJobStatus(tasks)
+	if err != nil {
+		return err
 	}
 	return b.Store.UpdateJobStatus(ctx, jobID, status)
 }

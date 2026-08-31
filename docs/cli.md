@@ -53,20 +53,26 @@ There is no re-registration step.
 
 | Command | What it does |
 |---|---|
-| `runq daemon start [-d]` | Start the cross-platform client/dashboard daemon (`-d` = background); a Linux local target starts sibling `runqd` on demand |
+| `runq daemon start [-d]` | Start the cross-platform client/dashboard daemon (`-d` = background); local targets require an independently started `runqd` endpoint |
 | `runq daemon stop / restart` | Stop / restart the client daemon (restart always backgrounds) |
 | `runq doctor` | Static self-check of this machine, with fixes |
 
-`runqd` is the separate Linux-only headless scheduler/executor. Normal
-installs place it next to `runq`; the client locates and starts it when the
-configured target is local. macOS installs only `runq` and can control
-remote Linux `runqd` or HPC targets.
+With no configured targets, the client daemon still starts and serves status,
+settings, history, and the dashboard. `runq status` reports `target_state` as
+`unconfigured`; submission and target-dependent operations explain how to add
+one. Empty configuration never implies a local executor.
+
+`runqd` is the separate Linux-only executor. The client does not locate,
+launch, or supervise it — start runqd independently (see runqd docs).
+macOS installs only `runq` and can control remote Linux `runqd` or HPC
+targets.
 
 ## HPC targets
 
 | Command | What it does |
 |---|---|
 | `runq target add <name> --template=<slurm\|pbs\|sge\|tsubame\|abci> --host=… --user=…` | Add a target from a preset |
+| `runq target add local` | Explicitly configure this client to use the independently running local runqd |
 | `runq target check [<name>]` | Validate templates: placeholders, regex, sample render — free |
 | `runq target show / edit` | Inspect, or open config.yaml in `$EDITOR` + validate |
 | `runq connect <name>` | Verify SSH + host key, install remote CLI, start forward |
@@ -84,9 +90,9 @@ remote Linux `runqd` or HPC targets.
 
 ## Plumbing (you rarely need these)
 
-`runq sbatch / squeue / scancel` — foreign-task preset plumbing used by the
-runq scheduler preset · `runq metrics-index` — build/inspect the metrics
-pyramid index · `--socket` — non-default daemon socket path.
+`runq metrics-index` builds or inspects the metrics pyramid index. `--socket`
+selects a non-default runq client socket. Machine execution is handled by
+runqd's own CLI — see runqd docs.
 
 ## Notes for scripts and agents
 

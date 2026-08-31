@@ -11,10 +11,14 @@ type TaskStatus string
 
 const (
 	StatusPending TaskStatus = "pending"
-	StatusRunning TaskStatus = "running"
-	StatusSuccess TaskStatus = "success"
-	StatusFailed  TaskStatus = "failed"
-	StatusKilled  TaskStatus = "killed"
+	// StatusSubmitting is the durable pre-effect state for a remote
+	// launch. A restart must never reinterpret it as safe-to-submit: the
+	// external command may have started immediately before the crash.
+	StatusSubmitting TaskStatus = "submitting"
+	StatusRunning    TaskStatus = "running"
+	StatusSuccess    TaskStatus = "success"
+	StatusFailed     TaskStatus = "failed"
+	StatusKilled     TaskStatus = "killed"
 	// StatusUnknown (RQ-74): the submission STARTED but its outcome was lost
 	// (connection dropped mid-submit, submit succeeded but the external id
 	// could not be parsed/persisted). runq openly does not know whether a
@@ -33,12 +37,11 @@ type Task struct {
 	Command     string         // fully instantiated command line
 	Params      map[string]any // the parameter values for this task
 	GPUsNeeded  int
-	GPUs        []int // assigned GPU indices (filled after scheduling)
+	GPUs        []int // legacy persisted assignment; runq-lab does not allocate it
 	Status      TaskStatus
 	RetryCount  int
 	MaxRetry    int // -1 = unlimited, 0 = no retries (zero value is safe)
-	PID         int
-	StartTime   time.Time // absolute process start time (for reclaim)
+	PID         int // legacy persisted process identity owned by runqd
 	LogPath     string
 	WorkingDir  string
 	Env         map[string]string
@@ -74,13 +77,13 @@ type Task struct {
 
 	// ExternalID is the remote scheduler's job id for the current attempt
 	// (empty before launch; cleared by requeue and manual retry). Purely
-	// informational — restore/display/kill plumbing. Verdict staleness is
-	// prevented by serializing all verdict producers on the target's
-	// lifecycle lock (remote.Backend.lifecycleMu), NOT by comparing ids.
+	// informational for scheduler policy, but part of the durable attempt
+	// fence used by reconciliation. Per-lane lifecycle serialization plus
+	// that fence protects verdicts across active/retiring generations.
 	ExternalID string `json:"external_id,omitempty"`
 }
 
-// Queue is a FIFO task queue with backfill + aging support. Thread-safe.
+// Queue is a FIFO remote-handoff queue. Thread-safe.
 type Queue struct {
 	mu    sync.Mutex
 	tasks []*Task
@@ -130,21 +133,6 @@ func (q *Queue) Peek() *Task {
 
 	for _, t := range q.tasks {
 		if t.Status == StatusPending {
-			return t
-		}
-	}
-	return nil
-}
-
-// PeekSchedulable returns the first pending task that fits within freeGPUs.
-// Used for backfill when the head task is too large.
-func (q *Queue) PeekSchedulable(freeGPUs int, jobFilter map[string]bool) *Task {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-
-	for _, t := range q.tasks {
-		filtered := jobFilter[t.JobID]
-		if t.Status == StatusPending && t.GPUsNeeded <= freeGPUs && !filtered {
 			return t
 		}
 	}
@@ -281,7 +269,6 @@ func (q *Queue) RetryExisting(task *Task) bool {
 	existing.RetryCount = task.RetryCount
 	existing.MaxRetry = task.MaxRetry
 	existing.PID = 0
-	existing.StartTime = time.Time{}
 	existing.LogPath = task.LogPath
 	existing.WorkingDir = task.WorkingDir
 	existing.Env = task.Env
@@ -324,11 +311,8 @@ func (q *Queue) ListByStatus(status TaskStatus) []*Task {
 	return result
 }
 
-// ListPending returns all pending tasks. Used by Prioritizer.
+// ListPending returns all pending tasks in enqueue order.
 func (q *Queue) ListPending() []*Task { return q.ListByStatus(StatusPending) }
-
-// ListRunning returns all running tasks. Used by Prioritizer.
-func (q *Queue) ListRunning() []*Task { return q.ListByStatus(StatusRunning) }
 
 // ListByJob returns all tasks belonging to a job.
 func (q *Queue) ListByJob(jobID string) []*Task {

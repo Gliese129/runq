@@ -2,7 +2,7 @@
 
 set -eu
 
-REPOSITORY=${RUNQ_REPOSITORY:-Gliese129/runq}
+REPOSITORY=${RUNQ_REPOSITORY:-Gliese129/runq-lab}
 DOWNLOAD_BASE=${RUNQ_DOWNLOAD_BASE:-https://github.com/${REPOSITORY}/releases/download}
 API_BASE=${RUNQ_API_BASE:-https://api.github.com/repos/${REPOSITORY}}
 
@@ -45,10 +45,10 @@ esac
 
 version=${RUNQ_VERSION:-latest}
 if [ "$version" = "latest" ]; then
-  release_json=$(curl -fsSL --retry 3 "${API_BASE}/releases?per_page=1") \
+  release_json=$(curl -fsSL --retry 3 "${API_BASE}/releases/latest") \
     || die "could not resolve the latest release; set RUNQ_VERSION explicitly"
   version=$(printf '%s\n' "$release_json" \
-    | sed -n 's/.*"tag_name": "\([^"]*\)".*/\1/p' \
+    | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
     | sed -n '1p')
   [ -n "$version" ] \
     || die "latest release response did not include a tag; set RUNQ_VERSION explicitly"
@@ -58,6 +58,9 @@ else
     *) version="v${version}" ;;
   esac
 fi
+case "$version" in
+  ''|*[!A-Za-z0-9._+-]*) die "invalid release version: ${version}" ;;
+esac
 
 if [ "${RUNQ_WITH_UI+x}" = "x" ]; then
   with_ui=$(bool_value "$RUNQ_WITH_UI") \
@@ -79,7 +82,7 @@ if [ "${RUNQ_START_DAEMON+x}" = "x" ]; then
   start_daemon=$(bool_value "$RUNQ_START_DAEMON") \
     || die "RUNQ_START_DAEMON must be yes/no, true/false, or 1/0"
 else
-  start_daemon=1
+  start_daemon=0
 fi
 
 if [ "$with_ui" = "1" ]; then
@@ -104,7 +107,14 @@ mkdir -p "$install_dir" || die "could not create ${install_dir}"
 
 tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/runq-install.XXXXXX") \
   || die "could not create a temporary directory"
-trap 'rm -rf "$tmp_dir"' EXIT HUP INT TERM
+staged_path=
+cleanup() {
+  if [ -n "$staged_path" ]; then
+    rm -f "$staged_path"
+  fi
+  rm -rf "$tmp_dir"
+}
+trap cleanup EXIT HUP INT TERM
 
 download_asset() {
   asset=$1
@@ -118,50 +128,48 @@ download_asset() {
 
 verify_asset() {
   asset=$1
-  (
-    cd "$tmp_dir"
-    if command -v sha256sum >/dev/null 2>&1; then
-      sha256sum -c "${asset}.sha256"
-    elif command -v shasum >/dev/null 2>&1; then
-      shasum -a 256 -c "${asset}.sha256"
-    else
-      die "sha256sum or shasum is required to verify downloads"
-    fi
-  ) || die "checksum verification failed for ${asset}"
+  expected=$(sed -n '1{s/[[:space:]].*$//;p;}' "${tmp_dir}/${asset}.sha256")
+  case "$expected" in
+    *[!0-9A-Fa-f]*|'') die "invalid checksum file for ${asset}" ;;
+  esac
+  [ "${#expected}" -eq 64 ] || die "invalid checksum file for ${asset}"
+
+  if command -v sha256sum >/dev/null 2>&1; then
+    actual=$(sha256sum "${tmp_dir}/${asset}" | awk '{print $1}')
+  elif command -v shasum >/dev/null 2>&1; then
+    actual=$(shasum -a 256 "${tmp_dir}/${asset}" | awk '{print $1}')
+  else
+    die "sha256sum or shasum is required to verify downloads"
+  fi
+  [ "$actual" = "$expected" ] || die "checksum verification failed for ${asset}"
 }
 
-install_binary() {
+install_binary_atomic() {
   source=$1
   target=$2
+  staged_path=$(mktemp "${install_dir}/.runq.new.XXXXXX") \
+    || die "could not create a staging file in ${install_dir}"
   if command -v install >/dev/null 2>&1; then
-    install -m 0755 "$source" "$target"
+    install -m 0755 "$source" "$staged_path" \
+      || die "could not stage runq in ${install_dir}"
   else
-    cp "$source" "$target"
-    chmod 0755 "$target"
+    cp "$source" "$staged_path" \
+      || die "could not stage runq in ${install_dir}"
+    chmod 0755 "$staged_path" \
+      || die "could not make the staged runq executable"
   fi
+  mv -f "$staged_path" "$target" \
+    || die "could not replace ${target}"
+  staged_path=
 }
 
 download_asset "$runq_asset"
 verify_asset "$runq_asset"
 
-runqd_asset=
-if [ "$os" = "linux" ]; then
-  runqd_asset="runqd-linux-${arch}"
-  download_asset "$runqd_asset"
-  verify_asset "$runqd_asset"
-fi
-
-install_binary "${tmp_dir}/${runq_asset}" "${install_dir}/runq" \
+install_binary_atomic "${tmp_dir}/${runq_asset}" "${install_dir}/runq" \
   || die "could not install runq to ${install_dir}"
-if [ -n "$runqd_asset" ]; then
-  install_binary "${tmp_dir}/${runqd_asset}" "${install_dir}/runqd" \
-    || die "could not install runqd to ${install_dir}"
-fi
 
 say "Installed runq ${version} to ${install_dir}/runq"
-if [ -n "$runqd_asset" ]; then
-  say "Installed runqd ${version} to ${install_dir}/runqd"
-fi
 
 case ":${PATH}:" in
   *":${install_dir}:"*) ;;
@@ -172,7 +180,13 @@ case ":${PATH}:" in
 esac
 
 if [ "$start_daemon" = "1" ]; then
-  data_dir=${RUNQ_DATA_DIR:-${HOME}/.runq}
+  if [ "${RUNQ_DATA_DIR+x}" = "x" ]; then
+    data_dir=$RUNQ_DATA_DIR
+  elif [ "$(id -u)" -eq 0 ]; then
+    data_dir=/var/lib/runq
+  else
+    data_dir=${HOME}/.local/share/runq
+  fi
   mkdir -p "$data_dir" \
     || die "runq was installed, but the data directory ${data_dir} could not be created"
   if "${install_dir}/runq" status --json >/dev/null 2>&1; then

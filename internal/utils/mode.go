@@ -51,16 +51,30 @@ func PathsFromDataDir(dataDir string) DataDirPaths {
 	}
 }
 
-// RunqdPathsFromDataDir computes the EXECUTION daemon's (runqd) file paths.
-// Same data root, distinct names: runqd owns its own store (the execution
-// ledger) and its own socket — the two-daemon split means two single-writer
-// stores, never two writers on one file.
-func RunqdPathsFromDataDir(dataDir string) DataDirPaths {
-	return DataDirPaths{
-		DataDir:    dataDir,
-		DBPath:     filepath.Join(dataDir, "runqd.db"),
-		SocketPath: filepath.Join(dataDir, "runqd.sock"),
-		PIDPath:    filepath.Join(dataDir, "runqd.pid"),
-		LogDir:     filepath.Join(dataDir, "logs"),
+// RunqdSocketPath resolves the independently installed execution daemon's
+// socket using runqd's own precedence and defaults. runq-lab must not derive
+// this from RUNQ_DATA_DIR: the repositories and their persistence roots are
+// intentionally independent after the split.
+func RunqdSocketPath() string {
+	if socket := os.Getenv("RUNQD_SOCKET"); socket != "" {
+		return absoluteClean(socket)
 	}
+	dataDir := os.Getenv("RUNQD_DATA_DIR")
+	if dataDir == "" {
+		if os.Geteuid() == 0 {
+			dataDir = "/var/lib/runqd"
+		} else {
+			home, _ := os.UserHomeDir()
+			dataDir = filepath.Join(home, ".local", "share", "runqd")
+		}
+	}
+	return filepath.Join(absoluteClean(dataDir), "runqd.sock")
+}
+
+func absoluteClean(value string) string {
+	abs, err := filepath.Abs(value)
+	if err == nil {
+		return filepath.Clean(abs)
+	}
+	return filepath.Clean(value)
 }

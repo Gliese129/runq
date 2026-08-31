@@ -55,20 +55,8 @@ jobs:
         run: |
           BINARY_NAME="runq-${{ matrix.goos }}-${{ matrix.goarch }}"
           go build \
-            -ldflags "-X github.com/gliese129/runq/internal/version.Version=${GITHUB_REF_NAME}" \
+            -ldflags "-X github.com/gliese129/runq-lab/internal/version.Version=${GITHUB_REF_NAME}" \
             -o "$BINARY_NAME" ./cmd/runq
-
-      - name: Build headless execution daemon
-        if: matrix.goos == 'linux'
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: 0
-        run: |
-          BINARY_NAME="runqd-${{ matrix.goos }}-${{ matrix.goarch }}"
-          go build \
-            -ldflags "-X github.com/gliese129/runq/internal/version.Version=${GITHUB_REF_NAME}" \
-            -o "$BINARY_NAME" ./cmd/runqd
 
       - name: Set up node
         uses: actions/setup-node@v4
@@ -97,7 +85,7 @@ jobs:
           BINARY_NAME="runq-dashboard-${{ matrix.goos }}-${{ matrix.goarch }}"
           go build \
             -tags dashboard \
-            -ldflags "-X github.com/gliese129/runq/internal/version.Version=${GITHUB_REF_NAME}" \
+            -ldflags "-X github.com/gliese129/runq-lab/internal/version.Version=${GITHUB_REF_NAME}" \
             -o "$BINARY_NAME" ./cmd/runq
 
       - name: Verify stamped version
@@ -112,10 +100,6 @@ jobs:
             > "runq-${{ matrix.goos }}-${{ matrix.goarch }}.sha256"
           sha256sum "runq-dashboard-${{ matrix.goos }}-${{ matrix.goarch }}" \
             > "runq-dashboard-${{ matrix.goos }}-${{ matrix.goarch }}.sha256"
-          if [ "${{ matrix.goos }}" = "linux" ]; then
-            sha256sum "runqd-${{ matrix.goos }}-${{ matrix.goarch }}" \
-              > "runqd-${{ matrix.goos }}-${{ matrix.goarch }}.sha256"
-          fi
 
       - name: Upload runq release assets
         uses: softprops/action-gh-release@v2
@@ -130,19 +114,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Upload runqd release assets
-        if: matrix.goos == 'linux'
-        uses: softprops/action-gh-release@v2
-        with:
-          fail_on_unmatched_files: true
-          prerelease: ${{ contains(github.ref_name, 'rc') || contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') }}
-          files: |
-            runqd-${{ matrix.goos }}-${{ matrix.goarch }}
-            runqd-${{ matrix.goos }}-${{ matrix.goarch }}.sha256
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  build-skills:
+  release-installer:
+    needs: test-go
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -150,34 +123,18 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Build skill bundle
-        run: |
-          mkdir -p release/runq
-          cp -R .skills/runq/. release/runq/
-          cd release
-          zip -r "../runq-skills-${GITHUB_REF_NAME}.zip" runq
-
-      - name: Verify skill bundle contents
-        run: |
-          ARCHIVE="runq-skills-${GITHUB_REF_NAME}.zip"
-          unzip -Z1 "$ARCHIVE" | grep -qx 'runq/SKILL.md'
-          unzip -Z1 "$ARCHIVE" | grep -qx 'runq/references/migration.md'
-          unzip -Z1 "$ARCHIVE" | grep -qx 'runq/references/sdk.md'
-          unzip -Z1 "$ARCHIVE" | grep -qx 'runq/references/setup.md'
-
       - name: Verify installer
         run: |
-          sh -n install.sh
+          sh -n install.sh tests/install/test_install.sh
           sh tests/install/test_install.sh
           sha256sum install.sh > install.sh.sha256
 
-      - name: Upload skill bundle and installer
+      - name: Upload installer
         uses: softprops/action-gh-release@v2
         with:
           fail_on_unmatched_files: true
           prerelease: ${{ contains(github.ref_name, 'rc') || contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') }}
           files: |
-            runq-skills-${{ github.ref_name }}.zip
             install.sh
             install.sh.sha256
         env:
@@ -187,7 +144,7 @@ jobs:
     needs:
       - test-go
       - build-go
-      - build-skills
+      - release-installer
     runs-on: ubuntu-latest
     environment:
       name: pypi

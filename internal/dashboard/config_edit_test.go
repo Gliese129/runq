@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gliese129/runq/internal/backend"
-	"github.com/gliese129/runq/internal/config"
+	"github.com/gliese129/runq-lab/internal/backend"
+	"github.com/gliese129/runq-lab/internal/config"
 )
 
 const targetsCfg = `default_target: a
@@ -129,6 +129,24 @@ func TestDeleteTargetIfMatch(t *testing.T) {
 	}
 	if len(cfg.Targets) != 0 {
 		t.Fatalf("last target not deleted: %+v", cfg.Targets)
+	}
+	if cfg.DefaultTarget != "" || cfg.ResolveDefaultTarget() != "" {
+		t.Fatalf("last-target delete left default raw=%q effective=%q", cfg.DefaultTarget, cfg.ResolveDefaultTarget())
+	}
+}
+
+func TestPutFirstTargetSetsDefault(t *testing.T) {
+	server, _ := newConfigEditHarness(t, "")
+	rec := doJSON(server, http.MethodPut, "/api/v1/targets/mac-hpc", "", `{"scheduler":"slurm","submit_template":"sbatch {{run_sh}}"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d, body %s", rec.Code, rec.Body.String())
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.ResolveDefaultTarget(); got != "mac-hpc" {
+		t.Fatalf("first target default = %q, want mac-hpc", got)
 	}
 }
 

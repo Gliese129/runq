@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/gliese129/runq/internal/store"
-	"github.com/gliese129/runq/internal/utils"
+	"github.com/gliese129/runq-lab/internal/store"
+	"github.com/gliese129/runq-lab/internal/utils"
 )
 
 // Kill cancels a job (all its tasks) or a single task. target is matched as a
@@ -105,6 +105,10 @@ func (b *Backend) resolveTargets(ctx context.Context, target string) ([]store.Ta
 	}
 	if tk == nil {
 		return nil, "", fmt.Errorf("no job or task with id %q", target)
+	}
+	if b.Scope != nil && !b.Scope.Owns(tk.Target, tk.TargetGeneration) {
+		return nil, "", fmt.Errorf("task %q belongs to target generation %q, not this lane generation %q",
+			target, tk.TargetGeneration, b.Scope.Generation)
 	}
 	return []store.TaskRow{*tk}, tk.JobID, nil
 }

@@ -6,24 +6,25 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/gliese129/runq/internal/logfile"
+	"github.com/gliese129/runq-lab/internal/logfile"
 
-	"github.com/gliese129/runq/internal/config"
-	"github.com/gliese129/runq/internal/ingest"
-	"github.com/gliese129/runq/internal/job"
-	"github.com/gliese129/runq/internal/project"
-	"github.com/gliese129/runq/internal/remote"
-	"github.com/gliese129/runq/internal/resource"
-	"github.com/gliese129/runq/internal/rfs"
-	"github.com/gliese129/runq/internal/scheduler"
-	"github.com/gliese129/runq/internal/store"
-	"github.com/gliese129/runq/internal/workspace"
+	"github.com/gliese129/runq-lab/internal/config"
+	"github.com/gliese129/runq-lab/internal/ingest"
+	"github.com/gliese129/runq-lab/internal/job"
+	"github.com/gliese129/runq-lab/internal/project"
+	"github.com/gliese129/runq-lab/internal/remote"
+	"github.com/gliese129/runq-lab/internal/resource"
+	"github.com/gliese129/runq-lab/internal/rfs"
+	"github.com/gliese129/runq-lab/internal/scheduler"
+	"github.com/gliese129/runq-lab/internal/store"
+	"github.com/gliese129/runq-lab/internal/workspace"
 )
 
 // Sensor cadences for the remote lane. Both loops are gated on HasInFlight —
@@ -99,23 +100,32 @@ const (
 //     a full scheduler probe for the job.
 //   - status.json: written by run.sh on compute nodes, read by daemon via SSH.
 type SSHBackend struct {
-	storeQueries // embeds store, reg, and shared project/clean/thaw/dryrun methods
-	backend      *remote.Backend
-	sshFS        *rfs.SSHFS       // held for Close()
-	targetName   string           // this lane's target name (tasks.target scope)
-	scope        *store.LaneScope // RQ-75: generation-ownership predicate, SHARED with remote.Backend
+	storeQueries    // embeds store, reg, and shared project/clean/thaw/dryrun methods
+	backend         *remote.Backend
+	transportCloser io.Closer        // SSHFS, or an injected closeable transport
+	targetName      string           // this lane's target name (tasks.target scope)
+	scope           *store.LaneScope // RQ-75: generation-ownership predicate, SHARED with remote.Backend
 
-	// Per-target scheduler lane (RQ-46): queue + submission-slot pool +
-	// scheduler instance + remote launcher. Same lifecycle code as the local
-	// lane, assembled from unsupervised components.
+	// Per-target scheduler lane (RQ-46): queue + submission slots + scheduler
+	// instance + remote launcher.
 	queue    *scheduler.Queue
 	pool     *resource.SlotAllocator
 	sched    *scheduler.Scheduler
 	launcher *remote.Launcher
 	logger   *slog.Logger
 
+	loopMu     sync.Mutex
 	loopCancel context.CancelFunc
 	loopWG     sync.WaitGroup
+
+	// A returned log follower outlives the routing call that created it.
+	// Close quiesces immediately but defers transport teardown until every
+	// follower releases its lease, so config rotation never severs a stream.
+	artifactMu        sync.Mutex
+	artifactRefs      int
+	closeRequested    bool
+	transportClosed   bool
+	transportCloseErr error
 
 	// GPU view cache (gpu_template targets): dashboard panels poll at
 	// human-refresh frequency; one SSH exec per gpuCacheTTL is plenty.
@@ -145,17 +155,17 @@ type SSHBackend struct {
 	// non-blocking send = concurrent nudges coalesce by construction.
 	nudgeCh chan struct{}
 
-	// submitsInFlight counts SubmitJob calls between entry and return
-	// (round 8 #1): incremented BEFORE the retired-gate check, so the
-	// sweep can never observe "zero unfinished + idle" while a Prepare is
-	// still in flight on this lane's pointer — the true lifecycle barrier
-	// the two-zero confirmation alone could not be.
-	submitsInFlight atomic.Int64
+	// admissionsInFlight counts SubmitJob and manual RetryTask calls between
+	// entry and return. It is incremented BEFORE the retired-gate check, so
+	// the retirement sweep cannot close a lane while new intent, reset, or
+	// queue publication is still in flight on a previously resolved pointer.
+	admissionsInFlight atomic.Int64
 }
 
-// HasInFlightSubmits reports whether a SubmitJob is currently executing
-// against this lane (round 8 #1) — the sweep refuses to close while true.
-func (b *SSHBackend) HasInFlightSubmits() bool { return b.submitsInFlight.Load() > 0 }
+// HasInFlightAdmissions reports whether a submit or manual retry is currently
+// executing against this lane. The retirement sweep refuses to close while
+// true, even before the operation has published a non-terminal task row.
+func (b *SSHBackend) HasInFlightAdmissions() bool { return b.admissionsInFlight.Load() > 0 }
 
 // touchActivity records a user-driven interaction (wakes a hibernated sensor
 // on its next tick).
@@ -193,10 +203,13 @@ func NewSSHBackend(cfg SSHBackendConfig) (*SSHBackend, error) {
 	}
 
 	var laneFS rfs.FS
-	var sshFS *rfs.SSHFS
+	var transportCloser io.Closer
 	if cfg.FS != nil {
 		// Injected transport (localhost-runqd lane over LocalFS).
 		laneFS = cfg.FS
+		if closer, ok := cfg.FS.(io.Closer); ok {
+			transportCloser = closer
+		}
 	} else {
 		if t.SSH == nil {
 			return nil, fmt.Errorf("target %q: ssh section is required for scheduler targets", t.Name)
@@ -230,8 +243,9 @@ func NewSSHBackend(cfg SSHBackendConfig) (*SSHBackend, error) {
 			// SSH user's shape.
 			IdleTimeout: 10 * time.Minute,
 		}
-		sshFS = rfs.NewSSHFS(sshCfg)
+		sshFS := rfs.NewSSHFS(sshCfg)
 		laneFS = sshFS
+		transportCloser = sshFS
 	}
 	hpcBe := remote.NewWithFS(&cfg.Target, cfg.Store, cfg.GlobalCfg, laneFS)
 
@@ -241,15 +255,12 @@ func NewSSHBackend(cfg SSHBackendConfig) (*SSHBackend, error) {
 	}
 	logger = logger.With("target", t.Name)
 
-	// Assemble the lane: FIFO prioritizer, submission slots, unsupervised
-	// launcher, no freeze (disk-freeze is an SDK+local-disk feature), no GPU
-	// refresh loop (no local GPUs to scan).
+	// Assemble the lane: FIFO prioritizer, submission slots, and remote
+	// launcher. Local execution and resource ownership live in runqd.
 	q := scheduler.NewQueue()
 	pool := resource.NewSlotAllocator(t.MaxInflight)
 	launcher := remote.NewLauncher(hpcBe)
-	schedCfg := scheduler.DefaultConfig()
-	schedCfg.GPURefreshInterval = 0
-	sched := scheduler.New(schedCfg, q, pool, launcher, cfg.Store, logger, nil, "", nil)
+	sched := scheduler.New(scheduler.DefaultConfig(), q, pool, launcher, cfg.Store, logger)
 
 	// Terminal transitions found by reconcile/markers flow through the
 	// scheduler's FinishTask funnel (retry policy, slot release).
@@ -260,17 +271,17 @@ func NewSSHBackend(cfg SSHBackendConfig) (*SSHBackend, error) {
 			store: cfg.Store,
 			reg:   project.NewRegistry(cfg.Store.DB()),
 		},
-		backend:    hpcBe,
-		sshFS:      sshFS,
-		queue:      q,
-		pool:       pool,
-		sched:      sched,
-		launcher:   launcher,
-		logger:     logger,
-		targetName: t.Name,
-		scope:      store.NewLaneScope(t.Name, t.SemanticGeneration()),
-		syncDone:   make(chan struct{}),
-		nudgeCh:    make(chan struct{}, 1),
+		backend:         hpcBe,
+		transportCloser: transportCloser,
+		queue:           q,
+		pool:            pool,
+		sched:           sched,
+		launcher:        launcher,
+		logger:          logger,
+		targetName:      t.Name,
+		scope:           store.NewLaneScope(t.Name, t.SemanticGeneration()),
+		syncDone:        make(chan struct{}),
+		nudgeCh:         make(chan struct{}, 1),
 	}
 	// One scope, every query surface (RQ-75): the remote backend's probe/
 	// marker/heartbeat/orphan reads filter by the same ownership predicate.
@@ -283,61 +294,170 @@ func NewSSHBackend(cfg SSHBackendConfig) (*SSHBackend, error) {
 }
 
 // Start restores this target's tasks into the lane, starts the scheduler
-// loop, and launches the two sensor loops. Called once by the daemon.
-func (b *SSHBackend) Start(ctx context.Context) {
-	b.restoreLane(ctx)
+// loop, and launches the sensor loop. Recovery is a readiness barrier: a
+// durable task must never be omitted while the lane reports itself started.
+func (b *SSHBackend) Start(ctx context.Context) error {
+	if err := b.restoreLane(ctx); err != nil {
+		return fmt.Errorf("restore target %s: %w", b.targetName, err)
+	}
+	b.loopMu.Lock()
+	defer b.loopMu.Unlock()
+	if b.loopCancel != nil {
+		return fmt.Errorf("target %s already started", b.targetName)
+	}
 	b.sched.Start()
 	loopCtx, cancel := context.WithCancel(ctx)
 	b.loopCancel = cancel
 	b.loopWG.Add(1)
 	go b.sensorLoop(loopCtx)
+	return nil
 }
 
 // restoreLane rebuilds the in-memory queue/slots from the DB on startup:
 // tasks with an external id are in flight on the cluster (occupy a slot,
 // restored as running); tasks without one are waiting to be (re)launched.
-func (b *SSHBackend) restoreLane(ctx context.Context) {
+func (b *SSHBackend) restoreLane(ctx context.Context) error {
 	rows, err := b.store.ListTasks(ctx, store.TaskFilter{Target: b.backend.Cfg.Name, Scope: b.scope})
 	if err != nil {
-		b.logger.Warn("restore: list tasks failed", "error", err)
-		return
+		return fmt.Errorf("list owned tasks: %w", err)
 	}
+	jobs, err := b.store.ListJobs(ctx, "", b.targetName)
+	if err != nil {
+		return fmt.Errorf("list target jobs: %w", err)
+	}
+
+	// Recovery is two-phase. First make every required durable repair; only
+	// after the whole set succeeds may any queue entry or slot be published.
+	// A partial in-memory restore would make the lane appear ready while some
+	// durable work had no owner until another restart.
+	var repairErrs []error
+	repairedJobs := make(map[string]struct{})
 	// Ownership filtering happens in SQL via the lane scope (RQ-75); what
 	// arrives here is OURS. The active lane additionally ADOPTS what it
 	// received from foreign orphan generations ('' legacy rows, hash
 	// shifts, crash windows) by RESTAMPING them — ownership is written,
 	// never re-inferred, so unfinished counts always add up.
-	restored, queued := 0, 0
 	for i := range rows {
-		row := rows[i]
+		row := &rows[i]
 		switch row.Status {
 		case "success", "failed", "killed":
 			continue
 		}
 		if !b.scope.IsRetiring() && row.TargetGeneration != b.scope.Generation {
+			previousGeneration := row.TargetGeneration
 			if rerr := b.store.RestampTask(ctx, row.ID, b.scope.Generation); rerr != nil {
-				b.logger.Warn("adopting task: restamp failed — will retry next restore",
-					"task", row.ID, "error", rerr)
-				continue // do not restore what we could not take ownership of
+				repairErrs = append(repairErrs, fmt.Errorf("adopt task %s: %w", row.ID, rerr))
+				continue
 			}
+			row.TargetGeneration = b.scope.Generation
 			b.logger.Info("adopted task from an unrecorded generation",
-				"task", row.ID, "was", row.TargetGeneration)
+				"task", row.ID, "was", previousGeneration)
 		}
+		if row.Status == "submitting" && row.StatusSource == "retry" {
+			// A manual retry persisted intent before resetting wrapper evidence.
+			// The reset is idempotent, so recovery completes it before making
+			// the task launchable. Recovery uses the same cross-generation task
+			// lock and durable identity fence as the interactive retry path.
+			if rerr := b.store.WithTaskAttemptLock(row.ID, func() error {
+				current, err := b.store.GetTask(ctx, row.ID)
+				if err != nil {
+					return err
+				}
+				if current == nil || current.Status != "submitting" || current.StatusSource != "retry" ||
+					current.RetryCount != row.RetryCount || current.TargetGeneration != row.TargetGeneration ||
+					current.ExternalID != "" {
+					return fmt.Errorf("durable retry intent changed during recovery")
+				}
+				if err := b.backend.ResetWrapperState(ctx, current.TaskDir, current.ID); err != nil {
+					return err
+				}
+				fields := map[string]any{
+					"status_source":  nil,
+					"failure_detail": nil,
+					"kill_requested": 0,
+				}
+				store.FenceTaskStatusUpdate(fields, *current)
+				return b.store.UpdateTaskStatus(ctx, current.ID, "pending", fields)
+			}); rerr != nil {
+				repairErrs = append(repairErrs, fmt.Errorf("resume retry reset %s: %w", row.ID, rerr))
+				continue
+			}
+			row.Status = "pending"
+			row.StatusSource = ""
+			row.FailureDetail = ""
+			row.KillRequested = false
+		} else if row.Status == "submitting" {
+			// The daemon stopped after persisting submit intent but before a
+			// durable external-id verdict. The command may have run, so a
+			// restart must conservatively retain ownership and must not launch
+			// the attempt again.
+			if uerr := b.store.UpdateTaskStatus(ctx, row.ID, "unknown", map[string]any{
+				"status_source":  "submit",
+				"failure_detail": "runq-lab restarted while submission was in flight; remote outcome is unknown",
+			}); uerr != nil {
+				repairErrs = append(repairErrs, fmt.Errorf("settle interrupted submission %s: %w", row.ID, uerr))
+				continue
+			}
+			row.Status = "unknown"
+			row.StatusSource = "submit"
+			row.FailureDetail = "runq-lab restarted while submission was in flight; remote outcome is unknown"
+		}
+		if row.KillRequested && row.Status == "pending" && row.ExternalID == "" {
+			if uerr := b.store.UpdateTaskStatus(ctx, row.ID, "killed", map[string]any{
+				"status_source":  "runq",
+				"finished_at":    time.Now().Unix(),
+				"kill_requested": 0,
+			}); uerr != nil {
+				repairErrs = append(repairErrs, fmt.Errorf("settle recovered pending kill %s: %w", row.ID, uerr))
+				continue
+			}
+			row.Status = "killed"
+			row.StatusSource = "runq"
+			row.KillRequested = false
+			repairedJobs[row.JobID] = struct{}{}
+		}
+	}
+	for jobID := range repairedJobs {
+		tasks, lerr := b.store.ListTasks(ctx, store.TaskFilter{JobID: jobID})
+		if lerr != nil {
+			repairErrs = append(repairErrs, fmt.Errorf("project recovered job %s: %w", jobID, lerr))
+			continue
+		}
+		status, perr := store.ProjectJobStatus(tasks)
+		if perr != nil {
+			repairErrs = append(repairErrs, perr)
+			continue
+		}
+		if uerr := b.store.UpdateJobStatus(ctx, jobID, status); uerr != nil {
+			repairErrs = append(repairErrs, fmt.Errorf("persist recovered job %s: %w", jobID, uerr))
+		}
+	}
+	if err := errors.Join(repairErrs...); err != nil {
+		return err
+	}
+	for _, job := range jobs {
+		_, killSettled := repairedJobs[job.ID]
+		if job.Status == "paused" && !killSettled {
+			b.sched.PauseJob(job.ID)
+		}
+	}
 
-		t := TaskRowToSchedulerTask(&row)
-		t.GPUsNeeded = 1 // one submission slot per remote task
+	restored, queued := 0, 0
+	for i := range rows {
+		row := &rows[i]
+		switch row.Status {
+		case "success", "failed", "killed":
+			continue
+		}
+		t := TaskRowToSchedulerTask(row)
 		switch {
 		case row.Status == "unknown":
-			// RQ-74: outcome-unknown submission survives the restart AS
-			// unknown — a cluster job may exist, so it must NOT be pushed
-			// for relaunch (double submit). It holds a slot and waits for
-			// reconcile, exactly as before the restart.
-			_ = b.pool.Reserve(nil, row.ID) // never fails for slots
+			b.pool.Reserve(row.ID)
 			t.Status = scheduler.StatusUnknown
 			b.queue.Restore(t)
 			restored++
 		case row.ExternalID != "":
-			_ = b.pool.Reserve(nil, row.ID) // never fails for slots
+			b.pool.Reserve(row.ID)
 			t.Status = scheduler.StatusRunning
 			b.queue.Restore(t)
 			restored++
@@ -345,10 +465,14 @@ func (b *SSHBackend) restoreLane(ctx context.Context) {
 			b.queue.Push(t)
 			queued++
 		}
+		if row.KillRequested {
+			b.sched.RestoreKillRequest(row.ID)
+		}
 	}
 	if restored+queued > 0 {
 		b.logger.Info("remote lane restored", "in_flight", restored, "queued", queued)
 	}
+	return nil
 }
 
 // sensorLoop is the SINGLE background sensor goroutine for this target —
@@ -386,6 +510,7 @@ func (b *SSHBackend) sensorLoop(ctx context.Context) {
 			if inflight, err := b.backend.HasInFlight(ctx); err != nil || !inflight {
 				continue
 			}
+			b.replayKillIntents(ctx)
 			active := b.userActive()
 
 			// Marker scan: every tick while active, every Nth while
@@ -393,7 +518,10 @@ func (b *SSHBackend) sensorLoop(ctx context.Context) {
 			if !active && tick%hibernatedMarkerEvery != 0 {
 				continue
 			}
-			if err := b.backend.ScanDoneMarkers(ctx); err != nil {
+			if err := b.backend.ScanDoneMarkers(ctx); errors.Is(err, remote.ErrMarkerDetectionDisabled) {
+				// No marker source is configured. This is not an observation and
+				// must not overwrite scheduler-derived freshness every tick.
+			} else if err != nil {
 				b.logger.Warn("marker scan failed", "error", err)
 				b.recordTasksSync(err)
 			} else {
@@ -447,6 +575,28 @@ func (b *SSHBackend) sensorLoop(ctx context.Context) {
 	}
 }
 
+// replayKillIntents retries durable cancellations recovered after restart or
+// left pending by a transient scheduler error. Intents without an external id
+// remain owned and are settled by later evidence (or the explicit unknown
+// escape hatch); they are never converted into a false cancellation.
+func (b *SSHBackend) replayKillIntents(ctx context.Context) {
+	rows, err := b.store.ListTasks(ctx, store.TaskFilter{Target: b.targetName, Scope: b.scope})
+	if err != nil {
+		b.logger.Warn("list durable kill intents failed", "error", err)
+		return
+	}
+	for i := range rows {
+		row := &rows[i]
+		terminal := row.Status == "success" || row.Status == "failed" || row.Status == "killed"
+		if !row.KillRequested || row.ExternalID == "" || terminal {
+			continue
+		}
+		if _, err := b.backend.Kill(ctx, row.ID); err != nil {
+			b.logger.Warn("replay durable kill intent failed", "task", row.ID, "error", err)
+		}
+	}
+}
+
 // ingestRunningMetrics runs one incremental metrics pass over this lane's
 // running tasks. Each task costs one stat when idle, delta-only reads when
 // growing — the spread-out替代 of a read-time parse storm.
@@ -455,14 +605,29 @@ func (b *SSHBackend) ingestRunningMetrics(ctx context.Context) {
 	if err != nil {
 		return
 	}
-	for _, r := range rows {
-		if r.TaskDir == "" {
+	for i := range rows {
+		loaded := rows[i]
+		if loaded.TaskDir == "" {
 			continue
 		}
-		if _, err := ingest.ReapIncremental(ctx, b.store, ingest.Target{
-			TaskID: r.ID, JobID: r.JobID, Dir: r.TaskDir, FS: b.backend.FS,
-		}, false); err != nil {
-			b.logger.Debug("metrics ingest failed", "task", r.ID, "error", err)
+		err := b.store.WithTaskAttemptLock(loaded.ID, func() error {
+			current, err := b.store.GetTask(ctx, loaded.ID)
+			if err != nil {
+				return err
+			}
+			if current == nil || current.Status != "running" ||
+				current.RetryCount != loaded.RetryCount ||
+				current.TargetGeneration != loaded.TargetGeneration ||
+				current.ExternalID != loaded.ExternalID {
+				return nil
+			}
+			_, err = ingest.ReapIncremental(ctx, b.store, ingest.Target{
+				TaskID: current.ID, JobID: current.JobID, Dir: current.TaskDir, FS: b.backend.FS,
+			}, false)
+			return err
+		})
+		if err != nil {
+			b.logger.Debug("metrics ingest failed", "task", loaded.ID, "error", err)
 		}
 	}
 }
@@ -498,19 +663,75 @@ func (b *SSHBackend) MarkRetiring() { b.scope.MarkRetiring() }
 // promoted back to active. Same object, same queue, scope widened.
 func (b *SSHBackend) PromoteActive() { b.scope.ResumeActive() }
 
-// Close stops the sensor loops and the scheduler, then releases the SSH
-// connection (if any — the localhost lane has none). Must be called on
-// daemon shutdown.
-func (b *SSHBackend) Close() error {
+// QuiesceForHistory stops control/reconcile loops while deliberately keeping
+// the filesystem usable for terminal logs and metric artifacts. Retirement
+// calls it only after the generation has no unfinished tasks.
+func (b *SSHBackend) QuiesceForHistory() {
+	b.loopMu.Lock()
+	defer b.loopMu.Unlock()
 	if b.loopCancel != nil {
 		b.loopCancel()
 		b.loopWG.Wait()
 		b.sched.Shutdown()
+		b.loopCancel = nil
 	}
-	if b.sshFS != nil {
-		return b.sshFS.Close()
+}
+
+// acquireArtifactLease pins the transport for a long-lived artifact reader.
+// The routing barrier protects lease acquisition against a concurrent Close;
+// after acquisition, Close may return without severing the reader.
+func (b *SSHBackend) acquireArtifactLease() (func(), error) {
+	b.artifactMu.Lock()
+	defer b.artifactMu.Unlock()
+	if b.closeRequested {
+		return nil, fmt.Errorf("target %s lane is closing", b.targetName)
 	}
-	return nil
+	b.artifactRefs++
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			b.artifactMu.Lock()
+			b.artifactRefs--
+			shouldClose := b.closeRequested && b.artifactRefs == 0 && !b.transportClosed
+			b.artifactMu.Unlock()
+			if shouldClose {
+				if err := b.closeTransportIfIdle(); err != nil {
+					b.logger.Warn("deferred lane transport close failed", "error", err)
+				}
+			}
+		})
+	}, nil
+}
+
+func (b *SSHBackend) closeTransportIfIdle() error {
+	b.artifactMu.Lock()
+	if !b.closeRequested || b.artifactRefs != 0 || b.transportClosed {
+		err := b.transportCloseErr
+		b.artifactMu.Unlock()
+		return err
+	}
+	b.transportClosed = true
+	closer := b.transportCloser
+	b.artifactMu.Unlock()
+
+	var err error
+	if closer != nil {
+		err = closer.Close()
+	}
+	b.artifactMu.Lock()
+	b.transportCloseErr = err
+	b.artifactMu.Unlock()
+	return err
+}
+
+// Close quiesces the lane immediately, then releases its transport once all
+// returned log followers have closed. Must be called on daemon shutdown.
+func (b *SSHBackend) Close() error {
+	b.QuiesceForHistory()
+	b.artifactMu.Lock()
+	b.closeRequested = true
+	b.artifactMu.Unlock()
+	return b.closeTransportIfIdle()
 }
 
 // ── Capabilities ──────────────────────────────────────────────────────────
@@ -518,7 +739,7 @@ func (b *SSHBackend) Close() error {
 func (b *SSHBackend) Capabilities() Capabilities {
 	return Capabilities{
 		GPUMap:        b.backend.Cfg.GPUTemplate != "", // gpu_template-driven (runq preset)
-		PauseResume:   false,                           // cluster queues have no runq-level pause
+		PauseResume:   true,                            // runq-level dispatch gate (in-flight work continues)
 		LiveLog:       true,                            // logs readable via SSH
 		Retry:         true,                            // scheduler lane re-runs submit.cmd (RQ-46)
 		StateModel:    "poll",                          // best-effort projection; staleness surfaced
@@ -546,13 +767,17 @@ func (b *SSHBackend) RefreshJob(ctx context.Context, jobID string) error {
 	b.touchActivity()
 	// Local reconcile (status.json, markers) always runs; the scheduler
 	// probe respects the qstat etiquette floor — same split as forcedSync.
-	return b.backend.EnsureFresh(ctx, jobID, schedProbeFloor)
+	err := b.backend.EnsureFresh(ctx, jobID, schedProbeFloor)
+	b.recordTasksSync(err)
+	return err
 }
 
 // ReconcileAll runs a full reconcile pass over all active jobs. Called by
 // the dashboard's background ticker — never by the list endpoint itself.
 func (b *SSHBackend) ReconcileAll(ctx context.Context) error {
-	return b.backend.SchedulerProbe(ctx, DefaultReadTTL)
+	err := b.backend.SchedulerProbe(ctx, DefaultReadTTL)
+	b.recordTasksSync(err)
+	return err
 }
 
 // ── Job operations ────────────────────────────────────────────────────────
@@ -564,10 +789,18 @@ func (b *SSHBackend) ListJobs(ctx context.Context, projectScope string) ([]JobSu
 	if err != nil {
 		return nil, err
 	}
+	var observationErrs []error
 	for _, j := range jobs {
 		if !store.IsTerminalJobStatus(j.Status) {
-			_ = b.backend.EnsureFresh(ctx, j.ID, DefaultReadTTL)
+			if err := b.backend.EnsureFresh(ctx, j.ID, DefaultReadTTL); err != nil {
+				observationErrs = append(observationErrs, fmt.Errorf("refresh job %s: %w", j.ID, err))
+			}
 		}
+	}
+	if err := errors.Join(observationErrs...); err != nil {
+		// Listing remains best-effort, but the envelope must not stamp the
+		// returned snapshot fresh after a synchronous observation failed.
+		b.recordTasksSync(err)
 	}
 	// Re-query after reconcile.
 	jobs, err = b.store.ListJobsVisible(ctx, projectScope, target)
@@ -681,6 +914,21 @@ func (b *SSHBackend) GPUStatus(ctx context.Context) ([]GPUSlot, error) {
 
 // ── Task operations ───────────────────────────────────────────────────────
 
+func (b *SSHBackend) loadOwnedTask(ctx context.Context, taskID, operation string) (*store.TaskRow, error) {
+	task, err := b.store.GetTask(ctx, taskID)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", operation, err)
+	}
+	if task == nil {
+		return nil, fmt.Errorf("task %q: %w", taskID, ErrNotFound)
+	}
+	if !b.scope.Owns(task.Target, task.TargetGeneration) {
+		return nil, fmt.Errorf("task %q moved to target generation %q; lane %q no longer owns it",
+			taskID, task.TargetGeneration, b.scope.Generation)
+	}
+	return task, nil
+}
+
 func (b *SSHBackend) GetTask(ctx context.Context, taskID string) (*TaskView, error) {
 	b.touchActivity()
 	task, err := b.store.GetTask(ctx, taskID)
@@ -691,8 +939,19 @@ func (b *SSHBackend) GetTask(ctx context.Context, taskID string) (*TaskView, err
 		return nil, fmt.Errorf("task %q: %w", taskID, ErrNotFound)
 	}
 	task = b.reconcileTask(ctx, taskID, task)
-	view := BuildTaskView(*task)
-	applyTaskDetail(&view, *task)
+	var view TaskView
+	err = b.store.WithTaskAttemptLock(taskID, func() error {
+		owned, err := b.loadOwnedTask(ctx, taskID, "get task")
+		if err != nil {
+			return err
+		}
+		view = BuildTaskView(*owned)
+		applyTaskDetail(&view, *owned)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
 	return &view, nil
 }
 
@@ -723,9 +982,16 @@ func (b *SSHBackend) TargetHealth() TargetHealth {
 // recordTasksSync persists one 'tasks' sync outcome. Background context:
 // the recording must not die with the (possibly canceled) pass it records.
 func (b *SSHBackend) recordTasksSync(outcome error) {
-	if err := b.store.RecordSyncOutcome(context.Background(), b.targetName, "tasks", outcome); err != nil {
+	if err := b.store.RecordSyncOutcome(context.Background(), b.targetName, b.tasksSyncResource(), outcome); err != nil {
 		b.logger.Debug("sync_state write failed", "error", err)
 	}
+}
+
+func (b *SSHBackend) tasksSyncResource() string {
+	if generation := b.Generation(); generation != "" {
+		return "tasks:" + generation
+	}
+	return "tasks"
 }
 
 // completeSyncCycle bumps the generation and wakes every waiter.
@@ -743,9 +1009,11 @@ func (b *SSHBackend) completeSyncCycle() {
 // records the outcome, and completes a generation. Runs on the sensor
 // goroutine — serialized with regular ticks by construction.
 func (b *SSHBackend) forcedSync(ctx context.Context) {
-	err := b.backend.ScanDoneMarkers(ctx)
-	if perr := b.backend.SchedulerProbe(ctx, schedProbeFloor); err == nil {
-		err = perr
+	markerErr := b.backend.ScanDoneMarkers(ctx)
+	probeErr := b.backend.SchedulerProbe(ctx, schedProbeFloor)
+	err := markerErr
+	if markerErr == nil || errors.Is(markerErr, remote.ErrMarkerDetectionDisabled) {
+		err = probeErr
 	}
 	b.recordTasksSync(err)
 	b.completeSyncCycle()
@@ -760,7 +1028,7 @@ func (b *SSHBackend) forcedSync(ctx context.Context) {
 // the last sync — age only starts to matter when there is something to
 // observe.
 func (b *SSHBackend) SyncInfo(ctx context.Context) (refreshedAt int64, stale bool) {
-	row, err := b.store.GetSyncState(ctx, b.targetName, "tasks")
+	row, err := b.store.GetSyncState(ctx, b.targetName, b.tasksSyncResource())
 	if err != nil || row == nil {
 		return 0, false
 	}
@@ -817,7 +1085,7 @@ func (b *SSHBackend) ForceRefresh(ctx context.Context) (*RefreshReceipt, error) 
 		b.syncMu.Unlock()
 	}
 
-	row, _ := b.store.GetSyncState(ctx, b.targetName, "tasks")
+	row, _ := b.store.GetSyncState(ctx, b.targetName, b.tasksSyncResource())
 	if row != nil && row.LastError != "" {
 		r := b.currentReceipt(ctx, false, row.LastError)
 		return r, nil
@@ -828,7 +1096,7 @@ func (b *SSHBackend) ForceRefresh(ctx context.Context) (*RefreshReceipt, error) 
 // currentReceipt assembles a receipt from the persisted freshness row.
 func (b *SSHBackend) currentReceipt(ctx context.Context, refreshed bool, reason string) *RefreshReceipt {
 	receipt := &RefreshReceipt{Refreshed: refreshed, Reason: reason}
-	if row, err := b.store.GetSyncState(ctx, b.targetName, "tasks"); err == nil && row != nil {
+	if row, err := b.store.GetSyncState(ctx, b.targetName, b.tasksSyncResource()); err == nil && row != nil {
 		receipt.RefreshedAt = row.LastSuccess
 	}
 	return receipt
@@ -844,49 +1112,72 @@ func (b *SSHBackend) ListTasks(ctx context.Context, opts TaskListOptions) ([]Tas
 	return listTasksFromStore(ctx, b.store, opts)
 }
 
-// TaskMetrics serves the chart: the RAW TAIL WINDOW of metrics.jsonl (one
-// ranged read — recent data is small by construction). The incremental
-// catch-up keeps the summary warm as a side effect (one stat when idle —
-// cheap enough to run per read, no TTL gate needed). Full-history multi-resolution
-// zoom will come from the on-target pyramid (TODO: wire pyramid.Query per
-// key once the builder lands). afterTS > 0 = ?after= incremental pull.
+// TaskMetrics serves the chart from the task-lifetime RAW TAIL WINDOW of
+// metrics.jsonl (one ranged read — recent data is small by construction).
+// It is deliberately side-effect free: background/reconcile paths own SQL
+// ingestion, while this read shares the task-attempt lock with retry reset
+// and ingestion so it cannot observe a torn attempt boundary. afterTS > 0
+// is the dashboard's incremental pull cursor.
 func (b *SSHBackend) TaskMetrics(ctx context.Context, taskID string, afterTS int64) ([]MetricPoint, error) {
 	b.touchActivity()
-	task, err := b.store.GetTask(ctx, taskID)
-	if err != nil || task == nil {
-		return nil, fmt.Errorf("task %q: %w", taskID, ErrNotFound)
-	}
-	_, _ = ingest.ReapIncremental(ctx, b.store, ingest.Target{
-		TaskID: task.ID, JobID: task.JobID, Dir: task.TaskDir, FS: b.backend.FS,
-	}, false)
-	return readTailMetricPoints(b.backend.FS, task.TaskDir, "", 2000, afterTS), nil
+	var points []MetricPoint
+	err := b.store.WithTaskAttemptLock(taskID, func() error {
+		task, err := b.loadOwnedTask(ctx, taskID, "task metrics")
+		if err != nil {
+			return err
+		}
+		points = readTailMetricPoints(b.backend.FS, task.TaskDir, "", 2000, afterTS)
+		return nil
+	})
+	return points, err
 }
 
 // TaskMetricBuckets — bucket-mode chart (spec §6.4): terminal tasks read
-// the on-target pyramid (1–O(log n) rfs ranged reads); pyramid absent
-// (running / builder not configured) falls back to tail-window
-// aggregation with the SAME merge operator.
+// the on-target pyramid (1–O(log n) rfs ranged reads) only when the normal
+// wrapper completed and rebuilt it. A retry appends to the task-lifetime raw
+// stream while the prior attempt's pyramid still exists, and TERM cancellation
+// skips the builder, so every other state must use tail-window aggregation.
+// The fallback uses the SAME merge operator.
 func (b *SSHBackend) TaskMetricBuckets(ctx context.Context, taskID, key string, fromTS, toTS int64, maxBuckets int) ([]workspace.PyramidBucket, string, error) {
 	b.touchActivity()
-	task, err := b.store.GetTask(ctx, taskID)
-	if err != nil || task == nil {
-		return nil, "", fmt.Errorf("task %q: %w", taskID, ErrNotFound)
-	}
-	buckets, err := workspace.QueryPyramid(ctx, b.backend.FS, task.TaskDir, key, fromTS, toTS, maxBuckets)
-	switch {
-	case err == nil:
-		return buckets, "pyramid", nil
-	case errors.Is(err, workspace.ErrPyramidNotBuilt):
-		return tailMetricBuckets(b.backend.FS, task.TaskDir, key, fromTS, toTS, maxBuckets), "tail", nil
-	default:
-		return nil, "", err // e.g. key not indexed — a real answer, not a fallback case
-	}
+	var (
+		buckets []workspace.PyramidBucket
+		source  string
+	)
+	err := b.store.WithTaskAttemptLock(taskID, func() error {
+		task, err := b.loadOwnedTask(ctx, taskID, "task metric buckets")
+		if err != nil {
+			return err
+		}
+		if task.StatusSource != remote.SourceWrapper || (task.Status != "success" && task.Status != "failed") {
+			buckets = tailMetricBuckets(b.backend.FS, task.TaskDir, key, fromTS, toTS, maxBuckets)
+			source = "tail"
+			return nil
+		}
+		buckets, err = workspace.QueryPyramid(ctx, b.backend.FS, task.TaskDir, key, fromTS, toTS, maxBuckets)
+		switch {
+		case err == nil:
+			source = "pyramid"
+			return nil
+		case errors.Is(err, workspace.ErrPyramidNotBuilt):
+			buckets = tailMetricBuckets(b.backend.FS, task.TaskDir, key, fromTS, toTS, maxBuckets)
+			source = "tail"
+			return nil
+		default:
+			return err // e.g. key not indexed — a real answer, not a fallback case
+		}
+	})
+	return buckets, source, err
 }
 
 func (b *SSHBackend) reconcileTask(ctx context.Context, taskID string, fallback *store.TaskRow) *store.TaskRow {
-	if err := b.backend.EnsureFresh(ctx, fallback.JobID, DefaultReadTTL); err != nil {
+	err := b.backend.EnsureFresh(ctx, fallback.JobID, DefaultReadTTL)
+	if err != nil {
+		err = fmt.Errorf("refresh task %s: %w", taskID, err)
+		b.recordTasksSync(err)
 		return fallback
 	}
+	b.recordTasksSync(nil)
 	if fresh, err := b.store.GetTask(ctx, taskID); err == nil && fresh != nil {
 		return fresh
 	}
@@ -902,23 +1193,32 @@ func (b *SSHBackend) KillTask(ctx context.Context, taskID string) error {
 	if task == nil {
 		return fmt.Errorf("task %q: %w", taskID, ErrNotFound)
 	}
-	// Queued locally (not yet handed to the cluster): nothing to cancel
-	// remotely — settle through the lifecycle funnel. In-flight-but-untracked
-	// tasks are queue-running, so they fall through to backend.Kill, which
-	// refuses honestly (no external id → cannot cancel).
-	if qt := b.queue.Get(taskID); qt != nil {
-		if qt.Status == scheduler.StatusPending {
-			b.sched.FinishTask(qt, scheduler.StatusKilled, map[string]any{"status_source": "runq"})
-			return nil
-		}
-		// Running or unknown in the queue (submit in flight, on the cluster,
-		// or outcome lost): plant the kill flag FIRST (RQ-69 ownership
-		// protocol). If backend.Kill below is refused for a missing external
-		// id, the flag survives and the next lifecycle event (submit
-		// completion, failure verdict) settles the task killed instead of
-		// resubmitting it.
-		if qt.Status == scheduler.StatusRunning || qt.Status == scheduler.StatusUnknown {
-			b.sched.RequestKill(taskID)
+	if !b.scope.Owns(task.Target, task.TargetGeneration) {
+		return fmt.Errorf("task %q moved to target generation %q; lane %q no longer owns it",
+			taskID, task.TargetGeneration, b.scope.Generation)
+	}
+	if settled, err := b.sched.TryKillPending(taskID, "runq"); err != nil {
+		return err
+	} else if settled {
+		return nil
+	}
+	// A manual retry can be between durable intent and pending publication.
+	// It owns no external process, so cancellation may terminalize that intent
+	// under the same lifecycle lock as RetryTask.
+	if settled, err := b.cancelRetryIntent(ctx, taskID); err != nil {
+		return err
+	} else if settled {
+		return nil
+	}
+	// Retry may have completed while cancelRetryIntent waited for the lock.
+	if settled, err := b.sched.TryKillPending(taskID, "runq"); err != nil {
+		return err
+	} else if settled {
+		return nil
+	}
+	if qt := b.queue.Get(taskID); qt != nil && (qt.Status == scheduler.StatusRunning || qt.Status == scheduler.StatusUnknown) {
+		if err := b.sched.RequestKill(taskID); err != nil {
+			return err
 		}
 	}
 	if err := b.backend.EnsureFresh(ctx, task.JobID, 0); err != nil {
@@ -931,6 +1231,21 @@ func (b *SSHBackend) KillTask(ctx context.Context, taskID string) error {
 	if task == nil || task.Status == "success" || task.Status == "failed" || task.Status == "killed" {
 		return nil
 	}
+	if !b.scope.Owns(task.Target, task.TargetGeneration) {
+		return fmt.Errorf("task %q moved to target generation %q during kill; lane %q no longer owns it",
+			taskID, task.TargetGeneration, b.scope.Generation)
+	}
+	// Reconciliation may have legally requeued a failed attempt.
+	if settled, err := b.sched.TryKillPending(taskID, "runq"); err != nil {
+		return err
+	} else if settled {
+		return nil
+	}
+	if qt := b.queue.Get(taskID); qt != nil && (qt.Status == scheduler.StatusRunning || qt.Status == scheduler.StatusUnknown) {
+		if err := b.sched.RequestKill(taskID); err != nil {
+			return err
+		}
+	}
 	// RQ-74: an `unknown` task with no external id has nothing to cancel and
 	// no verdict on the horizon if the submission truly never landed — the
 	// user's explicit kill is the escape hatch. Settling killed here is a
@@ -940,12 +1255,52 @@ func (b *SSHBackend) KillTask(ctx context.Context, taskID string) error {
 	// its marker is later swept as stale bookkeeping.
 	if task.Status == "unknown" && task.ExternalID == "" {
 		if qt := b.queue.Get(taskID); qt != nil && qt.Status == scheduler.StatusUnknown {
-			b.sched.FinishTask(qt, scheduler.StatusKilled, map[string]any{"status_source": "runq"})
+			if err := b.sched.FinishTaskChecked(qt, scheduler.StatusKilled, map[string]any{"status_source": "runq"}); err != nil {
+				return fmt.Errorf("persist unknown task kill: %w", err)
+			}
 			return nil
 		}
 	}
 	_, err = b.backend.Kill(ctx, taskID)
 	return err
+}
+
+// cancelRetryIntent handles the durable pre-effect phase of a manual retry.
+// No external submission can exist yet, so a user kill may settle it directly.
+func (b *SSHBackend) cancelRetryIntent(ctx context.Context, taskID string) (bool, error) {
+	settled := false
+	err := b.backend.WithLifecycleLock(func() error {
+		return b.store.WithTaskAttemptLock(taskID, func() error {
+			row, err := b.store.GetTask(ctx, taskID)
+			if err != nil {
+				return err
+			}
+			if row == nil || row.Status != "submitting" || row.StatusSource != "retry" || row.ExternalID != "" {
+				return nil
+			}
+			if !b.scope.Owns(row.Target, row.TargetGeneration) {
+				return nil
+			}
+			fields := map[string]any{
+				"status_source":  "runq",
+				"finished_at":    time.Now().Unix(),
+				"kill_requested": 0,
+			}
+			store.FenceTaskStatusUpdate(fields, *row)
+			if err := b.store.UpdateTaskStatus(ctx, taskID, "killed", fields); err != nil {
+				return fmt.Errorf("persist retry-intent kill: %w", err)
+			}
+			var publishErr error
+			if qt := b.queue.Get(taskID); qt != nil {
+				publishErr = b.queue.Complete(taskID, scheduler.StatusKilled)
+			}
+			b.sched.ClearKillRequest(taskID)
+			b.sched.RefreshJobStatus(row.JobID)
+			settled = true
+			return publishErr
+		})
+	})
+	return settled, err
 }
 
 // ── RQ-44: log access（核心实现 — Human 主笔，CC review）────────────────────
@@ -957,68 +1312,75 @@ func (b *SSHBackend) KillTask(ctx context.Context, taskID string) error {
 // 在 logfile 内 clamp（病态长行防御——review 重点）。
 func (b *SSHBackend) TaskLogRead(ctx context.Context, taskID string, offset int64, maxLines int) (*LogPage, error) {
 	b.touchActivity()
-	task, err := b.store.GetTask(ctx, taskID)
-	if err != nil {
-		return nil, fmt.Errorf("task log read: %w", err)
-	}
-	if task == nil {
-		return nil, fmt.Errorf("task %q: %w", taskID, ErrNotFound)
-	}
-	r, err := logfile.Open(task.LogPath, b.backend.FS)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return &LogPage{Lines: []string{}}, nil // pending: empty page, Size 0
+	var page *LogPage
+	err := b.store.WithTaskAttemptLock(taskID, func() error {
+		task, err := b.loadOwnedTask(ctx, taskID, "task log read")
+		if err != nil {
+			return err
 		}
-		return nil, err
-	}
-	defer r.Close()
-
-	return r.ReadLines(offset, maxLines) // LogPage = logfile.Page: no mapping
+		r, err := logfile.Open(task.LogPath, b.backend.FS)
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				page = &LogPage{Lines: []string{}} // pending: empty page, Size 0
+				return nil
+			}
+			return err
+		}
+		defer r.Close()
+		page, err = r.ReadLines(offset, maxLines)
+		return err
+	})
+	return page, err
 }
 
 // TaskLogTail — 尾部视图（每次首屏的入口）：解析 + 委托 TailLines。
 // 返回页的 Offset 即向上翻页锚点。
 func (b *SSHBackend) TaskLogTail(ctx context.Context, taskID string, maxLines int) (*LogPage, error) {
 	b.touchActivity()
-	task, err := b.store.GetTask(ctx, taskID)
-	if err != nil {
-		return nil, fmt.Errorf("task log tail: %w", err)
-	}
-	if task == nil {
-		return nil, fmt.Errorf("task %q: %w", taskID, ErrNotFound)
-	}
-	r, err := logfile.Open(task.LogPath, b.backend.FS)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return &LogPage{Lines: []string{}}, nil // pending: empty page, Size 0
+	var page *LogPage
+	err := b.store.WithTaskAttemptLock(taskID, func() error {
+		task, err := b.loadOwnedTask(ctx, taskID, "task log tail")
+		if err != nil {
+			return err
 		}
-		return nil, err
-	}
-	defer r.Close()
-
-	return r.TailLines(maxLines) // LogPage = logfile.Page: no mapping
+		r, err := logfile.Open(task.LogPath, b.backend.FS)
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				page = &LogPage{Lines: []string{}} // pending: empty page, Size 0
+				return nil
+			}
+			return err
+		}
+		defer r.Close()
+		page, err = r.TailLines(maxLines)
+		return err
+	})
+	return page, err
 }
 
 // TaskLogPage — dashboard log contract v2: byte-budget page (positional /
 // tail / rotation / optional line count) through the owning target's FS.
 func (b *SSHBackend) TaskLogPage(ctx context.Context, taskID string, req logfile.PageRequest) (*LogPage, error) {
 	b.touchActivity()
-	task, err := b.store.GetTask(ctx, taskID)
-	if err != nil {
-		return nil, fmt.Errorf("task log page: %w", err)
-	}
-	if task == nil {
-		return nil, fmt.Errorf("task %q: %w", taskID, ErrNotFound)
-	}
-	r, err := logfile.Open(task.LogPath, b.backend.FS)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return &LogPage{Lines: []string{}, TotalLines: -1, StartLine: -1}, nil // pending
+	var page *LogPage
+	err := b.store.WithTaskAttemptLock(taskID, func() error {
+		task, err := b.loadOwnedTask(ctx, taskID, "task log page")
+		if err != nil {
+			return err
 		}
-		return nil, err
-	}
-	defer r.Close()
-	return r.ReadPage(req)
+		r, err := logfile.Open(task.LogPath, b.backend.FS)
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				page = &LogPage{Lines: []string{}, TotalLines: -1, StartLine: -1} // pending
+				return nil
+			}
+			return err
+		}
+		defer r.Close()
+		page, err = r.ReadPage(req)
+		return err
+	})
+	return page, err
 }
 
 // TaskLogFollow — pure assembly: resolve the task, hand path+FS+offset to
@@ -1028,20 +1390,42 @@ func (b *SSHBackend) TaskLogPage(ctx context.Context, taskID string, req logfile
 // handler, CLI logs -f). offset passes through unclamped: size < offset IS
 // the rotation signal. Pending log (no file yet) is handled inside
 // Follower (lazy open). No lifecycleMu (read-only, produces no verdicts).
+type leasedLogFollower struct {
+	inner   LogFollower
+	release func()
+	once    sync.Once
+}
+
+func (f *leasedLogFollower) Next(ctx context.Context) (*LogPage, error) {
+	return f.inner.Next(ctx)
+}
+
+func (f *leasedLogFollower) Close() error {
+	err := f.inner.Close()
+	f.once.Do(f.release)
+	return err
+}
+
 func (b *SSHBackend) TaskLogFollow(ctx context.Context, taskID string, offset int64) (LogFollower, error) {
 	b.touchActivity()
-	task, err := b.store.GetTask(ctx, taskID)
+	release, err := b.acquireArtifactLease()
 	if err != nil {
+		return nil, err
+	}
+	var follower LogFollower
+	err = b.store.WithTaskAttemptLock(taskID, func() error {
+		task, err := b.loadOwnedTask(ctx, taskID, "task log follow")
+		if err != nil {
+			return err
+		}
+		follower, err = logfile.Follow(task.LogPath, b.backend.FS, offset)
+		return err
+	})
+	if err != nil {
+		release()
 		return nil, fmt.Errorf("task log follow: %w", err)
 	}
-	if task == nil {
-		return nil, fmt.Errorf("task %q: %w", taskID, ErrNotFound)
-	}
-	f, err := logfile.Follow(task.LogPath, b.backend.FS, offset)
-	if err != nil {
-		return nil, fmt.Errorf("task log follow: %w", err)
-	}
-	return f, nil
+	return &leasedLogFollower{inner: follower, release: release}, nil
 }
 
 // JobLogSearch greps the job's logs on the owning side (RQ-44): one
@@ -1070,69 +1454,93 @@ func (b *SSHBackend) JobResults(ctx context.Context, jobID string) (*JobResults,
 
 func (b *SSHBackend) RetryTask(ctx context.Context, taskID string) error {
 	b.touchActivity()
-	row, err := b.store.GetTask(ctx, taskID)
-	if err != nil {
-		return err
+	b.admissionsInFlight.Add(1)
+	defer b.admissionsInFlight.Add(-1)
+	if b.scope.IsRetiring() {
+		return fmt.Errorf("target %s: %w — retry to reach the active configuration", b.targetName, ErrLaneRetired)
 	}
-	if row == nil {
-		return fmt.Errorf("task %q not found", taskID)
-	}
-	if row.Status != "failed" && row.Status != "killed" {
-		return fmt.Errorf("task %q is %s, only failed/killed tasks can be retried", taskID, row.Status)
-	}
-
-	// The whole reset-and-requeue runs under the target's lifecycle lock:
-	// a verdict delivery in flight (marker/probe/kill) must fully land or
-	// fully wait — otherwise a stale verdict could interleave with the reset
-	// and clobber the fresh attempt (the serialization IS the staleness
-	// defense; see remote.Backend.lifecycleMu).
+	// Lock order is lane lifecycle, then the Store's shared task-attempt lock.
+	// The lane lock excludes this generation's verdict producers; the shared
+	// task lock also excludes cross-generation ingestion/reset effects.
 	return b.backend.WithLifecycleLock(func() error {
-		// Reset the wrapper state files FIRST (synchronously, over SSH). A
-		// stale terminal status.json would be re-reconciled into an instant
-		// failure before the relaunch happens; the awaitingRelaunch guard
-		// doesn't cover user retries of first-attempt failures (retry_count
-		// may be 0).
-		if err := b.backend.ResetWrapperState(ctx, row.TaskDir, taskID); err != nil {
-			return fmt.Errorf("reset wrapper state: %w", err)
-		}
+		return b.store.WithTaskAttemptLock(taskID, func() error {
+			// Validate only after taking the same lock as every verdict producer.
+			// A persisted status_source=retry row is an interrupted earlier call:
+			// resume its idempotent wrapper reset without consuming another epoch.
+			row, err := b.store.GetTask(ctx, taskID)
+			if err != nil {
+				return err
+			}
+			if row == nil {
+				return fmt.Errorf("task %q not found", taskID)
+			}
+			switch {
+			case row.Status == "failed" || row.Status == "killed":
+				// Persist retry intent and unfreeze task-lifetime SDK stream
+				// offsets in one transaction BEFORE touching wrapper evidence.
+				if err := b.store.BeginTaskRetry(ctx, taskID, row.RetryCount, b.scope.Generation); err != nil {
+					return fmt.Errorf("begin retry: %w", err)
+				}
+				row, err = b.store.GetTask(ctx, taskID)
+				if err != nil {
+					return fmt.Errorf("read retry intent: %w", err)
+				}
+				if row == nil {
+					return fmt.Errorf("task %q disappeared after retry intent", taskID)
+				}
+			case row.Status == "submitting" && row.StatusSource == "retry":
+				// Resume the already-counted epoch.
+			default:
+				return fmt.Errorf("task %q is %s, only failed/killed tasks can be retried", taskID, row.Status)
+			}
 
-		// Fresh attempt = fresh metrics: drop ingested rows AND the ingest
-		// mark — a hard-final terminal froze it (Final=true), and without
-		// this reset the new attempt's metrics.jsonl would never be read.
-		if err := b.store.DeleteTaskMetrics(ctx, taskID); err != nil {
-			return fmt.Errorf("reset metrics ingest: %w", err)
-		}
+			// Wrapper reset is the external effect guarded by the durable retry
+			// intent. Until it succeeds the task is not publishable as pending.
+			if err := b.backend.ResetWrapperState(ctx, row.TaskDir, taskID); err != nil {
+				noteErr := b.store.UpdateTaskStatus(ctx, taskID, "submitting", map[string]any{
+					"status_source":  "retry",
+					"failure_detail": "retry wrapper reset failed: " + err.Error(),
+				})
+				return errors.Join(fmt.Errorf("reset wrapper state: %w", err), noteErr)
+			}
+			if err := b.store.UpdateTaskStatus(ctx, taskID, "pending", map[string]any{
+				"status_source":  nil,
+				"failure_detail": nil,
+				"kill_requested": 0,
+			}); err != nil {
+				// Durable retry intent remains. Recovery or a repeated user retry
+				// safely repeats the wrapper reset and pending publication.
+				return fmt.Errorf("publish retry as pending: %w", err)
+			}
 
-		if err := b.store.UpdateTaskStatus(ctx, taskID, "pending", map[string]any{
-			"gpus":        nil,
-			"pid":         nil,
-			"started_at":  nil,
-			"finished_at": nil,
-			"external_id": nil,
-			// RQ-75: a retry is MY new attempt — ownership is stamped in
-			// the same reset write, after the wrapper reset succeeded, so
-			// a failed reset changes nothing and routing never lies.
-			"target_generation": b.scope.Generation,
-		}); err != nil {
-			return err
-		}
-
-		row, _ = b.store.GetTask(ctx, taskID)
-		task := TaskRowToSchedulerTask(row)
-		task.GPUsNeeded = 1
-		// Fresh attempt by explicit user intent — a stale kill flag from an
-		// earlier refused kill must not assassinate it (RQ-69).
-		b.sched.ClearKillRequest(taskID)
-		if !b.queue.RetryExisting(task) {
-			b.queue.Push(task)
-		}
-		b.sched.RefreshJobStatus(task.JobID)
-		return nil
+			row, err = b.store.GetTask(ctx, taskID)
+			if err != nil {
+				return fmt.Errorf("read retried task: %w", err)
+			}
+			if row == nil {
+				return fmt.Errorf("task %q disappeared after retry", taskID)
+			}
+			task := TaskRowToSchedulerTask(row)
+			// Fresh attempt by explicit user intent — a stale kill flag from an
+			// earlier refused kill must not assassinate it (RQ-69).
+			b.sched.ClearKillRequest(taskID)
+			if !b.queue.RetryExisting(task) {
+				b.queue.Push(task)
+			}
+			b.sched.RefreshJobStatus(task.JobID)
+			return nil
+		})
 	})
 }
 
 func (b *SSHBackend) KillJob(ctx context.Context, jobID string) error {
 	b.touchActivity()
+	// Kill supersedes the pause overlay. Clear the dispatch gate immediately,
+	// then always recompute the durable job projection after this cancellation
+	// pass, including partial-error paths that retain kill intent for replay.
+	b.sched.ClearPause(jobID)
+	defer b.sched.RefreshJobStatus(jobID)
+	var killErrs []error
 	// Settle locally-queued tasks first: they have no cluster job to cancel,
 	// and marking them killed here means backend.Kill (below) skips them as
 	// terminal instead of refusing over a missing external id. Queue-running
@@ -1142,24 +1550,128 @@ func (b *SSHBackend) KillJob(ctx context.Context, jobID string) error {
 	for _, qt := range b.queue.ListByJob(jobID) {
 		switch qt.Status {
 		case scheduler.StatusPending:
-			b.sched.FinishTask(qt, scheduler.StatusKilled, map[string]any{"status_source": "runq"})
-		case scheduler.StatusRunning:
-			b.sched.RequestKill(qt.ID)
+			settled, err := b.sched.TryKillPending(qt.ID, "runq")
+			if err != nil {
+				killErrs = append(killErrs, fmt.Errorf("persist queued task %s kill: %w", qt.ID, err))
+			} else if !settled {
+				if err := b.sched.RequestKill(qt.ID); err != nil {
+					killErrs = append(killErrs, err)
+				}
+			}
+		case scheduler.StatusRunning, scheduler.StatusUnknown:
+			if err := b.sched.RequestKill(qt.ID); err != nil {
+				killErrs = append(killErrs, err)
+			}
 		}
 	}
 	if err := b.backend.EnsureFresh(ctx, jobID, 0); err != nil {
-		return fmt.Errorf("reconcile before kill: %w", err)
+		killErrs = append(killErrs, fmt.Errorf("reconcile before kill: %w", err))
+		return errors.Join(killErrs...)
 	}
-	_, err := b.backend.Kill(ctx, jobID)
-	return err
+	// Match KillTask's explicit escape hatch for outcome-unknown attempts
+	// whose submit handle was lost. A whole-job kill carries the same user
+	// intent and must not leave precisely those tasks behind forever.
+	rows, err := b.store.ListTasks(ctx, store.TaskFilter{JobID: jobID, Scope: b.scope})
+	if err != nil {
+		return fmt.Errorf("list tasks after reconcile: %w", err)
+	}
+	for i := range rows {
+		task := &rows[i]
+		if task.Status == "pending" {
+			settled, err := b.sched.TryKillPending(task.ID, "runq")
+			if err != nil {
+				killErrs = append(killErrs, err)
+			} else if !settled {
+				if err := b.sched.RequestKill(task.ID); err != nil {
+					killErrs = append(killErrs, err)
+				}
+			}
+			continue
+		}
+		if task.Status == "submitting" && task.StatusSource == "retry" {
+			settled, err := b.cancelRetryIntent(ctx, task.ID)
+			if err != nil {
+				killErrs = append(killErrs, err)
+			} else if !settled {
+				if pending, err := b.sched.TryKillPending(task.ID, "runq"); err != nil {
+					killErrs = append(killErrs, err)
+				} else if !pending {
+					if err := b.sched.RequestKill(task.ID); err != nil {
+						killErrs = append(killErrs, err)
+					}
+				}
+			}
+			continue
+		}
+		if task.Status != "unknown" || task.ExternalID != "" {
+			continue
+		}
+		if qt := b.queue.Get(task.ID); qt != nil && qt.Status == scheduler.StatusUnknown {
+			if err := b.sched.FinishTaskChecked(qt, scheduler.StatusKilled, map[string]any{"status_source": "runq"}); err != nil {
+				killErrs = append(killErrs, fmt.Errorf("persist unknown task %s kill: %w", task.ID, err))
+			}
+		}
+	}
+	_, remoteErr := b.backend.Kill(ctx, jobID)
+	if remoteErr != nil {
+		killErrs = append(killErrs, remoteErr)
+	}
+	return errors.Join(killErrs...)
 }
 
-func (b *SSHBackend) PauseJob(_ context.Context, _ string) error {
-	return fmt.Errorf("pause job in ssh mode: %w", ErrNotSupported)
+func (b *SSHBackend) PauseJob(ctx context.Context, jobID string) error {
+	job, err := b.store.GetJob(ctx, jobID)
+	if err != nil {
+		return err
+	}
+	if job == nil {
+		return fmt.Errorf("job %q: %w", jobID, ErrNotFound)
+	}
+	if store.IsTerminalJobStatus(job.Status) {
+		return fmt.Errorf("job %q is already %s", jobID, job.Status)
+	}
+	// Establish the linearizable dispatch gate first. Any admitted dispatch
+	// finishes its pre-launch aggregate write before this returns; later
+	// dispatches observe the pause. Persist only after that boundary so an
+	// admitted RefreshJobStatus cannot overwrite the durable pause.
+	b.sched.PauseJob(jobID)
+	if err := b.store.UpdateJobStatus(ctx, jobID, "paused"); err != nil {
+		b.sched.ResumeJob(jobID) // the API did not acknowledge the pause
+		return fmt.Errorf("persist job pause: %w", err)
+	}
+	return nil
 }
 
-func (b *SSHBackend) ResumeJob(_ context.Context, _ string) error {
-	return fmt.Errorf("resume job in ssh mode: %w", ErrNotSupported)
+func (b *SSHBackend) ResumeJob(ctx context.Context, jobID string) error {
+	job, err := b.store.GetJob(ctx, jobID)
+	if err != nil {
+		return err
+	}
+	if job == nil {
+		return fmt.Errorf("job %q: %w", jobID, ErrNotFound)
+	}
+	if job.Status != "paused" && !b.sched.IsJobPaused(jobID) {
+		return fmt.Errorf("job %q is %s, not paused", jobID, job.Status)
+	}
+	if job.Status != "paused" {
+		// Another owning generation already persisted the resume. This lane
+		// still has the local dispatch gate, so complete the idempotent fanout.
+		b.sched.ResumeJob(jobID)
+		return nil
+	}
+	tasks, err := b.store.ListTasks(ctx, store.TaskFilter{JobID: jobID})
+	if err != nil {
+		return fmt.Errorf("derive resumed job status: %w", err)
+	}
+	status, err := store.ProjectJobStatus(tasks)
+	if err != nil {
+		return fmt.Errorf("derive resumed job status: %w", err)
+	}
+	if err := b.store.UpdateJobStatus(ctx, jobID, status); err != nil {
+		return fmt.Errorf("persist job resume: %w", err)
+	}
+	b.sched.ResumeJob(jobID)
+	return nil
 }
 
 // ── Submit ────────────────────────────────────────────────────────────────
@@ -1172,8 +1684,8 @@ func (b *SSHBackend) SubmitJob(ctx context.Context, cfg job.JobConfig, opts Subm
 	b.touchActivity()
 	// Increment BEFORE the gate (round 8 #1): once past this line the
 	// sweep sees the submit and will not close the lane under it.
-	b.submitsInFlight.Add(1)
-	defer b.submitsInFlight.Add(-1)
+	b.admissionsInFlight.Add(1)
+	defer b.admissionsInFlight.Add(-1)
 	// Retired = no NEW tasks (round 7, user design: the retired flag is a
 	// capability switch). A request that passes this check before the flag
 	// flips still lands in this lane's queue, runs correctly under its

@@ -12,8 +12,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gliese129/runq/internal/store"
-	"github.com/gliese129/runq/internal/workspace"
+	"github.com/gliese129/runq-lab/internal/store"
+	"github.com/gliese129/runq-lab/internal/workspace"
 )
 
 func writeTaskFile(t *testing.T, path string, lines []string) {
@@ -286,9 +286,10 @@ func TestReapFinalFreezesAllMarks(t *testing.T) {
 	}
 }
 
-func TestDeleteTaskMetricsUnfreezesResults(t *testing.T) {
-	// Retry path: DeleteTaskMetrics must clear result rows AND marks so the
-	// fresh attempt's full re-read cannot double-insert.
+func TestRetryUnfreezeContinuesResultsAtExistingOffset(t *testing.T) {
+	// SDK streams are task-lifetime append logs. A retry unfreezes the final
+	// mark at its existing offset, preserving the prior attempt and ingesting
+	// only bytes appended by the next attempt.
 	taskDir := t.TempDir()
 	writeTaskFile(t, workspace.ResultsPath(taskDir), []string{
 		`{"ts":1,"axes":{"step":1},"metrics":{"m":1}}`,
@@ -299,16 +300,26 @@ func TestDeleteTaskMetricsUnfreezesResults(t *testing.T) {
 	if _, err := ReapIncremental(context.Background(), st, target, true); err != nil {
 		t.Fatalf("terminal reap: %v", err)
 	}
-	if err := st.DeleteTaskMetrics(context.Background(), "t1"); err != nil {
-		t.Fatalf("DeleteTaskMetrics: %v", err)
+	if err := st.UpdateTaskStatus(context.Background(), "t1", "failed", map[string]any{
+		"status_source": "wrapper",
+	}); err != nil {
+		t.Fatalf("make task retryable: %v", err)
 	}
-	// Same file re-read from scratch (fresh attempt often rewrites it, but
-	// even the identical file must not duplicate).
+	if err := st.BeginTaskRetry(context.Background(), "t1", 0, "gen-next"); err != nil {
+		t.Fatalf("begin retry: %v", err)
+	}
+	writeTaskFile(t, workspace.ResultsPath(taskDir), []string{
+		`{"ts":1,"axes":{"step":1},"metrics":{"m":1}}`,
+		`{"ts":2,"axes":{"step":2},"metrics":{"m":2}}`,
+	})
 	if _, err := ReapIncremental(context.Background(), st, target, false); err != nil {
-		t.Fatalf("post-reset reap: %v", err)
+		t.Fatalf("next-attempt reap: %v", err)
 	}
 	rows, _ := st.ListResultRecords(context.Background(), "j1")
-	if len(rows) != 1 {
-		t.Fatalf("row count = %d, want 1 (no double-insert after reset)", len(rows))
+	if len(rows) != 2 {
+		t.Fatalf("row count = %d, want 2 task-lifetime records", len(rows))
+	}
+	if rows[0].TS != 1 || rows[1].TS != 2 {
+		t.Fatalf("result history = %+v, want old then newly appended record", rows)
 	}
 }
