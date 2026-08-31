@@ -938,7 +938,7 @@ func (b *SSHBackend) GetTask(ctx context.Context, taskID string) (*TaskView, err
 	if task == nil {
 		return nil, fmt.Errorf("task %q: %w", taskID, ErrNotFound)
 	}
-	task = b.reconcileTask(ctx, taskID, task)
+	b.reconcileTask(ctx, taskID, task)
 	var view TaskView
 	err = b.store.WithTaskAttemptLock(taskID, func() error {
 		owned, err := b.loadOwnedTask(ctx, taskID, "get task")

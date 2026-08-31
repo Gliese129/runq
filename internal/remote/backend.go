@@ -46,7 +46,6 @@ import (
 	"context"
 	"fmt"
 	"path"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -317,16 +316,6 @@ func isTerminal(status string) bool {
 		return true
 	}
 	return false
-}
-
-// sortedKeys returns map keys in deterministic order (stable run.sh output).
-func sortedKeys(m map[string]string) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
 }
 
 // refreshJobStatus derives the job's aggregate status from its tasks, mirroring

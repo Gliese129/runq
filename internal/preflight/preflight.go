@@ -1097,13 +1097,6 @@ func topLevelModule(name string) string {
 // (`python`, `python3`, `python3.11`).
 var pythonInterpreterRegex = regexp.MustCompile(`\b(python[\d.]*)\b`)
 
-// pythonInterpreter returns the interpreter the sample command actually
-// invokes, falling back to "python" when the command doesn't mention one.
-func pythonInterpreter(sampleCmd string) string {
-	interp, _ := pythonInterpreterIn(sampleCmd)
-	return interp
-}
-
 // pythonInterpreterIn additionally reports whether the text actually
 // NAMED an interpreter — a guessed fallback lets the probe pick python3
 // vs python at runtime instead of hardcoding one (Codex r2 #4).
